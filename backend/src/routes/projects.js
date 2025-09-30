@@ -14,6 +14,7 @@ const {
   auditLog,
   validateEducationalData
 } = require('../middleware/auth');
+const { requireGitHubConnection } = require('../middleware/github');
 
 const router = express.Router();
 const projectManager = new ProjectManager();

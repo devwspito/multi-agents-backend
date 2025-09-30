@@ -1,18 +1,42 @@
 const { Octokit } = require('@octokit/rest');
 const Activity = require('../models/Activity');
 
+/**
+ * Multi-tenant GitHub Service
+ * Each user uses their own GitHub OAuth token
+ */
 class GitHubService {
   constructor() {
-    this.octokit = new Octokit({
-      auth: process.env.GITHUB_TOKEN,
-    });
+    this.octokitInstances = new Map(); // Cache per-user Octokit instances
     this.defaultBranch = 'main';
   }
 
   /**
-   * Create a new repository for the educational project
+   * Get authenticated Octokit instance for a user
    */
-  async createRepository(project, organization = null) {
+  getOctokitForUser(userGitHubToken) {
+    if (!userGitHubToken) {
+      throw new Error('User GitHub token required for multi-tenant access');
+    }
+
+    // Cache instances per token for performance
+    if (this.octokitInstances.has(userGitHubToken)) {
+      return this.octokitInstances.get(userGitHubToken);
+    }
+
+    const octokit = new Octokit({
+      auth: userGitHubToken,
+    });
+
+    this.octokitInstances.set(userGitHubToken, octokit);
+    return octokit;
+  }
+
+  /**
+   * Create a new repository for the user's project
+   */
+  async createRepository(project, userGitHubToken, organization = null) {
+    const octokit = this.getOctokitForUser(userGitHubToken);
     try {
       const repoData = {
         name: this.sanitizeRepoName(project.name),
@@ -28,12 +52,12 @@ class GitHubService {
 
       let repo;
       if (organization) {
-        repo = await this.octokit.repos.createInOrg({
+        repo = await octokit.repos.createInOrg({
           org: organization,
           ...repoData
         });
       } else {
-        repo = await this.octokit.repos.createForAuthenticatedUser(repoData);
+        repo = await octokit.repos.createForAuthenticatedUser(repoData);
       }
 
       // Setup repository for educational development
