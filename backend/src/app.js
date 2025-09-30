@@ -5,12 +5,14 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
 const cookieParser = require('cookie-parser');
+const session = require('express-session');
 const databaseConfig = require('./config/database');
 
 // Import routes
 const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
 const taskRoutes = require('./routes/tasks');
+const githubAuthRoutes = require('./routes/github-auth');
 
 // Import middleware
 const { protectStudentData, auditLog } = require('./middleware/auth');
@@ -108,6 +110,18 @@ class EducationalApp {
 
     this.app.use(cookieParser());
 
+    // Session configuration for OAuth state management
+    this.app.use(session({
+      secret: process.env.SESSION_SECRET || 'multi-tenant-github-oauth-secret',
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        secure: this.environment === 'production',
+        httpOnly: true,
+        maxAge: 1000 * 60 * 15 // 15 minutes
+      }
+    }));
+
     // MongoDB injection protection
     this.app.use(mongoSanitize());
 
@@ -185,6 +199,7 @@ class EducationalApp {
 
     // Mount API routes
     this.app.use('/api/auth', authRoutes);
+    this.app.use('/api/github-auth', githubAuthRoutes);
     this.app.use('/api/projects', projectRoutes);
     this.app.use('/api/tasks', taskRoutes);
 

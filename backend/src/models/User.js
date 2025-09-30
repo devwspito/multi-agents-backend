@@ -47,6 +47,33 @@ const UserSchema = new mongoose.Schema({
       default: 'UTC'
     }
   },
+  // GitHub OAuth Integration (Multi-tenant)
+  github: {
+    id: String, // GitHub user ID
+    username: String, // GitHub username
+    accessToken: {
+      type: String,
+      select: false // Never include in queries by default for security
+    },
+    refreshToken: {
+      type: String,
+      select: false
+    },
+    connectedAt: Date,
+    lastSyncAt: Date,
+    profile: {
+      login: String,
+      name: String,
+      email: String,
+      avatar_url: String,
+      bio: String,
+      company: String,
+      location: String,
+      public_repos: Number,
+      followers: Number,
+      following: Number
+    }
+  },
   role: {
     type: String,
     enum: ['admin', 'manager', 'developer', 'qa', 'viewer'],
