@@ -1,0 +1,505 @@
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const { authenticate, rateLimit, auditLog } = require('../middleware/auth');
+
+const router = express.Router();
+
+/**
+ * @route   POST /api/auth/register
+ * @desc    Register a new user
+ * @access  Public
+ */
+router.post('/register', 
+  rateLimit(15 * 60 * 1000, 5), // 5 attempts per 15 minutes
+  auditLog('user_registration'),
+  async (req, res) => {
+    try {
+      const {
+        username,
+        email,
+        password,
+        profile,
+        organization,
+        specializations
+      } = req.body;
+
+      // Validation
+      if (!username || !email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username, email, and password are required.'
+        });
+      }
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'Password must be at least 6 characters long.'
+        });
+      }
+
+      // Check if user already exists
+      const existingUser = await User.findOne({
+        $or: [{ email }, { username }]
+      });
+
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'User with this email or username already exists.'
+        });
+      }
+
+      // Create user with educational defaults
+      const userData = {
+        username,
+        email,
+        password,
+        profile: {
+          firstName: profile?.firstName || '',
+          lastName: profile?.lastName || '',
+          ...profile
+        },
+        organization: {
+          name: organization?.name || '',
+          type: organization?.type || 'university',
+          ...organization
+        },
+        specializations: specializations || ['educational-technology'],
+        // Set default permissions for educational environment
+        permissions: {
+          projects: {
+            create: false,
+            read: true,
+            update: false,
+            delete: false
+          },
+          tasks: {
+            create: true,
+            assign: false,
+            review: false,
+            approve: false
+          },
+          agents: {
+            junior: false,
+            senior: false,
+            qa: false,
+            pm: false
+          },
+          compliance: {
+            ferpaAccess: false,
+            coppaAccess: false,
+            gdprAccess: false
+          }
+        }
+      };
+
+      const user = new User(userData);
+      await user.save();
+
+      // Generate token
+      const token = user.generateAuthToken();
+
+      res.status(201).json({
+        success: true,
+        message: 'User registered successfully.',
+        data: {
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            specializations: user.specializations,
+            organization: user.organization
+          },
+          token
+        }
+      });
+    } catch (error) {
+      console.error('Registration error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error during registration.',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/auth/login
+ * @desc    Login user
+ * @access  Public
+ */
+router.post('/login',
+  rateLimit(15 * 60 * 1000, 10), // 10 attempts per 15 minutes
+  auditLog('user_login'),
+  async (req, res) => {
+    try {
+      const { email, password } = req.body;
+
+      // Validation
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email and password are required.'
+        });
+      }
+
+      // Find user and validate credentials
+      const user = await User.findByCredentials(email, password);
+
+      // Check if user needs to verify email
+      if (!user.emailVerified && process.env.REQUIRE_EMAIL_VERIFICATION === 'true') {
+        return res.status(401).json({
+          success: false,
+          message: 'Please verify your email before logging in.'
+        });
+      }
+
+      // Generate token
+      const token = user.generateAuthToken();
+
+      res.json({
+        success: true,
+        message: 'Login successful.',
+        data: {
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            fullName: user.fullName,
+            specializations: user.specializations,
+            organization: user.organization,
+            permissions: user.permissions,
+            preferences: user.preferences
+          },
+          token
+        }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      
+      // Generic error message to prevent user enumeration
+      res.status(401).json({
+        success: false,
+        message: 'Invalid email or password.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/auth/logout
+ * @desc    Logout user (for token blacklisting if implemented)
+ * @access  Private
+ */
+router.post('/logout',
+  authenticate,
+  auditLog('user_logout'),
+  async (req, res) => {
+    try {
+      // In a production environment, you would blacklist the token here
+      // For now, just return success as the client will remove the token
+
+      res.json({
+        success: true,
+        message: 'Logout successful.'
+      });
+    } catch (error) {
+      console.error('Logout error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error during logout.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   GET /api/auth/me
+ * @desc    Get current user profile
+ * @access  Private
+ */
+router.get('/me',
+  authenticate,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user._id)
+        .select('-password')
+        .populate('activity.projectsWorked.project', 'name description');
+
+      res.json({
+        success: true,
+        data: {
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            profile: user.profile,
+            specializations: user.specializations,
+            skills: user.skills,
+            organization: user.organization,
+            permissions: user.permissions,
+            preferences: user.preferences,
+            activity: user.activity,
+            settings: user.settings,
+            emailVerified: user.emailVerified,
+            fullName: user.fullName
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Get profile error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error retrieving profile.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/auth/profile
+ * @desc    Update user profile
+ * @access  Private
+ */
+router.put('/profile',
+  authenticate,
+  auditLog('profile_update'),
+  async (req, res) => {
+    try {
+      const {
+        profile,
+        specializations,
+        skills,
+        preferences,
+        settings
+      } = req.body;
+
+      const user = await User.findById(req.user._id);
+
+      // Update allowed fields
+      if (profile) {
+        user.profile = { ...user.profile, ...profile };
+      }
+
+      if (specializations && Array.isArray(specializations)) {
+        user.specializations = specializations;
+      }
+
+      if (skills) {
+        user.skills = { ...user.skills, ...skills };
+      }
+
+      if (preferences) {
+        user.preferences = { ...user.preferences, ...preferences };
+      }
+
+      if (settings) {
+        user.settings = { ...user.settings, ...settings };
+      }
+
+      await user.save();
+
+      res.json({
+        success: true,
+        message: 'Profile updated successfully.',
+        data: {
+          user: {
+            id: user._id,
+            profile: user.profile,
+            specializations: user.specializations,
+            skills: user.skills,
+            preferences: user.preferences,
+            settings: user.settings
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Profile update error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error updating profile.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/auth/change-password
+ * @desc    Change user password
+ * @access  Private
+ */
+router.put('/change-password',
+  authenticate,
+  rateLimit(15 * 60 * 1000, 3), // 3 attempts per 15 minutes
+  auditLog('password_change'),
+  async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+
+      // Validation
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password and new password are required.'
+        });
+      }
+
+      if (newPassword.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be at least 6 characters long.'
+        });
+      }
+
+      const user = await User.findById(req.user._id);
+
+      // Verify current password
+      const isCurrentPasswordValid = await user.comparePassword(currentPassword);
+      if (!isCurrentPasswordValid) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is incorrect.'
+        });
+      }
+
+      // Check if new password is different
+      const isSamePassword = await user.comparePassword(newPassword);
+      if (isSamePassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be different from current password.'
+        });
+      }
+
+      // Update password
+      user.password = newPassword;
+      await user.save();
+
+      res.json({
+        success: true,
+        message: 'Password changed successfully.'
+      });
+    } catch (error) {
+      console.error('Password change error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error changing password.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/auth/request-permissions
+ * @desc    Request additional permissions for educational work
+ * @access  Private
+ */
+router.post('/request-permissions',
+  authenticate,
+  auditLog('permission_request'),
+  async (req, res) => {
+    try {
+      const { requestedPermissions, justification } = req.body;
+
+      if (!requestedPermissions || !justification) {
+        return res.status(400).json({
+          success: false,
+          message: 'Requested permissions and justification are required.'
+        });
+      }
+
+      // In a real implementation, this would create a permission request
+      // that administrators could approve/deny
+      
+      // For now, automatically grant basic educational permissions
+      const user = await User.findById(req.user._id);
+      
+      // Grant basic educational permissions
+      if (user.organization.type === 'university' || user.organization.type === 'k12-school') {
+        user.permissions.agents.junior = true;
+        user.permissions.tasks.assign = true;
+        
+        if (user.specializations.includes('educational-technology')) {
+          user.permissions.compliance.ferpaAccess = true;
+        }
+        
+        await user.save();
+      }
+
+      res.json({
+        success: true,
+        message: 'Permission request processed. Basic educational permissions granted.',
+        data: {
+          permissions: user.permissions
+        }
+      });
+    } catch (error) {
+      console.error('Permission request error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error processing permission request.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   GET /api/auth/educational-compliance
+ * @desc    Get user's educational compliance status
+ * @access  Private
+ */
+router.get('/educational-compliance',
+  authenticate,
+  async (req, res) => {
+    try {
+      const user = req.user;
+      
+      const complianceStatus = {
+        ferpaTraining: user.permissions.compliance.ferpaAccess,
+        coppaTraining: user.permissions.compliance.coppaAccess,
+        gdprTraining: user.permissions.compliance.gdprAccess,
+        accessibilityTraining: user.specializations.includes('accessibility'),
+        organizationType: user.organization.type,
+        educationalRole: user.specializations.filter(spec => 
+          spec.includes('educational') || spec.includes('learning')
+        ),
+        complianceLevel: this.calculateComplianceLevel(user)
+      };
+
+      res.json({
+        success: true,
+        data: { complianceStatus }
+      });
+    } catch (error) {
+      console.error('Compliance status error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error retrieving compliance status.'
+      });
+    }
+  }
+);
+
+// Helper function to calculate compliance level
+const calculateComplianceLevel = (user) => {
+  let score = 0;
+  
+  if (user.permissions.compliance.ferpaAccess) score += 30;
+  if (user.permissions.compliance.coppaAccess) score += 25;
+  if (user.permissions.compliance.gdprAccess) score += 20;
+  if (user.specializations.includes('accessibility')) score += 15;
+  if (user.organization.type === 'university' || user.organization.type === 'k12-school') score += 10;
+  
+  if (score >= 80) return 'high';
+  if (score >= 50) return 'medium';
+  return 'basic';
+};
+
+module.exports = router;

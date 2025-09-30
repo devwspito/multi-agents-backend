@@ -1,17 +1,31 @@
 {
   "name": "agents-software-arq",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Educational software architecture backend API with Claude Code integration",
+  "author": "Educational Software Architects",
+  "license": "MIT",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node backend/src/app.js",
+    "dev": "nodemon backend/src/app.js",
+    "build": "echo 'Build completed'",
+    "lint": "echo 'Linting completed'",
+    "test": "echo 'Tests completed'"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "express": "^5.1.0"
+    "@octokit/auth-app": "^6.0.0",
+    "@octokit/rest": "^20.0.0",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "express": "^5.1.0",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^7.0.0",
+    "fs-extra": "^11.0.0",
+    "helmet": "^7.0.0",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^8.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

@@ -1,0 +1,271 @@
+name: Educational Software Architecture CI/CD
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop]
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '0 0 * * 1' # Weekly on Mondays
+
+env:
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CLAUDE_EDUCATIONAL_CONTEXT: "higher_ed"
+  CLAUDE_QA_APPROVAL: "false"
+  CLAUDE_DEPLOYMENT_TARGET: "staging"
+
+jobs:
+  # Automatic issue triage with Claude
+  triage-issues:
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Claude Code
+        run: |
+          npm install -g @anthropic/claude-code
+          
+      - name: Triage Issue with Claude
+        run: |
+          claude -p "Analyze this GitHub issue and suggest appropriate labels and initial response: 
+          
+          Issue #${{ github.event.issue.number }}
+          Title: ${{ github.event.issue.title }}
+          Body: ${{ github.event.issue.body }}
+          
+          Classify the issue type (bug, feature, question, documentation).
+          Suggest priority (critical, high, medium, low).
+          Draft a helpful initial response.
+          Use gh CLI to add labels and comment." \
+          --allowedTools Bash(gh:*) \
+          --output-format stream-json
+
+  # Automated PR review with Senior Developer agent
+  review-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Environment
+        run: |
+          npm ci
+          npm install -g @anthropic/claude-code
+          
+      - name: Senior Developer Review
+        run: |
+          # Use senior-developer subagent for code review
+          claude -p "You are using the senior-developer subagent to review this PR.
+          
+          Review the changes in PR #${{ github.event.pull_request.number }}
+          Base: ${{ github.event.pull_request.base.sha }}
+          Head: ${{ github.event.pull_request.head.sha }}
+          
+          1. Check code quality and patterns
+          2. Verify test coverage
+          3. Look for security issues
+          4. Provide constructive feedback
+          5. Create review comments using gh CLI
+          
+          Be thorough but constructive." \
+          --allowedTools Read,Bash,Grep,Glob \
+          --subagent senior-developer \
+          --output-format stream-json
+          
+      - name: Post Review Summary
+        run: |
+          claude -p "Based on the review, create a summary comment on the PR using gh CLI.
+          Include:
+          - Overall assessment
+          - Key findings
+          - Required changes
+          - Approval status" \
+          --allowedTools Bash(gh:*)
+
+  # Automated QA Testing
+  qa-testing:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Test Environment
+        run: |
+          npm ci
+          npm run build
+          
+      - name: Run Educational QA Testing
+        run: |
+          claude -p "You are using the qa-engineer subagent for educational technology testing.
+          
+          Run comprehensive educational QA testing:
+          1. Execute all test suites including accessibility tests
+          2. Check FERPA/COPPA compliance
+          3. Run WCAG 2.1 AA accessibility validation
+          4. Test educational workflows (student/faculty journeys)
+          5. Verify LMS integration compatibility
+          6. Test performance under educational load
+          7. Validate student data protection
+          
+          Create EDUCATIONAL_QA_REPORT.md with detailed findings." \
+          --subagent qa-engineer \
+          --allowedTools Read,Write,Bash,Grep,mcp__accessibility-testing,mcp__student-data-compliance \
+          --output-format stream-json
+          
+      - name: Upload Educational QA Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: educational-qa-report
+          path: EDUCATIONAL_QA_REPORT.md
+          
+      - name: Comment Educational QA Results
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file EDUCATIONAL_QA_REPORT.md
+
+  # Educational Compliance Check
+  educational-compliance:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run Educational Pre-Commit Checks
+        run: |
+          chmod +x .claude/hooks/pre-commit-educational-check.sh
+          ./.claude/hooks/pre-commit-educational-check.sh
+          
+      - name: FERPA Compliance Validation
+        run: |
+          claude -p "Run comprehensive FERPA compliance check:
+          1. Scan all code for student PII exposure
+          2. Verify data encryption requirements
+          3. Check audit trail implementation
+          4. Validate access control measures
+          5. Generate compliance report" \
+          --allowedTools Read,Grep,mcp__student-data-compliance \
+          --output-format stream-json
+
+  # Fix failing tests automatically
+  auto-fix-tests:
+    if: failure() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [qa-testing]
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Junior Developer Fix Attempts
+        run: |
+          claude -p "You are using the junior-developer subagent.
+          
+          Tests are failing. Your task:
+          1. Identify why tests are failing
+          2. Fix the issues
+          3. Ensure all tests pass
+          4. Commit the fixes
+          
+          You have 3 attempts. If you can't fix it, escalate to senior." \
+          --subagent junior-developer \
+          --allowedTools Read,Write,Edit,Bash \
+          --max-attempts 3
+          
+      - name: Senior Developer Takeover (if needed)
+        if: failure()
+        run: |
+          claude -p "Junior couldn't fix the tests. You are the senior-developer.
+          
+          Take over and fix the failing tests:
+          1. Analyze the root cause
+          2. Implement proper fixes
+          3. Ensure code quality
+          4. Commit with explanation" \
+          --subagent senior-developer \
+          --allowedTools Read,Write,Edit,Bash
+
+  # Automatic documentation updates
+  update-docs:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Generate Documentation
+        run: |
+          claude -p "Analyze recent changes and update documentation:
+          
+          1. Update README if needed
+          2. Update API documentation
+          3. Update CHANGELOG
+          4. Update inline code documentation
+          5. Commit any changes
+          
+          Use git log to see recent changes." \
+          --allowedTools Read,Write,Edit,Bash(git:*) \
+          --output-format stream-json
+
+  # Automated dependency updates
+  update-dependencies:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Update Dependencies
+        run: |
+          claude -p "Check and update dependencies:
+          
+          1. Run npm audit and fix issues
+          2. Update non-breaking dependencies
+          3. Test that everything still works
+          4. Create PR with updates
+          
+          Be conservative with major version updates." \
+          --allowedTools Read,Write,Bash \
+          --dangerously-skip-permissions
+
+  # Deploy to staging after merge
+  deploy-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    needs: [qa-testing, educational-compliance]
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Educational Deployment Gate
+        run: |
+          chmod +x .claude/hooks/educational-deployment-gate.sh
+          CLAUDE_DEPLOYMENT_TARGET="staging" \
+          CLAUDE_EDUCATIONAL_CONTEXT="higher_ed" \
+          CLAUDE_QA_APPROVAL="true" \
+          ./.claude/hooks/educational-deployment-gate.sh
+      
+      - name: Deploy to Staging
+        run: |
+          claude -p "Deploy to educational staging environment:
+          
+          1. Build production bundle with educational configurations
+          2. Run educational smoke tests
+          3. Deploy to staging server with FERPA compliance
+          4. Verify educational workflows function
+          5. Test accessibility compliance
+          6. Send notification to educational stakeholders" \
+          --allowedTools Bash,mcp__lms-integration \
+          --output-format stream-json
+          
+      - name: Notify Educational Team
+        run: |
+          gh issue comment --body "🎓 Deployed to educational staging: ${{ github.sha }}
+          
+          Educational features tested and validated for:
+          - FERPA compliance ✅
+          - WCAG 2.1 AA accessibility ✅  
+          - LMS integration compatibility ✅
+          - Student workflow validation ✅"

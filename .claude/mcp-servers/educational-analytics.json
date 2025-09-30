@@ -1,0 +1,41 @@
+{
+  "name": "educational-analytics",
+  "description": "Learning analytics and educational data insights MCP server",
+  "executable": "node", 
+  "args": ["./mcp-servers/educational-analytics-server.js"],
+  "env": {
+    "ANALYTICS_MODE": "educational",
+    "PRIVACY_PRESERVATION": "differential_privacy",
+    "LEARNING_OUTCOMES": "tracked",
+    "EARLY_WARNING": "enabled",
+    "PERSONALIZATION": "adaptive_learning"
+  },
+  "capabilities": [
+    "learning_outcome_tracking",
+    "student_progress_analytics",
+    "early_intervention_detection",
+    "engagement_measurement",
+    "performance_prediction",
+    "curriculum_effectiveness_analysis"
+  ],
+  "analytics_features": {
+    "real_time_insights": true,
+    "predictive_modeling": "ethical_ai",
+    "dashboard_generation": "role_based",
+    "report_automation": "scheduled",
+    "data_visualization": "accessible"
+  },
+  "educational_metrics": {
+    "completion_rates": "course_assignment_module",
+    "engagement_indicators": "time_interaction_participation", 
+    "learning_gains": "pre_post_assessment",
+    "retention_prediction": "early_warning_system",
+    "accessibility_usage": "assistive_technology_tracking"
+  },
+  "privacy_protection": {
+    "anonymization": "k_anonymity",
+    "aggregation_minimum": 10,
+    "retention_policy": "academic_calendar_based",
+    "consent_tracking": "granular_permissions"
+  }
+}
