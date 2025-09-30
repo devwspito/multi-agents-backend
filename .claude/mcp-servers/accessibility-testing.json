@@ -1,0 +1,34 @@
+{
+  "name": "accessibility-testing",
+  "description": "Educational accessibility testing and WCAG 2.1 AA compliance MCP server",
+  "executable": "node",
+  "args": ["./mcp-servers/accessibility-testing-server.js"],
+  "env": {
+    "WCAG_LEVEL": "AA",
+    "WCAG_VERSION": "2.1",
+    "SCREEN_READER_TESTING": "enabled",
+    "COGNITIVE_ACCESSIBILITY": "educational_focus",
+    "BROWSER_TESTING": "cross_platform"
+  },
+  "capabilities": [
+    "wcag_automated_testing",
+    "screen_reader_simulation",
+    "keyboard_navigation_testing",
+    "color_contrast_validation",
+    "cognitive_load_assessment",
+    "mobile_accessibility_testing"
+  ],
+  "testing_tools": {
+    "axe_core": "latest",
+    "pa11y": "enabled",
+    "lighthouse": "accessibility_focused",
+    "wave": "educational_context",
+    "screen_readers": ["nvda", "jaws", "voiceover", "talkback"]
+  },
+  "educational_considerations": {
+    "learning_disabilities": "accommodated",
+    "diverse_abilities": "inclusive_design",
+    "age_appropriate": "k12_through_higher_ed",
+    "multilingual": "international_students"
+  }
+}

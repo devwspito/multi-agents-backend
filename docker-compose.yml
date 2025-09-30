@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # Educational Technology Backend API
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: agents-software-arq-backend
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+      - MONGODB_URI=mongodb://mongodb:27017/agents_software_arq
+      - JWT_SECRET=${JWT_SECRET}
+      - STUDENT_DATA_KEY=${STUDENT_DATA_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - FERPA_COMPLIANCE_MODE=${FERPA_COMPLIANCE_MODE:-strict}
+      - COPPA_COMPLIANCE=${COPPA_COMPLIANCE:-enabled}
+      - WCAG_COMPLIANCE_LEVEL=${WCAG_COMPLIANCE_LEVEL:-AA}
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./workspaces:/app/workspaces
+      - ./logs:/app/logs
+    networks:
+      - educational-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MongoDB Database for Educational Data
+  mongodb:
+    image: mongo:7.0
+    container_name: agents-software-arq-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME:-admin}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:-password}
+      - MONGO_INITDB_DATABASE=agents_software_arq
+    volumes:
+      - mongodb_data:/data/db
+      - ./docker/mongodb/init:/docker-entrypoint-initdb.d
+    networks:
+      - educational-network
+    restart: unless-stopped
+    command: mongod --auth --bind_ip_all
+
+  # Redis for Session Management and Caching
+  redis:
+    image: redis:7.2-alpine
+    container_name: agents-software-arq-redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-educational_redis_pass}
+    volumes:
+      - redis_data:/data
+    networks:
+      - educational-network
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-educational_redis_pass}
+
+  # Educational Analytics MCP Server
+  mcp-analytics:
+    build:
+      context: ./mcp-servers
+      dockerfile: analytics.Dockerfile
+    container_name: agents-mcp-analytics
+    environment:
+      - ANALYTICS_MODE=${ANALYTICS_MODE:-educational}
+      - PRIVACY_PRESERVATION=${PRIVACY_PRESERVATION:-differential_privacy}
+      - LEARNING_OUTCOMES=${LEARNING_OUTCOMES:-tracked}
+      - MONGODB_URI=mongodb://mongodb:27017/agents_software_arq
+    depends_on:
+      - mongodb
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+  # LMS Integration MCP Server
+  mcp-lms:
+    build:
+      context: ./mcp-servers
+      dockerfile: lms.Dockerfile
+    container_name: agents-mcp-lms
+    environment:
+      - LMS_CANVAS_API_KEY=${LMS_CANVAS_API_KEY}
+      - LMS_BLACKBOARD_API_KEY=${LMS_BLACKBOARD_API_KEY}
+      - LMS_MOODLE_API_KEY=${LMS_MOODLE_API_KEY}
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+  # Student Data Compliance MCP Server
+  mcp-compliance:
+    build:
+      context: ./mcp-servers
+      dockerfile: compliance.Dockerfile
+    container_name: agents-mcp-compliance
+    environment:
+      - COMPLIANCE_FERPA_ENABLED=${COMPLIANCE_FERPA_ENABLED:-true}
+      - COMPLIANCE_COPPA_ENABLED=${COMPLIANCE_COPPA_ENABLED:-true}
+      - COMPLIANCE_GDPR_ENABLED=${COMPLIANCE_GDPR_ENABLED:-true}
+      - STUDENT_DATA_KEY=${STUDENT_DATA_KEY}
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+  # Accessibility Testing MCP Server
+  mcp-accessibility:
+    build:
+      context: ./mcp-servers
+      dockerfile: accessibility.Dockerfile
+    container_name: agents-mcp-accessibility
+    environment:
+      - ACCESSIBILITY_WCAG_VERSION=${ACCESSIBILITY_WCAG_VERSION:-2.1}
+      - ACCESSIBILITY_COMPLIANCE_LEVEL=${ACCESSIBILITY_COMPLIANCE_LEVEL:-AA}
+      - ACCESSIBILITY_AUTO_TEST=${ACCESSIBILITY_AUTO_TEST:-true}
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+  # Educational Monitoring and Logging
+  monitoring:
+    image: prom/prometheus:latest
+    container_name: agents-monitoring
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+  # Educational Metrics Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: agents-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-educational_admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - monitoring
+    networks:
+      - educational-network
+    restart: unless-stopped
+
+networks:
+  educational-network:
+    driver: bridge
+    name: educational-network
+
+volumes:
+  mongodb_data:
+    driver: local
+    name: agents-mongodb-data
+  redis_data:
+    driver: local
+    name: agents-redis-data
+  prometheus_data:
+    driver: local
+    name: agents-prometheus-data
+  grafana_data:
+    driver: local
+    name: agents-grafana-data
