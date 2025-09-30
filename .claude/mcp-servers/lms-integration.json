@@ -1,0 +1,27 @@
+{
+  "name": "lms-integration",
+  "description": "LMS Integration MCP Server for Canvas, Moodle, and Blackboard connectivity",
+  "executable": "node",
+  "args": ["./mcp-servers/lms-integration-server.js"],
+  "env": {
+    "LMS_TYPE": "canvas",
+    "CANVAS_API_URL": "${CANVAS_API_URL}",
+    "CANVAS_ACCESS_TOKEN": "${CANVAS_ACCESS_TOKEN}",
+    "MOODLE_API_URL": "${MOODLE_API_URL}",
+    "MOODLE_API_TOKEN": "${MOODLE_API_TOKEN}",
+    "FERPA_COMPLIANCE_MODE": "strict"
+  },
+  "capabilities": [
+    "course_management",
+    "enrollment_sync",
+    "grade_passback",
+    "assignment_creation",
+    "student_progress_tracking"
+  ],
+  "educational_context": {
+    "privacy_level": "ferpa_compliant",
+    "data_retention": "academic_year",
+    "audit_logging": true,
+    "accessibility_required": true
+  }
+}
