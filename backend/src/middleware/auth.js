@@ -107,30 +107,6 @@ const checkAgentAccess = (agentType) => {
   };
 };
 
-/**
- * Educational compliance middleware - ensures user has appropriate access for educational data
- */
-const checkEducationalAccess = (complianceType) => {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Access denied. Please authenticate.'
-      });
-    }
-
-    const complianceField = `${complianceType}Access`;
-    
-    if (!req.user.permissions.compliance[complianceField]) {
-      return res.status(403).json({
-        success: false,
-        message: `Access denied. Missing ${complianceType.toUpperCase()} compliance access.`
-      });
-    }
-
-    next();
-  };
-};
 
 /**
  * Rate limiting middleware for API endpoints
@@ -162,21 +138,19 @@ const rateLimit = (windowMs = 15 * 60 * 1000, max = 100) => {
 };
 
 /**
- * Educational data protection middleware
+ * Data protection middleware
  */
-const protectStudentData = (req, res, next) => {
-  // Add headers for student data protection
+const protectData = (req, res, next) => {
+  // Add security headers
   res.set({
-    'X-Educational-Privacy': 'FERPA-Compliant',
-    'X-Student-Data-Protection': 'Enabled',
     'Cache-Control': 'no-store, no-cache, must-revalidate, private',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY'
   });
 
-  // Log access to educational data
+  // Log API access
   if (req.user) {
-    console.log(`Educational data access: ${req.user.username} - ${req.method} ${req.path} - ${new Date().toISOString()}`);
+    console.log(`API access: ${req.user.username} - ${req.method} ${req.path} - ${new Date().toISOString()}`);
   }
 
   next();
@@ -225,13 +199,13 @@ const auditLog = (action) => {
 };
 
 /**
- * Validate request body for educational requirements
+ * Validate request data
  */
-const validateEducationalData = (req, res, next) => {
+const validateRequestData = (req, res, next) => {
   const body = req.body;
 
   // Check for potential PII in request
-  const piiFields = ['ssn', 'social_security', 'student_id', 'email', 'phone', 'address'];
+  const piiFields = ['ssn', 'social_security', 'email', 'phone', 'address'];
   const suspiciousPII = piiFields.some(field => 
     JSON.stringify(body).toLowerCase().includes(field)
   );
@@ -239,23 +213,6 @@ const validateEducationalData = (req, res, next) => {
   if (suspiciousPII) {
     console.warn(`Potential PII detected in request from ${req.user?.username} to ${req.path}`);
     // In production, implement additional PII detection and scrubbing
-  }
-
-  // Validate educational context if required
-  if (body.educationalImpact) {
-    if (!body.educationalImpact.learningObjectives || !Array.isArray(body.educationalImpact.learningObjectives)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Educational impact must include learning objectives array.'
-      });
-    }
-
-    if (!body.educationalImpact.targetAudience) {
-      return res.status(400).json({
-        success: false,
-        message: 'Educational impact must include target audience.'
-      });
-    }
   }
 
   next();
@@ -285,13 +242,13 @@ const checkProjectAccess = async (req, res, next) => {
       });
     }
 
-    // Check if user is project owner or team member
+    // Check if user is project owner or collaborator
     const isOwner = project.owner.toString() === req.user._id.toString();
-    const isTeamMember = project.team.some(member => 
+    const isCollaborator = project.collaborators?.some(member =>
       member.user.toString() === req.user._id.toString()
     );
 
-    if (!isOwner && !isTeamMember && req.user.role !== 'admin') {
+    if (!isOwner && !isCollaborator && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'Access denied. Not authorized for this project.'
@@ -336,12 +293,12 @@ const checkTaskAccess = async (req, res, next) => {
     // Check project access first
     const project = task.project;
     const isOwner = project.owner.toString() === req.user._id.toString();
-    const isTeamMember = project.team.some(member => 
+    const isCollaborator = project.collaborators?.some(member =>
       member.user.toString() === req.user._id.toString()
     );
     const isAssigned = task.assignedTo && task.assignedTo.toString() === req.user._id.toString();
 
-    if (!isOwner && !isTeamMember && !isAssigned && req.user.role !== 'admin') {
+    if (!isOwner && !isCollaborator && !isAssigned && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'Access denied. Not authorized for this task.'
@@ -380,11 +337,10 @@ module.exports = {
   authorize,
   checkPermission,
   checkAgentAccess,
-  checkEducationalAccess,
   rateLimit,
-  protectStudentData,
+  protectData,
   auditLog,
-  validateEducationalData,
+  validateRequestData,
   checkProjectAccess,
   checkTaskAccess
 };

@@ -10,11 +10,10 @@ const {
   authorize,
   checkPermission,
   checkProjectAccess,
-  protectStudentData,
+  protectData,
   auditLog,
-  validateEducationalData
+  validateRequestData
 } = require('../middleware/auth');
-const { requireGitHubConnection } = require('../middleware/github');
 
 const router = express.Router();
 const projectManager = new ProjectManager();
@@ -28,7 +27,7 @@ const githubService = new GitHubService();
  */
 router.get('/',
   authenticate,
-  protectStudentData,
+  protectData,
   async (req, res) => {
     try {
       const {
@@ -41,10 +40,10 @@ router.get('/',
 
       const query = {};
 
-      // Filter by user access (owner or team member)
+      // Filter by user access (owner or collaborator)
       query.$or = [
         { owner: req.user._id },
-        { 'team.user': req.user._id }
+        { 'collaborators.user': req.user._id }
       ];
 
       // Apply filters
@@ -65,7 +64,7 @@ router.get('/',
 
       const projects = await Project.find(query)
         .populate('owner', 'username profile.firstName profile.lastName')
-        .populate('team.user', 'username profile.firstName profile.lastName')
+        .populate('collaborators.user', 'username profile.firstName profile.lastName')
         .sort({ updatedAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit)
@@ -122,7 +121,7 @@ router.get('/',
 router.post('/',
   authenticate,
   checkPermission('projects', 'create'),
-  validateEducationalData,
+  validateRequestData,
   auditLog('project_creation'),
   async (req, res) => {
     try {
@@ -159,7 +158,7 @@ router.post('/',
 
       // Populate project data for response
       await project.populate('owner', 'username profile.firstName profile.lastName');
-      await project.populate('team.user', 'username profile.firstName profile.lastName');
+      await project.populate('collaborators.user', 'username profile.firstName profile.lastName');
 
       res.status(201).json({
         success: true,
@@ -185,7 +184,7 @@ router.post('/',
 router.get('/:id',
   authenticate,
   checkProjectAccess,
-  protectStudentData,
+  protectData,
   async (req, res) => {
     try {
       const project = req.project;
@@ -233,12 +232,8 @@ router.get('/:id',
           completed: project.features.filter(f => f.status === 'done').length,
           inProgress: project.features.filter(f => f.status === 'in-progress').length
         },
-        team: {
-          size: project.team.length,
-          roles: project.team.reduce((acc, member) => {
-            acc[member.role] = (acc[member.role] || 0) + 1;
-            return acc;
-          }, {})
+        collaborators: {
+          total: project.collaborators?.length || 0
         }
       };
 
@@ -271,7 +266,7 @@ router.put('/:id',
   authenticate,
   checkProjectAccess,
   checkPermission('projects', 'update'),
-  validateEducationalData,
+  validateRequestData,
   auditLog('project_update'),
   async (req, res) => {
     try {
@@ -288,7 +283,7 @@ router.put('/:id',
       await project.save();
 
       await project.populate('owner', 'username profile.firstName profile.lastName');
-      await project.populate('team.user', 'username profile.firstName profile.lastName');
+      await project.populate('collaborators.user', 'username profile.firstName profile.lastName');
 
       res.json({
         success: true,
@@ -526,7 +521,7 @@ router.get('/:id/progress',
 router.get('/:id/educational-report',
   authenticate,
   checkProjectAccess,
-  protectStudentData,
+  protectData,
   async (req, res) => {
     try {
       const project = req.project;
@@ -548,63 +543,65 @@ router.get('/:id/educational-report',
 );
 
 /**
- * @route   POST /api/projects/:id/team
- * @desc    Add team member to project
+ * @route   POST /api/projects/:id/collaborators
+ * @desc    Add collaborator to project
  * @access  Private
  */
-router.post('/:id/team',
+router.post('/:id/collaborators',
   authenticate,
   checkProjectAccess,
   authorize('admin', 'manager'),
-  auditLog('team_member_added'),
+  auditLog('collaborator_added'),
   async (req, res) => {
     try {
       const project = req.project;
       const { userId, role } = req.body;
 
-      if (!userId || !role) {
+      if (!userId) {
         return res.status(400).json({
           success: false,
-          message: 'User ID and role are required.'
+          message: 'User ID is required.'
         });
       }
 
-      const validRoles = ['product-manager', 'project-manager', 'senior-developer', 'junior-developer', 'qa-engineer'];
-      if (!validRoles.includes(role)) {
+      const validRoles = ['owner', 'contributor', 'viewer'];
+      const collaboratorRole = role || 'contributor';
+
+      if (!validRoles.includes(collaboratorRole)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid role specified.'
+          message: 'Invalid role specified. Valid roles: owner, contributor, viewer.'
         });
       }
 
-      // Check if user is already in team
-      const existingMember = project.team.find(member => 
+      // Check if user is already a collaborator
+      const existingMember = project.collaborators.find(member =>
         member.user.toString() === userId
       );
 
       if (existingMember) {
         return res.status(400).json({
           success: false,
-          message: 'User is already a team member.'
+          message: 'User is already a collaborator.'
         });
       }
 
-      // Add team member
-      project.team.push({ user: userId, role });
+      // Add collaborator
+      project.collaborators.push({ user: userId, role: collaboratorRole });
       await project.save();
 
-      await project.populate('team.user', 'username profile.firstName profile.lastName');
+      await project.populate('collaborators.user', 'username profile.firstName profile.lastName');
 
       res.json({
         success: true,
-        message: 'Team member added successfully.',
-        data: { team: project.team }
+        message: 'Collaborator added successfully.',
+        data: { collaborators: project.collaborators }
       });
     } catch (error) {
-      console.error('Add team member error:', error);
+      console.error('Add collaborator error:', error);
       res.status(500).json({
         success: false,
-        message: 'Server error adding team member.'
+        message: 'Server error adding collaborator.'
       });
     }
   }

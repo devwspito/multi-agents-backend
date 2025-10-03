@@ -1,18 +1,43 @@
 const { Octokit } = require('@octokit/rest');
+const { App } = require('@octokit/app');
 const Activity = require('../models/Activity');
+const BranchManager = require('./BranchManager');
 
 /**
- * Multi-tenant GitHub Service
- * Each user uses their own GitHub OAuth token
+ * Multi-tenant GitHub Service with GitHub App integration
+ * Supports both OAuth (user auth) and GitHub App (server operations)
  */
 class GitHubService {
   constructor() {
     this.octokitInstances = new Map(); // Cache per-user Octokit instances
+    this.appInstances = new Map(); // Cache per-installation App instances
     this.defaultBranch = 'main';
+    this.branchManager = new BranchManager();
+    this.initializeGitHubApp();
   }
 
   /**
-   * Get authenticated Octokit instance for a user
+   * Initialize GitHub App for server operations
+   */
+  initializeGitHubApp() {
+    if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_PRIVATE_KEY) {
+      console.warn('⚠️ GitHub App not configured. Some features will be limited.');
+      return;
+    }
+
+    this.githubApp = new App({
+      appId: process.env.GITHUB_APP_ID,
+      privateKey: process.env.GITHUB_PRIVATE_KEY,
+      webhooks: {
+        secret: process.env.GITHUB_WEBHOOK_SECRET
+      }
+    });
+
+    console.log('✅ GitHub App initialized successfully');
+  }
+
+  /**
+   * Get authenticated Octokit instance for a user (OAuth)
    */
   getOctokitForUser(userGitHubToken) {
     if (!userGitHubToken) {
@@ -30,6 +55,37 @@ class GitHubService {
 
     this.octokitInstances.set(userGitHubToken, octokit);
     return octokit;
+  }
+
+  /**
+   * Get authenticated Octokit instance for GitHub App (server operations)
+   */
+  async getOctokitForApp(installationId) {
+    if (!this.githubApp) {
+      throw new Error('GitHub App not configured. Cannot perform server operations.');
+    }
+
+    // Cache instances per installation
+    if (this.appInstances.has(installationId)) {
+      return this.appInstances.get(installationId);
+    }
+
+    const octokit = await this.githubApp.getInstallationOctokit(installationId);
+    this.appInstances.set(installationId, octokit);
+    return octokit;
+  }
+
+  /**
+   * Get installation ID for a repository
+   */
+  async getInstallationId(repoOwner, repoName) {
+    // This would typically be stored in your database when user installs your app
+    // For now, we'll use a fallback or environment variable
+    const installationId = process.env.GITHUB_INSTALLATION_ID;
+    if (!installationId) {
+      throw new Error(`GitHub App not installed for repository ${repoOwner}/${repoName}`);
+    }
+    return parseInt(installationId);
   }
 
   /**
@@ -147,21 +203,28 @@ class GitHubService {
   }
 
   /**
-   * Create a new branch for task development
+   * Create a new branch for agent task with conflict management
    */
-  async createTaskBranch(task, repoOwner, repoName) {
+  async createAgentTaskBranch(task, agentType, repoOwner, repoName) {
     try {
+      // Check repository availability and reserve branch
+      const { branchName } = await this.branchManager.reserveBranch(
+        task, agentType, repoOwner, repoName
+      );
+
+      // Get GitHub App installation for server operations
+      const installationId = await this.getInstallationId(repoOwner, repoName);
+      const octokit = await this.getOctokitForApp(installationId);
+
       // Get main branch SHA
-      const mainBranch = await this.octokit.repos.getBranch({
+      const mainBranch = await octokit.repos.getBranch({
         owner: repoOwner,
         repo: repoName,
         branch: this.defaultBranch
       });
 
-      const branchName = this.generateTaskBranchName(task);
-
       // Create new branch
-      await this.octokit.git.createRef({
+      await octokit.git.createRef({
         owner: repoOwner,
         repo: repoName,
         ref: `refs/heads/${branchName}`,
@@ -171,19 +234,56 @@ class GitHubService {
       await Activity.logActivity({
         task: task._id,
         project: task.project,
-        actor: 'github-service',
-        actorType: 'system',
+        actor: agentType,
+        actorType: 'agent',
+        agentType: agentType,
         action: 'branch-created',
-        description: `Created branch: ${branchName}`,
+        description: `Agent ${agentType} created branch: ${branchName}`,
         details: {
           branchName,
-          baseBranch: this.defaultBranch
+          baseBranch: this.defaultBranch,
+          agentType,
+          conflictPrevention: true
         }
       });
 
       return branchName;
     } catch (error) {
-      throw new Error(`Failed to create task branch: ${error.message}`);
+      // If conflict detected, queue the task
+      if (error.message.includes('Repository busy')) {
+        console.log(`📋 Queueing task due to conflict: ${task.title}`);
+        
+        await this.branchManager.queueAgentTask(
+          task, agentType, repoOwner, repoName,
+          () => this.createAgentTaskBranch(task, agentType, repoOwner, repoName)
+        );
+
+        return { queued: true, reason: error.message };
+      }
+      
+      throw new Error(`Failed to create agent task branch: ${error.message}`);
+    }
+  }
+
+  /**
+   * Release branch when agent work is complete
+   */
+  async releaseAgentBranch(branchName) {
+    try {
+      await this.branchManager.releaseBranch(branchName);
+      
+      await Activity.logActivity({
+        actor: 'github-service',
+        actorType: 'system',
+        action: 'branch-released',
+        description: `Branch released: ${branchName}`,
+        details: {
+          branchName,
+          conflictPrevention: true
+        }
+      });
+    } catch (error) {
+      console.error(`Failed to release branch ${branchName}: ${error.message}`);
     }
   }
 
@@ -331,7 +431,28 @@ class GitHubService {
       .replace(/-+/g, '-')
       .substring(0, 50);
     
-    return `feature/edtech/${task.complexity}/${sanitizedTitle}`;
+    return `feature/${task.complexity}/${sanitizedTitle}`;
+  }
+
+  /**
+   * Get repository status for monitoring conflicts
+   */
+  getRepositoryStatus(repoOwner, repoName) {
+    return this.branchManager.getRepositoryStatus(repoOwner, repoName);
+  }
+
+  /**
+   * Get all repositories status for dashboard
+   */
+  getAllRepositoriesStatus() {
+    return this.branchManager.getAllRepositoriesStatus();
+  }
+
+  /**
+   * Force release a branch (admin function)
+   */
+  async forceReleaseBranch(branchName, reason) {
+    return this.branchManager.forceReleaseBranch(branchName, reason);
   }
 
   generatePRTitle(task) {
