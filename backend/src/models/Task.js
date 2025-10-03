@@ -36,16 +36,39 @@ const TaskSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['backlog', 'assigned', 'in-progress', 'review', 'testing', 'done', 'blocked'],
+    enum: ['backlog', 'assigned', 'in-progress', 'review', 'testing', 'done', 'blocked', 'cancelled'],
     default: 'backlog'
   },
-  assignedTo: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  assignedAgent: {
-    type: String,
-    enum: ['junior-developer', 'senior-developer', 'qa-engineer', 'product-manager', 'project-manager']
+  // Orchestration pipeline - automatic execution through all agents
+  orchestration: {
+    status: {
+      type: String,
+      enum: ['pending', 'in-progress', 'completed', 'failed', 'cancelled'],
+      default: 'pending'
+    },
+    currentStep: {
+      type: Number,
+      default: 0
+    },
+    pipeline: [{
+      agent: {
+        type: String,
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'senior-developer', 'junior-developer', 'qa-engineer']
+      },
+      status: {
+        type: String,
+        enum: ['pending', 'in-progress', 'completed', 'failed', 'cancelled'],
+        default: 'pending'
+      },
+      startedAt: Date,
+      completedAt: Date,
+      output: String,
+      metrics: {
+        executionTime: Number,
+        tokensUsed: Number
+      }
+    }],
+    logs: [String]
   },
   estimatedHours: {
     type: Number,
@@ -59,15 +82,19 @@ const TaskSchema = new mongoose.Schema({
   gitBranch: {
     type: String
   },
+  
   // Multi-repository support
   repositories: [{
     repositoryId: { type: String, required: true },
     repositoryName: { type: String, required: true },
-    team: { type: String, required: true },
-    branch: { type: String },
-    assignedAgent: { 
+    type: {
       type: String,
-      enum: ['junior-developer', 'senior-developer', 'qa-engineer', 'tech-lead']
+      enum: ['frontend', 'backend', 'mobile', 'api', 'infrastructure', 'documentation']
+    },
+    branch: { type: String },
+    isActive: {
+      type: Boolean,
+      default: true // Por defecto todos los repos están activos
     },
     status: {
       type: String,
@@ -134,10 +161,6 @@ const TaskSchema = new mongoose.Schema({
     reviewer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
-    },
-    reviewerAgent: {
-      type: String,
-      enum: ['senior-developer', 'qa-engineer']
     },
     status: {
       type: String,
@@ -251,6 +274,50 @@ const TaskSchema = new mongoose.Schema({
   activities: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Activity'
+  }],
+  // NUEVO: Estadísticas de tokens y costos
+  tokenStats: {
+    totalInputTokens: {
+      type: Number,
+      default: 0
+    },
+    totalOutputTokens: {
+      type: Number,
+      default: 0
+    },
+    totalTokens: {
+      type: Number,
+      default: 0
+    },
+    totalCost: {
+      type: Number,
+      default: 0
+    },
+    byAgent: [{
+      agent: {
+        type: String,
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'senior-developer', 'junior-developer', 'qa-engineer']
+      },
+      model: {
+        type: String,
+        enum: ['opus', 'sonnet']
+      },
+      inputTokens: { type: Number, default: 0 },
+      outputTokens: { type: Number, default: 0 },
+      totalTokens: { type: Number, default: 0 },
+      cost: { type: Number, default: 0 },
+      duration: { type: Number, default: 0 },
+      completedAt: Date
+    }],
+    lastUpdated: {
+      type: Date,
+      default: Date.now
+    }
+  },
+  // NUEVO: Referencia a los registros de uso de tokens
+  tokenUsageRecords: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'TokenUsage'
   }]
 }, {
   timestamps: true
@@ -259,7 +326,8 @@ const TaskSchema = new mongoose.Schema({
 // Indexes for performance
 TaskSchema.index({ project: 1, status: 1 });
 TaskSchema.index({ assignedTo: 1, status: 1 });
-TaskSchema.index({ assignedAgent: 1, status: 1 });
+TaskSchema.index({ 'orchestration.status': 1, status: 1 });
+TaskSchema.index({ 'orchestration.currentStep': 1 });
 TaskSchema.index({ complexity: 1, priority: 1 });
 TaskSchema.index({ 'pullRequest.status': 1 });
 
@@ -305,9 +373,8 @@ TaskSchema.methods.addRepository = function(repositoryData) {
   const repository = {
     repositoryId: repositoryData.repositoryId,
     repositoryName: repositoryData.repositoryName,
-    team: repositoryData.team,
+    type: repositoryData.type,
     branch: repositoryData.branch || this.gitBranch || 'main',
-    assignedAgent: repositoryData.assignedAgent,
     estimatedHours: repositoryData.estimatedHours,
     status: 'pending'
   };
@@ -358,8 +425,8 @@ TaskSchema.methods.updateOverallStatus = function() {
   }
 };
 
-TaskSchema.methods.getRepositoriesByTeam = function(teamName) {
-  return this.repositories.filter(repo => repo.team === teamName);
+TaskSchema.methods.getRepositoriesByType = function(type) {
+  return this.repositories.filter(repo => repo.type === type);
 };
 
 TaskSchema.methods.getRepositoryByName = function(repositoryName) {
@@ -416,7 +483,7 @@ TaskSchema.methods.generateUnifiedDiff = function() {
 
       unifiedDiff.repositoryDiffs.push({
         repository: repo.repositoryName,
-        team: repo.team,
+        type: repo.type,
         files: repo.changes.filesModified || [],
         linesAdded: repo.changes.linesAdded || 0,
         linesRemoved: repo.changes.linesRemoved || 0,
@@ -438,8 +505,47 @@ TaskSchema.statics.findTasksByRepository = function(repositoryName) {
   return this.find({ 'repositories.repositoryName': repositoryName });
 };
 
-TaskSchema.statics.findTasksByTeam = function(teamName) {
-  return this.find({ 'repositories.team': teamName });
+TaskSchema.statics.findTasksByType = function(type) {
+  return this.find({ 'repositories.type': type });
+};
+
+// NUEVO: Métodos para gestión de repositorios activos/inactivos por tarea
+TaskSchema.methods.getActiveRepositories = function() {
+  return this.repositories.filter(repo => repo.isActive !== false);
+};
+
+TaskSchema.methods.getInactiveRepositories = function() {
+  return this.repositories.filter(repo => repo.isActive === false);
+};
+
+TaskSchema.methods.toggleRepository = function(repositoryId, isActive) {
+  const repo = this.repositories.find(r => r.repositoryId === repositoryId);
+  if (repo) {
+    repo.isActive = isActive;
+  }
+  return this.save();
+};
+
+TaskSchema.methods.activateRepository = function(repositoryId) {
+  return this.toggleRepository(repositoryId, true);
+};
+
+TaskSchema.methods.deactivateRepository = function(repositoryId) {
+  return this.toggleRepository(repositoryId, false);
+};
+
+TaskSchema.methods.activateAllRepositories = function() {
+  this.repositories.forEach(repo => {
+    repo.isActive = true;
+  });
+  return this.save();
+};
+
+TaskSchema.methods.deactivateAllRepositories = function() {
+  this.repositories.forEach(repo => {
+    repo.isActive = false;
+  });
+  return this.save();
 };
 
 // Pre-save middleware to update coordination phases
@@ -460,40 +566,41 @@ TaskSchema.pre('save', function(next) {
 });
 
 TaskSchema.methods.generateCoordinationPhases = function() {
-  const teams = [...new Set(this.repositories.map(repo => repo.team))];
-  
-  // Simple phase generation: backend first, then frontend/mobile, then devops/qa
+  const types = [...new Set(this.repositories.map(repo => repo.type))];
+
+  // Simple phase generation: backend/api first, then frontend/mobile, then infrastructure/documentation
   const phases = [];
-  
-  if (teams.includes('backend')) {
+
+  const foundationTypes = types.filter(type => ['backend', 'api'].includes(type));
+  if (foundationTypes.length > 0) {
     phases.push({
       name: 'Foundation',
       repositories: this.repositories
-        .filter(repo => repo.team === 'backend')
+        .filter(repo => foundationTypes.includes(repo.type))
         .map(repo => repo.repositoryName),
       dependencies: [],
       status: 'pending'
     });
   }
 
-  const clientTeams = teams.filter(team => ['frontend', 'mobile'].includes(team));
-  if (clientTeams.length > 0) {
+  const clientTypes = types.filter(type => ['frontend', 'mobile'].includes(type));
+  if (clientTypes.length > 0) {
     phases.push({
       name: 'Client Development',
       repositories: this.repositories
-        .filter(repo => clientTeams.includes(repo.team))
+        .filter(repo => clientTypes.includes(repo.type))
         .map(repo => repo.repositoryName),
       dependencies: phases.length > 0 ? [phases[0].name] : [],
       status: 'pending'
     });
   }
 
-  const supportTeams = teams.filter(team => ['devops', 'qa'].includes(team));
-  if (supportTeams.length > 0) {
+  const supportTypes = types.filter(type => ['infrastructure', 'documentation'].includes(type));
+  if (supportTypes.length > 0) {
     phases.push({
-      name: 'Validation & Deployment',
+      name: 'Infrastructure & Documentation',
       repositories: this.repositories
-        .filter(repo => supportTeams.includes(repo.team))
+        .filter(repo => supportTypes.includes(repo.type))
         .map(repo => repo.repositoryName),
       dependencies: phases.map(p => p.name),
       status: 'pending'
@@ -502,5 +609,212 @@ TaskSchema.methods.generateCoordinationPhases = function() {
 
   this.coordination.phases = phases;
 };
+
+// Orchestration methods - automatic agent pipeline
+TaskSchema.methods.initializeOrchestration = function() {
+  const agentPipeline = [
+    'product-manager',
+    'project-manager', 
+    'tech-lead',
+    'senior-developer',
+    'junior-developer',
+    'qa-engineer'
+  ];
+
+  this.orchestration = {
+    status: 'pending',
+    currentStep: 0,
+    pipeline: agentPipeline.map(agent => ({
+      agent,
+      status: 'pending'
+    })),
+    logs: []
+  };
+
+  this.status = 'assigned'; // Ready for orchestration
+  return this.save();
+};
+
+TaskSchema.methods.getCurrentAgent = function() {
+  if (!this.orchestration || !this.orchestration.pipeline) return null;
+  return this.orchestration.pipeline[this.orchestration.currentStep];
+};
+
+TaskSchema.methods.advanceOrchestration = function(output, metrics = {}) {
+  if (!this.orchestration || !this.orchestration.pipeline) return false;
+
+  const currentStep = this.orchestration.pipeline[this.orchestration.currentStep];
+  if (currentStep) {
+    currentStep.status = 'completed';
+    currentStep.completedAt = new Date();
+    currentStep.output = output;
+    currentStep.metrics = metrics;
+  }
+
+  // Move to next step
+  this.orchestration.currentStep += 1;
+  
+  if (this.orchestration.currentStep >= this.orchestration.pipeline.length) {
+    // All agents completed
+    this.orchestration.status = 'completed';
+    this.status = 'done';
+    return false; // No more steps
+  } else {
+    // Mark next agent as in-progress
+    const nextStep = this.orchestration.pipeline[this.orchestration.currentStep];
+    nextStep.status = 'in-progress';
+    nextStep.startedAt = new Date();
+    return true; // Has next step
+  }
+};
+
+TaskSchema.methods.failOrchestration = function(error) {
+  if (!this.orchestration) return;
+  
+  const currentStep = this.orchestration.pipeline[this.orchestration.currentStep];
+  if (currentStep) {
+    currentStep.status = 'failed';
+    currentStep.completedAt = new Date();
+    currentStep.output = error;
+  }
+
+  this.orchestration.status = 'failed';
+  this.status = 'blocked';
+};
+
+TaskSchema.methods.cancelOrchestration = function(reason = 'User cancelled') {
+  if (!this.orchestration) return;
+  
+  // Cancel current step if it's in progress
+  const currentStep = this.orchestration.pipeline[this.orchestration.currentStep];
+  if (currentStep && currentStep.status === 'in-progress') {
+    currentStep.status = 'cancelled';
+    currentStep.completedAt = new Date();
+    currentStep.output = reason;
+  }
+
+  // Mark all pending steps as cancelled
+  this.orchestration.pipeline.forEach(step => {
+    if (step.status === 'pending') {
+      step.status = 'cancelled';
+    }
+  });
+
+  this.orchestration.status = 'cancelled';
+  this.status = 'cancelled';
+  this.addOrchestrationLog(`Orchestration cancelled: ${reason}`, 'System');
+};
+
+TaskSchema.methods.addOrchestrationLog = function(message, agent) {
+  if (!this.orchestration) {
+    this.orchestration = { logs: [] };
+  }
+  
+  const timestamp = new Date().toISOString();
+  const logEntry = `[${timestamp}] ${agent || 'System'}: ${message}`;
+  this.orchestration.logs.push(logEntry);
+  
+  // Keep only last 100 log entries
+  if (this.orchestration.logs.length > 100) {
+    this.orchestration.logs = this.orchestration.logs.slice(-100);
+  }
+};
+
+// NUEVO: Método para registrar uso de tokens de un agente
+TaskSchema.methods.recordAgentTokenUsage = async function(agentData) {
+  const TokenUsage = mongoose.model('TokenUsage');
+
+  // Crear registro detallado
+  const tokenUsage = await TokenUsage.create({
+    user: this.createdBy,
+    project: this.project,
+    task: this._id,
+    agentType: agentData.agent,
+    model: agentData.model,
+    inputTokens: agentData.inputTokens,
+    outputTokens: agentData.outputTokens,
+    totalTokens: agentData.inputTokens + agentData.outputTokens,
+    estimatedCost: agentData.cost,
+    requestType: 'orchestration',
+    responseTime: agentData.duration,
+    orchestrationWorkflowId: this.orchestration?.workflowId,
+    agentStage: agentData.stage,
+    duration: agentData.duration,
+    operationType: agentData.operationType,
+    repository: agentData.repository,
+    artifacts: agentData.artifacts || [],
+    success: agentData.status === 'success',
+    errorMessage: agentData.errorMessage,
+    startedAt: agentData.startedAt,
+    completedAt: agentData.completedAt,
+    timestamp: agentData.completedAt || new Date()
+  });
+
+  // Agregar a referencias
+  this.tokenUsageRecords.push(tokenUsage._id);
+
+  // Actualizar estadísticas de la tarea
+  this.tokenStats.totalInputTokens += agentData.inputTokens;
+  this.tokenStats.totalOutputTokens += agentData.outputTokens;
+  this.tokenStats.totalTokens += (agentData.inputTokens + agentData.outputTokens);
+  this.tokenStats.totalCost += agentData.cost;
+
+  // Agregar/actualizar estadísticas por agente
+  const agentStat = this.tokenStats.byAgent.find(a => a.agent === agentData.agent);
+  if (agentStat) {
+    agentStat.inputTokens += agentData.inputTokens;
+    agentStat.outputTokens += agentData.outputTokens;
+    agentStat.totalTokens += (agentData.inputTokens + agentData.outputTokens);
+    agentStat.cost += agentData.cost;
+    agentStat.duration += agentData.duration;
+    agentStat.completedAt = agentData.completedAt;
+  } else {
+    this.tokenStats.byAgent.push({
+      agent: agentData.agent,
+      model: agentData.model,
+      inputTokens: agentData.inputTokens,
+      outputTokens: agentData.outputTokens,
+      totalTokens: agentData.inputTokens + agentData.outputTokens,
+      cost: agentData.cost,
+      duration: agentData.duration,
+      completedAt: agentData.completedAt
+    });
+  }
+
+  this.tokenStats.lastUpdated = new Date();
+  await this.save();
+
+  // Actualizar estadísticas del proyecto
+  const Project = mongoose.model('Project');
+  const project = await Project.findById(this.project);
+  if (project) {
+    await project.updateTokenStats();
+  }
+
+  return tokenUsage;
+};
+
+// NUEVO: Método para obtener resumen de tokens
+TaskSchema.methods.getTokenSummary = function() {
+  return {
+    total: {
+      inputTokens: this.tokenStats.totalInputTokens,
+      outputTokens: this.tokenStats.totalOutputTokens,
+      totalTokens: this.tokenStats.totalTokens,
+      cost: this.tokenStats.totalCost
+    },
+    byAgent: this.tokenStats.byAgent.map(agent => ({
+      agent: agent.agent,
+      model: agent.model,
+      tokens: agent.totalTokens,
+      cost: agent.cost,
+      percentage: this.tokenStats.totalTokens > 0
+        ? ((agent.totalTokens / this.tokenStats.totalTokens) * 100).toFixed(2)
+        : 0
+    })),
+    lastUpdated: this.tokenStats.lastUpdated
+  };
+};
+
 
 module.exports = mongoose.model('Task', TaskSchema);

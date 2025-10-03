@@ -12,7 +12,7 @@ const ProjectSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['educational', 'learning-management', 'assessment', 'analytics'],
+    enum: ['web-app', 'mobile-app', 'api', 'microservice', 'library', 'saas'],
     required: true
   },
   status: {
@@ -25,14 +25,15 @@ const ProjectSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  team: [{
+  collaborators: [{
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     },
     role: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'senior-developer', 'junior-developer', 'qa-engineer']
+      enum: ['owner', 'contributor', 'viewer'],
+      default: 'contributor'
     }
   }],
   repository: {
@@ -59,11 +60,6 @@ const ProjectSchema = new mongoose.Schema({
     branch: {
       type: String,
       default: 'main'
-    },
-    team: {
-      type: String,
-      enum: ['frontend', 'backend', 'mobile', 'devops', 'qa'],
-      required: true
     },
     type: {
       type: String,
@@ -115,31 +111,6 @@ const ProjectSchema = new mongoose.Schema({
       default: 'pending'
     }
   }],
-  // Enhanced team structure for multi-repo
-  teams: [{
-    name: {
-      type: String,
-      required: true
-    },
-    members: [{
-      userId: { type: String },
-      role: { 
-        type: String, 
-        enum: ['developer', 'lead', 'reviewer'],
-        default: 'developer'
-      },
-      permissions: [{
-        type: String,
-        enum: ['read', 'write', 'admin', 'deploy']
-      }]
-    }],
-    agent: {
-      type: String,
-      enum: ['junior-developer', 'senior-developer', 'tech-lead', 'qa-engineer'],
-      default: 'senior-developer'
-    },
-    repositories: [{ type: String }] // Repository names assigned to this team
-  }],
   // Project settings
   settings: {
     defaultBranch: {
@@ -172,6 +143,51 @@ const ProjectSchema = new mongoose.Schema({
     activeTasks: { type: Number, default: 0 },
     pendingReviews: { type: Number, default: 0 },
     lastActivity: { type: Date }
+  },
+  // NUEVO: Estadísticas de tokens y costos
+  tokenStats: {
+    totalInputTokens: {
+      type: Number,
+      default: 0
+    },
+    totalOutputTokens: {
+      type: Number,
+      default: 0
+    },
+    totalTokens: {
+      type: Number,
+      default: 0
+    },
+    totalCost: {
+      type: Number,
+      default: 0
+    },
+    byModel: {
+      opus: {
+        inputTokens: { type: Number, default: 0 },
+        outputTokens: { type: Number, default: 0 },
+        totalTokens: { type: Number, default: 0 },
+        cost: { type: Number, default: 0 }
+      },
+      sonnet: {
+        inputTokens: { type: Number, default: 0 },
+        outputTokens: { type: Number, default: 0 },
+        totalTokens: { type: Number, default: 0 },
+        cost: { type: Number, default: 0 }
+      }
+    },
+    byAgent: {
+      'product-manager': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } },
+      'project-manager': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } },
+      'tech-lead': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } },
+      'senior-developer': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } },
+      'junior-developer': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } },
+      'qa-engineer': { tokens: { type: Number, default: 0 }, cost: { type: Number, default: 0 } }
+    },
+    lastUpdated: {
+      type: Date,
+      default: Date.now
+    }
   },
   features: [{
     name: String,
@@ -233,10 +249,10 @@ const ProjectSchema = new mongoose.Schema({
 
 // Index for faster queries
 ProjectSchema.index({ owner: 1, status: 1 });
-ProjectSchema.index({ 'team.user': 1 });
+ProjectSchema.index({ 'collaborators.user': 1 });
 ProjectSchema.index({ type: 1, status: 1 });
 ProjectSchema.index({ 'repositories.githubUrl': 1 });
-ProjectSchema.index({ 'repositories.team': 1 });
+ProjectSchema.index({ 'repositories.type': 1 });
 
 // Virtual for completion percentage
 ProjectSchema.virtual('completionPercentage').get(function() {
@@ -246,10 +262,10 @@ ProjectSchema.virtual('completionPercentage').get(function() {
 
 // Multi-repository methods
 ProjectSchema.methods.addRepository = function(repositoryData) {
-  // Validate team assignment
-  const validTeams = ['frontend', 'backend', 'mobile', 'devops', 'qa'];
-  if (!validTeams.includes(repositoryData.team)) {
-    throw new Error(`Invalid team assignment: ${repositoryData.team}`);
+  // Validate repository type
+  const validTypes = ['frontend', 'backend', 'mobile', 'api', 'infrastructure', 'documentation'];
+  if (repositoryData.type && !validTypes.includes(repositoryData.type)) {
+    throw new Error(`Invalid repository type: ${repositoryData.type}`);
   }
 
   // Extract owner and name from GitHub URL
@@ -263,18 +279,13 @@ ProjectSchema.methods.addRepository = function(repositoryData) {
     githubUrl: repositoryData.githubUrl,
     owner: urlMatch[1],
     branch: repositoryData.branch || 'main',
-    team: repositoryData.team,
-    type: repositoryData.type || this.inferTypeFromTeam(repositoryData.team),
+    type: repositoryData.type || 'backend',
     technologies: repositoryData.technologies || [],
     accessToken: repositoryData.accessToken,
     installationId: repositoryData.installationId
   };
 
   this.repositories.push(repository);
-  
-  // Ensure team exists
-  this.ensureTeamExists(repositoryData.team);
-  
   return repository;
 };
 
@@ -285,41 +296,8 @@ ProjectSchema.methods.removeRepository = function(repositoryId) {
   }
 };
 
-ProjectSchema.methods.getRepositoriesByTeam = function(teamName) {
-  return this.repositories.filter(repo => repo.team === teamName);
-};
-
-ProjectSchema.methods.inferTypeFromTeam = function(team) {
-  const typeMapping = {
-    'frontend': 'frontend',
-    'backend': 'backend',
-    'mobile': 'mobile',
-    'devops': 'infrastructure',
-    'qa': 'testing'
-  };
-  return typeMapping[team] || 'backend';
-};
-
-ProjectSchema.methods.ensureTeamExists = function(teamName) {
-  if (!this.teams.find(team => team.name === teamName)) {
-    this.teams.push({
-      name: teamName,
-      members: [],
-      agent: this.getDefaultAgentForTeam(teamName),
-      repositories: []
-    });
-  }
-};
-
-ProjectSchema.methods.getDefaultAgentForTeam = function(teamName) {
-  const agentMapping = {
-    'frontend': 'senior-developer',
-    'backend': 'senior-developer',
-    'mobile': 'senior-developer',
-    'devops': 'tech-lead',
-    'qa': 'qa-engineer'
-  };
-  return agentMapping[teamName] || 'senior-developer';
+ProjectSchema.methods.getRepositoriesByType = function(type) {
+  return this.repositories.filter(repo => repo.type === type);
 };
 
 ProjectSchema.methods.updateStats = async function() {
@@ -367,6 +345,93 @@ ProjectSchema.methods.updateStats = async function() {
   await this.save();
 };
 
+// NUEVO: Método para actualizar estadísticas de tokens
+ProjectSchema.methods.updateTokenStats = async function() {
+  const TokenUsage = mongoose.model('TokenUsage');
+
+  // Agregar por modelo
+  const stats = await TokenUsage.aggregate([
+    { $match: { project: this._id } },
+    {
+      $group: {
+        _id: '$model',
+        inputTokens: { $sum: '$inputTokens' },
+        outputTokens: { $sum: '$outputTokens' },
+        totalTokens: { $sum: '$totalTokens' },
+        cost: { $sum: '$estimatedCost' }
+      }
+    }
+  ]);
+
+  // Agregar por agente
+  const agentStats = await TokenUsage.aggregate([
+    { $match: { project: this._id } },
+    {
+      $group: {
+        _id: '$agentType',
+        tokens: { $sum: '$totalTokens' },
+        cost: { $sum: '$estimatedCost' }
+      }
+    }
+  ]);
+
+  // Resetear estadísticas
+  this.tokenStats.totalInputTokens = 0;
+  this.tokenStats.totalOutputTokens = 0;
+  this.tokenStats.totalTokens = 0;
+  this.tokenStats.totalCost = 0;
+
+  this.tokenStats.byModel.opus = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cost: 0
+  };
+  this.tokenStats.byModel.sonnet = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cost: 0
+  };
+
+  // Actualizar el proyecto
+  stats.forEach(stat => {
+    this.tokenStats.totalInputTokens += stat.inputTokens;
+    this.tokenStats.totalOutputTokens += stat.outputTokens;
+    this.tokenStats.totalTokens += stat.totalTokens;
+    this.tokenStats.totalCost += stat.cost;
+
+    if (stat._id === 'opus') {
+      this.tokenStats.byModel.opus = {
+        inputTokens: stat.inputTokens,
+        outputTokens: stat.outputTokens,
+        totalTokens: stat.totalTokens,
+        cost: stat.cost
+      };
+    } else if (stat._id === 'sonnet') {
+      this.tokenStats.byModel.sonnet = {
+        inputTokens: stat.inputTokens,
+        outputTokens: stat.outputTokens,
+        totalTokens: stat.totalTokens,
+        cost: stat.cost
+      };
+    }
+  });
+
+  agentStats.forEach(stat => {
+    if (this.tokenStats.byAgent[stat._id]) {
+      this.tokenStats.byAgent[stat._id] = {
+        tokens: stat.tokens,
+        cost: stat.cost
+      };
+    }
+  });
+
+  this.tokenStats.lastUpdated = new Date();
+
+  await this.save();
+};
+
 // Static methods for multi-repository projects
 ProjectSchema.statics.findByOwner = function(owner) {
   return this.find({ owner });
@@ -380,24 +445,9 @@ ProjectSchema.statics.findProjectsWithRepository = function(githubUrl) {
   return this.find({ 'repositories.githubUrl': githubUrl });
 };
 
-// Pre-save middleware to ensure team consistency
+// Pre-save middleware
 ProjectSchema.pre('save', function(next) {
-  // Ensure teams are created for each repository team
-  const repoTeams = [...new Set(this.repositories.map(repo => repo.team))];
-  
-  repoTeams.forEach(teamName => {
-    this.ensureTeamExists(teamName);
-    
-    // Update team's repository list
-    const team = this.teams.find(t => t.name === teamName);
-    if (team) {
-      const teamRepos = this.repositories
-        .filter(repo => repo.team === teamName)
-        .map(repo => repo.name);
-      team.repositories = teamRepos;
-    }
-  });
-
+  // Validation logic can be added here if needed
   next();
 });
 
