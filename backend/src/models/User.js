@@ -90,21 +90,18 @@ const UserSchema = new mongoose.Schema({
       'devops',
       'product-management',
       'project-management',
-      'educational-technology',
-      'learning-analytics',
-      'lms-integration',
       'accessibility',
-      'compliance'
+      'security'
     ]
   }],
   skills: {
     programmingLanguages: [String],
     frameworks: [String],
     tools: [String],
-    educationalPlatforms: [{
+    cloudPlatforms: [{
       platform: {
         type: String,
-        enum: ['canvas', 'moodle', 'blackboard', 'schoology', 'google-classroom']
+        enum: ['aws', 'azure', 'gcp', 'digitalocean', 'heroku']
       },
       proficiency: {
         type: String,
@@ -156,7 +153,7 @@ const UserSchema = new mongoose.Schema({
     name: String,
     type: {
       type: String,
-      enum: ['k12-school', 'university', 'college', 'corporate', 'non-profit', 'government']
+      enum: ['startup', 'corporate', 'enterprise', 'agency', 'freelance', 'non-profit']
     },
     role: String,
     department: String
@@ -212,20 +209,6 @@ const UserSchema = new mongoose.Schema({
         default: false
       },
       pm: {
-        type: Boolean,
-        default: false
-      }
-    },
-    compliance: {
-      ferpaAccess: {
-        type: Boolean,
-        default: false
-      },
-      coppaAccess: {
-        type: Boolean,
-        default: false
-      },
-      gdprAccess: {
         type: Boolean,
         default: false
       }
@@ -293,9 +276,7 @@ const UserSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes for performance
-UserSchema.index({ email: 1 });
-UserSchema.index({ username: 1 });
+// Indexes for performance (email and username already have unique: true)
 UserSchema.index({ role: 1, isActive: 1 });
 UserSchema.index({ specializations: 1 });
 UserSchema.index({ 'organization.type': 1 });

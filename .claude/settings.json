@@ -1,45 +1,32 @@
 {
-  "allowedTools": ["read_file", "write_file", "execute_bash", "grep", "glob"],
-  "subagents": {
-    "architecture-analyst": {
-      "description": "Analyzes software architecture patterns and designs",
-      "model": "claude-3-opus-20240229",
-      "allowedTools": ["read_file", "write_file", "grep", "glob"]
+  "allowedTools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Git"],
+  "agents": {
+    "product-manager": {
+      "description": "Analyzes requirements and defines product specifications",
+      "model": "opus"
     },
-    "code-reviewer": {
-      "description": "Reviews code for architecture compliance and best practices",
-      "model": "claude-3-sonnet-20240229", 
-      "allowedTools": ["read_file", "grep", "glob"]
+    "project-manager": {
+      "description": "Breaks down epics into implementable stories",
+      "model": "opus"
     },
-    "documentation-writer": {
-      "description": "Creates technical documentation and architecture diagrams",
-      "model": "claude-3-haiku-20240307",
-      "allowedTools": ["read_file", "write_file"]
+    "tech-lead": {
+      "description": "Designs technical architecture and mentors development team",
+      "model": "opus"
+    },
+    "senior-developer": {
+      "description": "Implements complex features and reviews all junior code",
+      "model": "sonnet"
+    },
+    "junior-developer": {
+      "description": "Implements UI components and simple features under supervision",
+      "model": "sonnet"
+    },
+    "qa-engineer": {
+      "description": "Final quality gate with comprehensive testing and validation",
+      "model": "sonnet"
     }
   },
   "projects": {
-    "defaultProject": "software-architecture-agents"
-  },
-  "mcpServers": {
-    "lms-integration": {
-      "config": ".claude/mcp-servers/lms-integration.json",
-      "enabled": true,
-      "autoStart": true
-    },
-    "student-data-compliance": {
-      "config": ".claude/mcp-servers/student-data-compliance.json", 
-      "enabled": true,
-      "autoStart": true
-    },
-    "accessibility-testing": {
-      "config": ".claude/mcp-servers/accessibility-testing.json",
-      "enabled": true,
-      "autoStart": false
-    },
-    "educational-analytics": {
-      "config": ".claude/mcp-servers/educational-analytics.json",
-      "enabled": true,
-      "autoStart": false
-    }
+    "defaultProject": "multi-agent-software-development"
   }
 }

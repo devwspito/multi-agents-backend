@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -13,15 +14,20 @@ const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
 const taskRoutes = require('./routes/tasks');
 const githubAuthRoutes = require('./routes/github-auth');
+const repositoryStatusRoutes = require('./routes/repository-status');
+const conversationRoutes = require('./routes/conversations');
+const agentRoutes = require('./routes/agents');
+const uploadRoutes = require('./routes/uploads');
+const tokenUsageRoutes = require('./routes/token-usage');
 
 // Import middleware
-const { protectStudentData, auditLog } = require('./middleware/auth');
+const { protectData, auditLog } = require('./middleware/auth');
 
 /**
- * Educational Technology Development Server
+ * Multi-Agent Software Development Platform
  * Specialized for Claude Code agent orchestration
  */
-class EducationalApp {
+class AgentPlatformApp {
   constructor() {
     this.app = express();
     this.port = process.env.PORT || 3000;
@@ -33,7 +39,7 @@ class EducationalApp {
   }
 
   /**
-   * Initialize middleware stack optimized for educational applications
+   * Initialize middleware stack optimized for software development applications
    */
   initializeMiddleware() {
     // Security middleware
@@ -54,13 +60,13 @@ class EducationalApp {
       }
     }));
 
-    // CORS configuration for educational platforms
+    // CORS configuration for development platforms
     this.app.use(cors({
       origin: this.getAllowedOrigins(),
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Educational-Context'],
-      exposedHeaders: ['X-Educational-Privacy', 'X-Student-Data-Protection']
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Agent-Context'],
+      exposedHeaders: ['X-Agent-Execution', 'X-Task-Status']
     }));
 
     // Compression for better performance
@@ -73,8 +79,8 @@ class EducationalApp {
       message: {
         success: false,
         message: 'Too many requests from this IP. Please try again later.',
-        educational: {
-          tip: 'Rate limiting helps protect student data and system stability.'
+        development: {
+          tip: 'Rate limiting helps protect system stability and performance.'
         }
       },
       standardHeaders: true,
@@ -90,12 +96,12 @@ class EducationalApp {
     this.app.use(express.json({ 
       limit: '10mb',
       verify: (req, res, buf) => {
-        // Educational data validation
+        // Data validation
         if (buf.length > 0) {
           try {
             const data = JSON.parse(buf.toString());
-            // Check for potential PII in request body
-            this.validateEducationalData(data, req);
+            // Basic data validation
+            this.validateRequestData(data, req);
           } catch (error) {
             // Invalid JSON - let express handle it
           }
@@ -125,25 +131,30 @@ class EducationalApp {
     // MongoDB injection protection
     this.app.use(mongoSanitize());
 
-    // Educational data protection headers
-    this.app.use(protectStudentData);
-
-    // Request logging for educational compliance
+    // Data protection headers
     this.app.use((req, res, next) => {
-      // Log all API requests for compliance audit
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('X-XSS-Protection', '1; mode=block');
+      next();
+    });
+
+    // Request logging for API monitoring
+    this.app.use((req, res, next) => {
+      // Log all API requests for monitoring
       if (req.path.startsWith('/api/')) {
-        console.log(`📚 Educational API: ${req.method} ${req.path} - ${req.ip} - ${new Date().toISOString()}`);
+        console.log(`🚀 Agent API: ${req.method} ${req.path} - ${req.ip} - ${new Date().toISOString()}`);
       }
       next();
     });
 
-    // Educational context middleware
+    // Agent context middleware
     this.app.use((req, res, next) => {
-      req.educational = {
+      req.agentContext = {
         environment: this.environment,
         timestamp: new Date().toISOString(),
-        ferpaCompliant: true,
-        coppaCompliant: true
+        securityCompliant: true,
+        performanceOptimized: true
       };
       next();
     });
@@ -157,14 +168,14 @@ class EducationalApp {
     this.app.get('/health', (req, res) => {
       res.json({
         success: true,
-        service: 'Educational Technology Development API',
+        service: 'Multi-Agent Software Development Platform',
         version: process.env.npm_package_version || '1.0.0',
         environment: this.environment,
         timestamp: new Date().toISOString(),
-        educational: {
-          ferpaCompliant: true,
-          coppaCompliant: true,
-          wcagLevel: 'AA'
+        platform: {
+          securityEnabled: true,
+          agentsActive: true,
+          performanceOptimized: true
         }
       });
     });
@@ -173,7 +184,7 @@ class EducationalApp {
     this.app.get('/api', (req, res) => {
       res.json({
         success: true,
-        message: 'Educational Technology Development API',
+        message: 'Multi-Agent Software Development Platform',
         version: '1.0.0',
         documentation: {
           authentication: '/api/auth',
@@ -181,17 +192,17 @@ class EducationalApp {
           tasks: '/api/tasks',
           agents: 'See CLAUDE.md for agent configuration'
         },
-        educational: {
-          compliance: ['FERPA', 'COPPA', 'GDPR'],
+        platform: {
+          security: ['GDPR', 'Enterprise Security'],
           accessibility: 'WCAG 2.1 AA',
-          dataProtection: 'Student data encrypted and anonymized'
+          dataProtection: 'Enterprise-grade encryption and security'
         },
         endpoints: {
-          'POST /api/auth/register': 'Register new educational team member',
+          'POST /api/auth/register': 'Register new development team member',
           'POST /api/auth/login': 'Authenticate user',
-          'GET /api/projects': 'List educational projects',
-          'POST /api/projects': 'Create new educational project',
-          'GET /api/tasks': 'List tasks with educational context',
+          'GET /api/projects': 'List software projects',
+          'POST /api/projects': 'Create new software project',
+          'GET /api/tasks': 'List development tasks',
           'POST /api/tasks/:id/execute': 'Execute task with Claude agents'
         }
       });
@@ -202,10 +213,14 @@ class EducationalApp {
     this.app.use('/api/github-auth', githubAuthRoutes);
     this.app.use('/api/projects', projectRoutes);
     this.app.use('/api/tasks', taskRoutes);
+    this.app.use('/api/repositories', repositoryStatusRoutes);
+    this.app.use('/api/conversations', conversationRoutes);
+    this.app.use('/api/agents', agentRoutes);
+    this.app.use('/api/uploads', uploadRoutes);
+    this.app.use('/api/token-usage', tokenUsageRoutes);
 
-    // Educational metrics endpoint
-    this.app.get('/api/educational-metrics', 
-      auditLog('metrics_access'),
+    // Platform metrics endpoint
+    this.app.get('/api/platform-metrics', 
       async (req, res) => {
         try {
           const dbStats = await databaseConfig.getStats();
@@ -216,17 +231,17 @@ class EducationalApp {
             data: {
               database: dbStats,
               health: healthCheck,
-              educational: {
-                projectTypes: ['educational', 'learning-management', 'assessment', 'analytics'],
-                complianceStandards: ['FERPA', 'COPPA', 'GDPR', 'WCAG 2.1 AA'],
-                agentTypes: ['product-manager', 'project-manager', 'senior-developer', 'junior-developer', 'qa-engineer']
+              platform: {
+                projectTypes: ['web-app', 'mobile-app', 'api', 'microservice', 'library'],
+                securityStandards: ['GDPR', 'OWASP', 'Enterprise Security'],
+                agentTypes: ['product-manager', 'project-manager', 'tech-lead', 'senior-developer', 'junior-developer', 'qa-engineer']
               }
             }
           });
         } catch (error) {
           res.status(500).json({
             success: false,
-            message: 'Error retrieving educational metrics.'
+            message: 'Error retrieving platform metrics.'
           });
         }
       }
@@ -237,7 +252,7 @@ class EducationalApp {
       res.status(404).json({
         success: false,
         message: 'API endpoint not found.',
-        educational: {
+        platform: {
           tip: 'Check the API documentation at /api for available endpoints.'
         }
       });
@@ -247,20 +262,20 @@ class EducationalApp {
     this.app.get('/', (req, res) => {
       res.json({
         success: true,
-        message: 'Educational Technology Development API',
-        description: 'Backend API for educational institutions using Claude Code agents',
+        message: 'Multi-Agent Software Development Platform',
+        description: 'Backend API for autonomous software development using Claude Code agents',
         features: [
           'AI-powered development agents',
-          'Educational compliance (FERPA/COPPA)',
+          'Enterprise security and compliance',
           'Accessibility testing (WCAG 2.1 AA)',
-          'LMS integration support',
-          'Student data protection'
+          'GitHub integration support',
+          'Multi-project orchestration'
         ],
         api: '/api',
         health: '/health',
-        educational: {
-          targetAudience: ['K-12 Schools', 'Universities', 'Corporate Training', 'EdTech Companies'],
-          compliance: 'Full FERPA and COPPA compliance built-in',
+        platform: {
+          targetAudience: ['Startups', 'Tech Companies', 'Enterprise Teams', 'Development Agencies'],
+          security: 'Enterprise-grade security and GDPR compliance',
           accessibility: 'WCAG 2.1 AA standards enforced'
         }
       });
@@ -276,7 +291,7 @@ class EducationalApp {
       res.status(404).json({
         success: false,
         message: 'Endpoint not found.',
-        educational: {
+        platform: {
           suggestion: 'Visit /api for API documentation or /health for system status.'
         }
       });
@@ -286,9 +301,9 @@ class EducationalApp {
     this.app.use((error, req, res, next) => {
       console.error('🚨 Server Error:', error);
 
-      // Educational data breach detection
-      if (error.message && error.message.toLowerCase().includes('student')) {
-        console.error('🔒 POTENTIAL STUDENT DATA EXPOSURE DETECTED');
+      // Sensitive data detection
+      if (error.message && (error.message.toLowerCase().includes('password') || error.message.toLowerCase().includes('token'))) {
+        console.error('🔒 POTENTIAL SENSITIVE DATA EXPOSURE DETECTED');
         // In production, trigger immediate security protocols
       }
 
@@ -316,8 +331,8 @@ class EducationalApp {
       res.status(status).json({
         success: false,
         message,
-        educational: {
-          dataProtection: 'Student data remains secure',
+        platform: {
+          dataProtection: 'User data remains secure',
           timestamp: new Date().toISOString()
         },
         ...(this.environment === 'development' && {
@@ -356,7 +371,8 @@ class EducationalApp {
       'http://localhost:3000',
       'http://localhost:3001',
       'http://localhost:4000',
-      'http://localhost:5000'
+      'http://localhost:5000',
+      'http://localhost:3002'
     ];
 
     // Add production origins
@@ -364,36 +380,36 @@ class EducationalApp {
       origins.push(process.env.FRONTEND_URL);
     }
 
-    // Add educational platform origins
-    if (process.env.LMS_ORIGINS) {
-      origins.push(...process.env.LMS_ORIGINS.split(','));
+    // Add development platform origins
+    if (process.env.PLATFORM_ORIGINS) {
+      origins.push(...process.env.PLATFORM_ORIGINS.split(','));
     }
 
     return origins;
   }
 
   /**
-   * Validate educational data for PII and compliance
+   * Validate request data for security and compliance
    */
-  validateEducationalData(data, req) {
-    // Check for potential student PII
-    const piiFields = [
-      'ssn', 'social_security_number', 'student_id', 'student_number',
-      'email', 'phone', 'address', 'birth_date', 'parent_name'
+  validateRequestData(data, req) {
+    // Check for potential sensitive data
+    const sensitiveFields = [
+      'password', 'token', 'secret', 'key', 'credential',
+      'ssn', 'social_security_number', 'credit_card'
     ];
 
     const dataString = JSON.stringify(data).toLowerCase();
-    const foundPII = piiFields.filter(field => dataString.includes(field));
+    const foundSensitive = sensitiveFields.filter(field => dataString.includes(field));
 
-    if (foundPII.length > 0) {
-      console.warn(`⚠️ Potential PII detected in request: ${foundPII.join(', ')} - ${req.path}`);
-      req.educational.piiWarning = foundPII;
+    if (foundSensitive.length > 0) {
+      console.warn(`⚠️ Potential sensitive data detected in request: ${foundSensitive.join(', ')} - ${req.path}`);
+      req.agentContext.sensitiveDataWarning = foundSensitive;
     }
 
-    // Check for required educational context
-    if (req.path.includes('/tasks') && data.educationalImpact) {
-      if (!data.educationalImpact.learningObjectives) {
-        console.warn(`⚠️ Educational task missing learning objectives - ${req.path}`);
+    // Check for required task context
+    if (req.path.includes('/tasks') && data.projectContext) {
+      if (!data.projectContext.requirements) {
+        console.warn(`⚠️ Task missing requirements specification - ${req.path}`);
       }
     }
   }
@@ -406,23 +422,23 @@ class EducationalApp {
       // Connect to database
       await databaseConfig.connect();
       
-      // Initialize educational database structure
-      await databaseConfig.initializeEducationalDatabase();
+      // Initialize platform database structure
+      await databaseConfig.initializePlatformDatabase();
 
       // Start HTTP server
       this.server = this.app.listen(this.port, () => {
         console.log('');
-        console.log('🎓 Educational Technology Development Server');
+        console.log('🚀 Multi-Agent Software Development Platform');
         console.log('================================================');
         console.log(`🚀 Server running on port ${this.port}`);
         console.log(`🌍 Environment: ${this.environment}`);
         console.log(`📊 Database: ${databaseConfig.getConnectionStatus().name}`);
         console.log('');
-        console.log('🎯 Educational Features:');
-        console.log('   ✅ FERPA Compliance');
-        console.log('   ✅ COPPA Compliance');
+        console.log('🎯 Platform Features:');
+        console.log('   ✅ Enterprise Security');
+        console.log('   ✅ GDPR Compliance');
         console.log('   ✅ WCAG 2.1 AA Accessibility');
-        console.log('   ✅ Student Data Protection');
+        console.log('   ✅ Multi-Project Orchestration');
         console.log('   ✅ Claude Code Agent Integration');
         console.log('');
         console.log('📚 API Endpoints:');
@@ -435,9 +451,10 @@ class EducationalApp {
         console.log('🤖 Claude Code Agents Available:');
         console.log('   👔 Product Manager (Requirements & Stakeholder Communication)');
         console.log('   📋 Project Manager (Task Breakdown & Assignment)');
+        console.log('   🏗️ Tech Lead (Architecture Design & Technical Guidance)');
         console.log('   🎓 Senior Developer (Complex Features & Code Review)');
         console.log('   👨‍💻 Junior Developer (UI Components & Simple Features)');
-        console.log('   🧪 QA Engineer (Testing & Compliance Validation)');
+        console.log('   🧪 QA Engineer (Testing & Quality Validation)');
         console.log('');
       });
 
@@ -452,7 +469,7 @@ class EducationalApp {
    * Graceful shutdown
    */
   async shutdown() {
-    console.log('📊 Shutting down Educational Technology Development Server...');
+    console.log('📊 Shutting down Multi-Agent Development Platform...');
     
     if (this.server) {
       this.server.close(async () => {
@@ -473,10 +490,15 @@ class EducationalApp {
 }
 
 // Create and export app instance
-const educationalApp = new EducationalApp();
+const agentPlatformApp = new AgentPlatformApp();
 
 // Handle graceful shutdown
-process.on('SIGTERM', () => educationalApp.shutdown());
-process.on('SIGINT', () => educationalApp.shutdown());
+process.on('SIGTERM', () => agentPlatformApp.shutdown());
+process.on('SIGINT', () => agentPlatformApp.shutdown());
 
-module.exports = educationalApp;
+// Start the server if this file is executed directly
+if (require.main === module) {
+  agentPlatformApp.start();
+}
+
+module.exports = agentPlatformApp;

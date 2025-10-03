@@ -52,7 +52,7 @@ router.post('/register',
         });
       }
 
-      // Create user with educational defaults
+      // Create user with default permissions
       const userData = {
         username,
         email,
@@ -64,11 +64,11 @@ router.post('/register',
         },
         organization: {
           name: organization?.name || '',
-          type: organization?.type || 'university',
+          type: organization?.type || 'corporate',
           ...organization
         },
-        specializations: specializations || ['educational-technology'],
-        // Set default permissions for educational environment
+        specializations: specializations || ['fullstack-development'],
+        // Set default permissions for development environment
         permissions: {
           projects: {
             create: false,
@@ -87,11 +87,6 @@ router.post('/register',
             senior: false,
             qa: false,
             pm: false
-          },
-          compliance: {
-            ferpaAccess: false,
-            coppaAccess: false,
-            gdprAccess: false
           }
         }
       };
@@ -418,24 +413,20 @@ router.post('/request-permissions',
       // In a real implementation, this would create a permission request
       // that administrators could approve/deny
       
-      // For now, automatically grant basic educational permissions
+      // For now, automatically grant basic development permissions
       const user = await User.findById(req.user._id);
       
-      // Grant basic educational permissions
-      if (user.organization.type === 'university' || user.organization.type === 'k12-school') {
+      // Grant basic development permissions
+      if (user.organization.type === 'corporate' || user.organization.type === 'startup') {
         user.permissions.agents.junior = true;
         user.permissions.tasks.assign = true;
-        
-        if (user.specializations.includes('educational-technology')) {
-          user.permissions.compliance.ferpaAccess = true;
-        }
         
         await user.save();
       }
 
       res.json({
         success: true,
-        message: 'Permission request processed. Basic educational permissions granted.',
+        message: 'Permission request processed. Basic development permissions granted.',
         data: {
           permissions: user.permissions
         }
@@ -450,56 +441,5 @@ router.post('/request-permissions',
   }
 );
 
-/**
- * @route   GET /api/auth/educational-compliance
- * @desc    Get user's educational compliance status
- * @access  Private
- */
-router.get('/educational-compliance',
-  authenticate,
-  async (req, res) => {
-    try {
-      const user = req.user;
-      
-      const complianceStatus = {
-        ferpaTraining: user.permissions.compliance.ferpaAccess,
-        coppaTraining: user.permissions.compliance.coppaAccess,
-        gdprTraining: user.permissions.compliance.gdprAccess,
-        accessibilityTraining: user.specializations.includes('accessibility'),
-        organizationType: user.organization.type,
-        educationalRole: user.specializations.filter(spec => 
-          spec.includes('educational') || spec.includes('learning')
-        ),
-        complianceLevel: this.calculateComplianceLevel(user)
-      };
-
-      res.json({
-        success: true,
-        data: { complianceStatus }
-      });
-    } catch (error) {
-      console.error('Compliance status error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Server error retrieving compliance status.'
-      });
-    }
-  }
-);
-
-// Helper function to calculate compliance level
-const calculateComplianceLevel = (user) => {
-  let score = 0;
-  
-  if (user.permissions.compliance.ferpaAccess) score += 30;
-  if (user.permissions.compliance.coppaAccess) score += 25;
-  if (user.permissions.compliance.gdprAccess) score += 20;
-  if (user.specializations.includes('accessibility')) score += 15;
-  if (user.organization.type === 'university' || user.organization.type === 'k12-school') score += 10;
-  
-  if (score >= 80) return 'high';
-  if (score >= 50) return 'medium';
-  return 'basic';
-};
 
 module.exports = router;

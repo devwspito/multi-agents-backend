@@ -1,6 +1,6 @@
-# Educational Software Architecture API
+# Multi-Agent Software Development Platform
 
-Backend API for educational institutions using Claude Code agent integration.
+Backend API for autonomous software development using Claude Code agent integration.
 
 ## Getting Started
 

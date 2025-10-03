@@ -16,10 +16,7 @@ class ProjectManager {
       const project = new Project({
         ...projectData,
         owner: userId,
-        team: [{
-          user: userId,
-          role: 'product-manager'
-        }]
+        collaborators: []
       });
 
       await project.save();
@@ -185,16 +182,8 @@ class ProjectManager {
         break;
     }
 
-    // Find appropriate team member
-    const teamMember = project.team.find(member => 
-      member.role === assignment.agentType || 
-      (assignment.agentType.includes('developer') && member.role.includes('developer'))
-    );
-
-    if (teamMember) {
-      assignment.userId = teamMember.user._id;
-    }
-
+    // Assignment is handled automatically by orchestration
+    // No manual user assignment needed
     return assignment;
   }
 

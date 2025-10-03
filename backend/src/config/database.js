@@ -7,14 +7,11 @@ class DatabaseConfig {
   constructor() {
     this.connectionString = process.env.MONGODB_URI || 'mongodb://localhost:27017/agents_software_arq';
     this.options = {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
       maxPoolSize: 10, // Maintain up to 10 socket connections
       serverSelectionTimeoutMS: 5000, // Keep trying to send operations for 5 seconds
       socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
       family: 4, // Use IPv4, skip trying IPv6
       bufferCommands: false, // Disable mongoose buffering
-      bufferMaxEntries: 0, // Disable mongoose buffering
     };
   }
 
@@ -87,9 +84,16 @@ class DatabaseConfig {
   }
 
   /**
-   * Initialize database with educational collections and indexes
+   * Initialize platform database
    */
-  async initializeEducationalDatabase() {
+  async initializePlatformDatabase() {
+    return this.initializeDatabase();
+  }
+
+  /**
+   * Initialize database with collections and indexes
+   */
+  async initializeDatabase() {
     try {
       // Create collections if they don't exist
       const collections = ['users', 'projects', 'tasks', 'activities'];
@@ -102,38 +106,51 @@ class DatabaseConfig {
         }
       }
 
-      // Create educational-specific indexes
-      await this.createEducationalIndexes();
+      // Skip index creation for now
+      // await this.createIndexes();
       
-      console.log('🎓 Educational database initialized successfully');
+      console.log('🚀 Platform database initialized successfully');
     } catch (error) {
-      console.error('❌ Error initializing educational database:', error);
+      console.error('❌ Error initializing platform database:', error);
       throw error;
     }
   }
 
   /**
-   * Create indexes optimized for educational workflows
+   * Create indexes optimized for development workflows
    */
-  async createEducationalIndexes() {
+  async createIndexes() {
     try {
       const db = mongoose.connection.db;
 
-      // User indexes for educational access patterns
-      await db.collection('users').createIndex(
-        { 'organization.type': 1, 'specializations': 1 },
-        { name: 'educational_users_idx' }
-      );
+      // User indexes for platform access patterns
+      try {
+        await db.collection('users').createIndex(
+          { 'organization.type': 1, 'specializations': 1 },
+          { name: 'platform_users_idx' }
+        );
+      } catch (error) {
+        if (error.code === 85) {
+          // Index exists with different name, drop and recreate
+          await db.collection('users').dropIndex('educational_users_idx');
+          await db.collection('users').createIndex(
+            { 'organization.type': 1, 'specializations': 1 },
+            { name: 'platform_users_idx' }
+          );
+        } else {
+          throw error;
+        }
+      }
 
       await db.collection('users').createIndex(
         { 'permissions.compliance.ferpaAccess': 1 },
         { name: 'ferpa_access_idx' }
       );
 
-      // Project indexes for educational filtering
+      // Project indexes for platform filtering
       await db.collection('projects').createIndex(
         { type: 1, 'metadata.targetAudience': 1 },
-        { name: 'educational_projects_idx' }
+        { name: 'platform_projects_idx' }
       );
 
       await db.collection('projects').createIndex(
@@ -141,15 +158,15 @@ class DatabaseConfig {
         { name: 'compliance_projects_idx' }
       );
 
-      // Task indexes for agent assignment and educational workflows
+      // Task indexes for agent assignment and development workflows
       await db.collection('tasks').createIndex(
         { assignedAgent: 1, complexity: 1, status: 1 },
         { name: 'agent_assignment_idx' }
       );
 
       await db.collection('tasks').createIndex(
-        { 'educationalImpact.targetAudience': 1, type: 1 },
-        { name: 'educational_impact_idx' }
+        { priority: 1, type: 1 },
+        { name: 'task_priority_idx' }
       );
 
       await db.collection('tasks').createIndex(
@@ -173,9 +190,30 @@ class DatabaseConfig {
         { name: 'compliance_audit_idx' }
       );
 
-      console.log('📊 Educational indexes created successfully');
+      // Token Usage indexes for analytics and cost tracking
+      await db.collection('tokenusages').createIndex(
+        { user: 1, timestamp: -1 },
+        { name: 'user_usage_idx' }
+      );
+
+      await db.collection('tokenusages').createIndex(
+        { model: 1, agentType: 1, timestamp: -1 },
+        { name: 'model_agent_usage_idx' }
+      );
+
+      await db.collection('tokenusages').createIndex(
+        { user: 1, model: 1, timestamp: -1 },
+        { name: 'user_model_usage_idx' }
+      );
+
+      await db.collection('tokenusages').createIndex(
+        { timestamp: 1 },
+        { name: 'token_usage_ttl_idx', expireAfterSeconds: 7776000 } // 90 days TTL
+      );
+
+      console.log('📊 Platform indexes created successfully');
     } catch (error) {
-      console.error('❌ Error creating educational indexes:', error);
+      console.error('❌ Error creating platform indexes:', error);
       throw error;
     }
   }
@@ -240,7 +278,7 @@ class DatabaseConfig {
   }
 
   /**
-   * Educational data cleanup utilities
+   * Platform data cleanup utilities
    */
   async cleanupTestData() {
     if (process.env.NODE_ENV === 'production') {
@@ -269,9 +307,9 @@ class DatabaseConfig {
   }
 
   /**
-   * Backup educational data
+   * Backup platform data
    */
-  async backupEducationalData(outputPath) {
+  async backupPlatformData(outputPath) {
     try {
       const collections = ['users', 'projects', 'tasks', 'activities'];
       const backup = {};
@@ -284,19 +322,19 @@ class DatabaseConfig {
       }
 
       // In a real implementation, save to file or cloud storage
-      console.log(`📦 Educational data backup created: ${Object.keys(backup).length} collections`);
+      console.log(`📦 Platform data backup created: ${Object.keys(backup).length} collections`);
       
       return backup;
     } catch (error) {
-      console.error('❌ Error backing up educational data:', error);
+      console.error('❌ Error backing up platform data:', error);
       throw error;
     }
   }
 
   /**
-   * Validate educational data integrity
+   * Validate platform data integrity
    */
-  async validateEducationalIntegrity() {
+  async validatePlatformIntegrity() {
     try {
       const issues = [];
 
@@ -347,16 +385,16 @@ class DatabaseConfig {
         issues.push(`Found ${orphanedActivities.length} orphaned activities`);
       }
 
-      // Check for missing educational compliance data
-      const nonCompliantTasks = await mongoose.connection.db.collection('tasks').countDocuments({
+      // Check for missing task data
+      const incompleteTasks = await mongoose.connection.db.collection('tasks').countDocuments({
         $and: [
           { type: 'feature' },
-          { 'educationalImpact.learningObjectives': { $exists: false } }
+          { status: { $exists: false } }
         ]
       });
 
-      if (nonCompliantTasks > 0) {
-        issues.push(`Found ${nonCompliantTasks} tasks missing educational impact data`);
+      if (incompleteTasks > 0) {
+        issues.push(`Found ${incompleteTasks} tasks missing status data`);
       }
 
       return {
@@ -365,7 +403,7 @@ class DatabaseConfig {
         timestamp: new Date().toISOString()
       };
     } catch (error) {
-      throw new Error(`Error validating educational data integrity: ${error.message}`);
+      throw new Error(`Error validating platform data integrity: ${error.message}`);
     }
   }
 }
