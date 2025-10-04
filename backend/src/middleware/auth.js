@@ -7,8 +7,9 @@ const User = require('../models/User');
 const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
-    
+
     if (!token) {
+      console.warn('⚠️ Authentication failed: No token provided for', req.method, req.path);
       return res.status(401).json({
         success: false,
         message: 'Access denied. No token provided.'
