@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
  */
 class DatabaseConfig {
   constructor() {
-    this.connectionString = process.env.MONGODB_URI || 'mongodb://localhost:27017/agents_software_arq';
+    this.connectionString = process.env.MONGODB_URI;
     this.options = {
       maxPoolSize: 10, // Maintain up to 10 socket connections
       serverSelectionTimeoutMS: 5000, // Keep trying to send operations for 5 seconds
