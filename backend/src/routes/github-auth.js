@@ -168,12 +168,34 @@ router.get('/callback', async (req, res) => {
     } else {
       // User doesn't exist - create new user
       console.log('🆕 Creating new user from GitHub account');
+
+      // Parse GitHub name into firstName and lastName
+      let firstName = githubUser.login; // Default to username
+      let lastName = '';
+
+      if (githubUser.name) {
+        const nameParts = githubUser.name.trim().split(' ');
+        if (nameParts.length > 0) {
+          firstName = nameParts[0];
+          lastName = nameParts.slice(1).join(' ') || 'User';
+        }
+      } else {
+        firstName = githubUser.login;
+        lastName = 'User';
+      }
+
       user = new User({
         username: githubUser.login,
         email: primaryEmail,
         password: Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2), // Random password
         role: 'developer',
         isActive: true,
+        profile: {
+          firstName: firstName,
+          lastName: lastName,
+          avatar: githubUser.avatar_url,
+          bio: githubUser.bio || ''
+        },
         github: {
           id: githubUser.id.toString(),
           username: githubUser.login,
