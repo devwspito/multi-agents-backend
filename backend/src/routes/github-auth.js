@@ -196,6 +196,26 @@ router.get('/callback', async (req, res) => {
           avatar: githubUser.avatar_url,
           bio: githubUser.bio || ''
         },
+        permissions: {
+          projects: {
+            create: true,
+            read: true,
+            update: true,
+            delete: true
+          },
+          tasks: {
+            create: true,
+            assign: true,
+            review: true,
+            approve: true
+          },
+          agents: {
+            junior: true,
+            senior: true,
+            qa: true,
+            pm: true
+          }
+        },
         github: {
           id: githubUser.id.toString(),
           username: githubUser.login,
@@ -353,6 +373,64 @@ router.get('/repositories', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching GitHub repositories'
+    });
+  }
+});
+
+/**
+ * @route   POST /api/github-auth/fix-permissions
+ * @desc    Fix permissions for existing GitHub OAuth users (temporary endpoint)
+ * @access  Private
+ */
+router.post('/fix-permissions', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Update permissions to full access
+    user.permissions = {
+      projects: {
+        create: true,
+        read: true,
+        update: true,
+        delete: true
+      },
+      tasks: {
+        create: true,
+        assign: true,
+        review: true,
+        approve: true
+      },
+      agents: {
+        junior: true,
+        senior: true,
+        qa: true,
+        pm: true
+      }
+    };
+
+    await user.save();
+
+    console.log('✅ Permissions fixed for user:', user.username);
+
+    res.json({
+      success: true,
+      message: 'Permissions updated successfully',
+      data: {
+        permissions: user.permissions
+      }
+    });
+  } catch (error) {
+    console.error('Error fixing permissions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating permissions'
     });
   }
 });
