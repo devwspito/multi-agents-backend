@@ -419,11 +419,25 @@ router.post('/fix-permissions', authenticate, async (req, res) => {
 
     console.log('✅ Permissions fixed for user:', user.username);
 
+    // Generate new JWT token with updated permissions
+    const newToken = jwt.sign(
+      { id: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
     res.json({
       success: true,
-      message: 'Permissions updated successfully',
+      message: 'Permissions updated successfully. Please use the new token.',
       data: {
-        permissions: user.permissions
+        permissions: user.permissions,
+        token: newToken,
+        user: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          role: user.role
+        }
       }
     });
   } catch (error) {
