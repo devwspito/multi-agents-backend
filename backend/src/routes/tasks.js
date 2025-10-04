@@ -8,7 +8,6 @@ const AgentOrchestrator = require('../services/AgentOrchestrator');
 const { getInstance: getGitHubService } = require('../services/GitHubService');
 const {
   authenticate,
-  checkPermission,
   checkTaskAccess,
   checkAgentAccess,
   protectData,
@@ -148,7 +147,6 @@ router.get('/',
  */
 router.post('/',
   authenticate,
-  checkPermission('tasks', 'create'),
   validateRequestData,
   auditLog('task_creation'),
   async (req, res) => {
@@ -335,7 +333,6 @@ router.post('/:id/start',
   upload.single('image'),
   estimateTokenUsage,
   checkTaskExecutionLimits,
-  checkPermission('tasks', 'execute'),
   auditLog('task_orchestration_start'),
   addUsageHeaders,
   async (req, res) => {
@@ -646,7 +643,6 @@ router.get('/:id/orchestration',
 router.delete('/:id',
   authenticate,
   checkTaskAccess,
-  checkPermission('tasks', 'delete'),
   auditLog('task_deletion'),
   async (req, res) => {
     try {
@@ -680,7 +676,6 @@ router.delete('/:id',
 router.post('/:id/cancel',
   authenticate,
   checkTaskAccess,
-  checkPermission('tasks', 'cancel'),
   auditLog('task_orchestration_cancel'),
   async (req, res) => {
     try {

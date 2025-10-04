@@ -8,7 +8,6 @@ const { getInstance: getGitHubService } = require('../services/GitHubService');
 const {
   authenticate,
   authorize,
-  checkPermission,
   checkProjectAccess,
   protectData,
   auditLog,
@@ -120,7 +119,6 @@ router.get('/',
  */
 router.post('/',
   authenticate,
-  checkPermission('projects', 'create'),
   validateRequestData,
   auditLog('project_creation'),
   async (req, res) => {
@@ -314,7 +312,6 @@ router.get('/:id',
 router.put('/:id',
   authenticate,
   checkProjectAccess,
-  checkPermission('projects', 'update'),
   validateRequestData,
   auditLog('project_update'),
   async (req, res) => {
@@ -357,7 +354,6 @@ router.put('/:id',
 router.delete('/:id',
   authenticate,
   checkProjectAccess,
-  checkPermission('projects', 'delete'),
   auditLog('project_deletion'),
   async (req, res) => {
     try {
@@ -400,7 +396,6 @@ router.delete('/:id',
 router.post('/:id/features/:featureIndex/implement',
   authenticate,
   checkProjectAccess,
-  checkPermission('tasks', 'create'),
   auditLog('feature_implementation'),
   async (req, res) => {
     try {
@@ -462,7 +457,6 @@ router.post('/:id/features/:featureIndex/implement',
 router.post('/:id/tasks/create-from-features',
   authenticate,
   checkProjectAccess,
-  checkPermission('tasks', 'create'),
   auditLog('tasks_from_features'),
   async (req, res) => {
     try {
@@ -504,7 +498,6 @@ router.post('/:id/tasks/create-from-features',
 router.post('/:id/assign-tasks',
   authenticate,
   checkProjectAccess,
-  checkPermission('tasks', 'assign'),
   auditLog('task_assignment'),
   async (req, res) => {
     try {
