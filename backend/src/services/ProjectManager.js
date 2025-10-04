@@ -105,7 +105,7 @@ class ProjectManager {
    */
   async assignTasks(projectId) {
     try {
-      const project = await Project.findById(projectId).populate('team.user');
+      const project = await Project.findById(projectId).populate('collaborators.user');
       const unassignedTasks = await Task.find({
         project: projectId,
         status: 'backlog'
