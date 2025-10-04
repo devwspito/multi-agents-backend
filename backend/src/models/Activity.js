@@ -46,7 +46,8 @@ const ActivitySchema = new mongoose.Schema({
       'pr-updated',
       'code-generated',
       'test-run',
-      'compliance-check'
+      'compliance-check',
+      'failed'
     ],
     required: true
   },
