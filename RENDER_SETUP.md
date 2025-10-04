@@ -17,6 +17,7 @@ npm start
 #### Claude Code (REQUERIDO)
 ```bash
 ANTHROPIC_API_KEY=sk-ant-api03-...
+NODE_ENV=production
 ```
 
 #### Base de Datos

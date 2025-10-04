@@ -10,7 +10,8 @@ const execAsync = promisify(exec);
 
 class ClaudeService {
   constructor() {
-    this.claudePath = process.env.CLAUDE_PATH || 'claude';
+    // Use npx in production (Render), direct claude in development
+    this.claudePath = process.env.CLAUDE_PATH || (process.env.NODE_ENV === 'production' ? 'npx claude' : 'claude');
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
     this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
