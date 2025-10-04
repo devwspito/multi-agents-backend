@@ -27,7 +27,8 @@ class NotificationService {
         });
 
         // Notification queues using same Redis URL
-        this.notificationQueue = new Queue('notifications', redisUrl, {
+        this.notificationQueue = new Queue('notifications', {
+          redis: redisUrl,
           defaultJobOptions: {
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -36,7 +37,9 @@ class NotificationService {
           }
         });
 
-        this.emailQueue = new Queue('email notifications', redisUrl);
+        this.emailQueue = new Queue('email notifications', {
+          redis: redisUrl
+        });
 
         this.setupQueueProcessors();
         this.redisEnabled = true;
