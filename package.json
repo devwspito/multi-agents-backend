@@ -15,6 +15,7 @@
     "test:all": "npm run test:token-tracking && npm run test:token-api"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "^1.0.0",
     "@octokit/app": "^14.0.0",
     "@octokit/auth-app": "^6.0.0",
     "@octokit/rest": "^20.0.0",
