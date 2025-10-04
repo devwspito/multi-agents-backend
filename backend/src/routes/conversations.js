@@ -322,7 +322,7 @@ router.get('/task/:taskId', authenticate, async (req, res) => {
     // Filter conversations user has access to
     const accessibleConversations = conversations.filter(conv => {
       if (conv.userId._id.toString() === req.user.id) return true;
-      
+
       return conv.participants.some(
         p => p.user.toString() === req.user.id && p.permissions.canView
       );
@@ -338,6 +338,94 @@ router.get('/task/:taskId', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch conversations'
+    });
+  }
+});
+
+// Get unified conversation for task (all agents merged into single conversation)
+router.get('/task/:taskId/unified', authenticate, async (req, res) => {
+  try {
+    const { taskId } = req.params;
+
+    // Get all conversations for this task
+    const conversations = await AgentConversation.findByTask(taskId)
+      .populate('userId', 'name email avatar')
+      .populate('taskId', 'title description status')
+      .populate('projectId', 'name type');
+
+    // Filter conversations user has access to
+    const accessibleConversations = conversations.filter(conv => {
+      if (conv.userId._id.toString() === req.user.id) return true;
+
+      return conv.participants.some(
+        p => p.user.toString() === req.user.id && p.permissions.canView
+      );
+    });
+
+    if (accessibleConversations.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          conversationId: `unified-${taskId}`,
+          taskId: taskId,
+          messages: [],
+          metadata: {
+            totalConversations: 0,
+            agents: []
+          }
+        }
+      });
+    }
+
+    // Merge all messages from all conversations, sorted by timestamp
+    const allMessages = [];
+    const agentsInvolved = new Set();
+
+    accessibleConversations.forEach(conv => {
+      agentsInvolved.add(conv.agentType);
+
+      conv.messages.forEach(msg => {
+        allMessages.push({
+          id: msg.id || msg._id.toString(),
+          role: msg.role === 'agent' ? 'assistant' : msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp,
+          agent: msg.role === 'agent' ? conv.agentType : null,
+          attachments: msg.attachments || [],
+          structured: msg.structured || null
+        });
+      });
+    });
+
+    // Sort messages by timestamp
+    allMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    // Get task and project info from first conversation
+    const firstConv = accessibleConversations[0];
+
+    res.json({
+      success: true,
+      data: {
+        conversationId: `unified-${taskId}`,
+        taskId: firstConv.taskId,
+        projectId: firstConv.projectId,
+        messages: allMessages,
+        metadata: {
+          totalConversations: accessibleConversations.length,
+          agents: Array.from(agentsInvolved),
+          totalMessages: allMessages.length,
+          lastUpdated: allMessages.length > 0
+            ? allMessages[allMessages.length - 1].timestamp
+            : null
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching unified conversation:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch unified conversation'
     });
   }
 });

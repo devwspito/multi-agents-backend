@@ -84,20 +84,30 @@ router.get('/',
       if (status) query.status = status;
       if (complexity) query.complexity = complexity;
       if (type) query.type = type;
-      if (projectId) query.project = projectId;
 
-      // User access control - only show tasks from accessible projects
-      const userProjects = await require('../models/Project').find({
-        $or: [
-          { owner: req.user._id },
-          { 'team.user': req.user._id }
-        ]
-      }).select('_id');
+      // Handle project filtering
+      if (projectId === 'unassigned') {
+        // Special case: show tasks without project (unassigned chats)
+        query.project = { $exists: false };
+        query.createdBy = req.user._id; // Only show user's own unassigned tasks
+      } else if (projectId) {
+        // Specific project
+        query.project = projectId;
+      } else {
+        // User access control - show tasks from accessible projects + own unassigned tasks
+        const userProjects = await require('../models/Project').find({
+          $or: [
+            { owner: req.user._id },
+            { 'team.user': req.user._id },
+            { 'collaborators.user': req.user._id }
+          ]
+        }).select('_id');
 
-      query.project = { 
-        $in: userProjects.map(p => p._id),
-        ...(query.project && typeof query.project === 'string' ? { $eq: query.project } : query.project)
-      };
+        query.$or = [
+          { project: { $in: userProjects.map(p => p._id) } }, // Tasks from accessible projects
+          { project: { $exists: false }, createdBy: req.user._id } // Own unassigned tasks
+        ];
+      }
 
       const tasks = await Task.find(query)
         .populate('project', 'name description type')
@@ -145,23 +155,34 @@ router.post('/',
     try {
       const taskData = {
         ...req.body,
-        status: 'backlog'
+        status: 'backlog',
+        createdBy: req.user._id // Set creator for access control
       };
 
       // Validate required fields
-      if (!taskData.title || !taskData.description || !taskData.project) {
+      if (!taskData.title || !taskData.description) {
         return res.status(400).json({
           success: false,
-          message: 'Title, description, and project are required.'
+          message: 'Title and description are required.'
         });
       }
 
       // Validate complexity
-      if (!['simple', 'moderate', 'complex', 'expert'].includes(taskData.complexity)) {
+      if (taskData.complexity && !['simple', 'moderate', 'complex', 'expert'].includes(taskData.complexity)) {
         return res.status(400).json({
           success: false,
           message: 'Complexity must be simple, moderate, complex, or expert.'
         });
+      }
+
+      // Set default complexity if not provided
+      if (!taskData.complexity) {
+        taskData.complexity = 'moderate';
+      }
+
+      // Set default type if not provided
+      if (!taskData.type) {
+        taskData.type = 'feature';
       }
 
       const task = new Task(taskData);
