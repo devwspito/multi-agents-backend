@@ -34,7 +34,10 @@ class AgentPlatformApp {
     this.app = express();
     this.port = process.env.PORT || 3000;
     this.environment = process.env.NODE_ENV || 'development';
-    
+
+    // Trust proxy for Render/production environments
+    this.app.set('trust proxy', 1);
+
     this.initializeMiddleware();
     this.initializeRoutes();
     this.initializeErrorHandling();
@@ -87,6 +90,8 @@ class AgentPlatformApp {
       },
       standardHeaders: true,
       legacyHeaders: false,
+      // Trust proxy headers for Render
+      trustProxy: true,
       skip: (req) => {
         // Skip rate limiting for health checks
         return req.path === '/health' || req.path === '/api/health';
