@@ -1,15 +1,16 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 const fs = require('fs').promises;
 const path = require('path');
 const Activity = require('../models/Activity');
 const tokenTrackingService = require('./TokenTrackingService');
 const crypto = require('crypto');
 
+const execAsync = promisify(exec);
+
 class ClaudeService {
   constructor() {
-    this.anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY
-    });
+    this.claudePath = process.env.CLAUDE_PATH || 'claude';
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
     this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
