@@ -19,8 +19,9 @@ RUN addgroup -g 1001 -S educational && \
 # Copy package files
 COPY package*.json ./
 
-# Install Node.js dependencies
+# Install Node.js dependencies (including Claude Code globally)
 RUN npm ci --only=production && \
+    npm install -g @anthropic-ai/claude-code && \
     npm cache clean --force
 
 # Copy application code
