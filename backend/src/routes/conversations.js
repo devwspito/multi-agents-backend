@@ -111,7 +111,7 @@ router.get('/:id', authenticate, async (req, res) => {
       .findById(req.params.id)
       .populate('taskId', 'title description status')
       .populate('projectId', 'name type status')
-      .populate('userId', 'name email avatar');
+      .populate('userId', 'username email profile.avatar');
 
     if (!conversation) {
       return res.status(404).json({

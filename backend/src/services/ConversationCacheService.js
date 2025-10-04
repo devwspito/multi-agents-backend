@@ -108,7 +108,7 @@ class ConversationCacheService {
         .findById(conversationId)
         .populate('taskId', 'title description status')
         .populate('projectId', 'name type status')
-        .populate('userId', 'name email avatar')
+        .populate('userId', 'username email profile.avatar')
         .lean(); // Use lean for better performance
 
       if (conversation && this.redisEnabled) {
@@ -124,7 +124,7 @@ class ConversationCacheService {
       return await AgentConversation.findById(conversationId)
         .populate('taskId', 'title description status')
         .populate('projectId', 'name type status')
-        .populate('userId', 'name email avatar');
+        .populate('userId', 'username email profile.avatar');
     }
   }
 
