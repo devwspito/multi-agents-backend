@@ -9,32 +9,55 @@ const User = require('../models/User');
  */
 class NotificationService {
   constructor() {
-    // Redis URL from environment or fallback to localhost
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+    this.redisEnabled = false;
+    this.redis = null;
+    this.notificationQueue = null;
+    this.emailQueue = null;
 
-    // Redis connection for direct operations
-    this.redis = new Redis(redisUrl);
+    // Try to initialize Redis if URL is provided
+    if (process.env.REDIS_URL) {
+      try {
+        const redisUrl = process.env.REDIS_URL;
 
-    // Notification queues using same Redis URL
-    this.notificationQueue = new Queue('notifications', redisUrl, {
-      defaultJobOptions: {
-        removeOnComplete: 100,
-        removeOnFail: 50,
-        attempts: 3,
-        backoff: 'exponential'
+        // Redis connection for direct operations
+        this.redis = new Redis(redisUrl, {
+          lazyConnect: true,
+          enableOfflineQueue: false,
+          reconnectOnError: () => false
+        });
+
+        // Notification queues using same Redis URL
+        this.notificationQueue = new Queue('notifications', redisUrl, {
+          defaultJobOptions: {
+            removeOnComplete: 100,
+            removeOnFail: 50,
+            attempts: 3,
+            backoff: 'exponential'
+          }
+        });
+
+        this.emailQueue = new Queue('email notifications', redisUrl);
+
+        this.setupQueueProcessors();
+        this.redisEnabled = true;
+        console.log('📢 Notification Service initialized with Redis queues');
+      } catch (error) {
+        console.warn('⚠️ Redis not available, notifications will work in-memory:', error.message);
       }
-    });
-
-    this.emailQueue = new Queue('email notifications', redisUrl);
-
-    this.setupQueueProcessors();
-    console.log('📢 Notification Service initialized');
+    } else {
+      console.warn('⚠️ REDIS_URL not configured, notifications will work in-memory');
+    }
   }
 
   /**
    * Setup queue processors
    */
   setupQueueProcessors() {
+    if (!this.notificationQueue || !this.emailQueue) {
+      console.warn('⚠️ Queues not initialized, skipping processor setup');
+      return;
+    }
+
     // Process in-app notifications
     this.notificationQueue.process('send_notification', async (job) => {
       const { userId, type, title, message, data, priority } = job.data;
@@ -313,6 +336,12 @@ class NotificationService {
    * Queue a notification for processing
    */
   async queueNotification(notificationData) {
+    if (!this.redisEnabled || !this.notificationQueue) {
+      // Process directly if Redis not available
+      const { userId, type, title, message, data, priority } = notificationData;
+      return await this.processInAppNotification(userId, type, title, message, data, priority);
+    }
+
     return await this.notificationQueue.add('send_notification', notificationData, {
       priority: this.getPriorityValue(notificationData.priority)
     });
@@ -322,6 +351,12 @@ class NotificationService {
    * Queue an email for processing
    */
   async queueEmail(emailData) {
+    if (!this.redisEnabled || !this.emailQueue) {
+      // Process directly if Redis not available
+      const { to, subject, template, data } = emailData;
+      return await this.processEmailNotification(to, subject, template, data);
+    }
+
     return await this.emailQueue.add('send_email', emailData);
   }
 

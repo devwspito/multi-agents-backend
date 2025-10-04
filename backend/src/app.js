@@ -476,9 +476,9 @@ class AgentPlatformApp {
     if (this.server) {
       this.server.close(async () => {
         console.log('🔌 HTTP server closed');
-        
+
         try {
-          await databaseConfig.disconnect();
+          await mongoose.connection.close();
           console.log('📊 Database disconnected');
           console.log('✅ Graceful shutdown completed');
           process.exit(0);

@@ -25,6 +25,11 @@ class GitHubService {
       return;
     }
 
+    if (!process.env.GITHUB_WEBHOOK_SECRET) {
+      console.warn('⚠️ GitHub App not configured (GITHUB_WEBHOOK_SECRET missing). Webhooks will not work.');
+      return;
+    }
+
     // Get private key from environment variable or file
     let privateKey;
 
@@ -47,15 +52,20 @@ class GitHubService {
       return;
     }
 
-    this.githubApp = new App({
-      appId: process.env.GITHUB_APP_ID,
-      privateKey: privateKey,
-      webhooks: {
-        secret: process.env.GITHUB_WEBHOOK_SECRET
-      }
-    });
+    try {
+      this.githubApp = new App({
+        appId: process.env.GITHUB_APP_ID,
+        privateKey: privateKey,
+        webhooks: {
+          secret: process.env.GITHUB_WEBHOOK_SECRET
+        }
+      });
 
-    console.log('✅ GitHub App initialized successfully');
+      console.log('✅ GitHub App initialized successfully');
+    } catch (error) {
+      console.error('❌ Failed to initialize GitHub App:', error.message);
+      console.warn('⚠️ GitHub App features will be disabled');
+    }
   }
 
   /**
