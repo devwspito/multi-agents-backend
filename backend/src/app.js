@@ -14,6 +14,7 @@ const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
 const taskRoutes = require('./routes/tasks');
 const githubAuthRoutes = require('./routes/github-auth');
+const githubWebhooksRoutes = require('./routes/github-webhooks');
 const repositoryStatusRoutes = require('./routes/repository-status');
 const conversationRoutes = require('./routes/conversations');
 const agentRoutes = require('./routes/agents');
@@ -211,6 +212,7 @@ class AgentPlatformApp {
     // Mount API routes
     this.app.use('/api/auth', authRoutes);
     this.app.use('/api/github-auth', githubAuthRoutes);
+    this.app.use('/api/github-webhooks', githubWebhooksRoutes);
     this.app.use('/api/projects', projectRoutes);
     this.app.use('/api/tasks', taskRoutes);
     this.app.use('/api/repositories', repositoryStatusRoutes);

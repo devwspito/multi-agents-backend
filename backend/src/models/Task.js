@@ -13,11 +13,11 @@ const TaskSchema = new mongoose.Schema({
   project: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Project',
-    required: true
+    required: false // Optional to support unassigned chats
   },
   feature: {
     type: String,
-    required: true
+    required: false // Optional for unassigned tasks
   },
   type: {
     type: String,
@@ -318,7 +318,13 @@ const TaskSchema = new mongoose.Schema({
   tokenUsageRecords: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'TokenUsage'
-  }]
+  }],
+  // User who created the task (for unassigned tasks access control)
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  }
 }, {
   timestamps: true
 });
@@ -326,6 +332,7 @@ const TaskSchema = new mongoose.Schema({
 // Indexes for performance
 TaskSchema.index({ project: 1, status: 1 });
 TaskSchema.index({ assignedTo: 1, status: 1 });
+TaskSchema.index({ createdBy: 1, project: 1 }); // For unassigned tasks queries
 TaskSchema.index({ 'orchestration.status': 1, status: 1 });
 TaskSchema.index({ 'orchestration.currentStep': 1 });
 TaskSchema.index({ complexity: 1, priority: 1 });

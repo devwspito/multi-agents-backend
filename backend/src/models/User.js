@@ -271,7 +271,24 @@ const UserSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  lastPasswordChange: Date
+  lastPasswordChange: Date,
+  // Refresh tokens for JWT authentication
+  refreshTokens: [{
+    token: {
+      type: String,
+      required: true
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    },
+    expiresAt: {
+      type: Date,
+      required: true
+    },
+    userAgent: String,
+    ipAddress: String
+  }]
 }, {
   timestamps: true
 });
@@ -305,18 +322,85 @@ UserSchema.methods.comparePassword = async function(candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Method to generate JWT token
-UserSchema.methods.generateAuthToken = function() {
+// Method to generate access token (short-lived)
+UserSchema.methods.generateAccessToken = function() {
   const payload = {
     id: this._id,
     username: this.username,
     email: this.email,
     role: this.role
   };
-  
+
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || '7d'
+    expiresIn: process.env.JWT_ACCESS_EXPIRE || '1h'
   });
+};
+
+// Method to generate refresh token (long-lived)
+UserSchema.methods.generateRefreshToken = function() {
+  const payload = {
+    id: this._id,
+    type: 'refresh'
+  };
+
+  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_REFRESH_EXPIRE || '7d'
+  });
+};
+
+// Method to generate both tokens
+UserSchema.methods.generateAuthTokens = async function(userAgent = '', ipAddress = '') {
+  const accessToken = this.generateAccessToken();
+  const refreshToken = this.generateRefreshToken();
+
+  // Calculate expiration date (7 days from now by default)
+  const expiresAt = new Date();
+  const expireDays = parseInt(process.env.JWT_REFRESH_EXPIRE?.replace('d', '')) || 7;
+  expiresAt.setDate(expiresAt.getDate() + expireDays);
+
+  // Save refresh token to database
+  this.refreshTokens.push({
+    token: refreshToken,
+    expiresAt,
+    userAgent,
+    ipAddress
+  });
+
+  // Keep only last 5 refresh tokens (security)
+  if (this.refreshTokens.length > 5) {
+    this.refreshTokens = this.refreshTokens.slice(-5);
+  }
+
+  await this.save();
+
+  return { accessToken, refreshToken };
+};
+
+// Method to validate refresh token
+UserSchema.methods.validateRefreshToken = function(token) {
+  const refreshToken = this.refreshTokens.find(rt => rt.token === token);
+
+  if (!refreshToken) {
+    return { valid: false, reason: 'Token not found' };
+  }
+
+  if (new Date() > refreshToken.expiresAt) {
+    return { valid: false, reason: 'Token expired' };
+  }
+
+  return { valid: true, refreshToken };
+};
+
+// Method to revoke refresh token
+UserSchema.methods.revokeRefreshToken = async function(token) {
+  this.refreshTokens = this.refreshTokens.filter(rt => rt.token !== token);
+  await this.save();
+};
+
+// Method to revoke all refresh tokens (logout from all devices)
+UserSchema.methods.revokeAllRefreshTokens = async function() {
+  this.refreshTokens = [];
+  await this.save();
 };
 
 // Method to check if user has permission
