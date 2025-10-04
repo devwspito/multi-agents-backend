@@ -78,7 +78,6 @@ workspaces/
 uploads/
 temp/
 tmp/
-
 # Database dumps
 *.sql
 *.dump
@@ -124,3 +123,8 @@ educational-records/
 # Backup files
 *.backup
 *.bak
+
+# GitHub setup documentation (sensitive configuration info)
+GITHUB_SETUP_GUIDE.md
+GITHUB_INTEGRATION_COMPLETE_GUIDE.md
+GITHUB_APP_SETUP.md

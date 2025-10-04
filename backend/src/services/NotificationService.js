@@ -9,12 +9,14 @@ const User = require('../models/User');
  */
 class NotificationService {
   constructor() {
-    // Redis connection for queues
-    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
-    
-    // Notification queues
-    this.notificationQueue = new Queue('notifications', {
-      redis: { port: 6379, host: 'localhost' },
+    // Redis URL from environment or fallback to localhost
+    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+
+    // Redis connection for direct operations
+    this.redis = new Redis(redisUrl);
+
+    // Notification queues using same Redis URL
+    this.notificationQueue = new Queue('notifications', redisUrl, {
       defaultJobOptions: {
         removeOnComplete: 100,
         removeOnFail: 50,
@@ -23,9 +25,7 @@ class NotificationService {
       }
     });
 
-    this.emailQueue = new Queue('email notifications', {
-      redis: { port: 6379, host: 'localhost' }
-    });
+    this.emailQueue = new Queue('email notifications', redisUrl);
 
     this.setupQueueProcessors();
     console.log('📢 Notification Service initialized');
