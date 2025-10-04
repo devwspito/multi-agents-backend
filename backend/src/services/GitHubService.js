@@ -20,14 +20,36 @@ class GitHubService {
    * Initialize GitHub App for server operations
    */
   initializeGitHubApp() {
-    if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_PRIVATE_KEY) {
-      console.warn('⚠️ GitHub App not configured. Some features will be limited.');
+    if (!process.env.GITHUB_APP_ID) {
+      console.warn('⚠️ GitHub App not configured (GITHUB_APP_ID missing). Some features will be limited.');
+      return;
+    }
+
+    // Get private key from environment variable or file
+    let privateKey;
+
+    if (process.env.GITHUB_PRIVATE_KEY) {
+      // Production: Use environment variable (recommended)
+      privateKey = process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
+      console.log('📝 GitHub App: Using private key from GITHUB_PRIVATE_KEY environment variable');
+    } else if (process.env.GITHUB_PRIVATE_KEY_PATH) {
+      // Development: Use file path
+      try {
+        const fs = require('fs');
+        privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
+        console.log('📝 GitHub App: Using private key from file:', process.env.GITHUB_PRIVATE_KEY_PATH);
+      } catch (error) {
+        console.error('❌ Failed to read GitHub App private key file:', error.message);
+        return;
+      }
+    } else {
+      console.warn('⚠️ GitHub App private key not configured. Set GITHUB_PRIVATE_KEY or GITHUB_PRIVATE_KEY_PATH.');
       return;
     }
 
     this.githubApp = new App({
       appId: process.env.GITHUB_APP_ID,
-      privateKey: process.env.GITHUB_PRIVATE_KEY,
+      privateKey: privateKey,
       webhooks: {
         secret: process.env.GITHUB_WEBHOOK_SECRET
       }
