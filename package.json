@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node backend/src/app.js",
     "dev": "nodemon backend/src/app.js",
-    "build": "echo 'Build completed'",
+    "build": "npm run install:claude-code",
+    "install:claude-code": "npm install -g @anthropic-ai/claude-code || npm link @anthropic-ai/claude-code",
+    "postinstall": "npm run install:claude-code",
     "lint": "echo 'Linting completed'",
     "test": "npm run test:token-tracking && npm run test:token-api",
     "test:token-tracking": "node backend/test/token-tracking.test.js",
@@ -15,7 +17,7 @@
     "test:all": "npm run test:token-tracking && npm run test:token-api"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^1.0.0",
+    "@anthropic-ai/claude-code": "^2.0.5",
     "@octokit/app": "^14.0.0",
     "@octokit/auth-app": "^6.0.0",
     "@octokit/rest": "^20.0.0",

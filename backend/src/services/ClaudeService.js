@@ -10,13 +10,11 @@ const execAsync = promisify(exec);
 
 class ClaudeService {
   constructor() {
-    // Use npx in production (Render), direct claude in development
-    this.claudePath = process.env.CLAUDE_PATH || (process.env.NODE_ENV === 'production' ? 'npx claude' : 'claude');
+    this.claudePath = 'claude'; // Assumes claude is in PATH
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
     this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
     this.supportedImageTypes = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
-    this.maxTokens = 8192; // Default max tokens for responses
   }
 
   /**
@@ -25,15 +23,15 @@ class ClaudeService {
   async executeTask(task, agent, instructions, images = [], userId = null) {
     const startTime = Date.now();
     const workspacePath = await this.setupWorkspace(task);
-    
+
     try {
       // Process uploaded images if any
       const processedImages = await this.processImages(images);
-      
+
       // Prepare agent-specific context
       const agentTemplate = await this.loadAgentTemplate(agent);
       const fullInstructions = this.buildInstructions(task, agent, instructions, agentTemplate, processedImages);
-      
+
       // Prepare task context for token tracking
       const taskContext = userId ? {
         userId: userId,
@@ -41,12 +39,12 @@ class ClaudeService {
         projectId: task.project,
         requestType: 'orchestration'
       } : null;
-      
+
       // Execute Claude Code
       const result = await this.runClaudeCommand(fullInstructions, workspacePath, agent, processedImages, taskContext);
-      
+
       const executionTime = Date.now() - startTime;
-      
+
       // Log successful execution
       await Activity.logActivity({
         task: task._id,
@@ -75,7 +73,7 @@ class ClaudeService {
         codeChanges: result.codeChanges,
         artifacts: result.artifacts,
         attachedImages: result.attachedImages,
-        // NUEVO: Información de tokens para tracking granular
+        // Token usage information for tracking
         tokenUsage: {
           agent: agent,
           model: result.model || this.getModelForAgent(agent),
@@ -94,7 +92,7 @@ class ClaudeService {
       };
     } catch (error) {
       const executionTime = Date.now() - startTime;
-      
+
       // Log failed execution
       await Activity.logActivity({
         task: task._id,
@@ -123,17 +121,17 @@ class ClaudeService {
    */
   async reviewCode(task, reviewerAgent, codeFiles) {
     const startTime = Date.now();
-    
+
     try {
       const reviewTemplate = await this.loadAgentTemplate(reviewerAgent);
       const reviewInstructions = this.buildReviewInstructions(task, codeFiles, reviewTemplate);
-      
+
       const result = await this.runClaudeCommand(reviewInstructions, null, reviewerAgent);
       const executionTime = Date.now() - startTime;
-      
+
       // Parse review results
       const review = this.parseReviewResult(result.output);
-      
+
       // Log review activity
       await Activity.logActivity({
         task: task._id,
@@ -169,13 +167,13 @@ class ClaudeService {
    */
   async generateTests(task, testType = 'unit') {
     const startTime = Date.now();
-    
+
     try {
       const testInstructions = this.buildTestInstructions(task, testType);
       const result = await this.runClaudeCommand(testInstructions, null, 'qa-engineer');
-      
+
       const executionTime = Date.now() - startTime;
-      
+
       await Activity.logActivity({
         task: task._id,
         project: task.project,
@@ -211,14 +209,14 @@ class ClaudeService {
    */
   async checkAccessibility(task, componentFiles) {
     const startTime = Date.now();
-    
+
     try {
       const accessibilityInstructions = this.buildAccessibilityInstructions(task, componentFiles);
       const result = await this.runClaudeCommand(accessibilityInstructions, null, 'qa-engineer');
-      
+
       const executionTime = Date.now() - startTime;
       const complianceReport = this.parseAccessibilityResult(result.output);
-      
+
       await Activity.logActivity({
         task: task._id,
         project: task.project,
@@ -260,20 +258,20 @@ class ClaudeService {
    */
   async setupWorkspace(task) {
     const workspacePath = path.join(this.workspaceBase, `task-${task._id}`);
-    
+
     try {
       await fs.mkdir(workspacePath, { recursive: true });
-      
+
       // Copy relevant project files if they exist
       if (task.project.repository?.url) {
         await this.cloneRepository(task.project.repository.url, workspacePath);
       }
-      
+
       // Create task-specific branch
       if (task.gitBranch) {
         await this.createBranch(workspacePath, task.gitBranch);
       }
-      
+
       return workspacePath;
     } catch (error) {
       throw new Error(`Failed to setup workspace: ${error.message}`);
@@ -285,7 +283,7 @@ class ClaudeService {
    */
   async loadAgentTemplate(agentType) {
     const templatePath = path.join(__dirname, '../../claude-templates/agents', `${agentType}.md`);
-    
+
     try {
       const template = await fs.readFile(templatePath, 'utf8');
       return template;
@@ -304,7 +302,7 @@ class ClaudeService {
     }
 
     const processedImages = [];
-    
+
     for (const image of images) {
       try {
         // Validate image type
@@ -347,7 +345,7 @@ class ClaudeService {
     const educationalContext = this.buildEducationalContext(task);
     const complianceRequirements = this.buildComplianceRequirements(task);
     const imageContext = this.buildImageContext(processedImages);
-    
+
     return `
 ${agentTemplate}
 
@@ -394,7 +392,7 @@ Please provide:
       return '';
     }
 
-    const imageList = processedImages.map(img => 
+    const imageList = processedImages.map(img =>
       `- ${img.originalName} (${img.mimeType}, ${Math.round(img.size / 1024)}KB)`
     ).join('\n');
 
@@ -466,7 +464,7 @@ Please provide your review in JSON format:
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
-      
+
       // Fallback to manual parsing if JSON not found
       return {
         score: 70,
@@ -482,64 +480,64 @@ Please provide your review in JSON format:
   }
 
   /**
-   * Run Claude Code command with optional image support
+   * Run Claude Code CLI command with optional image support
    */
   async runClaudeCommand(instructions, workspacePath, agent, processedImages = [], taskContext = null) {
     const model = this.getModelForAgent(agent);
     const claudeCodeModel = this.getClaudeCodeModelName(model);
     const tempInstructionFile = path.join('/tmp', `claude-instructions-${Date.now()}.md`);
     const startTime = Date.now();
-    
+
     try {
       // Check token limits before execution if task context is provided
       if (taskContext) {
         const estimatedInputTokens = Math.ceil(instructions.length / 4); // Rough estimation
         const limitCheck = await tokenTrackingService.checkUserLimits(
-          taskContext.userId, 
-          model, 
+          taskContext.userId,
+          model,
           estimatedInputTokens
         );
-        
+
         if (!limitCheck.allowed) {
           throw new Error(`Token limit exceeded: ${limitCheck.reason}. Current: ${limitCheck.current}, Limit: ${limitCheck.limit}`);
         }
       }
-      
+
       // Write instructions to temporary file
       await fs.writeFile(tempInstructionFile, instructions);
-      
-      // Build Claude command
+
+      // Build Claude Code CLI command
+      // Claude Code uses -p flag for prompt, not --file
       const command = [
         this.claudePath,
+        '-p', `"$(cat ${tempInstructionFile})"`,
         '--model', claudeCodeModel,
-        '--file', tempInstructionFile
+        '--output-format', 'json'
       ];
-      
-      if (workspacePath) {
-        command.push('--workspace', workspacePath);
+
+      // Add image attachments if any (using append-system-prompt)
+      if (processedImages && processedImages.length > 0) {
+        const imageContext = processedImages.map(img =>
+          `Image attached: ${img.path} (${img.originalName})`
+        ).join('\n');
+        command.push('--append-system-prompt', `"${imageContext}"`);
       }
 
-      // Add image attachments if any
-      if (processedImages && processedImages.length > 0) {
-        for (const image of processedImages) {
-          command.push('--attach', image.path);
-        }
-      }
-      
-      // Execute command
+      // Execute Claude Code CLI command in workspace directory
       const { stdout, stderr } = await execAsync(command.join(' '), {
         cwd: workspacePath || process.cwd(),
-        timeout: 300000 // 5 minutes timeout
+        timeout: 300000, // 5 minutes timeout
+        shell: '/bin/bash'
       });
-      
+
       const responseTime = Date.now() - startTime;
-      
+
       // Parse output and extract information
       const result = this.parseClaudeOutput(stdout, stderr);
-      
+
       // Extract token usage from Claude Code output
       const tokenUsage = this.extractTokenUsage(stdout, stderr);
-      
+
       // Record token usage if task context is provided
       if (taskContext && tokenUsage) {
         try {
@@ -559,12 +557,12 @@ Please provide your review in JSON format:
           console.warn('Failed to record token usage:', trackingError.message);
         }
       }
-      
+
       // Add metadata to result
       result.model = model;
       result.responseTime = responseTime;
       result.tokenUsage = tokenUsage;
-      
+
       // Add image information to result
       if (processedImages.length > 0) {
         result.attachedImages = processedImages.map(img => ({
@@ -574,11 +572,11 @@ Please provide your review in JSON format:
           mimeType: img.mimeType
         }));
       }
-      
+
       return result;
     } catch (error) {
       const responseTime = Date.now() - startTime;
-      
+
       // Record failed usage if task context is provided
       if (taskContext) {
         try {
@@ -599,8 +597,8 @@ Please provide your review in JSON format:
           console.warn('Failed to record failed token usage:', trackingError.message);
         }
       }
-      
-      throw new Error(`Claude command execution failed: ${error.message}`);
+
+      throw new Error(`Claude Code CLI execution failed: ${error.message}`);
     } finally {
       // Clean up temporary file
       try {
@@ -612,53 +610,74 @@ Please provide your review in JSON format:
   }
 
   /**
-   * Parse Claude Code output
+   * Parse Claude Code output (JSON format)
    */
   parseClaudeOutput(stdout, stderr = '') {
-    return {
-      output: stdout,
-      stderr: stderr,
-      tokens: this.extractTokenCount(stdout),
-      codeChanges: this.extractCodeChanges(stdout),
-      artifacts: this.extractArtifacts(stdout)
-    };
+    try {
+      // Claude Code with --output-format json returns structured output
+      const jsonOutput = JSON.parse(stdout);
+
+      return {
+        output: jsonOutput.text || jsonOutput.content || stdout,
+        stderr: stderr,
+        tokens: jsonOutput.usage?.total_tokens || this.extractTokenCount(stdout),
+        codeChanges: this.extractCodeChanges(jsonOutput.text || stdout),
+        artifacts: jsonOutput.artifacts || this.extractArtifacts(jsonOutput.text || stdout)
+      };
+    } catch (error) {
+      // Fallback to plain text parsing if JSON parsing fails
+      console.warn('Failed to parse JSON output, falling back to text parsing:', error.message);
+      return {
+        output: stdout,
+        stderr: stderr,
+        tokens: this.extractTokenCount(stdout),
+        codeChanges: this.extractCodeChanges(stdout),
+        artifacts: this.extractArtifacts(stdout)
+      };
+    }
   }
 
   /**
-   * Extract token usage from Claude Code output
+   * Extract token usage from Claude Code output (JSON format)
    */
   extractTokenUsage(stdout, stderr) {
     try {
-      // Claude Code typically shows token usage in stderr or at the end of stdout
+      // Try to parse JSON output first (from --output-format json)
+      const jsonOutput = JSON.parse(stdout);
+
+      if (jsonOutput.usage) {
+        return {
+          inputTokens: jsonOutput.usage.input_tokens || 0,
+          outputTokens: jsonOutput.usage.output_tokens || 0,
+          totalTokens: jsonOutput.usage.total_tokens ||
+                       (jsonOutput.usage.input_tokens || 0) + (jsonOutput.usage.output_tokens || 0)
+        };
+      }
+    } catch (error) {
+      // Not JSON, try text parsing
+    }
+
+    try {
+      // Fallback: look for token usage patterns in text output
       const output = stdout + '\n' + stderr;
-      
-      // Look for token usage patterns that Claude Code might output
-      const patterns = [
-        /Input tokens:\s*(\d+)/i,
-        /Output tokens:\s*(\d+)/i,
-        /Total tokens:\s*(\d+)/i,
-        /(\d+)\s*input tokens/i,
-        /(\d+)\s*output tokens/i,
-        /Token usage:\s*(\d+)\s*\/\s*(\d+)/i
-      ];
-      
+
       let inputTokens = 0;
       let outputTokens = 0;
-      
+
       // Try to extract from various patterns
-      const inputMatch = output.match(/Input tokens?:\s*(\d+)/i) || 
+      const inputMatch = output.match(/Input tokens?:\s*(\d+)/i) ||
                         output.match(/(\d+)\s*input tokens?/i);
-      const outputMatch = output.match(/Output tokens?:\s*(\d+)/i) || 
+      const outputMatch = output.match(/Output tokens?:\s*(\d+)/i) ||
                          output.match(/(\d+)\s*output tokens?/i);
-      
+
       if (inputMatch) {
         inputTokens = parseInt(inputMatch[1]);
       }
-      
+
       if (outputMatch) {
         outputTokens = parseInt(outputMatch[1]);
       }
-      
+
       // If we don't find specific input/output breakdown, estimate based on request
       if (inputTokens === 0 && outputTokens === 0) {
         // Estimate based on character count (rough approximation)
@@ -666,7 +685,7 @@ Please provide your review in JSON format:
         outputTokens = Math.ceil(outputLength / 4); // Rough token estimation
         inputTokens = Math.ceil(outputLength / 6); // Assume input was smaller
       }
-      
+
       return {
         inputTokens,
         outputTokens,
@@ -690,28 +709,25 @@ Please provide your review in JSON format:
     const modelMapping = {
       // Planning agents use Opus (complex reasoning)
       'product-manager': 'opus',
-      'project-manager': 'opus', 
+      'project-manager': 'opus',
       'tech-lead': 'opus',
-      
+
       // Implementation agents use Sonnet (execution)
       'senior-developer': 'sonnet',
       'junior-developer': 'sonnet',
       'qa-engineer': 'sonnet'
     };
-    
+
     return modelMapping[agentType] || 'sonnet'; // Default to sonnet
   }
 
   /**
-   * Get Claude model name for API/CLI command
+   * Get Claude Code model name for CLI command (Updated to Claude 4)
+   * Claude Code CLI accepts short names: "opus", "sonnet", etc.
    */
   getClaudeCodeModelName(model) {
-    const claudeCodeMapping = {
-      'opus': 'claude-opus-4-1-20250805',      // Opus 4.1
-      'sonnet': 'claude-sonnet-4-5-20250929'   // Sonnet 4.5
-    };
-
-    return claudeCodeMapping[model] || 'claude-sonnet-4-5-20250929';
+    // Claude Code CLI uses short model names, not full IDs
+    return model; // Just return "opus" or "sonnet"
   }
 
   /**
@@ -719,19 +735,19 @@ Please provide your review in JSON format:
    */
   buildEducationalContext(task) {
     const context = [];
-    
+
     if (task.educationalImpact?.learningObjectives) {
       context.push(`**Learning Objectives**: ${task.educationalImpact.learningObjectives.join(', ')}`);
     }
-    
+
     if (task.educationalImpact?.targetAudience) {
       context.push(`**Target Audience**: ${task.educationalImpact.targetAudience}`);
     }
-    
+
     if (task.educationalImpact?.expectedOutcomes) {
       context.push(`**Expected Outcomes**: ${task.educationalImpact.expectedOutcomes.join(', ')}`);
     }
-    
+
     return context.join('\n');
   }
 
@@ -740,20 +756,20 @@ Please provide your review in JSON format:
    */
   buildComplianceRequirements(task) {
     const requirements = [];
-    
+
     if (task.compliance?.ferpaReview.required) {
       requirements.push('- FERPA compliance: No student PII in logs or client-side code');
     }
-    
+
     if (task.compliance?.coppaReview.required) {
       requirements.push('- COPPA compliance: Parental consent for under-13 users');
     }
-    
+
     if (task.testing?.accessibilityTests.required) {
       const level = task.testing.accessibilityTests.wcagLevel.toUpperCase();
       requirements.push(`- Accessibility: WCAG 2.1 ${level} compliance required`);
     }
-    
+
     return requirements.join('\n');
   }
 
@@ -768,7 +784,7 @@ Please provide your review in JSON format:
     const lines = output.split('\n');
     const addedLines = lines.filter(line => line.startsWith('+')).length;
     const removedLines = lines.filter(line => line.startsWith('-')).length;
-    
+
     return {
       linesAdded: addedLines,
       linesRemoved: removedLines,
@@ -884,7 +900,7 @@ Please provide accessibility report in JSON:
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
-      
+
       return {
         wcagScore: 80,
         level: 'AA',
@@ -925,7 +941,7 @@ Please provide accessibility report in JSON:
    */
   validateImage(file) {
     const ext = path.extname(file.originalname).toLowerCase();
-    
+
     if (!this.supportedImageTypes.includes(ext)) {
       throw new Error(`Unsupported image type: ${ext}. Supported types: ${this.supportedImageTypes.join(', ')}`);
     }
@@ -940,7 +956,7 @@ Please provide accessibility report in JSON:
   }
 
   /**
-   * NUEVO: Calcular costo según modelo y tokens
+   * Calculate cost based on model and tokens
    */
   calculateCost(model, inputTokens, outputTokens) {
     const prices = {
@@ -964,7 +980,7 @@ Please provide accessibility report in JSON:
   }
 
   /**
-   * NUEVO: Determinar tipo de operación según agente
+   * Determine operation type based on agent
    */
   getOperationType(agentType) {
     const operationMap = {
