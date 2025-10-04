@@ -51,17 +51,7 @@ class DatabaseConfig {
       console.log('✅ MongoDB reconnected');
     });
 
-    // Graceful shutdown
-    process.on('SIGINT', async () => {
-      try {
-        await mongoose.connection.close();
-        console.log('📊 MongoDB connection closed through app termination');
-        process.exit(0);
-      } catch (error) {
-        console.error('❌ Error closing MongoDB connection:', error);
-        process.exit(1);
-      }
-    });
+    // Note: Graceful shutdown is handled by app.js
   }
 
   /**
