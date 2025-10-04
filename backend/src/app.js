@@ -375,7 +375,8 @@ class AgentPlatformApp {
       'http://localhost:3001',
       'http://localhost:4000',
       'http://localhost:5000',
-      'http://localhost:3002'
+      'http://localhost:3002',
+      "https://multi-agents-d6279.web.app"
     ];
 
     // Add production origins
