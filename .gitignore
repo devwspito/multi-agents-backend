@@ -114,8 +114,6 @@ build/
 student-data/
 educational-records/
 
-# Claude Code specific
-.claude/settings.local.json
 
 # Certificates and keys
 *.pem
