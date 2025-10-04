@@ -2,6 +2,7 @@ const express = require('express');
 const { Octokit } = require('@octokit/rest');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const OAuthState = require('../models/OAuthState');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -34,8 +35,9 @@ router.get('/url', async (req, res) => {
     // Generate random state parameter for security (CSRF protection)
     const state = `gh-${Date.now()}-${Math.random().toString(36).substring(2)}`;
 
-    // Store state in session for verification in callback
-    req.session.githubAuthState = state;
+    // Store state in database for verification in callback (TTL: 10 minutes)
+    await OAuthState.create({ state });
+    console.log('💾 OAuth state saved to database');
 
     const scopes = [
       'repo',          // Access to repositories
@@ -84,12 +86,22 @@ router.get('/callback', async (req, res) => {
     }
 
     // Verify state parameter (CSRF protection)
-    if (!state || !req.session.githubAuthState || state !== req.session.githubAuthState) {
-      console.error('❌ Invalid state parameter - possible CSRF attack');
+    if (!state) {
+      console.error('❌ No state parameter provided');
+      return res.redirect(`${process.env.FRONTEND_URL}/?error=invalid_state`);
+    }
+
+    // Check if state exists in database
+    const storedState = await OAuthState.findOne({ state });
+    if (!storedState) {
+      console.error('❌ Invalid state parameter - not found in database or expired');
       return res.redirect(`${process.env.FRONTEND_URL}/?error=invalid_state`);
     }
 
     console.log('✅ State verified successfully');
+
+    // Delete state from database (one-time use)
+    await OAuthState.deleteOne({ state });
 
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -195,9 +207,6 @@ router.get('/callback', async (req, res) => {
     );
 
     console.log('✅ JWT token generated for user:', user.username);
-
-    // Clear the state from session
-    delete req.session.githubAuthState;
 
     // Redirect to frontend with token
     res.redirect(`${process.env.FRONTEND_URL}/?token=${jwtToken}&github=connected`);
