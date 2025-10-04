@@ -47,15 +47,15 @@ const ProjectSchema = new mongoose.Schema({
   repositories: [{
     name: {
       type: String,
-      required: true
+      required: false
     },
     githubUrl: {
       type: String,
-      required: true
+      required: false
     },
     owner: {
       type: String,
-      required: true
+      required: false
     },
     branch: {
       type: String,
@@ -64,7 +64,7 @@ const ProjectSchema = new mongoose.Schema({
     type: {
       type: String,
       enum: ['frontend', 'backend', 'mobile', 'api', 'infrastructure', 'documentation'],
-      required: true
+      required: false
     },
     technologies: [{
       type: String
