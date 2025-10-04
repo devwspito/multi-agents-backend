@@ -72,13 +72,6 @@ router.get('/',
 
       const query = {};
 
-      // Filter by assignment
-      if (assigned === 'mine') {
-        query.assignedTo = req.user._id;
-      } else if (assigned === 'unassigned') {
-        query.assignedTo = { $exists: false };
-      }
-
       // Apply filters
       if (status) query.status = status;
       if (complexity) query.complexity = complexity;
@@ -110,7 +103,6 @@ router.get('/',
 
       const tasks = await Task.find(query)
         .populate('project', 'name description type')
-        .populate('assignedTo', 'username profile.firstName profile.lastName')
         .populate('codeReview.reviewer', 'username profile.firstName profile.lastName')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
@@ -202,7 +194,6 @@ router.post('/',
       });
 
       await task.populate('project', 'name description type');
-      await task.populate('assignedTo', 'username profile.firstName profile.lastName');
 
       res.status(201).json({
         success: true,
@@ -305,7 +296,6 @@ router.put('/:id',
       }
 
       await task.populate('project', 'name description type');
-      await task.populate('assignedTo', 'username profile.firstName profile.lastName');
 
       res.json({
         success: true,

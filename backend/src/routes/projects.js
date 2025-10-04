@@ -238,7 +238,6 @@ router.get('/:id',
       
       // Get project tasks
       const tasks = await Task.find({ project: project._id })
-        .populate('assignedTo', 'username profile.firstName profile.lastName')
         .sort({ createdAt: -1 });
 
       // Get recent activities
