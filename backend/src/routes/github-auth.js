@@ -1,5 +1,6 @@
 const express = require('express');
 const { Octokit } = require('@octokit/rest');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { authenticate } = require('../middleware/auth');
 
@@ -13,11 +14,11 @@ const router = express.Router();
 /**
  * @route   GET /api/github-auth/url
  * @desc    Get GitHub OAuth authorization URL
- * @access  Private (requires user to be logged in)
+ * @access  Public (anyone can start OAuth flow)
  */
-router.get('/url', authenticate, async (req, res) => {
+router.get('/url', async (req, res) => {
   try {
-    console.log('✅ GitHub OAuth URL request authenticated for user:', req.user.username);
+    console.log('🔓 GitHub OAuth URL request (public access)');
 
     const clientId = process.env.GITHUB_CLIENT_ID;
     const redirectUri = `${process.env.BASE_URL}/api/github-auth/callback`;
@@ -30,10 +31,10 @@ router.get('/url', authenticate, async (req, res) => {
       });
     }
 
-    // Generate state parameter for security (CSRF protection)
-    const state = `${req.user.id}-${Date.now()}-${Math.random().toString(36).substring(2)}`;
-    
-    // Store state in session or database for verification
+    // Generate random state parameter for security (CSRF protection)
+    const state = `gh-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+
+    // Store state in session for verification in callback
     req.session.githubAuthState = state;
 
     const scopes = [
@@ -47,6 +48,8 @@ router.get('/url', authenticate, async (req, res) => {
       `redirect_uri=${encodeURIComponent(redirectUri)}&` +
       `scope=${encodeURIComponent(scopes)}&` +
       `state=${state}`;
+
+    console.log('✅ GitHub OAuth URL generated successfully');
 
     res.json({
       success: true,
@@ -73,18 +76,21 @@ router.get('/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
 
+    console.log('📥 GitHub OAuth callback received');
+
     if (!code) {
-      return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=oauth_denied`);
+      console.error('❌ No code provided in callback');
+      return res.redirect(`${process.env.FRONTEND_URL}/?error=oauth_denied`);
     }
 
     // Verify state parameter (CSRF protection)
     if (!state || !req.session.githubAuthState || state !== req.session.githubAuthState) {
-      return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=invalid_state`);
+      console.error('❌ Invalid state parameter - possible CSRF attack');
+      return res.redirect(`${process.env.FRONTEND_URL}/?error=invalid_state`);
     }
 
-    // Extract user ID from state
-    const userId = state.split('-')[0];
-    
+    console.log('✅ State verified successfully');
+
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
@@ -102,9 +108,11 @@ router.get('/callback', async (req, res) => {
     const tokenData = await tokenResponse.json();
 
     if (tokenData.error) {
-      console.error('GitHub OAuth error:', tokenData);
-      return res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=oauth_failed`);
+      console.error('❌ GitHub OAuth error:', tokenData);
+      return res.redirect(`${process.env.FRONTEND_URL}/?error=oauth_failed`);
     }
+
+    console.log('✅ GitHub access token obtained');
 
     // Get user's GitHub profile
     const octokit = new Octokit({
@@ -112,36 +120,90 @@ router.get('/callback', async (req, res) => {
     });
 
     const { data: githubUser } = await octokit.rest.users.getAuthenticated();
+    console.log('✅ GitHub user profile fetched:', githubUser.login);
 
-    // Update user with GitHub connection
-    const user = await User.findByIdAndUpdate(userId, {
-      'github.id': githubUser.id.toString(),
-      'github.username': githubUser.login,
-      'github.accessToken': tokenData.access_token,
-      'github.refreshToken': tokenData.refresh_token,
-      'github.connectedAt': new Date(),
-      'github.lastSyncAt': new Date(),
-      'github.profile': {
-        login: githubUser.login,
-        name: githubUser.name,
-        email: githubUser.email,
-        avatar_url: githubUser.avatar_url,
-        bio: githubUser.bio,
-        company: githubUser.company,
-        location: githubUser.location,
-        public_repos: githubUser.public_repos,
-        followers: githubUser.followers,
-        following: githubUser.following
-      }
-    }, { new: true }).select('-github.accessToken -github.refreshToken');
+    // Get user's primary email
+    const { data: emails } = await octokit.rest.users.listEmailsForAuthenticatedUser();
+    const primaryEmail = emails.find(email => email.primary)?.email || githubUser.email;
+
+    // Check if user already exists with this GitHub ID
+    let user = await User.findOne({ 'github.id': githubUser.id.toString() });
+
+    if (user) {
+      // User exists - update their GitHub info
+      console.log('✅ Existing user found, updating GitHub info');
+      user.github = {
+        id: githubUser.id.toString(),
+        username: githubUser.login,
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        connectedAt: user.github.connectedAt || new Date(),
+        lastSyncAt: new Date(),
+        profile: {
+          login: githubUser.login,
+          name: githubUser.name,
+          email: primaryEmail,
+          avatar_url: githubUser.avatar_url,
+          bio: githubUser.bio,
+          company: githubUser.company,
+          location: githubUser.location,
+          public_repos: githubUser.public_repos,
+          followers: githubUser.followers,
+          following: githubUser.following
+        }
+      };
+      await user.save();
+    } else {
+      // User doesn't exist - create new user
+      console.log('🆕 Creating new user from GitHub account');
+      user = new User({
+        username: githubUser.login,
+        email: primaryEmail,
+        password: Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2), // Random password
+        role: 'developer',
+        isActive: true,
+        github: {
+          id: githubUser.id.toString(),
+          username: githubUser.login,
+          accessToken: tokenData.access_token,
+          refreshToken: tokenData.refresh_token,
+          connectedAt: new Date(),
+          lastSyncAt: new Date(),
+          profile: {
+            login: githubUser.login,
+            name: githubUser.name,
+            email: primaryEmail,
+            avatar_url: githubUser.avatar_url,
+            bio: githubUser.bio,
+            company: githubUser.company,
+            location: githubUser.location,
+            public_repos: githubUser.public_repos,
+            followers: githubUser.followers,
+            following: githubUser.following
+          }
+        }
+      });
+      await user.save();
+      console.log('✅ New user created successfully');
+    }
+
+    // Generate JWT token
+    const jwtToken = jwt.sign(
+      { id: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    console.log('✅ JWT token generated for user:', user.username);
 
     // Clear the state from session
     delete req.session.githubAuthState;
 
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard?github=connected`);
+    // Redirect to frontend with token
+    res.redirect(`${process.env.FRONTEND_URL}/?token=${jwtToken}&github=connected`);
   } catch (error) {
-    console.error('Error in GitHub OAuth callback:', error);
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard?error=oauth_error`);
+    console.error('❌ Error in GitHub OAuth callback:', error);
+    res.redirect(`${process.env.FRONTEND_URL}/?error=oauth_error`);
   }
 });
 
