@@ -4,7 +4,7 @@ const Task = require('../models/Task');
 const Activity = require('../models/Activity');
 const ProjectManager = require('../services/ProjectManager');
 const AgentOrchestrator = require('../services/AgentOrchestrator');
-const GitHubService = require('../services/GitHubService');
+const { getInstance: getGitHubService } = require('../services/GitHubService');
 const {
   authenticate,
   authorize,
@@ -18,7 +18,7 @@ const {
 const router = express.Router();
 const projectManager = new ProjectManager();
 const orchestrator = new AgentOrchestrator();
-const githubService = new GitHubService();
+const githubService = getGitHubService();
 
 /**
  * @route   GET /api/projects

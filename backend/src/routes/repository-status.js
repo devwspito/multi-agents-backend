@@ -1,8 +1,8 @@
 const express = require('express');
-const GitHubService = require('../services/GitHubService');
+const { getInstance: getGitHubService } = require('../services/GitHubService');
 
 const router = express.Router();
-const githubService = new GitHubService();
+const githubService = getGitHubService();
 
 /**
  * Get status of all repositories (admin dashboard)
