@@ -920,4 +920,16 @@ jobs:
   }
 }
 
-module.exports = GitHubService;
+// Export singleton instance to avoid multiple GitHub App initializations
+let instance = null;
+
+module.exports = {
+  getInstance: () => {
+    if (!instance) {
+      instance = new GitHubService();
+    }
+    return instance;
+  },
+  // For backward compatibility (deprecated)
+  GitHubService
+};

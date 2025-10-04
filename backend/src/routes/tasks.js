@@ -5,7 +5,7 @@ const Task = require('../models/Task');
 const Activity = require('../models/Activity');
 const ClaudeService = require('../services/ClaudeService');
 const AgentOrchestrator = require('../services/AgentOrchestrator');
-const GitHubService = require('../services/GitHubService');
+const { getInstance: getGitHubService } = require('../services/GitHubService');
 const {
   authenticate,
   checkPermission,
@@ -24,7 +24,7 @@ const {
 const router = express.Router();
 const claudeService = new ClaudeService();
 const agentOrchestrator = new AgentOrchestrator();
-const githubService = new GitHubService();
+const githubService = getGitHubService();
 
 // Configure multer for image uploads (screenshots, wireframes, etc.)
 const storage = multer.memoryStorage();

@@ -1,5 +1,5 @@
 const ClaudeService = require('./ClaudeService');
-const GitHubService = require('./GitHubService');
+const { getInstance: getGitHubService } = require('./GitHubService');
 const BranchManager = require('./BranchManager');
 const TaskPlanner = require('./TaskPlanner');
 const Activity = require('../models/Activity');
@@ -8,7 +8,7 @@ const Task = require('../models/Task');
 class AgentOrchestrator {
   constructor() {
     this.claudeService = new ClaudeService();
-    this.githubService = new GitHubService();
+    this.githubService = getGitHubService();
     this.branchManager = new BranchManager();
     this.taskPlanner = new TaskPlanner();
     this.agentCapabilities = this.initializeAgentCapabilities();
