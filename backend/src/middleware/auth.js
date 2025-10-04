@@ -74,13 +74,20 @@ const checkPermission = (resource, action) => {
       });
     }
 
+    // Debug logging
+    console.log(`🔐 Permission check for ${req.user.username}: ${resource}:${action}`);
+    console.log(`   Role: ${req.user.role}`);
+    console.log(`   Permissions.${resource}:`, req.user.permissions?.[resource]);
+
     if (!req.user.hasPermission(resource, action)) {
+      console.error(`❌ Permission denied for ${req.user.username}: ${resource}:${action}`);
       return res.status(403).json({
         success: false,
         message: `Access denied. Missing ${resource}:${action} permission.`
       });
     }
 
+    console.log(`✅ Permission granted for ${req.user.username}: ${resource}:${action}`);
     next();
   };
 };
