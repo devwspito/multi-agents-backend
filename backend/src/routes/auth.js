@@ -94,8 +94,11 @@ router.post('/register',
       const user = new User(userData);
       await user.save();
 
-      // Generate token
-      const token = user.generateAuthToken();
+      // Generate access and refresh tokens
+      const { accessToken, refreshToken } = await user.generateAuthTokens(
+        req.headers['user-agent'],
+        req.ip
+      );
 
       res.status(201).json({
         success: true,
@@ -109,7 +112,8 @@ router.post('/register',
             specializations: user.specializations,
             organization: user.organization
           },
-          token
+          accessToken,
+          refreshToken
         }
       });
     } catch (error) {
@@ -154,8 +158,11 @@ router.post('/login',
         });
       }
 
-      // Generate token
-      const token = user.generateAuthToken();
+      // Generate access and refresh tokens
+      const { accessToken, refreshToken } = await user.generateAuthTokens(
+        req.headers['user-agent'],
+        req.ip
+      );
 
       res.json({
         success: true,
@@ -172,7 +179,8 @@ router.post('/login',
             permissions: user.permissions,
             preferences: user.preferences
           },
-          token
+          accessToken,
+          refreshToken
         }
       });
     } catch (error) {
@@ -189,7 +197,7 @@ router.post('/login',
 
 /**
  * @route   POST /api/auth/logout
- * @desc    Logout user (for token blacklisting if implemented)
+ * @desc    Logout user and revoke refresh token
  * @access  Private
  */
 router.post('/logout',
@@ -197,8 +205,12 @@ router.post('/logout',
   auditLog('user_logout'),
   async (req, res) => {
     try {
-      // In a production environment, you would blacklist the token here
-      // For now, just return success as the client will remove the token
+      const { refreshToken } = req.body;
+
+      if (refreshToken) {
+        // Revoke the specific refresh token
+        await req.user.revokeRefreshToken(refreshToken);
+      }
 
       res.json({
         success: true,
@@ -209,6 +221,78 @@ router.post('/logout',
       res.status(500).json({
         success: false,
         message: 'Server error during logout.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/auth/refresh
+ * @desc    Refresh access token using refresh token
+ * @access  Public
+ */
+router.post('/refresh',
+  rateLimit(15 * 60 * 1000, 20), // 20 attempts per 15 minutes
+  async (req, res) => {
+    try {
+      const { refreshToken } = req.body;
+
+      if (!refreshToken) {
+        return res.status(400).json({
+          success: false,
+          message: 'Refresh token is required.'
+        });
+      }
+
+      // Verify refresh token
+      let decoded;
+      try {
+        decoded = jwt.verify(
+          refreshToken,
+          process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
+        );
+      } catch (error) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired refresh token.'
+        });
+      }
+
+      // Find user
+      const user = await User.findById(decoded.id);
+
+      if (!user || !user.isActive) {
+        return res.status(401).json({
+          success: false,
+          message: 'User not found or inactive.'
+        });
+      }
+
+      // Validate refresh token in database
+      const validation = user.validateRefreshToken(refreshToken);
+
+      if (!validation.valid) {
+        return res.status(401).json({
+          success: false,
+          message: `Invalid refresh token: ${validation.reason}`
+        });
+      }
+
+      // Generate new access token
+      const accessToken = user.generateAccessToken();
+
+      res.json({
+        success: true,
+        message: 'Token refreshed successfully.',
+        data: {
+          accessToken
+        }
+      });
+    } catch (error) {
+      console.error('Refresh token error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error refreshing token.'
       });
     }
   }

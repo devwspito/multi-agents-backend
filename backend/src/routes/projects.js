@@ -130,18 +130,46 @@ router.post('/',
         owner: req.user._id
       };
 
-      // Validate educational project requirements
-      if (!projectData.type || !['educational', 'learning-management', 'assessment', 'analytics'].includes(projectData.type)) {
+      // Validate project type
+      const validTypes = ['web-app', 'mobile-app', 'api', 'microservice', 'library', 'saas', 'educational', 'learning-management', 'assessment', 'analytics'];
+      if (!projectData.type || !validTypes.includes(projectData.type)) {
         return res.status(400).json({
           success: false,
-          message: 'Project type must be educational, learning-management, assessment, or analytics.'
+          message: `Project type must be one of: ${validTypes.join(', ')}.`
         });
       }
 
       // Create project with ProjectManager
       const project = await projectManager.createProject(projectData, req.user._id);
 
-      // Setup GitHub repository if requested
+      // Process repositories if provided
+      if (req.body.repositories && Array.isArray(req.body.repositories)) {
+        for (const repoData of req.body.repositories) {
+          try {
+            // Infer repository type from language or user-provided type
+            const inferredType = inferRepositoryType(repoData.language);
+
+            const repositoryToAdd = {
+              name: repoData.name,
+              githubUrl: repoData.clone_url || repoData.ssh_url,
+              owner: repoData.full_name?.split('/')[0] || req.user.username,
+              branch: repoData.default_branch || 'main',
+              type: repoData.type || inferredType,
+              technologies: repoData.language ? [repoData.language] : [],
+              isActive: true
+            };
+
+            project.repositories.push(repositoryToAdd);
+          } catch (repoError) {
+            console.warn(`Failed to add repository ${repoData.name}:`, repoError.message);
+            // Continue adding other repositories
+          }
+        }
+
+        await project.save();
+      }
+
+      // Setup GitHub repository if requested (legacy support)
       if (req.body.createRepository) {
         try {
           const repo = await githubService.createRepository(project, req.body.organization);
@@ -162,7 +190,7 @@ router.post('/',
 
       res.status(201).json({
         success: true,
-        message: 'Educational project created successfully.',
+        message: 'Project created successfully.',
         data: { project }
       });
     } catch (error) {
@@ -175,6 +203,27 @@ router.post('/',
     }
   }
 );
+
+// Helper function to infer repository type from language
+function inferRepositoryType(language) {
+  const typeMapping = {
+    'JavaScript': 'frontend',
+    'TypeScript': 'frontend',
+    'Python': 'backend',
+    'Java': 'backend',
+    'Go': 'backend',
+    'Rust': 'backend',
+    'Swift': 'mobile',
+    'Kotlin': 'mobile',
+    'Dart': 'mobile',
+    'HTML': 'frontend',
+    'CSS': 'frontend',
+    'Dockerfile': 'infrastructure',
+    'Shell': 'infrastructure'
+  };
+
+  return typeMapping[language] || 'backend';
+}
 
 /**
  * @route   GET /api/projects/:id
@@ -537,6 +586,231 @@ router.get('/:id/educational-report',
       res.status(500).json({
         success: false,
         message: 'Server error generating educational report.'
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/projects/:id/repositories
+ * @desc    Add repository to existing project
+ * @access  Private
+ */
+router.post('/:id/repositories',
+  authenticate,
+  checkProjectAccess,
+  auditLog('repository_added'),
+  async (req, res) => {
+    try {
+      const project = req.project;
+      const { id, name, full_name, clone_url, ssh_url, default_branch, language, type } = req.body;
+
+      // Validate required fields
+      if (!name || (!clone_url && !ssh_url)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Repository name and URL (clone_url or ssh_url) are required.'
+        });
+      }
+
+      // Check if repository already exists in project
+      const existingRepo = project.repositories.find(
+        repo => repo.githubUrl === clone_url || repo.githubUrl === ssh_url
+      );
+
+      if (existingRepo) {
+        return res.status(400).json({
+          success: false,
+          message: 'Repository already exists in this project.'
+        });
+      }
+
+      // Infer repository type from language if not provided
+      const inferredType = type || inferRepositoryType(language);
+
+      // Add repository to project
+      const newRepository = {
+        name: name,
+        githubUrl: clone_url || ssh_url,
+        owner: full_name?.split('/')[0] || req.user.username,
+        branch: default_branch || 'main',
+        type: inferredType,
+        technologies: language ? [language] : [],
+        isActive: true,
+        syncStatus: 'pending'
+      };
+
+      project.repositories.push(newRepository);
+      await project.save();
+
+      // Log activity
+      await Activity.logActivity({
+        project: project._id,
+        actor: req.user.username,
+        actorType: 'user',
+        action: 'repository_added',
+        description: `Repository "${name}" added to project`,
+        details: {
+          repositoryName: name,
+          repositoryType: inferredType,
+          language: language
+        }
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Repository added successfully.',
+        data: {
+          project: {
+            _id: project._id,
+            name: project.name,
+            repositories: project.repositories
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Add repository error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error adding repository.',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  }
+);
+
+/**
+ * @route   POST /api/projects/:id/repositories/:repoId/reconnect
+ * @desc    Reconnect a disconnected repository
+ * @access  Private
+ */
+router.post('/:id/repositories/:repoId/reconnect',
+  authenticate,
+  checkProjectAccess,
+  auditLog('repository_reconnect'),
+  async (req, res) => {
+    try {
+      const project = req.project;
+      const { repoId } = req.params;
+
+      // Find repository in project
+      const repository = project.repositories.id(repoId);
+
+      if (!repository) {
+        return res.status(404).json({
+          success: false,
+          message: 'Repository not found in this project.'
+        });
+      }
+
+      // Get user's GitHub access token
+      const user = await User.findById(req.user._id).select('+github.accessToken');
+
+      if (!user.github || !user.github.accessToken) {
+        return res.status(400).json({
+          success: false,
+          message: 'GitHub account not connected. Please connect your GitHub account first.'
+        });
+      }
+
+      try {
+        // Initialize Octokit with user's token
+        const { Octokit } = require('@octokit/rest');
+        const octokit = new Octokit({
+          auth: user.github.accessToken
+        });
+
+        // Extract owner and repo name from GitHub URL
+        const urlMatch = repository.githubUrl.match(/github\.com\/([^\/]+)\/([^\/\.]+)/);
+
+        if (!urlMatch) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid GitHub repository URL.'
+          });
+        }
+
+        const [, owner, repoName] = urlMatch;
+
+        // Test access by fetching repository info
+        const { data: repoInfo } = await octokit.rest.repos.get({
+          owner,
+          repo: repoName
+        });
+
+        // Update repository status
+        repository.isActive = true;
+        repository.syncStatus = 'synced';
+        repository.lastSync = new Date();
+
+        // Update metadata if available
+        if (repoInfo) {
+          repository.metadata = {
+            ...repository.metadata,
+            hasTests: false, // Can be detected by analyzing repo structure
+            hasCI: false,
+            languages: {} // Can be fetched with octokit.rest.repos.listLanguages
+          };
+        }
+
+        await project.save();
+
+        // Log activity
+        await Activity.logActivity({
+          project: project._id,
+          actor: req.user.username,
+          actorType: 'user',
+          action: 'repository_reconnected',
+          description: `Repository "${repository.name}" reconnected successfully`,
+          details: {
+            repositoryName: repository.name,
+            owner: owner,
+            syncStatus: 'synced'
+          }
+        });
+
+        res.json({
+          success: true,
+          message: 'Repository reconnected successfully.',
+          data: {
+            repository: {
+              _id: repository._id,
+              name: repository.name,
+              isActive: repository.isActive,
+              syncStatus: repository.syncStatus,
+              lastSync: repository.lastSync
+            }
+          }
+        });
+
+      } catch (githubError) {
+        console.error('GitHub API error:', githubError);
+
+        // Update repository as disconnected
+        repository.isActive = false;
+        repository.syncStatus = 'error';
+        await project.save();
+
+        const errorMessage = githubError.status === 404
+          ? 'Repository not found or no access. Please check permissions.'
+          : githubError.status === 401
+          ? 'GitHub authentication failed. Please reconnect your GitHub account.'
+          : 'Failed to access repository. Please check your GitHub permissions.';
+
+        return res.status(400).json({
+          success: false,
+          message: errorMessage,
+          error: process.env.NODE_ENV === 'development' ? githubError.message : undefined
+        });
+      }
+
+    } catch (error) {
+      console.error('Reconnect repository error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error reconnecting repository.',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   }
