@@ -1,20 +1,20 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
+const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs').promises;
 const path = require('path');
 const Activity = require('../models/Activity');
 const tokenTrackingService = require('./TokenTrackingService');
 const crypto = require('crypto');
 
-const execAsync = promisify(exec);
-
 class ClaudeService {
   constructor() {
-    this.claudePath = 'claude'; // Assumes claude is in PATH
+    this.anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
-    this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-3-sonnet-20240229';
+    this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
     this.supportedImageTypes = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
+    this.maxTokens = 8192; // Default max tokens for responses
   }
 
   /**
@@ -701,15 +701,15 @@ Please provide your review in JSON format:
   }
 
   /**
-   * Get Claude Code model name for CLI command
+   * Get Claude model name for API/CLI command
    */
   getClaudeCodeModelName(model) {
     const claudeCodeMapping = {
-      'opus': 'claude-3-opus-20240229',
-      'sonnet': 'claude-3-sonnet-20240229'
+      'opus': 'claude-opus-4-1-20250805',      // Opus 4.1
+      'sonnet': 'claude-sonnet-4-5-20250929'   // Sonnet 4.5
     };
-    
-    return claudeCodeMapping[model] || 'claude-3-sonnet-20240229';
+
+    return claudeCodeMapping[model] || 'claude-sonnet-4-5-20250929';
   }
 
   /**
