@@ -17,10 +17,13 @@ const router = express.Router();
  */
 router.get('/url', authenticate, async (req, res) => {
   try {
+    console.log('✅ GitHub OAuth URL request authenticated for user:', req.user.username);
+
     const clientId = process.env.GITHUB_CLIENT_ID;
     const redirectUri = `${process.env.BASE_URL}/api/github-auth/callback`;
-    
+
     if (!clientId) {
+      console.error('❌ GitHub OAuth not configured - missing GITHUB_CLIENT_ID');
       return res.status(500).json({
         success: false,
         message: 'GitHub OAuth not configured'
