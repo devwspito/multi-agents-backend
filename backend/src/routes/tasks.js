@@ -402,7 +402,7 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
     // Execute each agent in the pipeline
     for (let step = 0; step < task.orchestration.pipeline.length; step++) {
       // Check if orchestration was cancelled before starting next agent
-      await task.reload(); // Refresh task state from database
+      task = await Task.findById(task._id); // Refresh task state from database
       if (task.orchestration.status === 'cancelled') {
         task.addOrchestrationLog('Orchestration cancelled by user', 'System');
         return;
