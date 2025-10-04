@@ -7,12 +7,30 @@ const AgentConversation = require('../models/AgentConversation');
  */
 class ConversationCacheService {
   constructor() {
-    // Redis client for caching
-    this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-      retryDelayOnFailover: 100,
-      maxRetriesPerRequest: 3,
-      lazyConnect: true
-    });
+    this.redisEnabled = false;
+    this.redis = null;
+
+    // Try to initialize Redis if URL is provided
+    if (process.env.REDIS_URL) {
+      try {
+        this.redis = new Redis(process.env.REDIS_URL, {
+          retryDelayOnFailover: 100,
+          maxRetriesPerRequest: 3,
+          lazyConnect: true,
+          enableOfflineQueue: false,
+          reconnectOnError: () => false
+        });
+
+        this.setupRedisHandlers();
+        this.redisEnabled = true;
+        console.log('💾 Conversation Cache Service initialized with Redis');
+      } catch (error) {
+        console.warn('⚠️ Redis not available, caching disabled:', error.message);
+        this.redis = null;
+      }
+    } else {
+      console.warn('⚠️ REDIS_URL not configured, caching disabled');
+    }
 
     // Cache configuration
     this.cacheConfig = {
@@ -30,26 +48,39 @@ class ConversationCacheService {
       writes: 0,
       evictions: 0
     };
-
-    this.setupRedisHandlers();
-    console.log('💾 Conversation Cache Service initialized');
   }
 
   /**
    * Setup Redis event handlers
    */
   setupRedisHandlers() {
+    if (!this.redis) return;
+
     this.redis.on('connect', () => {
       console.log('💾 Redis cache connected');
+      this.redisEnabled = true;
     });
 
     this.redis.on('error', (error) => {
-      console.error('❌ Redis cache error:', error);
+      console.warn('⚠️ Redis cache error (falling back to DB):', error.message);
+      this.redisEnabled = false;
     });
 
     this.redis.on('reconnecting', () => {
       console.log('🔄 Redis cache reconnecting...');
     });
+
+    this.redis.on('end', () => {
+      console.log('💾 Redis cache disconnected');
+      this.redisEnabled = false;
+    });
+  }
+
+  /**
+   * Check if Redis is available for caching
+   */
+  isRedisAvailable() {
+    return this.redisEnabled && this.redis !== null;
   }
 
   /**
@@ -57,9 +88,9 @@ class ConversationCacheService {
    */
   async getConversation(conversationId, useCache = true) {
     const cacheKey = `conversation:${conversationId}`;
-    
+
     try {
-      if (useCache) {
+      if (useCache && this.redisEnabled && this.redis) {
         // Try cache first
         const cached = await this.redis.get(cacheKey);
         if (cached) {
@@ -72,7 +103,7 @@ class ConversationCacheService {
       // Cache miss - get from database
       this.stats.misses++;
       console.log(`💾 Cache miss for conversation ${conversationId} - fetching from DB`);
-      
+
       const conversation = await AgentConversation
         .findById(conversationId)
         .populate('taskId', 'title description status')
@@ -80,7 +111,7 @@ class ConversationCacheService {
         .populate('userId', 'name email avatar')
         .lean(); // Use lean for better performance
 
-      if (conversation) {
+      if (conversation && this.redisEnabled) {
         // Cache the result
         await this.cacheConversation(conversationId, conversation);
         return conversation;
@@ -101,23 +132,25 @@ class ConversationCacheService {
    * Cache conversation data
    */
   async cacheConversation(conversationId, conversation) {
+    if (!this.isRedisAvailable()) return;
+
     const cacheKey = `conversation:${conversationId}`;
-    
+
     try {
       await this.redis.setex(
         cacheKey,
         this.cacheConfig.conversationTTL,
         JSON.stringify(conversation)
       );
-      
+
       this.stats.writes++;
-      
+
       // Cache conversation metadata separately for quick access
       await this.cacheConversationMetadata(conversationId, conversation);
-      
+
       console.log(`💾 Cached conversation ${conversationId}`);
     } catch (error) {
-      console.error('Error caching conversation:', error);
+      console.warn('⚠️ Error caching conversation (falling back to DB):', error.message);
     }
   }
 
