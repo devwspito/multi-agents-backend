@@ -419,8 +419,12 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
     // Execute each agent in the pipeline
     for (let step = 0; step < task.orchestration.pipeline.length; step++) {
       console.log(`🔄 Loop iteration ${step + 1}/${task.orchestration.pipeline.length}`);
+      console.log(`🔍 About to refresh task from DB, task._id: ${task._id}`);
+
       // Check if orchestration was cancelled before starting next agent
       task = await Task.findById(task._id); // Refresh task state from database
+      console.log(`✅ Task refreshed from DB successfully`);
+
       if (task.orchestration.status === 'cancelled') {
         task.addOrchestrationLog('Orchestration cancelled by user', 'System');
         return;
@@ -428,17 +432,22 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
 
       const currentAgentStep = task.orchestration.pipeline[step];
       const currentAgent = currentAgentStep.agent;
+      console.log(`🤖 Current agent: ${currentAgent}`);
 
       try {
+        console.log(`⚙️ Marking ${currentAgent} as in-progress...`);
         // Mark current step as in-progress
         currentAgentStep.status = 'in-progress';
         currentAgentStep.startedAt = new Date();
         task.addOrchestrationLog(`Starting ${currentAgent}`, currentAgent);
         await task.save();
+        console.log(`✅ Task saved, about to execute ${currentAgent}...`);
 
         // Execute current agent with Claude service and track tokens
         const agentInstructions = globalInstructions || `Execute ${currentAgent} tasks for: ${task.description}`;
+        console.log(`📝 Agent instructions: ${agentInstructions.substring(0, 100)}...`);
 
+        console.log(`🚀 Calling agentOrchestrator.executeAgentWithTokenTracking for ${currentAgent}...`);
         const result = await agentOrchestrator.executeAgentWithTokenTracking(
           task,
           currentAgent,
@@ -449,6 +458,8 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
             userId: task.createdBy // Pass user ID for token tracking
           }
         );
+
+        console.log(`✅ ${currentAgent} execution returned, success: ${result.success}`);
 
         if (result.success) {
           // Mark step as completed
