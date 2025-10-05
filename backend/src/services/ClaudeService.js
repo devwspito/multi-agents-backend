@@ -644,78 +644,10 @@ Current directory: ${workspacePath}
 
       }
 
-      // NO MORE FALLBACKS - Claude Code is the ONLY engine
+      // NO FALLBACKS - GitHub Actions is the execution strategy
       if (!stdout) {
-        throw new Error('Claude Code did not produce output');
+        throw new Error('No output generated - GitHub Actions workflow should have been created');
       }
-
-      /* COMMENTED OUT - NO FALLBACKS
-      if (!stdout && process.env.USE_REAL_EXECUTION === 'true') {
-        console.log(`🔧 Using REAL Claude Code Executor (executes actual commands)...`);
-
-        try {
-          // Get the task object from taskContext
-          const task = {
-            _id: taskContext?.taskId || 'unknown',
-            title: instructions.match(/Execute .* tasks for: (.*)/)?.[1] || 'Task',
-            description: instructions
-          };
-
-          // Execute REAL commands based on agent type
-          const executionResult = await claudeCodeExecutor.executeAgentTasks(
-            agent,
-            task,
-            instructions,
-            workspacePath
-          );
-
-          if (executionResult.success) {
-            stdout = executionResult.result;
-            // Store code changes for tracking
-            this.lastCodeChanges = executionResult.codeChanges;
-          } else {
-            throw new Error(executionResult.error);
-          }
-
-          console.log(`✅ Real command execution completed!`);
-        } catch (execError) {
-          console.error(`❌ Real execution failed:`, execError.message);
-          throw execError;
-        }
-
-      // Option 3: Use Anthropic SDK as fallback (only generates text)
-      } else if (this.useAnthropicSDK && this.anthropic) {
-        console.log(`🚀 Using Anthropic SDK as fallback (TEXT ONLY - no real execution)...`);
-        console.log(`💡 Set USE_REAL_EXECUTION=true to enable actual command execution`);
-
-        try {
-          // Convert model name to Anthropic format
-          const anthropicModel = this.getAnthropicModelName(model);
-
-          console.log(`⏳ Executing Anthropic API call...`);
-          const message = await this.anthropic.messages.create({
-            model: anthropicModel,
-            max_tokens: 4096,
-            messages: [{
-              role: 'user',
-              content: instructions
-            }],
-            system: this.buildSystemPrompt(agent)
-          });
-
-          // Extract text from response
-          stdout = message.content.map(c => c.text || '').join('\n');
-
-          console.log(`✅ Anthropic API execution completed (TEXT ONLY)!`);
-        } catch (apiError) {
-          console.error(`❌ Anthropic API failed:`, apiError.message);
-          throw apiError;
-        }
-
-      } else {
-        throw new Error('No Claude Code SDK or Anthropic SDK available. Please install @anthropic-ai/claude-code or @anthropic-ai/sdk');
-      }
-      */ // END OF COMMENTED OUT SECTION
 
       console.log(`📤 stdout length: ${stdout?.length || 0} chars`);
       console.log(`📤 stderr length: ${stderr?.length || 0} chars`);
