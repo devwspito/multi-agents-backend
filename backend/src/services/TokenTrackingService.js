@@ -13,16 +13,16 @@ class TokenTrackingService {
     // Daily limits (configurable per user)
     this.defaultLimits = {
       free: {
-        opus: { daily: 10000, monthly: 100000 },
-        sonnet: { daily: 50000, monthly: 500000 }
+        opus: { daily: 100000, monthly: 1000000 },  // Increased 10x for development/testing
+        sonnet: { daily: 500000, monthly: 5000000 }  // Increased 10x
       },
       premium: {
-        opus: { daily: 100000, monthly: 1000000 },
-        sonnet: { daily: 500000, monthly: 5000000 }
-      },
-      enterprise: {
         opus: { daily: 1000000, monthly: 10000000 },
         sonnet: { daily: 5000000, monthly: 50000000 }
+      },
+      enterprise: {
+        opus: { daily: 10000000, monthly: 100000000 },
+        sonnet: { daily: 50000000, monthly: 500000000 }
       }
     };
 
