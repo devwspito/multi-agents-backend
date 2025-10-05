@@ -401,15 +401,24 @@ router.post('/:id/start',
  */
 async function executeFullOrchestration(task, globalInstructions, images = []) {
   console.log('📋 executeFullOrchestration called for task:', task._id);
+
   try {
     console.log('⚙️ Setting task status to in-progress...');
     task.orchestration.status = 'in-progress';
     task.status = 'in-progress';
     await task.save();
     console.log('✅ Task status saved, starting agent loop...');
+    console.log('🔍 Pipeline length:', task.orchestration.pipeline.length);
+    console.log('🔍 Pipeline contents:', JSON.stringify(task.orchestration.pipeline, null, 2));
+
+    if (!task.orchestration.pipeline || task.orchestration.pipeline.length === 0) {
+      console.error('❌ CRITICAL: Pipeline is empty or undefined!');
+      throw new Error('Pipeline not initialized');
+    }
 
     // Execute each agent in the pipeline
     for (let step = 0; step < task.orchestration.pipeline.length; step++) {
+      console.log(`🔄 Loop iteration ${step + 1}/${task.orchestration.pipeline.length}`);
       // Check if orchestration was cancelled before starting next agent
       task = await Task.findById(task._id); // Refresh task state from database
       if (task.orchestration.status === 'cancelled') {
@@ -487,6 +496,8 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
       await task.save();
     }
 
+    console.log('🎉 Agent loop completed, all agents executed successfully');
+
     // All agents completed successfully
     task.orchestration.status = 'completed';
     task.status = 'done';
@@ -507,8 +518,11 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
     });
 
   } catch (error) {
-    console.error('Full orchestration error:', error);
-    
+    console.error('❌ ORCHESTRATION CRITICAL ERROR:', error);
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    console.error('❌ Error name:', error.name);
+
     task.orchestration.status = 'failed';
     task.status = 'blocked';
     task.addOrchestrationLog(`Orchestration failed: ${error.message}`, 'System');
