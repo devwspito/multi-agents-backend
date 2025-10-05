@@ -296,10 +296,13 @@ class ClaudeService {
    * Setup workspace for task execution
    */
   async setupWorkspace(task) {
-    const workspacePath = path.join(this.workspaceBase, `task-${task._id}`);
+    // Use absolute path to ensure it works correctly
+    const workspacePath = path.resolve(process.cwd(), this.workspaceBase, `task-${task._id}`);
 
     try {
-      await fs.mkdir(workspacePath, { recursive: true });
+      // Create workspace directory with full permissions
+      await fs.mkdir(workspacePath, { recursive: true, mode: 0o755 });
+      console.log(`✅ Workspace created at: ${workspacePath}`);
 
       // Copy relevant project files if they exist
       console.log(`🔍 Checking for repository: ${task.project?.repository?.url || 'No repository configured'}`);
@@ -533,10 +536,11 @@ Please provide your review in JSON format:
 
     const model = this.getModelForAgent(agent);
     const startTime = Date.now();
+    let tempInstructionFile = null; // Define here for proper scope
 
     console.log(`📊 Model: ${model}`);
     console.log(`📂 Workspace: ${workspacePath}`);
-    console.log(`🔧 Using: ${this.useClaudeCodeSDK ? 'Claude Code SDK' : this.useAnthropicSDK ? 'Anthropic SDK' : 'No SDK available'}`);
+    console.log(`🔧 Using Claude Code CLI as PRIMARY ENGINE`);
 
     try {
       // Check token limits before execution if task context is provided
@@ -565,7 +569,8 @@ Please provide your review in JSON format:
 
         try {
           // Create a temporary file with the instructions for Claude Code
-          const tempInstructionFile = path.join(workspacePath, `.claude-instructions-${Date.now()}.txt`);
+          // Use absolute path to ensure it works correctly
+          tempInstructionFile = path.resolve(workspacePath, `.claude-instructions-${Date.now()}.txt`);
           await fs.writeFile(tempInstructionFile, instructions);
 
           // Build the Claude Code CLI command
@@ -595,15 +600,19 @@ Please provide your review in JSON format:
           console.log(`📊 Output length: ${stdout.length} chars`);
 
         } catch (cliError) {
-          console.error(`⚠️ Claude Code CLI failed, trying fallback:`, cliError.message);
-
-          // Fall through to next option instead of throwing
-          // This allows us to try the custom executor or Anthropic SDK
+          console.error(`❌ Claude Code CLI failed:`, cliError.message);
+          // NO FALLBACK - Claude Code is our ONLY engine
+          throw new Error(`Claude Code execution failed: ${cliError.message}`);
         }
 
-      // Option 2: Fallback to custom executor if Claude Code CLI fails
       }
 
+      // NO MORE FALLBACKS - Claude Code is the ONLY engine
+      if (!stdout) {
+        throw new Error('Claude Code did not produce output');
+      }
+
+      /* COMMENTED OUT - NO FALLBACKS
       if (!stdout && process.env.USE_REAL_EXECUTION === 'true') {
         console.log(`🔧 Using REAL Claude Code Executor (executes actual commands)...`);
 
@@ -744,10 +753,12 @@ Please provide your review in JSON format:
       throw new Error(`Claude Code CLI execution failed: ${error.message}`);
     } finally {
       // Clean up temporary file
-      try {
-        await fs.unlink(tempInstructionFile);
-      } catch (cleanupError) {
-        console.warn('Failed to cleanup temp file:', cleanupError.message);
+      if (tempInstructionFile) {
+        try {
+          await fs.unlink(tempInstructionFile);
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temp file:', cleanupError.message);
+        }
       }
     }
   }
