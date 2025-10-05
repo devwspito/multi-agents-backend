@@ -100,9 +100,14 @@ class AgentPlatformApp {
     this.app.use('/api/', limiter);
 
     // Body parsing with size limits
-    this.app.use(express.json({ 
+    this.app.use(express.json({
       limit: '10mb',
       verify: (req, res, buf) => {
+        // Store raw body for webhook signature verification
+        if (req.path === '/api/github-webhooks' || req.path.includes('/github-webhooks')) {
+          req.rawBody = buf.toString('utf8');
+        }
+
         // Data validation
         if (buf.length > 0) {
           try {
