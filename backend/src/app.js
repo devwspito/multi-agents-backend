@@ -231,6 +231,7 @@ class AgentPlatformApp {
     this.app.use('/api/agents', agentRoutes);
     this.app.use('/api/uploads', uploadRoutes);
     this.app.use('/api/token-usage', tokenUsageRoutes);
+    this.app.use('/api/agent-outputs', require('./routes/agent-outputs'));  // NEW: Agent outputs
 
     // Platform metrics endpoint
     this.app.get('/api/platform-metrics', 

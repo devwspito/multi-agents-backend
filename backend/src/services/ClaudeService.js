@@ -810,14 +810,12 @@ Please provide your review in JSON format:
    * Get appropriate Claude model for agent type
    */
   getModelForAgent(agentType) {
-    // Model mapping based on our optimized configuration
+    // ALL agents use Sonnet 4.5 for cost optimization
+    // Sonnet 4.5 is powerful enough for all tasks and MUCH cheaper than Opus
     const modelMapping = {
-      // Planning agents use Opus (complex reasoning)
-      'product-manager': 'opus',
-      'project-manager': 'opus',
-      'tech-lead': 'opus',
-
-      // Implementation agents use Sonnet (execution)
+      'product-manager': 'sonnet',
+      'project-manager': 'sonnet',
+      'tech-lead': 'sonnet',
       'senior-developer': 'sonnet',
       'junior-developer': 'sonnet',
       'qa-engineer': 'sonnet'
