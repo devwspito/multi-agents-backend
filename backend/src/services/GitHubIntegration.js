@@ -450,11 +450,21 @@ class GitHubIntegration {
       throw new Error('Webhook secret not configured');
     }
 
+    // Validate signature exists and has correct format
+    if (!signature || typeof signature !== 'string') {
+      return false;
+    }
+
     const crypto = require('crypto');
     const expectedSignature = 'sha256=' + crypto
       .createHmac('sha256', this.webhookSecret)
       .update(payload, 'utf8')
       .digest('hex');
+
+    // Check length before timingSafeEqual to avoid ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH
+    if (signature.length !== expectedSignature.length) {
+      return false;
+    }
 
     return crypto.timingSafeEqual(
       Buffer.from(signature),
