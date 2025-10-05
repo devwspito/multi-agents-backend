@@ -29,7 +29,9 @@
       "Bash(curl:*)",
       "Bash(python3:*)",
       "Bash(ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\" npx @anthropic-ai/claude-code --print --model \"sonnet\")",
-      "Bash(export ANTHROPIC_API_KEY=\"sk-ant-api03-IWFZ0cV6mCMnLh70WOhqUz5NQnKy0IzE4s5kjxsFGb8Tl_9MdMNwyGZFCqR12sTT-vdmvDyJ4w-RvxMQgAA\")"
+      "Bash(export ANTHROPIC_API_KEY=\"sk-ant-api03-IWFZ0cV6mCMnLh70WOhqUz5NQnKy0IzE4s5kjxsFGb8Tl_9MdMNwyGZFCqR12sTT-vdmvDyJ4w-RvxMQgAA\")",
+      "Bash(claude --print --model sonnet)",
+      "Bash(ANTHROPIC_API_KEY=\"sk-ant-api03-0FM6z0sYtrS7uTu8F-2YxqnqC10E42R2VYhLlpCqT3CQ1cIKBbTOI-wlJP2_QNBH0DLgD1qU4A-PJrxWQgAA\" npx claude --print --model sonnet)"
     ],
     "deny": [],
     "ask": []
