@@ -580,6 +580,8 @@ Please provide your review in JSON format:
 
           console.log(`⏳ Executing Claude Code CLI...`);
           console.log(`📂 Working directory: ${workspacePath}`);
+          console.log(`🔑 API Key starts with: ${process.env.ANTHROPIC_API_KEY?.substring(0, 20)}...`);
+          console.log(`📝 Command: ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`);
 
           // Execute Claude Code CLI with the instructions
           const { stdout: cliOutput, stderr: cliError } = await execAsync(claudeCommand, {
