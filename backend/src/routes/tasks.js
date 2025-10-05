@@ -376,8 +376,14 @@ router.post('/:id/start',
 
       // Execute all agents automatically in background (non-blocking)
       const image = req.file ? [req.file] : []; // Convert single file to array for consistency
+      console.log('🚀 Scheduling orchestration for task:', task._id);
       setImmediate(async () => {
-        await executeFullOrchestration(task, instructions, image);
+        console.log('🔥 Starting executeFullOrchestration for task:', task._id);
+        try {
+          await executeFullOrchestration(task, instructions, image);
+        } catch (error) {
+          console.error('❌ CRITICAL: Orchestration wrapper failed:', error);
+        }
       });
 
     } catch (error) {
@@ -394,10 +400,13 @@ router.post('/:id/start',
  * Execute all 6 agents automatically in sequence
  */
 async function executeFullOrchestration(task, globalInstructions, images = []) {
+  console.log('📋 executeFullOrchestration called for task:', task._id);
   try {
+    console.log('⚙️ Setting task status to in-progress...');
     task.orchestration.status = 'in-progress';
     task.status = 'in-progress';
     await task.save();
+    console.log('✅ Task status saved, starting agent loop...');
 
     // Execute each agent in the pipeline
     for (let step = 0; step < task.orchestration.pipeline.length; step++) {
