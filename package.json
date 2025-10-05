@@ -7,9 +7,7 @@
   "scripts": {
     "start": "node backend/src/app.js",
     "dev": "nodemon backend/src/app.js",
-    "build": "npm run install:claude-code",
-    "install:claude-code": "npm install -g @anthropic-ai/claude-code || npm link @anthropic-ai/claude-code",
-    "postinstall": "npm run install:claude-code",
+    "build": "echo 'Build completed'",
     "lint": "echo 'Linting completed'",
     "test": "npm run test:token-tracking && npm run test:token-api",
     "test:token-tracking": "node backend/test/token-tracking.test.js",
