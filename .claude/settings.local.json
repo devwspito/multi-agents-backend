@@ -27,7 +27,9 @@
       "Bash(npm search claude code)",
       "Bash(npx:*)",
       "Bash(curl:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\" npx @anthropic-ai/claude-code --print --model \"sonnet\")",
+      "Bash(export ANTHROPIC_API_KEY=\"sk-ant-api03-IWFZ0cV6mCMnLh70WOhqUz5NQnKy0IzE4s5kjxsFGb8Tl_9MdMNwyGZFCqR12sTT-vdmvDyJ4w-RvxMQgAA\")"
     ],
     "deny": [],
     "ask": []
