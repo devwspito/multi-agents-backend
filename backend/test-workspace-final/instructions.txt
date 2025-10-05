@@ -1,0 +1,1 @@
+You are a senior developer. Tell me what directory you are in and list the files.
