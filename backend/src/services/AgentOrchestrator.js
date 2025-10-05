@@ -1915,7 +1915,13 @@ Please implement this microtask following all guidelines and constraints.
    * Wrapper alrededor de claudeService.executeTask que registra tokens automáticamente
    */
   async executeAgentWithTokenTracking(task, agent, instructions, stage, options = {}) {
+    console.log(`🎯 executeAgentWithTokenTracking called for ${agent}`);
+    console.log(`📝 Task ID: ${task._id}, Stage: ${stage}`);
+    console.log(`🔍 Options:`, JSON.stringify(options, null, 2));
+
     try {
+      console.log(`🚀 About to call claudeService.executeTask for ${agent}...`);
+
       // Ejecutar el agente
       const result = await this.claudeService.executeTask(
         task,
@@ -1924,6 +1930,8 @@ Please implement this microtask following all guidelines and constraints.
         options.images || [],
         options.userId || null
       );
+
+      console.log(`✅ claudeService.executeTask returned for ${agent}`);
 
       // Registrar tokens si la tarea existe y tiene los métodos
       if (task && task.recordAgentTokenUsage && result.tokenUsage) {

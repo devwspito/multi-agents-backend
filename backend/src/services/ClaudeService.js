@@ -22,16 +22,29 @@ class ClaudeService {
    * Execute Claude Code command for a specific task with optional image support
    */
   async executeTask(task, agent, instructions, images = [], userId = null) {
+    console.log(`🎯 ClaudeService.executeTask called for ${agent}`);
+    console.log(`📝 Task: ${task._id}, Title: ${task.title}`);
+
     const startTime = Date.now();
+
+    console.log(`🔧 Setting up workspace for task ${task._id}...`);
     const workspacePath = await this.setupWorkspace(task);
+    console.log(`✅ Workspace ready: ${workspacePath}`);
 
     try {
+      console.log(`🖼️ Processing ${images.length} images...`);
       // Process uploaded images if any
       const processedImages = await this.processImages(images);
+      console.log(`✅ Images processed: ${processedImages.length}`);
 
+      console.log(`📄 Loading agent template for ${agent}...`);
       // Prepare agent-specific context
       const agentTemplate = await this.loadAgentTemplate(agent);
+      console.log(`✅ Agent template loaded`);
+
+      console.log(`📝 Building instructions...`);
       const fullInstructions = this.buildInstructions(task, agent, instructions, agentTemplate, processedImages);
+      console.log(`✅ Instructions built (${fullInstructions.length} chars)`);
 
       // Prepare task context for token tracking
       const taskContext = userId ? {
@@ -41,8 +54,10 @@ class ClaudeService {
         requestType: 'orchestration'
       } : null;
 
+      console.log(`🚀 About to run Claude Code CLI command for ${agent}...`);
       // Execute Claude Code
       const result = await this.runClaudeCommand(fullInstructions, workspacePath, agent, processedImages, taskContext);
+      console.log(`✅ Claude Code CLI command completed for ${agent}`);
 
       const executionTime = Date.now() - startTime;
 
@@ -484,14 +499,21 @@ Please provide your review in JSON format:
    * Run Claude Code CLI command with optional image support
    */
   async runClaudeCommand(instructions, workspacePath, agent, processedImages = [], taskContext = null) {
+    console.log(`🚀 runClaudeCommand called for agent: ${agent}`);
+
     const model = this.getModelForAgent(agent);
     const claudeCodeModel = this.getClaudeCodeModelName(model);
     const tempInstructionFile = path.join('/tmp', `claude-instructions-${Date.now()}.md`);
     const startTime = Date.now();
 
+    console.log(`📊 Model: ${model}, Claude Code Model: ${claudeCodeModel}`);
+    console.log(`📁 Temp file: ${tempInstructionFile}`);
+    console.log(`📂 Workspace: ${workspacePath}`);
+
     try {
       // Check token limits before execution if task context is provided
       if (taskContext) {
+        console.log(`🔍 Checking token limits for user ${taskContext.userId}...`);
         const estimatedInputTokens = Math.ceil(instructions.length / 4); // Rough estimation
         const limitCheck = await tokenTrackingService.checkUserLimits(
           taskContext.userId,
@@ -502,18 +524,23 @@ Please provide your review in JSON format:
         if (!limitCheck.allowed) {
           throw new Error(`Token limit exceeded: ${limitCheck.reason}. Current: ${limitCheck.current}, Limit: ${limitCheck.limit}`);
         }
+        console.log(`✅ Token limits OK`);
       }
 
+      console.log(`📝 Writing instructions to temp file (${instructions.length} chars)...`);
       // Write instructions to temporary file
       await fs.writeFile(tempInstructionFile, instructions);
+      console.log(`✅ Instructions written to temp file`);
 
       // Build Claude Code CLI command
       // Claude Code uses -p flag for prompt, not --file
+      // IMPORTANT: Claude Code CLI may not support --model or --output-format flags
+      // Testing without these flags first
       const command = [
         this.claudePath,
-        '-p', `"$(cat ${tempInstructionFile})"`,
-        '--model', claudeCodeModel,
-        '--output-format', 'json'
+        '-p', `"$(cat ${tempInstructionFile})"`
+        // Temporarily removed: '--model', claudeCodeModel,
+        // Temporarily removed: '--output-format', 'json'
       ];
 
       // Add image attachments if any (using append-system-prompt)
@@ -524,12 +551,20 @@ Please provide your review in JSON format:
         command.push('--append-system-prompt', `"${imageContext}"`);
       }
 
+      const fullCommand = command.join(' ');
+      console.log(`🎯 Full command: ${fullCommand.substring(0, 150)}...`);
+      console.log(`⏳ Executing Claude Code CLI (timeout: 300s)...`);
+
       // Execute Claude Code CLI command in workspace directory
-      const { stdout, stderr } = await execAsync(command.join(' '), {
+      const { stdout, stderr } = await execAsync(fullCommand, {
         cwd: workspacePath || process.cwd(),
         timeout: 300000, // 5 minutes timeout
         shell: '/bin/bash'
       });
+
+      console.log(`✅ Claude Code CLI execution completed!`);
+      console.log(`📤 stdout length: ${stdout?.length || 0} chars`);
+      console.log(`📤 stderr length: ${stderr?.length || 0} chars`);
 
       const responseTime = Date.now() - startTime;
 
