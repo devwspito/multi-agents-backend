@@ -592,10 +592,16 @@ Current directory: ${workspacePath}
           const escapedInstructions = realInstructions.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`').replace(/\n/g, '\\n');
           const claudeCommand = `echo "${escapedInstructions}" | ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`;
 
-          console.log(`⏳ Executing Claude Code CLI...`);
+          console.log(`\n${'='.repeat(80)}`);
+          console.log(`🚀 ATTEMPTING CLAUDE CODE EXECUTION`);
+          console.log(`${'='.repeat(80)}`);
+          console.log(`📍 Agent: ${agent}`);
           console.log(`📂 Working directory: ${workspacePath}`);
-          console.log(`🔑 API Key starts with: ${process.env.ANTHROPIC_API_KEY?.substring(0, 20)}...`);
+          console.log(`🔑 API Key: ${process.env.ANTHROPIC_API_KEY ? `${process.env.ANTHROPIC_API_KEY.substring(0, 20)}...` : 'NOT SET!'}`);
           console.log(`📝 Command: ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`);
+          console.log(`📏 Instructions length: ${instructions.length} chars`);
+          console.log(`⏰ Starting at: ${new Date().toISOString()}`);
+          console.log(`${'='.repeat(80)}\n`);
 
           // Execute Claude Code CLI with the instructions
           const { stdout: cliOutput, stderr: cliError } = await execAsync(claudeCommand, {
@@ -614,31 +620,80 @@ Current directory: ${workspacePath}
           console.log(`📊 Output length: ${stdout.length} chars`);
 
         } catch (cliError) {
-          console.error(`❌ CLAUDE CODE FAILED:`, cliError.message);
-          console.error(`🔥 SWITCHING TO GITHUB ACTIONS STRATEGY`);
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`❌❌❌ CLAUDE CODE EXECUTION FAILED ❌❌❌`);
+          console.error(`${'='.repeat(80)}`);
+          console.error(`📍 AGENT: ${agent}`);
+          console.error(`📂 WORKSPACE: ${workspacePath}`);
+          console.error(`🔑 API KEY: ${process.env.ANTHROPIC_API_KEY ? 'Set' : 'NOT SET'}`);
+          console.error(`⏰ TIME: ${new Date().toISOString()}`);
+          console.error(`\n❌ ERROR MESSAGE:`);
+          console.error(cliError.message);
+          console.error(`\n❌ FULL ERROR:`);
+          console.error(cliError);
 
-          // NUEVA ESTRATEGIA: Generar GitHub Actions workflows
-          const workflowYaml = this.generateGitHubActionsWorkflow(agent, instructions, workspacePath);
+          if (cliError.stderr) {
+            console.error(`\n❌ STDERR OUTPUT:`);
+            console.error(cliError.stderr);
+          }
 
-          // Guardar el workflow en .github/workflows/
-          const workflowPath = path.join(workspacePath, '.github', 'workflows', `${agent}-${Date.now()}.yml`);
-          await fs.mkdir(path.dirname(workflowPath), { recursive: true });
-          await fs.writeFile(workflowPath, workflowYaml);
+          if (cliError.stdout) {
+            console.error(`\n📤 STDOUT (if any):`);
+            console.error(cliError.stdout);
+          }
 
-          // Commit y push el workflow
-          const commitCommands = `
-            cd ${workspacePath} &&
-            git add .github/workflows/ &&
-            git commit -m "🤖 ${agent}: Add GitHub Actions workflow" &&
-            git push origin main
-          `;
+          console.error(`\n🔄 ATTEMPTING GITHUB ACTIONS FALLBACK...`);
+          console.error(`${'='.repeat(80)}\n`);
 
           try {
-            await execAsync(commitCommands);
+            // NUEVA ESTRATEGIA: Generar GitHub Actions workflows
+            const workflowYaml = this.generateGitHubActionsWorkflow(agent, instructions, workspacePath);
+            console.log(`📝 Generated GitHub Actions workflow for ${agent}`);
+
+            // Guardar el workflow en .github/workflows/
+            const workflowPath = path.join(workspacePath, '.github', 'workflows', `${agent}-${Date.now()}.yml`);
+            console.log(`💾 Saving workflow to: ${workflowPath}`);
+
+            await fs.mkdir(path.dirname(workflowPath), { recursive: true });
+            await fs.writeFile(workflowPath, workflowYaml);
+            console.log(`✅ Workflow file created`);
+
+            // Commit y push el workflow
+            const commitCommands = `
+              cd ${workspacePath} &&
+              git add .github/workflows/ &&
+              git commit -m "🤖 ${agent}: Add GitHub Actions workflow" &&
+              git push origin main
+            `;
+
+            console.log(`🚀 Executing git commands to push workflow...`);
+            const gitResult = await execAsync(commitCommands);
+
+            if (gitResult.stdout) {
+              console.log(`📤 GIT OUTPUT:`);
+              console.log(gitResult.stdout);
+            }
+
             stdout = `GitHub Actions workflow created and pushed for ${agent}`;
-            console.log(`✅ GitHub Actions workflow deployed for ${agent}`);
+            console.log(`✅ GitHub Actions workflow deployed successfully for ${agent}`);
+
           } catch (gitError) {
-            throw new Error(`Failed to deploy GitHub Actions: ${gitError.message}`);
+            console.error(`\n${'='.repeat(80)}`);
+            console.error(`❌❌❌ GITHUB ACTIONS DEPLOYMENT ALSO FAILED ❌❌❌`);
+            console.error(`${'='.repeat(80)}`);
+            console.error(`❌ GIT ERROR:`);
+            console.error(gitError.message);
+            console.error(`\n❌ FULL GIT ERROR:`);
+            console.error(gitError);
+
+            if (gitError.stderr) {
+              console.error(`\n❌ GIT STDERR:`);
+              console.error(gitError.stderr);
+            }
+
+            console.error(`${'='.repeat(80)}\n`);
+
+            throw new Error(`TOTAL FAILURE - Claude Code failed: ${cliError.message} | GitHub Actions failed: ${gitError.message}`);
           }
         }
 
