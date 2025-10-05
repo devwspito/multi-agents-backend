@@ -32,17 +32,22 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Verify webhook signature
-    const payload = JSON.stringify(req.body);
-    const isValid = githubIntegration.verifyWebhookSignature(signature, payload);
+    // Verify webhook signature using raw body
+    if (!req.rawBody) {
+      console.error('❌ Raw body not available for webhook verification');
+      return res.status(500).json({
+        success: false,
+        message: 'Server configuration error: raw body not captured'
+      });
+    }
+
+    const isValid = githubIntegration.verifyWebhookSignature(req.rawBody, signature);
 
     if (!isValid) {
-      // TEMPORARY: Silenced webhook signature errors to reduce log spam
-      // TODO: Fix webhook secret configuration
-      // Return 200 to prevent GitHub from retrying
-      return res.status(200).json({
-        success: true,
-        message: 'Webhook received (signature validation disabled temporarily)'
+      console.error('❌ Invalid webhook signature for event:', event);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid signature'
       });
     }
 
