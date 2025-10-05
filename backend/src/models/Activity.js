@@ -22,7 +22,7 @@ const ActivitySchema = new mongoose.Schema({
   },
   agentType: {
     type: String,
-    enum: ['product-manager', 'project-manager', 'senior-developer', 'junior-developer', 'qa-engineer']
+    enum: ['product-manager', 'project-manager', 'tech-lead', 'senior-developer', 'junior-developer', 'qa-engineer']
   },
   action: {
     type: String,
