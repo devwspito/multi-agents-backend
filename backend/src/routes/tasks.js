@@ -422,7 +422,8 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
       console.log(`🔍 About to refresh task from DB, task._id: ${task._id}`);
 
       // Check if orchestration was cancelled before starting next agent
-      task = await Task.findById(task._id); // Refresh task state from database
+      task = await Task.findById(task._id)
+        .populate('project'); // IMPORTANT: Include project with repository info
       console.log(`✅ Task refreshed from DB successfully`);
 
       if (task.orchestration.status === 'cancelled') {

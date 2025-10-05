@@ -1,8 +1,12 @@
 const fs = require('fs').promises;
 const path = require('path');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 const Activity = require('../models/Activity');
 const tokenTrackingService = require('./TokenTrackingService');
 const crypto = require('crypto');
+
+const execAsync = promisify(exec);
 
 // Try to import Claude Code SDK if available
 let claudeCode;
@@ -303,12 +307,19 @@ class ClaudeService {
       await fs.mkdir(workspacePath, { recursive: true });
 
       // Copy relevant project files if they exist
-      if (task.project.repository?.url) {
+      console.log(`🔍 Checking for repository: ${task.project?.repository?.url || 'No repository configured'}`);
+
+      if (task.project?.repository?.url) {
+        console.log(`📥 Cloning repository: ${task.project.repository.url} into ${workspacePath}`);
         await this.cloneRepository(task.project.repository.url, workspacePath);
+        console.log(`✅ Repository cloned successfully`);
+      } else {
+        console.log(`⚠️ No repository URL configured for project: ${task.project?.name || 'Unknown'}`);
       }
 
       // Create task-specific branch
       if (task.gitBranch) {
+        console.log(`🌿 Creating branch: ${task.gitBranch}`);
         await this.createBranch(workspacePath, task.gitBranch);
       }
 
@@ -942,9 +953,25 @@ Always consider the learning impact of your work and prioritize student success.
   // Additional helper methods
   async cloneRepository(repoUrl, workspacePath) {
     try {
-      await execAsync(`git clone ${repoUrl} ${workspacePath}`);
+      // Clone into a temp directory first, then move contents
+      const tempDir = `${workspacePath}_temp`;
+      console.log(`📦 Executing: git clone ${repoUrl} ${tempDir}`);
+
+      const { stdout, stderr } = await execAsync(`git clone ${repoUrl} ${tempDir}`, {
+        timeout: 60000 // 1 minute timeout
+      });
+
+      if (stdout) console.log(`📋 Git output: ${stdout}`);
+      if (stderr) console.log(`⚠️ Git warnings: ${stderr}`);
+
+      // Move contents from temp to workspace
+      await execAsync(`mv ${tempDir}/* ${tempDir}/.* ${workspacePath}/ 2>/dev/null || true`);
+      await execAsync(`rm -rf ${tempDir}`);
+
+      console.log(`✅ Repository cloned and moved to workspace`);
     } catch (error) {
-      console.warn(`Failed to clone repository: ${error.message}`);
+      console.error(`❌ Failed to clone repository: ${error.message}`);
+      // Don't throw - continue without repo
     }
   }
 
