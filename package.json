@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.0.5",
+    "@anthropic-ai/sdk": "^0.24.3",
     "@octokit/app": "^14.0.0",
     "@octokit/auth-app": "^6.0.0",
     "@octokit/rest": "^20.0.0",

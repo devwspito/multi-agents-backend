@@ -1,17 +1,41 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
 const fs = require('fs').promises;
 const path = require('path');
 const Activity = require('../models/Activity');
 const tokenTrackingService = require('./TokenTrackingService');
 const crypto = require('crypto');
 
-const execAsync = promisify(exec);
+// Try to import Claude Code SDK if available
+let claudeCode;
+try {
+  claudeCode = require('@anthropic-ai/claude-code').claudeCode;
+  console.log('✅ Claude Code SDK loaded successfully');
+} catch (error) {
+  console.error('❌ Claude Code SDK not available, will use fallback API');
+}
+
+// Fallback: Use Anthropic SDK directly if Claude Code SDK is not available
+let Anthropic;
+if (!claudeCode) {
+  try {
+    Anthropic = require('@anthropic-ai/sdk');
+    console.log('✅ Anthropic SDK loaded as fallback');
+  } catch (error) {
+    console.error('❌ Neither Claude Code SDK nor Anthropic SDK available');
+  }
+}
 
 class ClaudeService {
   constructor() {
-    // Use npx for Render compatibility (can't install global packages)
-    this.claudePath = 'npx @anthropic-ai/claude-code';
+    // Initialize with SDK instead of CLI path
+    this.useClaudeCodeSDK = !!claudeCode;
+    this.useAnthropicSDK = !claudeCode && !!Anthropic;
+
+    if (this.useAnthropicSDK) {
+      this.anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+    }
+
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
     this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
@@ -496,19 +520,17 @@ Please provide your review in JSON format:
   }
 
   /**
-   * Run Claude Code CLI command with optional image support
+   * Run Claude Code using SDK (programmatically) or Anthropic API as fallback
    */
   async runClaudeCommand(instructions, workspacePath, agent, processedImages = [], taskContext = null) {
     console.log(`🚀 runClaudeCommand called for agent: ${agent}`);
 
     const model = this.getModelForAgent(agent);
-    const claudeCodeModel = this.getClaudeCodeModelName(model);
-    const tempInstructionFile = path.join('/tmp', `claude-instructions-${Date.now()}.md`);
     const startTime = Date.now();
 
-    console.log(`📊 Model: ${model}, Claude Code Model: ${claudeCodeModel}`);
-    console.log(`📁 Temp file: ${tempInstructionFile}`);
+    console.log(`📊 Model: ${model}`);
     console.log(`📂 Workspace: ${workspacePath}`);
+    console.log(`🔧 Using: ${this.useClaudeCodeSDK ? 'Claude Code SDK' : this.useAnthropicSDK ? 'Anthropic SDK' : 'No SDK available'}`);
 
     try {
       // Check token limits before execution if task context is provided
@@ -527,42 +549,78 @@ Please provide your review in JSON format:
         console.log(`✅ Token limits OK`);
       }
 
-      console.log(`📝 Writing instructions to temp file (${instructions.length} chars)...`);
-      // Write instructions to temporary file
-      await fs.writeFile(tempInstructionFile, instructions);
-      console.log(`✅ Instructions written to temp file`);
+      let stdout = '';
+      let stderr = '';
 
-      // Build Claude Code CLI command
-      // Claude Code uses -p flag for prompt, not --file
-      // IMPORTANT: Claude Code CLI may not support --model or --output-format flags
-      // Testing without these flags first
-      const command = [
-        this.claudePath,
-        '-p', `"$(cat ${tempInstructionFile})"`
-        // Temporarily removed: '--model', claudeCodeModel,
-        // Temporarily removed: '--output-format', 'json'
-      ];
+      // Option 1: Use Claude Code SDK if available
+      if (this.useClaudeCodeSDK && claudeCode) {
+        console.log(`🚀 Using Claude Code SDK programmatically...`);
 
-      // Add image attachments if any (using append-system-prompt)
-      if (processedImages && processedImages.length > 0) {
-        const imageContext = processedImages.map(img =>
-          `Image attached: ${img.path} (${img.originalName})`
-        ).join('\n');
-        command.push('--append-system-prompt', `"${imageContext}"`);
+        try {
+          const options = {
+            prompt: instructions,
+            cwd: workspacePath || process.cwd(),
+            // Add model if supported by SDK
+            model: this.getClaudeCodeModelName(model),
+            // Add environment variable for API key
+            env: {
+              ...process.env,
+              ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
+            }
+          };
+
+          // Add image context if needed
+          if (processedImages && processedImages.length > 0) {
+            const imageContext = processedImages.map(img =>
+              `Image attached: ${img.path} (${img.originalName})`
+            ).join('\n');
+            options.systemPrompt = imageContext;
+          }
+
+          console.log(`⏳ Executing Claude Code SDK...`);
+          const response = await claudeCode(options);
+
+          stdout = response.stdout || response.text || JSON.stringify(response);
+          stderr = response.stderr || '';
+
+          console.log(`✅ Claude Code SDK execution completed!`);
+        } catch (sdkError) {
+          console.error(`❌ Claude Code SDK failed:`, sdkError.message);
+          throw sdkError;
+        }
+
+      // Option 2: Use Anthropic SDK as fallback
+      } else if (this.useAnthropicSDK && this.anthropic) {
+        console.log(`🚀 Using Anthropic SDK as fallback...`);
+
+        try {
+          // Convert model name to Anthropic format
+          const anthropicModel = this.getAnthropicModelName(model);
+
+          console.log(`⏳ Executing Anthropic API call...`);
+          const message = await this.anthropic.messages.create({
+            model: anthropicModel,
+            max_tokens: 4096,
+            messages: [{
+              role: 'user',
+              content: instructions
+            }],
+            system: this.buildSystemPrompt(agent)
+          });
+
+          // Extract text from response
+          stdout = message.content.map(c => c.text || '').join('\n');
+
+          console.log(`✅ Anthropic API execution completed!`);
+        } catch (apiError) {
+          console.error(`❌ Anthropic API failed:`, apiError.message);
+          throw apiError;
+        }
+
+      } else {
+        throw new Error('No Claude Code SDK or Anthropic SDK available. Please install @anthropic-ai/claude-code or @anthropic-ai/sdk');
       }
 
-      const fullCommand = command.join(' ');
-      console.log(`🎯 Full command: ${fullCommand.substring(0, 150)}...`);
-      console.log(`⏳ Executing Claude Code CLI (timeout: 300s)...`);
-
-      // Execute Claude Code CLI command in workspace directory
-      const { stdout, stderr } = await execAsync(fullCommand, {
-        cwd: workspacePath || process.cwd(),
-        timeout: 300000, // 5 minutes timeout
-        shell: '/bin/bash'
-      });
-
-      console.log(`✅ Claude Code CLI execution completed!`);
       console.log(`📤 stdout length: ${stdout?.length || 0} chars`);
       console.log(`📤 stderr length: ${stderr?.length || 0} chars`);
 
@@ -764,6 +822,33 @@ Please provide your review in JSON format:
   getClaudeCodeModelName(model) {
     // Claude Code CLI uses short model names, not full IDs
     return model; // Just return "opus" or "sonnet"
+  }
+
+  /**
+   * Get Anthropic API model name
+   */
+  getAnthropicModelName(model) {
+    const modelMap = {
+      'opus': 'claude-3-opus-20240229',
+      'sonnet': 'claude-3-5-sonnet-20241022',
+      'haiku': 'claude-3-haiku-20240307'
+    };
+    return modelMap[model] || 'claude-3-5-sonnet-20241022';
+  }
+
+  /**
+   * Build system prompt for agent
+   */
+  buildSystemPrompt(agent) {
+    const prompts = {
+      'product-manager': 'You are a Product Manager analyzing requirements and defining specifications.',
+      'project-manager': 'You are a Project Manager breaking down tasks and managing timelines.',
+      'tech-lead': 'You are a Technical Lead designing architecture and providing technical guidance.',
+      'senior-developer': 'You are a Senior Developer implementing complex features and reviewing code.',
+      'junior-developer': 'You are a Junior Developer implementing UI components and simple features.',
+      'qa-engineer': 'You are a QA Engineer testing functionality and ensuring quality standards.'
+    };
+    return prompts[agent] || 'You are a helpful AI assistant.';
   }
 
   /**
