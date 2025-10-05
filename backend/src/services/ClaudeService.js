@@ -10,8 +10,25 @@ const crypto = require('crypto');
 const execAsync = promisify(exec);
 
 // Claude Code is the PRIMARY ENGINE for our entire platform
-// We execute it with npx - this is the CORRECT package name
-const CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
+// Try different methods to find Claude Code
+let CLAUDE_CODE_CLI;
+
+// Method 1: Try direct node_modules path
+try {
+  const claudePath = path.resolve(__dirname, '../../../node_modules/.bin/claude');
+  if (require('fs').existsSync(claudePath)) {
+    CLAUDE_CODE_CLI = claudePath;
+    console.log('✅ Claude Code found at:', claudePath);
+  } else {
+    // Method 2: Try npx
+    CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
+    console.log('📦 Using npx to run Claude Code');
+  }
+} catch (e) {
+  CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
+  console.log('📦 Fallback to npx for Claude Code');
+}
+
 console.log('🚀 CLAUDE CODE IS OUR PRIMARY ENGINE - All agents use Claude Code');
 
 // Fallback: Use Anthropic SDK directly if Claude Code execution fails
@@ -601,8 +618,32 @@ Please provide your review in JSON format:
 
         } catch (cliError) {
           console.error(`❌ Claude Code CLI failed:`, cliError.message);
-          // NO FALLBACK - Claude Code is our ONLY engine
-          throw new Error(`Claude Code execution failed: ${cliError.message}`);
+
+          // TEMPORARY: Use Anthropic SDK as emergency fallback
+          if (this.useAnthropicSDK && this.anthropic) {
+            console.log(`⚠️ EMERGENCY: Using Anthropic SDK temporarily - Claude Code not working`);
+            console.log(`⚠️ This generates TEXT ONLY - no real commands executed`);
+
+            try {
+              const anthropicModel = this.getAnthropicModelName(model);
+              const message = await this.anthropic.messages.create({
+                model: anthropicModel,
+                max_tokens: 4096,
+                messages: [{
+                  role: 'user',
+                  content: instructions
+                }],
+                system: this.buildSystemPrompt(agent)
+              });
+
+              stdout = message.content.map(c => c.text || '').join('\n');
+              console.log(`✅ Emergency fallback completed - TEXT ONLY`);
+            } catch (apiError) {
+              throw new Error(`Both Claude Code and fallback failed: ${cliError.message} | ${apiError.message}`);
+            }
+          } else {
+            throw new Error(`Claude Code execution failed: ${cliError.message}`);
+          }
         }
 
       }
