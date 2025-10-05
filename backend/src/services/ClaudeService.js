@@ -10,7 +10,8 @@ const execAsync = promisify(exec);
 
 class ClaudeService {
   constructor() {
-    this.claudePath = 'claude'; // Assumes claude is in PATH
+    // Use npx for Render compatibility (can't install global packages)
+    this.claudePath = 'npx @anthropic-ai/claude-code';
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
     this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
