@@ -13,21 +13,10 @@ const execAsync = promisify(exec);
 // Try different methods to find Claude Code
 let CLAUDE_CODE_CLI;
 
-// Method 1: Try direct node_modules path
-try {
-  const claudePath = path.resolve(__dirname, '../../../node_modules/.bin/claude');
-  if (require('fs').existsSync(claudePath)) {
-    CLAUDE_CODE_CLI = claudePath;
-    console.log('✅ Claude Code found at:', claudePath);
-  } else {
-    // Method 2: Try npx
-    CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
-    console.log('📦 Using npx to run Claude Code');
-  }
-} catch (e) {
-  CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
-  console.log('📦 Fallback to npx for Claude Code');
-}
+// The correct command is 'npx claude' NOT 'npx @anthropic-ai/claude-code'
+// Claude Code installs as 'claude' command
+CLAUDE_CODE_CLI = 'npx claude';
+console.log('✅ Using npx claude command');
 
 console.log('🚀 CLAUDE CODE IS OUR PRIMARY ENGINE - All agents use Claude Code');
 
@@ -553,7 +542,6 @@ Please provide your review in JSON format:
 
     const model = this.getModelForAgent(agent);
     const startTime = Date.now();
-    let tempInstructionFile = null; // Define here for proper scope
 
     console.log(`📊 Model: ${model}`);
     console.log(`📂 Workspace: ${workspacePath}`);
@@ -585,14 +573,10 @@ Please provide your review in JSON format:
         console.log(`📝 Claude Code will execute REAL commands: git, npm, file editing, PRs`);
 
         try {
-          // Create a temporary file with the instructions for Claude Code
-          // Use absolute path to ensure it works correctly
-          tempInstructionFile = path.resolve(workspacePath, `.claude-instructions-${Date.now()}.txt`);
-          await fs.writeFile(tempInstructionFile, instructions);
-
-          // Build the Claude Code CLI command
-          // Claude Code reads the API key from ANTHROPIC_API_KEY environment variable
-          const claudeCommand = `${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < "${tempInstructionFile}"`;
+          // Build the Claude Code CLI command using echo and pipe
+          // This works better than file redirection
+          const escapedInstructions = instructions.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
+          const claudeCommand = `echo "${escapedInstructions}" | ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`;
 
           console.log(`⏳ Executing Claude Code CLI...`);
           console.log(`📂 Working directory: ${workspacePath}`);
@@ -609,9 +593,6 @@ Please provide your review in JSON format:
 
           stdout = cliOutput || '';
           stderr = cliError || '';
-
-          // Clean up temp file
-          await fs.unlink(tempInstructionFile).catch(() => {});
 
           console.log(`✅ Claude Code CLI execution completed!`);
           console.log(`📊 Output length: ${stdout.length} chars`);
@@ -772,15 +753,6 @@ Please provide your review in JSON format:
       }
 
       throw new Error(`Claude Code CLI execution failed: ${error.message}`);
-    } finally {
-      // Clean up temporary file
-      if (tempInstructionFile) {
-        try {
-          await fs.unlink(tempInstructionFile);
-        } catch (cleanupError) {
-          console.warn('Failed to cleanup temp file:', cleanupError.message);
-        }
-      }
     }
   }
 
