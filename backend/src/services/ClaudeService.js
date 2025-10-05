@@ -678,6 +678,7 @@ Please provide your review in JSON format:
       } else {
         throw new Error('No Claude Code SDK or Anthropic SDK available. Please install @anthropic-ai/claude-code or @anthropic-ai/sdk');
       }
+      */ // END OF COMMENTED OUT SECTION
 
       console.log(`📤 stdout length: ${stdout?.length || 0} chars`);
       console.log(`📤 stderr length: ${stderr?.length || 0} chars`);
