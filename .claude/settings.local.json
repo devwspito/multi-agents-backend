@@ -23,7 +23,9 @@
       "WebFetch(domain:github.com)",
       "Read(//tmp/**)",
       "Bash(curl -I https://multi-agents-backend.onrender.com/health)",
-      "Bash(timeout 5 npm start)"
+      "Bash(timeout 5 npm start)",
+      "Bash(npm search claude code)",
+      "Bash(npx:*)"
     ],
     "deny": [],
     "ask": []
