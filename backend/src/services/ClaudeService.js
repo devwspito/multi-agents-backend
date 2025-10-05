@@ -4,6 +4,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const Activity = require('../models/Activity');
 const tokenTrackingService = require('./TokenTrackingService');
+const claudeCodeExecutor = require('./ClaudeCodeExecutor');  // REAL command executor
 const crypto = require('crypto');
 
 const execAsync = promisify(exec);
@@ -563,30 +564,29 @@ Please provide your review in JSON format:
       let stdout = '';
       let stderr = '';
 
-      // Option 1: Use Claude Code SDK if available
+      // Option 1: Use Claude Code SDK if available (NEEDS FIXING - SDK not loading)
       if (this.useClaudeCodeSDK && claudeCode) {
         console.log(`🚀 Using Claude Code SDK programmatically...`);
+        console.log(`⚠️ WARNING: Claude Code SDK integration needs proper implementation`);
 
         try {
+          // TODO: Fix Claude Code SDK integration
+          // The SDK should be executing REAL commands like:
+          // - git checkout -b feature/fix-bug
+          // - Writing/editing actual files
+          // - Running tests
+          // - Creating pull requests
+          // Current implementation is not working properly
+
           const options = {
             prompt: instructions,
             cwd: workspacePath || process.cwd(),
-            // Add model if supported by SDK
             model: this.getClaudeCodeModelName(model),
-            // Add environment variable for API key
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
             }
           };
-
-          // Add image context if needed
-          if (processedImages && processedImages.length > 0) {
-            const imageContext = processedImages.map(img =>
-              `Image attached: ${img.path} (${img.originalName})`
-            ).join('\n');
-            options.systemPrompt = imageContext;
-          }
 
           console.log(`⏳ Executing Claude Code SDK...`);
           const response = await claudeCode(options);
@@ -600,9 +600,44 @@ Please provide your review in JSON format:
           throw sdkError;
         }
 
-      // Option 2: Use Anthropic SDK as fallback
+      // Option 2: Use REAL Command Executor for actual development tasks
+      } else if (process.env.USE_REAL_EXECUTION === 'true') {
+        console.log(`🔧 Using REAL Claude Code Executor (executes actual commands)...`);
+
+        try {
+          // Get the task object from taskContext
+          const task = {
+            _id: taskContext?.taskId || 'unknown',
+            title: instructions.match(/Execute .* tasks for: (.*)/)?.[1] || 'Task',
+            description: instructions
+          };
+
+          // Execute REAL commands based on agent type
+          const executionResult = await claudeCodeExecutor.executeAgentTasks(
+            agent,
+            task,
+            instructions,
+            workspacePath
+          );
+
+          if (executionResult.success) {
+            stdout = executionResult.result;
+            // Store code changes for tracking
+            this.lastCodeChanges = executionResult.codeChanges;
+          } else {
+            throw new Error(executionResult.error);
+          }
+
+          console.log(`✅ Real command execution completed!`);
+        } catch (execError) {
+          console.error(`❌ Real execution failed:`, execError.message);
+          throw execError;
+        }
+
+      // Option 3: Use Anthropic SDK as fallback (only generates text)
       } else if (this.useAnthropicSDK && this.anthropic) {
-        console.log(`🚀 Using Anthropic SDK as fallback...`);
+        console.log(`🚀 Using Anthropic SDK as fallback (TEXT ONLY - no real execution)...`);
+        console.log(`💡 Set USE_REAL_EXECUTION=true to enable actual command execution`);
 
         try {
           // Convert model name to Anthropic format
@@ -622,7 +657,7 @@ Please provide your review in JSON format:
           // Extract text from response
           stdout = message.content.map(c => c.text || '').join('\n');
 
-          console.log(`✅ Anthropic API execution completed!`);
+          console.log(`✅ Anthropic API execution completed (TEXT ONLY)!`);
         } catch (apiError) {
           console.error(`❌ Anthropic API failed:`, apiError.message);
           throw apiError;
