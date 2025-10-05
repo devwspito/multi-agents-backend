@@ -9,31 +9,25 @@ const crypto = require('crypto');
 
 const execAsync = promisify(exec);
 
-// Try to import Claude Code SDK if available
-let claudeCode;
-try {
-  claudeCode = require('@anthropic-ai/claude-code').claudeCode;
-  console.log('✅ Claude Code SDK loaded successfully');
-} catch (error) {
-  console.error('❌ Claude Code SDK not available, will use fallback API');
-}
+// Claude Code is the PRIMARY ENGINE for our entire platform
+// We execute it with npx - this is the CORRECT package name
+const CLAUDE_CODE_CLI = 'npx @anthropic-ai/claude-code';
+console.log('🚀 CLAUDE CODE IS OUR PRIMARY ENGINE - All agents use Claude Code');
 
-// Fallback: Use Anthropic SDK directly if Claude Code SDK is not available
+// Fallback: Use Anthropic SDK directly if Claude Code execution fails
 let Anthropic;
-if (!claudeCode) {
-  try {
-    Anthropic = require('@anthropic-ai/sdk');
-    console.log('✅ Anthropic SDK loaded as fallback');
-  } catch (error) {
-    console.error('❌ Neither Claude Code SDK nor Anthropic SDK available');
-  }
+try {
+  Anthropic = require('@anthropic-ai/sdk');
+  console.log('✅ Anthropic SDK loaded as fallback');
+} catch (error) {
+  console.error('⚠️ Anthropic SDK not available as fallback');
 }
 
 class ClaudeService {
   constructor() {
-    // Initialize with SDK instead of CLI path
-    this.useClaudeCodeSDK = !!claudeCode;
-    this.useAnthropicSDK = !claudeCode && !!Anthropic;
+    // Claude Code CLI is our PRIMARY engine
+    this.useClaudeCodeCLI = true;  // Always use Claude Code CLI as primary
+    this.useAnthropicSDK = !!Anthropic;  // Fallback option
 
     if (this.useAnthropicSDK) {
       this.anthropic = new Anthropic({
@@ -564,44 +558,53 @@ Please provide your review in JSON format:
       let stdout = '';
       let stderr = '';
 
-      // Option 1: Use Claude Code SDK if available (NEEDS FIXING - SDK not loading)
-      if (this.useClaudeCodeSDK && claudeCode) {
-        console.log(`🚀 Using Claude Code SDK programmatically...`);
-        console.log(`⚠️ WARNING: Claude Code SDK integration needs proper implementation`);
+      // Option 1: Use Claude Code CLI (PRIMARY ENGINE - EXECUTES REAL COMMANDS)
+      if (this.useClaudeCodeCLI) {
+        console.log(`🚀 Using Claude Code CLI as PRIMARY ENGINE...`);
+        console.log(`📝 Claude Code will execute REAL commands: git, npm, file editing, PRs`);
 
         try {
-          // TODO: Fix Claude Code SDK integration
-          // The SDK should be executing REAL commands like:
-          // - git checkout -b feature/fix-bug
-          // - Writing/editing actual files
-          // - Running tests
-          // - Creating pull requests
-          // Current implementation is not working properly
+          // Create a temporary file with the instructions for Claude Code
+          const tempInstructionFile = path.join(workspacePath, `.claude-instructions-${Date.now()}.txt`);
+          await fs.writeFile(tempInstructionFile, instructions);
 
-          const options = {
-            prompt: instructions,
-            cwd: workspacePath || process.cwd(),
-            model: this.getClaudeCodeModelName(model),
+          // Build the Claude Code CLI command
+          // Claude Code reads the API key from ANTHROPIC_API_KEY environment variable
+          const claudeCommand = `${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < "${tempInstructionFile}"`;
+
+          console.log(`⏳ Executing Claude Code CLI...`);
+          console.log(`📂 Working directory: ${workspacePath}`);
+
+          // Execute Claude Code CLI with the instructions
+          const { stdout: cliOutput, stderr: cliError } = await execAsync(claudeCommand, {
+            cwd: workspacePath,
+            maxBuffer: 10 * 1024 * 1024, // 10MB buffer
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
             }
-          };
+          });
 
-          console.log(`⏳ Executing Claude Code SDK...`);
-          const response = await claudeCode(options);
+          stdout = cliOutput || '';
+          stderr = cliError || '';
 
-          stdout = response.stdout || response.text || JSON.stringify(response);
-          stderr = response.stderr || '';
+          // Clean up temp file
+          await fs.unlink(tempInstructionFile).catch(() => {});
 
-          console.log(`✅ Claude Code SDK execution completed!`);
-        } catch (sdkError) {
-          console.error(`❌ Claude Code SDK failed:`, sdkError.message);
-          throw sdkError;
+          console.log(`✅ Claude Code CLI execution completed!`);
+          console.log(`📊 Output length: ${stdout.length} chars`);
+
+        } catch (cliError) {
+          console.error(`⚠️ Claude Code CLI failed, trying fallback:`, cliError.message);
+
+          // Fall through to next option instead of throwing
+          // This allows us to try the custom executor or Anthropic SDK
         }
 
-      // Option 2: Use REAL Command Executor for actual development tasks
-      } else if (process.env.USE_REAL_EXECUTION === 'true') {
+      // Option 2: Fallback to custom executor if Claude Code CLI fails
+      }
+
+      if (!stdout && process.env.USE_REAL_EXECUTION === 'true') {
         console.log(`🔧 Using REAL Claude Code Executor (executes actual commands)...`);
 
         try {
