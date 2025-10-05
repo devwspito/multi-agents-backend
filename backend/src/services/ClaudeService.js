@@ -37,7 +37,7 @@ class ClaudeService {
     }
 
     this.workspaceBase = process.env.WORKSPACE_BASE || './workspaces';
-    this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
+    this.defaultModel = process.env.DEFAULT_CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';  // Sonnet 4.5
     this.uploadDir = process.env.UPLOAD_DIR || './uploads';
     this.supportedImageTypes = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
   }
@@ -829,11 +829,11 @@ Please provide your review in JSON format:
    */
   getAnthropicModelName(model) {
     const modelMap = {
-      'opus': 'claude-3-opus-20240229',
-      'sonnet': 'claude-3-5-sonnet-20241022',
-      'haiku': 'claude-3-haiku-20240307'
+      'opus': 'claude-opus-4-1-20250805',  // Claude Opus 4.1
+      'sonnet': 'claude-sonnet-4-5-20250929',  // Claude Sonnet 4.5
+      'haiku': 'claude-3-haiku-20240307'  // Claude Haiku (3.0)
     };
-    return modelMap[model] || 'claude-3-5-sonnet-20241022';
+    return modelMap[model] || 'claude-sonnet-4-5-20250929';  // Default to Sonnet 4.5
   }
 
   /**
