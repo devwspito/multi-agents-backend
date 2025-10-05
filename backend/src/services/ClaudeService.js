@@ -617,33 +617,12 @@ Please provide your review in JSON format:
           console.log(`📊 Output length: ${stdout.length} chars`);
 
         } catch (cliError) {
-          console.error(`❌ Claude Code CLI failed:`, cliError.message);
-
-          // TEMPORARY: Use Anthropic SDK as emergency fallback
-          if (this.useAnthropicSDK && this.anthropic) {
-            console.log(`⚠️ EMERGENCY: Using Anthropic SDK temporarily - Claude Code not working`);
-            console.log(`⚠️ This generates TEXT ONLY - no real commands executed`);
-
-            try {
-              const anthropicModel = this.getAnthropicModelName(model);
-              const message = await this.anthropic.messages.create({
-                model: anthropicModel,
-                max_tokens: 4096,
-                messages: [{
-                  role: 'user',
-                  content: instructions
-                }],
-                system: this.buildSystemPrompt(agent)
-              });
-
-              stdout = message.content.map(c => c.text || '').join('\n');
-              console.log(`✅ Emergency fallback completed - TEXT ONLY`);
-            } catch (apiError) {
-              throw new Error(`Both Claude Code and fallback failed: ${cliError.message} | ${apiError.message}`);
-            }
-          } else {
-            throw new Error(`Claude Code execution failed: ${cliError.message}`);
-          }
+          console.error(`❌ CLAUDE CODE FAILED - NO FALLBACK:`, cliError.message);
+          console.error(`❌ POSSIBLE CAUSES:`);
+          console.error(`   1. Invalid API key - check ANTHROPIC_API_KEY`);
+          console.error(`   2. Claude Code not installed - npm install @anthropic-ai/claude-code`);
+          console.error(`   3. Network issues - check internet connection`);
+          throw new Error(`CLAUDE CODE IS THE ONLY ENGINE - IT MUST WORK: ${cliError.message}`);
         }
 
       }
