@@ -1,7 +1,9 @@
 const express = require('express');
+const { Octokit } = require('@octokit/rest');
 const Project = require('../models/Project');
 const Task = require('../models/Task');
 const Activity = require('../models/Activity');
+const User = require('../models/User');
 const ProjectManager = require('../services/ProjectManager');
 const AgentOrchestrator = require('../services/AgentOrchestrator');
 const { getInstance: getGitHubService } = require('../services/GitHubService');
@@ -142,38 +144,70 @@ router.post('/',
 
       // Process repositories if provided
       if (req.body.repositories && Array.isArray(req.body.repositories)) {
+        // Get user with GitHub access token
+        const userWithToken = await User.findById(req.user._id).select('+github.accessToken +github.username');
+
+        if (!userWithToken.github?.accessToken) {
+          return res.status(401).json({
+            success: false,
+            message: 'GitHub authentication required to add repositories'
+          });
+        }
+
+        const octokit = new Octokit({
+          auth: userWithToken.github.accessToken
+        });
+
         for (const repoData of req.body.repositories) {
           try {
-            // Infer repository type from language or user-provided type
-            const inferredType = inferRepositoryType(repoData.language);
+            let fullRepoData;
 
-            // GARANTIZAR que tengamos la URL del repositorio
-            let githubUrl = repoData.clone_url || repoData.ssh_url || repoData.html_url;
+            // Si solo viene el nombre, obtener la info completa de GitHub
+            if (repoData.name && !repoData.clone_url) {
+              console.log(`📦 Fetching full repository data for: ${repoData.name}`);
 
-            // Si no viene ninguna URL, construirla desde full_name
-            if (!githubUrl && repoData.full_name) {
-              githubUrl = `https://github.com/${repoData.full_name}`;
+              try {
+                // Intentar obtener el repo del usuario autenticado
+                const { data: repoInfo } = await octokit.rest.repos.get({
+                  owner: userWithToken.github.username,
+                  repo: repoData.name
+                });
+                fullRepoData = repoInfo;
+              } catch (error) {
+                // Si no es del usuario, intentar con el owner si lo tenemos
+                if (repoData.owner) {
+                  const { data: repoInfo } = await octokit.rest.repos.get({
+                    owner: repoData.owner,
+                    repo: repoData.name
+                  });
+                  fullRepoData = repoInfo;
+                } else {
+                  throw error;
+                }
+              }
+            } else {
+              // Si ya vienen los datos, usarlos
+              fullRepoData = repoData;
             }
 
-            // Si tampoco tenemos full_name, construirla
-            if (!githubUrl && repoData.name) {
-              const owner = repoData.owner || req.user.username || 'unknown';
-              githubUrl = `https://github.com/${owner}/${repoData.name}`;
-            }
+            // Ahora tenemos toda la info del repositorio
+            const inferredType = inferRepositoryType(fullRepoData.language);
 
             const repositoryToAdd = {
-              name: repoData.name,
-              githubUrl: githubUrl,
-              owner: repoData.full_name?.split('/')[0] || repoData.owner || req.user.username,
-              branch: repoData.default_branch || 'main',
+              name: fullRepoData.name,
+              githubUrl: fullRepoData.clone_url || fullRepoData.html_url || `https://github.com/${fullRepoData.full_name}`,
+              owner: fullRepoData.owner?.login || fullRepoData.full_name?.split('/')[0] || userWithToken.github.username,
+              branch: fullRepoData.default_branch || 'main',
               type: repoData.type || inferredType,
-              technologies: repoData.language ? [repoData.language] : [],
+              technologies: fullRepoData.language ? [fullRepoData.language] : [],
               isActive: true
             };
 
+            console.log(`✅ Adding repository: ${repositoryToAdd.name} (${repositoryToAdd.githubUrl})`);
             project.repositories.push(repositoryToAdd);
+
           } catch (repoError) {
-            console.warn(`Failed to add repository ${repoData.name}:`, repoError.message);
+            console.error(`Failed to add repository ${repoData.name}:`, repoError.message);
             // Continue adding other repositories
           }
         }
