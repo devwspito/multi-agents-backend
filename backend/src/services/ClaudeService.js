@@ -631,9 +631,13 @@ You are NOT in a sandbox. Execute REAL commands. Create REAL pull requests.
 Current directory: ${workspacePath}
 `;
 
-          // Build the Claude Code CLI command
-          const escapedInstructions = realInstructions.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`').replace(/\n/g, '\\n');
-          const claudeCommand = `echo "${escapedInstructions}" | ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`;
+          // Write instructions to a temporary file to avoid shell escaping issues
+          const fs = require('fs').promises;
+          const tempInstructionsPath = path.join(workspacePath, `.claude-instructions-${Date.now()}.txt`);
+          await fs.writeFile(tempInstructionsPath, realInstructions);
+
+          // Build the Claude Code CLI command using file input
+          const claudeCommand = `${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < "${tempInstructionsPath}"`;
 
           console.log(`\n${'='.repeat(80)}`);
           console.log(`🚀 ATTEMPTING CLAUDE CODE EXECUTION`);
@@ -641,20 +645,28 @@ Current directory: ${workspacePath}
           console.log(`📍 Agent: ${agent}`);
           console.log(`📂 Working directory: ${workspacePath}`);
           console.log(`🔑 API Key: ${process.env.ANTHROPIC_API_KEY ? `${process.env.ANTHROPIC_API_KEY.substring(0, 20)}...` : 'NOT SET!'}`);
-          console.log(`📝 Command: ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}"`);
+          console.log(`📝 Command: ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < [instructions file]`);
           console.log(`📏 Instructions length: ${instructions.length} chars`);
           console.log(`⏰ Starting at: ${new Date().toISOString()}`);
           console.log(`${'='.repeat(80)}\n`);
 
-          // Execute Claude Code CLI with the instructions
+          // Execute Claude Code CLI with timeout to prevent hanging
           const { stdout: cliOutput, stderr: cliError } = await execAsync(claudeCommand, {
             cwd: workspacePath,
             maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+            timeout: 5 * 60 * 1000, // 5 minute timeout
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
             }
           });
+
+          // Clean up temp file
+          try {
+            await fs.unlink(tempInstructionsPath);
+          } catch (e) {
+            // Ignore cleanup errors
+          }
 
           stdout = cliOutput || '';
           stderr = cliError || '';
