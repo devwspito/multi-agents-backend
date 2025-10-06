@@ -11,22 +11,21 @@ const crypto = require('crypto');
 
 const execAsync = promisify(exec);
 
-// Claude Code CLI detection - only available in development
+// CLAUDE CODE ES OBLIGATORIO - USAMOS EMULADOR SI ES NECESARIO
 let CLAUDE_CODE_CLI = null;
-const isDevelopment = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === undefined;
+let USE_EMULATOR = false;
 
-if (isDevelopment) {
-  // Try to detect Claude Code in development
-  try {
-    const { execSync } = require('child_process');
-    execSync('which claude', { stdio: 'pipe' });
-    CLAUDE_CODE_CLI = 'claude';
-    console.log('✅ Claude Code detected in development');
-  } catch {
-    console.log('⚠️ Claude Code not found - will use Anthropic API');
-  }
-} else {
-  console.log('🚀 Production mode - using Anthropic API directly')
+// Intentar detectar Claude Code real
+try {
+  const { execSync } = require('child_process');
+  execSync('which claude', { stdio: 'pipe' });
+  CLAUDE_CODE_CLI = 'claude';
+  console.log('✅ Claude Code REAL detectado');
+} catch {
+  // Si no hay Claude Code real, usar emulador
+  USE_EMULATOR = true;
+  console.log('🤖 Claude Code Emulator activado - Funciona IGUAL que Claude Code');
+  console.log('✅ Ejecutará comandos REALES, editará archivos REALES');
 }
 
 // Fallback: Use Anthropic SDK directly if Claude Code execution fails
@@ -40,9 +39,10 @@ try {
 
 class ClaudeService {
   constructor() {
-    // Use Claude Code CLI only if available (development)
-    this.useClaudeCodeCLI = !!CLAUDE_CODE_CLI;  // Only use if detected
-    this.useAnthropicSDK = !!Anthropic;  // Primary option in production
+    // Use Claude Code CLI if available, or emulator as fallback
+    this.useClaudeCodeCLI = !!CLAUDE_CODE_CLI;
+    this.useEmulator = USE_EMULATOR;
+    this.useAnthropicSDK = !!Anthropic;
 
     if (this.useAnthropicSDK) {
       this.anthropic = new Anthropic({
@@ -617,10 +617,29 @@ Please provide your review in JSON format:
       let stdout = '';
       let stderr = '';
 
-      // Option 1: Use Claude Code CLI (PRIMARY ENGINE - EXECUTES REAL COMMANDS)
-      if (this.useClaudeCodeCLI) {
-        console.log(`🚀 Using Claude Code CLI as PRIMARY ENGINE...`);
-        console.log(`📝 Claude Code will execute REAL commands: git, npm, file editing, PRs`);
+      // Option 1: Use Claude Code CLI or Emulator
+      if (this.useClaudeCodeCLI || this.useEmulator) {
+
+        // Si tenemos el emulador, usarlo
+        if (this.useEmulator) {
+          console.log(`🤖 Using Claude Code EMULATOR (funciona IGUAL que Claude Code)...`);
+          const ClaudeCodeEmulator = require('./ClaudeCodeEmulator');
+          const emulator = new ClaudeCodeEmulator();
+
+          const result = await emulator.execute(instructions, workspacePath);
+
+          stdout = JSON.stringify(result, null, 2);
+          stderr = '';
+
+          console.log(`✅ Claude Code Emulator execution completed!`);
+          console.log(`📊 Commands executed: ${result.executed.commands}`);
+          console.log(`📝 Files created: ${result.executed.files_created}`);
+          console.log(`✏️ Files edited: ${result.executed.files_edited}`);
+
+        } else {
+          // Usar Claude Code real
+          console.log(`🚀 Using Claude Code CLI as PRIMARY ENGINE...`);
+          console.log(`📝 Claude Code will execute REAL commands: git, npm, file editing, PRs`);
 
         try {
           // Add REAL execution context to instructions
@@ -680,6 +699,7 @@ Current directory: ${workspacePath}
 
           console.log(`✅ Claude Code CLI execution completed!`);
           console.log(`📊 Output length: ${stdout.length} chars`);
+        }
 
         } catch (cliError) {
           console.error(`\n${'='.repeat(80)}`);
