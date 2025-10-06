@@ -3,8 +3,10 @@ const path = require('path');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const Activity = require('../models/Activity');
+const User = require('../models/User');
 const tokenTrackingService = require('./TokenTrackingService');
 const claudeCodeExecutor = require('./ClaudeCodeExecutor');  // REAL command executor
+const repositoryService = require('./RepositoryService');  // For cloning repositories
 const crypto = require('crypto');
 
 const execAsync = promisify(exec);
@@ -310,15 +312,56 @@ class ClaudeService {
       await fs.mkdir(workspacePath, { recursive: true, mode: 0o755 });
       console.log(`✅ Workspace created at: ${workspacePath}`);
 
-      // Copy relevant project files if they exist
-      console.log(`🔍 Checking for repository: ${task.project?.repository?.url || 'No repository configured'}`);
+      // Clone project repositories if they exist
+      console.log(`🔍 Checking for repositories in project: ${task.project?.name || 'Unknown'}`);
 
-      if (task.project?.repository?.url) {
-        console.log(`📥 Cloning repository: ${task.project.repository.url} into ${workspacePath}`);
+      if (task.project?.repositories && task.project.repositories.length > 0) {
+        console.log(`📦 Found ${task.project.repositories.length} repositories to clone`);
+
+        // Get user with GitHub token for cloning
+        const user = await User.findById(task.user || task.project.owner).select('+github.accessToken');
+
+        if (user?.github?.accessToken) {
+          for (const repo of task.project.repositories) {
+            if (repo.githubUrl) {
+              console.log(`📥 Cloning repository: ${repo.name} from ${repo.githubUrl}`);
+
+              try {
+                const repoPath = await repositoryService.cloneRepository(
+                  repo.githubUrl,
+                  user.github.accessToken,
+                  task.project._id.toString(),
+                  repo.name
+                );
+                console.log(`✅ Repository ${repo.name} cloned to: ${repoPath}`);
+
+                // Create symlink in workspace for easy access
+                const linkPath = path.join(workspacePath, repo.name);
+                try {
+                  await fs.symlink(repoPath, linkPath, 'dir');
+                  console.log(`🔗 Created symlink: ${linkPath} -> ${repoPath}`);
+                } catch (linkError) {
+                  if (linkError.code !== 'EEXIST') {
+                    console.warn(`⚠️ Could not create symlink: ${linkError.message}`);
+                  }
+                }
+              } catch (cloneError) {
+                console.error(`❌ Failed to clone ${repo.name}: ${cloneError.message}`);
+              }
+            } else {
+              console.warn(`⚠️ Repository ${repo.name} has no GitHub URL`);
+            }
+          }
+        } else {
+          console.warn(`⚠️ User has no GitHub access token for cloning repositories`);
+        }
+      } else if (task.project?.repository?.url) {
+        // Fallback for old single repository format
+        console.log(`📥 Cloning legacy repository: ${task.project.repository.url}`);
         await this.cloneRepository(task.project.repository.url, workspacePath);
         console.log(`✅ Repository cloned successfully`);
       } else {
-        console.log(`⚠️ No repository URL configured for project: ${task.project?.name || 'Unknown'}`);
+        console.log(`⚠️ No repositories configured for project: ${task.project?.name || 'Unknown'}`);
       }
 
       // Create task-specific branch
