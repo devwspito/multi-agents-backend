@@ -4,7 +4,7 @@ const ActivitySchema = new mongoose.Schema({
   task: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Task',
-    required: true
+    required: false  // NO es requerido - las actividades de proyecto no tienen task
   },
   project: {
     type: mongoose.Schema.Types.ObjectId,

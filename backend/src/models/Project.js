@@ -47,15 +47,21 @@ const ProjectSchema = new mongoose.Schema({
   repositories: [{
     name: {
       type: String,
-      required: false
+      required: true
     },
     githubUrl: {
       type: String,
-      required: false
+      required: true,
+      validate: {
+        validator: function(v) {
+          return /^https:\/\/github\.com\/[^\/]+\/[^\/]+/.test(v);
+        },
+        message: props => `${props.value} is not a valid GitHub URL!`
+      }
     },
     owner: {
       type: String,
-      required: false
+      required: true
     },
     branch: {
       type: String,
