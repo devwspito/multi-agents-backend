@@ -373,6 +373,7 @@ class AgentPlatformApp {
     process.on('uncaughtException', (err) => {
       console.error('🚨 Uncaught Exception:', err);
       console.log('Shutting down server due to uncaught exception');
+      // Force restart to reload schemas
       process.exit(1);
     });
   }
@@ -443,8 +444,9 @@ class AgentPlatformApp {
       // Start HTTP server
       this.server = this.app.listen(this.port, () => {
         console.log('');
-        console.log('🚀 Multi-Agent Software Development Platform');
+        console.log('🚀 Multi-Agent Software Development Platform - V3');
         console.log('================================================');
+        console.log('✅ HOTFIX: Activity.task is now OPTIONAL');
         console.log(`🚀 Server running on port ${this.port}`);
         console.log(`🌍 Environment: ${this.environment}`);
         console.log(`📊 Database: ${databaseConfig.getConnectionStatus().name}`);
