@@ -147,10 +147,24 @@ router.post('/',
             // Infer repository type from language or user-provided type
             const inferredType = inferRepositoryType(repoData.language);
 
+            // GARANTIZAR que tengamos la URL del repositorio
+            let githubUrl = repoData.clone_url || repoData.ssh_url || repoData.html_url;
+
+            // Si no viene ninguna URL, construirla desde full_name
+            if (!githubUrl && repoData.full_name) {
+              githubUrl = `https://github.com/${repoData.full_name}`;
+            }
+
+            // Si tampoco tenemos full_name, construirla
+            if (!githubUrl && repoData.name) {
+              const owner = repoData.owner || req.user.username || 'unknown';
+              githubUrl = `https://github.com/${owner}/${repoData.name}`;
+            }
+
             const repositoryToAdd = {
               name: repoData.name,
-              githubUrl: repoData.clone_url || repoData.ssh_url,
-              owner: repoData.full_name?.split('/')[0] || req.user.username,
+              githubUrl: githubUrl,
+              owner: repoData.full_name?.split('/')[0] || repoData.owner || req.user.username,
               branch: repoData.default_branch || 'main',
               type: repoData.type || inferredType,
               technologies: repoData.language ? [repoData.language] : [],
@@ -602,6 +616,27 @@ router.post('/:id/repositories',
         return res.status(400).json({
           success: false,
           message: 'Repository name and URL (clone_url or ssh_url) are required.'
+        });
+      }
+
+      // GARANTIZAR que tengamos una URL válida de GitHub
+      let githubUrl = clone_url || ssh_url || req.body.html_url;
+
+      // Si no viene ninguna URL, construirla
+      if (!githubUrl) {
+        if (full_name) {
+          githubUrl = `https://github.com/${full_name}`;
+        } else if (name) {
+          const owner = req.body.owner || req.user.username || 'unknown';
+          githubUrl = `https://github.com/${owner}/${name}`;
+        }
+      }
+
+      // Validar que tengamos una URL de GitHub
+      if (!githubUrl || !githubUrl.includes('github.com')) {
+        return res.status(400).json({
+          success: false,
+          message: 'Could not determine GitHub URL. Please provide clone_url, ssh_url, or full_name'
         });
       }
 
