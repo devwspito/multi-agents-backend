@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: multi-agents-backend
+    runtime: node
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && node src/app.js
+    envVars:
+      - key: MONGODB_URI
+        value: mongodb+srv://luifer1313correa:lol1313lol@cluster0.hjx7z.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      - key: ANTHROPIC_API_KEY
+        value: sk-ant-api03-IWFZ0cV6mCMnLh70WOhqUz5NQnKy0IzE4s5kjxsFGb8Tl_9MdMNwyGZFCqR12sTT-vdmvDyJ4w-RvxMQgAA
+      - key: GITHUB_CLIENT_ID
+        value: Ov23li1r0teSKy6wRCTj
+      - key: GITHUB_CLIENT_SECRET
+        value: 56e4aa7e967d7fe2bb967c09c59f8c78a27c3daa
+      - key: JWT_SECRET
+        value: super-secret-jwt-key-12345
+      - key: SESSION_SECRET
+        value: session-secret-key-12345
+      - key: FRONTEND_URL
+        value: https://multi-agents-d6279.web.app
+      - key: PORT
+        value: 3001
+      - key: NODE_ENV
+        value: production
+      - key: USE_CLAUDE_CODE_EMULATOR
+        value: true
+      - key: USE_REAL_EXECUTION
+        value: true
