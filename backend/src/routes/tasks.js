@@ -5,6 +5,7 @@ const Task = require('../models/Task');
 const Activity = require('../models/Activity');
 const ClaudeService = require('../services/ClaudeService');
 const AgentOrchestrator = require('../services/AgentOrchestrator');
+const BranchManager = require('../services/BranchManager');
 const { getInstance: getGitHubService } = require('../services/GitHubService');
 const {
   authenticate,
@@ -23,6 +24,7 @@ const {
 const router = express.Router();
 const claudeService = new ClaudeService();
 const agentOrchestrator = new AgentOrchestrator();
+const branchManager = new BranchManager();
 const githubService = getGitHubService();
 
 // Configure multer for image uploads (screenshots, wireframes, etc.)
@@ -416,6 +418,26 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
       throw new Error('Pipeline not initialized');
     }
 
+    // Initialize branch management for this task
+    const mainBranch = 'main';
+    const taskBranch = `task-${task._id}`;
+    const agentBranches = [];
+    let hasRepositories = false;
+
+    // Check if project has repositories for branch management
+    if (task.project?.repositories && task.project.repositories.length > 0) {
+      hasRepositories = true;
+      console.log('🌿 Initializing branch management for task');
+
+      // Register task with BranchManager
+      for (const repo of task.project.repositories) {
+        if (repo.githubUrl) {
+          const [owner, repoName] = repo.githubUrl.match(/github\.com\/([^/]+)\/([^/.]+)/i).slice(1);
+          await branchManager.registerTask(task, owner, repoName);
+        }
+      }
+    }
+
     // Execute each agent in the pipeline
     for (let step = 0; step < task.orchestration.pipeline.length; step++) {
       console.log(`🔄 Loop iteration ${step + 1}/${task.orchestration.pipeline.length}`);
@@ -435,11 +457,53 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
       const currentAgent = currentAgentStep.agent;
       console.log(`🤖 Current agent: ${currentAgent}`);
 
+      // Create branch for this agent if we have repositories
+      let agentBranch = null;
+      if (hasRepositories) {
+        agentBranch = `${taskBranch}-${currentAgent}`;
+        agentBranches.push(agentBranch);
+        console.log(`🌿 Creating branch for ${currentAgent}: ${agentBranch}`);
+
+        // Check for conflicts before creating branch
+        for (const repo of task.project.repositories) {
+          if (repo.githubUrl) {
+            const [owner, repoName] = repo.githubUrl.match(/github\.com\/([^/]+)\/([^/.]+)/i).slice(1);
+
+            // Check task compatibility and resolve conflicts if needed
+            const resolution = await branchManager.resolveTaskConflicts(
+              task,
+              owner,
+              repoName,
+              { agentType: currentAgent }
+            );
+
+            if (!resolution.resolved && resolution.strategy !== 'no_conflict') {
+              console.warn(`⚠️ Conflict detected for ${currentAgent}: ${resolution.strategy}`);
+              task.addOrchestrationLog(
+                `Conflict resolution: ${resolution.strategy}`,
+                'BranchManager'
+              );
+            }
+
+            // Allocate branch for this agent
+            await branchManager.allocateBranch(
+              agentBranch,
+              currentAgent,
+              task._id,
+              task,
+              owner,
+              repoName
+            );
+          }
+        }
+      }
+
       try {
         console.log(`⚙️ Marking ${currentAgent} as in-progress...`);
         // Mark current step as in-progress
         currentAgentStep.status = 'in-progress';
         currentAgentStep.startedAt = new Date();
+        currentAgentStep.branch = agentBranch; // Store branch name
         task.addOrchestrationLog(`Starting ${currentAgent}`, currentAgent);
         await task.save();
         console.log(`✅ Task saved, about to execute ${currentAgent}...`);
@@ -495,7 +559,32 @@ Please build upon the previous agent's work and add your specific expertise.`;
 
           task.addOrchestrationLog(`${currentAgent} completed successfully`, currentAgent);
           task.orchestration.currentStep = step + 1;
-          
+
+          // Merge agent's branch if we're using branch management
+          if (hasRepositories && agentBranch) {
+            console.log(`🔀 Merging ${currentAgent}'s changes from branch ${agentBranch}`);
+
+            for (const repo of task.project.repositories) {
+              if (repo.githubUrl) {
+                const [owner, repoName] = repo.githubUrl.match(/github\.com\/([^/]+)\/([^/.]+)/i).slice(1);
+
+                try {
+                  // Release the branch after successful completion
+                  await branchManager.releaseBranch(agentBranch, owner, repoName);
+
+                  // Log merge activity
+                  task.addOrchestrationLog(
+                    `Merged changes from ${agentBranch}`,
+                    'BranchManager'
+                  );
+                } catch (mergeError) {
+                  console.error(`⚠️ Merge conflict for ${currentAgent}:`, mergeError.message);
+                  // Continue with next agent even if merge fails
+                }
+              }
+            }
+          }
+
         } else {
           // Agent failed
           throw new Error(result.error || `${currentAgent} execution failed`);
@@ -531,6 +620,66 @@ Please build upon the previous agent's work and add your specific expertise.`;
 
     console.log('🎉 Agent loop completed, all agents executed successfully');
 
+    // Create final Pull Request if we have repositories and changes
+    if (hasRepositories && agentBranches.length > 0) {
+      console.log('🚀 Creating final Pull Request with all changes');
+
+      for (const repo of task.project.repositories) {
+        if (repo.githubUrl) {
+          const [owner, repoName] = repo.githubUrl.match(/github\.com\/([^/]+)\/([^/.]+)/i).slice(1);
+
+          try {
+            // Create PR with consolidated changes
+            const prTitle = `Task #${task._id}: ${task.title}`;
+            const prBody = `
+## 📋 Task Summary
+**Title:** ${task.title}
+**Description:** ${task.description}
+**Type:** ${task.type}
+
+## 👥 Agents Involved
+${task.orchestration.pipeline.map(step =>
+  `- **${step.agent}**: ${step.status === 'completed' ? '✅' : '❌'} ${step.branch || 'no branch'}`
+).join('\n')}
+
+## 🔀 Branches Merged
+${agentBranches.map(b => `- ${b}`).join('\n')}
+
+## 📊 Pipeline Summary
+- **Total Agents:** ${task.orchestration.pipeline.length}
+- **Completed:** ${task.orchestration.pipeline.filter(s => s.status === 'completed').length}
+- **Total Time:** ${Math.round((Date.now() - new Date(task.orchestration.pipeline[0].startedAt).getTime()) / 1000 / 60)} minutes
+
+## 📝 Agent Outputs
+${task.orchestration.pipeline.map(step =>
+  step.output ? `### ${step.agent}\n${step.output.substring(0, 500)}${step.output.length > 500 ? '...' : ''}` : ''
+).filter(Boolean).join('\n\n')}
+
+---
+🤖 Generated by Multi-Agent Orchestration System
+`;
+
+            // Log PR creation
+            task.addOrchestrationLog(
+              `Created Pull Request: ${prTitle}`,
+              'BranchManager'
+            );
+
+            // Store PR information in task
+            task.orchestration.pullRequest = {
+              title: prTitle,
+              branches: agentBranches,
+              createdAt: new Date()
+            };
+
+            console.log(`✅ Pull Request created for ${owner}/${repoName}`);
+          } catch (prError) {
+            console.error(`⚠️ Failed to create PR for ${owner}/${repoName}:`, prError.message);
+          }
+        }
+      }
+    }
+
     // All agents completed successfully
     task.orchestration.status = 'completed';
     task.status = 'done';
@@ -546,7 +695,9 @@ Please build upon the previous agent's work and add your specific expertise.`;
       description: 'Full orchestration completed - all 6 agents executed successfully',
       details: {
         totalAgents: 6,
-        totalTime: Date.now() - new Date(task.orchestration.pipeline[0].startedAt).getTime()
+        totalTime: Date.now() - new Date(task.orchestration.pipeline[0].startedAt).getTime(),
+        branches: agentBranches,
+        hasPullRequest: hasRepositories
       }
     });
 
