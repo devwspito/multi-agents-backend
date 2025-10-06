@@ -156,7 +156,7 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
 
     // Iniciar orquestación en background
     agentService
-      .orchestrateTask(task._id.toString())
+      .orchestrateTask((task._id as any).toString())
       .catch((error) => {
         console.error('Orchestration error:', error);
       });
@@ -165,7 +165,7 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
       success: true,
       message: 'Task orchestration started',
       data: {
-        taskId: task._id,
+        taskId: (task._id as any).toString(),
         status: task.status,
       },
     });
