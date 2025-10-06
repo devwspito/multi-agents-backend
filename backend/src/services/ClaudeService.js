@@ -11,16 +11,23 @@ const crypto = require('crypto');
 
 const execAsync = promisify(exec);
 
-// Claude Code is the PRIMARY ENGINE for our entire platform
-// Try different methods to find Claude Code
-let CLAUDE_CODE_CLI;
+// Claude Code CLI detection - only available in development
+let CLAUDE_CODE_CLI = null;
+const isDevelopment = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === undefined;
 
-// The correct command is 'npx claude' NOT 'npx @anthropic-ai/claude-code'
-// Claude Code installs as 'claude' command
-CLAUDE_CODE_CLI = 'npx claude';
-console.log('✅ Using npx claude command');
-
-console.log('🚀 CLAUDE CODE IS OUR PRIMARY ENGINE - All agents use Claude Code');
+if (isDevelopment) {
+  // Try to detect Claude Code in development
+  try {
+    const { execSync } = require('child_process');
+    execSync('which claude', { stdio: 'pipe' });
+    CLAUDE_CODE_CLI = 'claude';
+    console.log('✅ Claude Code detected in development');
+  } catch {
+    console.log('⚠️ Claude Code not found - will use Anthropic API');
+  }
+} else {
+  console.log('🚀 Production mode - using Anthropic API directly')
+}
 
 // Fallback: Use Anthropic SDK directly if Claude Code execution fails
 let Anthropic;
@@ -33,9 +40,9 @@ try {
 
 class ClaudeService {
   constructor() {
-    // Claude Code CLI is our PRIMARY engine
-    this.useClaudeCodeCLI = true;  // Always use Claude Code CLI as primary
-    this.useAnthropicSDK = !!Anthropic;  // Fallback option
+    // Use Claude Code CLI only if available (development)
+    this.useClaudeCodeCLI = !!CLAUDE_CODE_CLI;  // Only use if detected
+    this.useAnthropicSDK = !!Anthropic;  // Primary option in production
 
     if (this.useAnthropicSDK) {
       this.anthropic = new Anthropic({
@@ -637,7 +644,7 @@ Current directory: ${workspacePath}
           await fs.writeFile(tempInstructionsPath, realInstructions);
 
           // Build the Claude Code CLI command using file input
-          const claudeCommand = `${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < "${tempInstructionsPath}"`;
+          const claudeCommand = `ANTHROPIC_API_KEY="${process.env.ANTHROPIC_API_KEY}" ${CLAUDE_CODE_CLI} --print --model "${this.getClaudeCodeModelName(model)}" < "${tempInstructionsPath}"`;
 
           console.log(`\n${'='.repeat(80)}`);
           console.log(`🚀 ATTEMPTING CLAUDE CODE EXECUTION`);
