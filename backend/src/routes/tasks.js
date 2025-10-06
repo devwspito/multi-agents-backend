@@ -24,8 +24,7 @@ const {
 const router = express.Router();
 const claudeService = new ClaudeService();
 const agentOrchestrator = new AgentOrchestrator();
-// BranchManager is already instantiated in AgentOrchestrator
-// We'll use the simplified version for now
+const branchManager = new BranchManager(); // Create BranchManager instance
 const githubService = getGitHubService();
 
 // Configure multer for image uploads (screenshots, wireframes, etc.)
