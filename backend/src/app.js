@@ -227,6 +227,7 @@ class AgentPlatformApp {
     this.app.use('/api/projects', projectRoutes);
     this.app.use('/api/tasks', taskRoutes);
     this.app.use('/api/repositories', repositoryStatusRoutes);
+    this.app.use('/api/repository-test', require('./routes/repository-test'));
     this.app.use('/api/conversations', conversationRoutes);
     this.app.use('/api/agents', agentRoutes);
     this.app.use('/api/uploads', uploadRoutes);
