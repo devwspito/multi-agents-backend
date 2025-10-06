@@ -1,6 +1,5 @@
 import { query, type SDKMessage, type Options, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
-import { env } from '../config/env';
-import { Task, ITask, AgentType, IAgentStep } from '../models/Task';
+import { Task, ITask, AgentType } from '../models/Task';
 import path from 'path';
 import os from 'os';
 
@@ -290,7 +289,7 @@ Always provide:
       const prompt = this.buildAgentPrompt(task, agentType);
 
       // Ejecutar agente
-      const result = await this.executeAgent(agentType, prompt, task._id.toString());
+      const result = await this.executeAgent(agentType, prompt, (task._id as any).toString());
 
       // Actualizar resultado
       step.status = 'completed';
@@ -347,7 +346,7 @@ ${agentType === 'qa-engineer' ? '**IMPORTANT**: This is the FINAL GATE. Provide 
   /**
    * Maneja mensajes del agente para logging y debugging
    */
-  private handleAgentMessage(message: SDKMessage, taskId: string, agentType: AgentType): void {
+  private handleAgentMessage(message: SDKMessage, _taskId: string, agentType: AgentType): void {
     if (message.type === 'system' && message.subtype === 'init') {
       console.log(`📊 [${agentType}] Initialized with tools:`, message.tools.join(', '));
     }
