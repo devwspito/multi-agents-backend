@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ================================================================
-# DESPLIEGUE VULTR - MOTOR CLAUDE CODE
+# VULTR DEPLOYMENT - Multi-Agent Platform (TypeScript)
 # ================================================================
-# Ejecuta: bash <(curl -s https://raw.githubusercontent.com/devwspito/multi-agents-backend/main/backend/deploy-vultr.sh)
+# Powered by Claude Agent SDK
 # ================================================================
 
 set -e
@@ -14,7 +14,7 @@ echo "🚀 INICIANDO DESPLIEGUE EN VULTR..."
 echo "📦 Actualizando sistema..."
 apt update && apt upgrade -y
 
-# 2. Instalar dependencias
+# 2. Instalar dependencias base
 echo "🔧 Instalando dependencias..."
 apt install -y curl git build-essential nginx
 
@@ -23,39 +23,45 @@ echo "📥 Instalando Node.js 20..."
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
-# 4. Instalar PM2
+# 4. Verificar versión de Node
+echo "✅ Node version: $(node --version)"
+echo "✅ NPM version: $(npm --version)"
+
+# 5. Instalar PM2
 echo "⚙️ Instalando PM2..."
 npm install -g pm2
 
-# 5. Clonar repositorio
+# 6. Clonar repositorio
 echo "📂 Clonando repositorio..."
 mkdir -p /var/www
 cd /var/www
 rm -rf multi-agents
 git clone https://github.com/devwspito/multi-agents-backend.git multi-agents
 
-# 6. Instalar dependencias
+# 7. Instalar dependencias TypeScript
 echo "📚 Instalando dependencias..."
 cd /var/www/multi-agents/backend
 npm install
 
-# 7. Crear .env
+# 8. Crear .env
 echo "🔐 Creando variables de entorno..."
 cat > .env << 'EOF'
 MONGODB_URI=mongodb+srv://luifer1313correa:lol1313lol@cluster0.hjx7z.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
 ANTHROPIC_API_KEY=sk-ant-api03-IWFZ0cV6mCMnLh70WOhqUz5NQnKy0IzE4s5kjxsFGb8Tl_9MdMNwyGZFCqR12sTT-vdmvDyJ4w-RvxMQgAA
 GITHUB_CLIENT_ID=Ov23li1r0teSKy6wRCTj
 GITHUB_CLIENT_SECRET=56e4aa7e967d7fe2bb967c09c59f8c78a27c3daa
-JWT_SECRET=super-secret-jwt-key-12345
-SESSION_SECRET=session-secret-key-12345
+JWT_SECRET=super-secret-jwt-key-12345-change-in-production-min-32-chars
+SESSION_SECRET=session-secret-key-12345-change-in-production-min-32-chars
 FRONTEND_URL=https://multi-agents-d6279.web.app
 PORT=3001
 NODE_ENV=production
-USE_CLAUDE_CODE_EMULATOR=true
-USE_REAL_EXECUTION=true
 EOF
 
-# 8. Configurar Nginx
+# 9. Build TypeScript
+echo "🏗️ Building TypeScript..."
+npm run build
+
+# 10. Configurar Nginx
 echo "🌐 Configurando Nginx..."
 cat > /etc/nginx/sites-available/default << 'EOF'
 server {
@@ -92,22 +98,25 @@ nginx -t
 systemctl restart nginx
 systemctl enable nginx
 
-# 9. Configurar firewall
+# 11. Configurar firewall
 echo "🔥 Configurando firewall..."
 ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
 
-# 10. Iniciar con PM2
+# 12. Crear directorio para agentes
+mkdir -p /tmp/agent-workspace
+
+# 13. Iniciar con PM2
 echo "🚀 Iniciando aplicación..."
 cd /var/www/multi-agents/backend
 pm2 delete all 2>/dev/null || true
-pm2 start src/app.js --name "multi-agents-backend" --time
+pm2 start dist/index.js --name "multi-agents" --time
 pm2 save
 pm2 startup systemd -u root --hp /root
 
-# 11. Resultado
+# 14. Resultado
 echo ""
 echo "════════════════════════════════════════════════════════"
 echo "✅ DESPLIEGUE COMPLETADO"
@@ -116,9 +125,19 @@ echo ""
 echo "🌐 Tu aplicación está en: http://$(curl -s ifconfig.me)"
 echo ""
 echo "📊 Comandos útiles:"
-echo "   pm2 status    - Ver estado"
-echo "   pm2 logs      - Ver logs"
-echo "   pm2 restart all - Reiniciar"
+echo "   pm2 status           - Ver estado"
+echo "   pm2 logs             - Ver logs"
+echo "   pm2 restart all      - Reiniciar"
+echo "   pm2 monit            - Monitor en tiempo real"
 echo ""
-echo "🤖 Motor Claude Code: ✅ ACTIVADO"
+echo "🔧 Archivos:"
+echo "   App: /var/www/multi-agents/backend/dist/index.js"
+echo "   Env: /var/www/multi-agents/backend/.env"
+echo "   Nginx: /etc/nginx/sites-available/default"
+echo ""
+echo "🤖 Claude Agent SDK: ✅ ACTIVO"
+echo "   - TypeScript: ✅"
+echo "   - 6 Agentes especializados: ✅"
+echo "   - Sistema de archivos real: ✅"
+echo "   - Bash real: ✅"
 echo "════════════════════════════════════════════════════════"
