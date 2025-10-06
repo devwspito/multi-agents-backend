@@ -327,7 +327,7 @@ const calculateMetrics = (data, weights) => {
 
 ## 🔧 Agent Configuration
 
-### Product Manager (claude-opus-4-1-20250805)
+### Product Manager (claude-sonnet-4-5-20250929)
 ```yaml
 description: "Analyzes requirements and defines product specifications"
 tools: [Read, Grep, WebSearch]
@@ -335,7 +335,7 @@ restrictions: [no_code_modification]
 focus: [requirements_analysis, stakeholder_communication]
 ```
 
-### Project Manager (claude-opus-4-1-20250805)
+### Project Manager (claude-sonnet-4-5-20250929)
 ```yaml
 description: "Breaks down epics into implementable stories"
 tools: [Read, Write, Edit, Grep]
@@ -343,7 +343,7 @@ restrictions: [no_implementation_code]
 focus: [task_breakdown, sprint_planning]
 ```
 
-### Tech Lead (claude-opus-4-1-20250805)
+### Tech Lead (claude-sonnet-4-5-20250929)
 ```yaml
 description: "Designs technical architecture and mentors development team"
 tools: [Read, Write, Edit, Bash, Grep, Glob]
@@ -351,7 +351,7 @@ restrictions: [architecture_only, no_direct_implementation]
 focus: [system_design, technical_guidance]
 ```
 
-### Senior Developer (claude-opus-4-1-20250805)
+### Senior Developer (claude-sonnet-4-5-20250929)
 ```yaml
 description: "Implements complex features and reviews all junior code"
 tools: [Read, Write, Edit, Bash, Grep, Glob, Git]

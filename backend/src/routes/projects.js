@@ -125,9 +125,13 @@ router.post('/',
   auditLog('project_creation'),
   async (req, res) => {
     try {
+      // Extract repositories to process them separately
+      const { repositories, ...projectDataWithoutRepos } = req.body;
+
       const projectData = {
-        ...req.body,
-        owner: req.user._id
+        ...projectDataWithoutRepos,
+        owner: req.user._id,
+        repositories: [] // Start with empty repositories array
       };
 
       // Validate project type
@@ -139,11 +143,11 @@ router.post('/',
         });
       }
 
-      // Create project with ProjectManager
+      // Create project with ProjectManager (WITHOUT repositories)
       const project = await projectManager.createProject(projectData, req.user._id);
 
       // Process repositories if provided
-      if (req.body.repositories && Array.isArray(req.body.repositories)) {
+      if (repositories && Array.isArray(repositories)) {
         // Get user with GitHub access token
         const userWithToken = await User.findById(req.user._id).select('+github.accessToken +github.username');
 
@@ -158,7 +162,7 @@ router.post('/',
           auth: userWithToken.github.accessToken
         });
 
-        for (const repoData of req.body.repositories) {
+        for (const repoData of repositories) {
           try {
             let fullRepoData;
 
