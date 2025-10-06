@@ -51,17 +51,11 @@ const ProjectSchema = new mongoose.Schema({
     },
     githubUrl: {
       type: String,
-      required: true,
-      validate: {
-        validator: function(v) {
-          return /^https:\/\/github\.com\/[^\/]+\/[^\/]+/.test(v);
-        },
-        message: props => `${props.value} is not a valid GitHub URL!`
-      }
+      required: false  // Se llenará automáticamente desde GitHub API
     },
     owner: {
       type: String,
-      required: true
+      required: false  // Se llenará automáticamente desde GitHub API
     },
     branch: {
       type: String,
