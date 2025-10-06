@@ -73,7 +73,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       }),
     });
 
-    const tokenData = await tokenResponse.json();
+    const tokenData: any = await tokenResponse.json();
 
     if (!tokenData.access_token) {
       console.error('GitHub OAuth error:', tokenData);
@@ -89,7 +89,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       },
     });
 
-    const githubUser = await userResponse.json();
+    const githubUser: any = await userResponse.json();
 
     // Obtener email si no está público
     let email = githubUser.email;
@@ -100,7 +100,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
           Accept: 'application/json',
         },
       });
-      const emails = await emailsResponse.json();
+      const emails: any = await emailsResponse.json();
       const primaryEmail = emails.find((e: any) => e.primary);
       email = primaryEmail?.email || emails[0]?.email;
     }
@@ -129,7 +129,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     }
 
     // Generar JWT
-    const token = generateToken(user._id.toString(), user.githubId);
+    const token = generateToken((user._id as any).toString(), user.githubId);
 
     // Redirigir al frontend con el token
     res.redirect(`${env.FRONTEND_URL}/auth/callback?token=${token}`);
@@ -191,7 +191,7 @@ router.get('/me', async (req: Request, res: Response) => {
  * POST /api/auth/logout
  * Cerrar sesión (opcional, JWT es stateless)
  */
-router.post('/logout', (req: Request, res: Response) => {
+router.post('/logout', (_req: Request, res: Response) => {
   res.json({
     success: true,
     message: 'Logged out successfully',

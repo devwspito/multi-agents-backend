@@ -97,7 +97,7 @@ class AgentPlatformApp {
    */
   private initializeRoutes(): void {
     // Health check
-    this.app.get('/health', (req: Request, res: Response) => {
+    this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
         success: true,
         message: 'Multi-Agent Platform is running',
@@ -124,7 +124,7 @@ class AgentPlatformApp {
    * Inicializa manejo de errores
    */
   private initializeErrorHandling(): void {
-    this.app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    this.app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
       console.error('🚨 Server Error:', err);
 
       const statusCode = (err as any).statusCode || 500;

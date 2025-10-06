@@ -46,7 +46,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
 
     // Agregar usuario al request
     req.user = {
-      id: user._id.toString(),
+      id: (user._id as any).toString(),
       githubId: user.githubId,
       username: user.username,
       email: user.email,
