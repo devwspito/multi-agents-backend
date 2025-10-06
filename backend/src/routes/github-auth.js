@@ -350,22 +350,31 @@ router.get('/repositories', authenticate, async (req, res) => {
     res.json({
       success: true,
       data: {
-        repositories: repositories.map(repo => ({
-          id: repo.id,
-          name: repo.name,
-          full_name: repo.full_name,
-          description: repo.description,
-          private: repo.private,
-          html_url: repo.html_url,
-          clone_url: repo.clone_url,
-          ssh_url: repo.ssh_url,
-          default_branch: repo.default_branch,
-          created_at: repo.created_at,
-          updated_at: repo.updated_at,
-          language: repo.language,
-          stargazers_count: repo.stargazers_count,
-          forks_count: repo.forks_count
-        }))
+        repositories: repositories.map(repo => {
+          // GARANTIZAR que siempre tengamos las URLs
+          const full_name = repo.full_name || `${repo.owner?.login || 'unknown'}/${repo.name}`;
+          const clone_url = repo.clone_url || `https://github.com/${full_name}`;
+          const ssh_url = repo.ssh_url || `git@github.com:${full_name}.git`;
+          const html_url = repo.html_url || `https://github.com/${full_name}`;
+
+          return {
+            id: repo.id,
+            name: repo.name,
+            full_name: full_name,
+            description: repo.description,
+            private: repo.private,
+            html_url: html_url,
+            clone_url: clone_url,
+            ssh_url: ssh_url,
+            default_branch: repo.default_branch || 'main',
+            created_at: repo.created_at,
+            updated_at: repo.updated_at,
+            language: repo.language,
+            stargazers_count: repo.stargazers_count,
+            forks_count: repo.forks_count,
+            owner: repo.owner?.login || full_name.split('/')[0]
+          };
+        })
       }
     });
   } catch (error) {
