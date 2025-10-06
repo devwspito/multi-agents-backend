@@ -444,8 +444,28 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
         await task.save();
         console.log(`✅ Task saved, about to execute ${currentAgent}...`);
 
-        // Execute current agent with Claude service and track tokens
-        const agentInstructions = globalInstructions || `Execute ${currentAgent} tasks for: ${task.description}`;
+        // Build agent instructions with context from previous agents
+        let agentInstructions;
+
+        if (step === 0) {
+          // First agent (product-manager) gets original instructions
+          agentInstructions = globalInstructions || `Execute ${currentAgent} tasks for: ${task.description}`;
+        } else {
+          // Subsequent agents get output from previous agent
+          const previousStep = task.orchestration.pipeline[step - 1];
+          const previousAgent = previousStep.agent;
+          const previousOutput = previousStep.output || '';
+
+          agentInstructions = `
+## Context from ${previousAgent}:
+${previousOutput}
+
+## Your Task as ${currentAgent}:
+Based on the above context from ${previousAgent}, continue the work for: ${task.description}
+
+Please build upon the previous agent's work and add your specific expertise.`;
+        }
+
         console.log(`📝 Agent instructions: ${agentInstructions.substring(0, 100)}...`);
 
         console.log(`🚀 Calling agentOrchestrator.executeAgentWithTokenTracking for ${currentAgent}...`);
@@ -456,7 +476,8 @@ async function executeFullOrchestration(task, globalInstructions, images = []) {
           step + 1, // Stage number (1-6)
           {
             images: images, // Pass images to all agents for context
-            userId: task.createdBy // Pass user ID for token tracking
+            userId: task.createdBy, // Pass user ID for token tracking
+            previousOutput: step > 0 ? task.orchestration.pipeline[step - 1].output : null // Pass previous output
           }
         );
 
