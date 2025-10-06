@@ -35,7 +35,19 @@
       "Bash(npm start)",
       "Bash(npm install:*)",
       "Bash(lsof:*)",
-      "Bash(xargs kill:*)"
+      "Bash(xargs kill:*)",
+      "Bash(brew install:*)",
+      "Bash(sshpass -p 'Luis1234!' ssh -o StrictHostKeyChecking=no root@187.33.145.222 \"apt update && apt upgrade -y && apt install -y curl git build-essential nginx\")",
+      "Read(//Users/luiscorrea/**)",
+      "Bash(chmod:*)",
+      "Bash(sshpass -p 'Luis1234!' ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no root@187.33.145.222 'apt update >/dev/null 2>&1 && echo \"\"✅ Conectado exitosamente\"\"')",
+      "Bash(ssh:*)",
+      "Bash(sshpass -p 'Luis1234!' ssh -o StrictHostKeyChecking=no root@187.33.145.222 'apt update >/dev/null 2>&1 && echo \"\"✅ Conectado exitosamente\"\"')",
+      "Bash(sshpass -p 'Luis1234!' scp -o StrictHostKeyChecking=no -o PubkeyAuthentication=no /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq/backend/deploy-digitalocean.sh root@187.33.145.222:/root/deploy.sh)",
+      "Bash(sshpass:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []

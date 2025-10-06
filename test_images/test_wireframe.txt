@@ -1,9 +1,0 @@
-# This represents a test wireframe image
-# In real usage, this would be an actual PNG/JPG file
-# For testing purposes, we'll create a mock image file
-
-Student Dashboard Wireframe:
-- Header with navigation
-- Sidebar with course list
-- Main content area with assignments
-- Progress chart on the right
