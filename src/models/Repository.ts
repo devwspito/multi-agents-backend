@@ -55,7 +55,7 @@ const repositorySchema = new Schema<IRepository>(
         validator: (name: string) => {
           return /^[\w-]+\/[\w-]+$/.test(name);
         },
-        message: 'Invalid GitHub repository name format (should be owner/repo)',
+        message: 'Invalid GitHub repository name format (should be owner/repo).',
       },
     },
     githubBranch: {
