@@ -1,41 +1,70 @@
 import { Router, Request, Response } from 'express';
 import { env } from '../config/env';
 import { User } from '../models/User';
+import { OAuthState } from '../models/OAuthState';
 import { generateToken } from '../middleware/auth';
 import crypto from 'crypto';
 
 const router = Router();
 
-// Store OAuth states temporarily (en producción usar Redis)
-const oauthStates = new Map<string, { createdAt: number }>();
+/**
+ * GET /api/auth/github-auth/url
+ * Devuelve la URL de autorización de GitHub (para frontends SPA)
+ */
+router.get('/github-auth/url', async (req: Request, res: Response) => {
+  try {
+    const state = crypto.randomBytes(16).toString('hex');
 
-// Limpiar estados expirados cada 5 minutos
-setInterval(() => {
-  const now = Date.now();
-  for (const [state, data] of oauthStates.entries()) {
-    if (now - data.createdAt > 10 * 60 * 1000) {
-      // 10 minutos
-      oauthStates.delete(state);
-    }
+    // Guardar estado en MongoDB (TTL automático de 10 minutos)
+    const savedState = await OAuthState.create({ state });
+    console.log(`✅ OAuth state created and saved: ${state}`, { id: savedState._id });
+
+    const params = new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      redirect_uri: `${req.protocol}://${req.get('host')}/api/auth/github/callback`,
+      scope: 'user:email repo',
+      state,
+    });
+
+    const authUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
+
+    res.json({
+      success: true,
+      url: authUrl,
+    });
+  } catch (error) {
+    console.error('❌ Error generating GitHub auth URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate auth URL',
+    });
   }
-}, 5 * 60 * 1000);
+});
 
 /**
  * GET /api/auth/github
- * Inicia el flujo de autenticación con GitHub
+ * Inicia el flujo de autenticación con GitHub (redirección directa)
  */
-router.get('/github', (req: Request, res: Response) => {
-  const state = crypto.randomBytes(16).toString('hex');
-  oauthStates.set(state, { createdAt: Date.now() });
+router.get('/github', async (req: Request, res: Response) => {
+  try {
+    const state = crypto.randomBytes(16).toString('hex');
 
-  const params = new URLSearchParams({
-    client_id: env.GITHUB_CLIENT_ID,
-    redirect_uri: `${req.protocol}://${req.get('host')}/api/auth/github/callback`,
-    scope: 'user:email',
-    state,
-  });
+    // Guardar estado en MongoDB (TTL automático de 10 minutos)
+    const savedState = await OAuthState.create({ state });
+    console.log(`✅ OAuth state created and saved (direct): ${state}`, { id: savedState._id });
 
-  res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+    const params = new URLSearchParams({
+      client_id: env.GITHUB_CLIENT_ID,
+      redirect_uri: `${req.protocol}://${req.get('host')}/api/auth/github/callback`,
+      scope: 'user:email repo',
+      state,
+    });
+
+    res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+  } catch (error) {
+    console.error('❌ Error initiating GitHub auth:', error);
+    res.redirect(`${env.FRONTEND_URL}?error=auth_init_failed`);
+  }
 });
 
 /**
@@ -46,13 +75,32 @@ router.get('/github/callback', async (req: Request, res: Response) => {
   try {
     const { code, state } = req.query;
 
-    // Validar state
-    if (!state || !oauthStates.has(state as string)) {
+    console.log(`🔍 OAuth callback received - state: ${state}, code: ${code ? 'present' : 'missing'}`);
+
+    // Validar state desde MongoDB
+    if (!state) {
+      console.error('❌ OAuth callback: missing state parameter');
       res.redirect(`${env.FRONTEND_URL}?error=invalid_state`);
       return;
     }
 
-    oauthStates.delete(state as string);
+    // Verificar cuántos estados hay en la DB para debug
+    const allStates = await OAuthState.find({});
+    console.log(`📊 Total OAuth states in DB: ${allStates.length}`, allStates.map(s => s.state));
+
+    const oauthState = await OAuthState.findOne({ state: state as string });
+
+    if (!oauthState) {
+      console.error(`❌ OAuth callback: state not found in database: ${state}`);
+      console.error(`   Available states: ${allStates.map(s => s.state).join(', ')}`);
+      res.redirect(`${env.FRONTEND_URL}?error=invalid_state`);
+      return;
+    }
+
+    console.log(`✅ OAuth state validated: ${state}`);
+
+    // Eliminar el estado usado (one-time use)
+    await OAuthState.deleteOne({ state: state as string });
 
     if (!code) {
       res.redirect(`${env.FRONTEND_URL}?error=no_code`);
@@ -106,18 +154,10 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     }
 
     // Crear o actualizar usuario
-    let user = await User.findOne({ githubId: githubUser.id.toString() });
+    let user;
 
-    if (user) {
-      // Actualizar usuario existente
-      user.username = githubUser.login;
-      user.email = email;
-      user.avatarUrl = githubUser.avatar_url;
-      user.accessToken = tokenData.access_token;
-      user.refreshToken = tokenData.refresh_token;
-      await user.save();
-    } else {
-      // Crear nuevo usuario
+    try {
+      // Intentar crear nuevo usuario
       user = await User.create({
         githubId: githubUser.id.toString(),
         username: githubUser.login,
@@ -126,6 +166,25 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         accessToken: tokenData.access_token,
         refreshToken: tokenData.refresh_token,
       });
+    } catch (error: any) {
+      // Si falla por clave duplicada, buscar y actualizar
+      if (error.code === 11000) {
+        user = await User.findOne({ username: githubUser.login });
+
+        if (user) {
+          user.githubId = githubUser.id.toString();
+          user.email = email;
+          user.avatarUrl = githubUser.avatar_url;
+          user.accessToken = tokenData.access_token;
+          user.refreshToken = tokenData.refresh_token;
+          await user.save();
+        } else {
+          // No debería pasar, pero por si acaso
+          throw error;
+        }
+      } else {
+        throw error;
+      }
     }
 
     // Generar JWT
@@ -158,7 +217,7 @@ router.get('/me', async (req: Request, res: Response) => {
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, env.JWT_SECRET) as { userId: string };
 
-    const user = await User.findById(decoded.userId).select('-accessToken -refreshToken -__v');
+    const user = await User.findById(decoded.userId).select('-refreshToken -__v');
 
     if (!user) {
       res.status(404).json({
@@ -176,6 +235,7 @@ router.get('/me', async (req: Request, res: Response) => {
         username: user.username,
         email: user.email,
         avatarUrl: user.avatarUrl,
+        hasGithubConnected: !!user.accessToken, // NUEVO: indica si tiene GitHub conectado
       },
     });
   } catch (error) {
