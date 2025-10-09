@@ -1,19 +1,25 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { Task } from '../models/Task';
-import { AgentService } from '../services/AgentService';
+import { TeamOrchestrator } from '../services/TeamOrchestrator';
 import { z } from 'zod';
 
 const router = Router();
-const agentService = new AgentService();
+const teamOrchestrator = new TeamOrchestrator();
 
 // Validación schemas con Zod
 const createTaskSchema = z.object({
   title: z.string().min(1).max(200),
-  description: z.string().min(1),
+  description: z.string().optional(), // Opcional - se define en el chat
   priority: z.enum(['low', 'medium', 'high', 'critical']).optional(),
   projectId: z.string().optional(),
+  repositoryIds: z.array(z.string()).optional(), // Array de repository IDs
   tags: z.array(z.string()).optional(),
+});
+
+const startTaskSchema = z.object({
+  description: z.string().min(1), // Descripción de la tarea desde el chat
+  instructions: z.string().optional(),
 });
 
 /**
@@ -22,15 +28,21 @@ const createTaskSchema = z.object({
  */
 router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { status, priority, projectId } = req.query;
+    const { status, priority, projectId, repositoryId } = req.query;
 
     const filter: any = { userId: req.user!.id };
 
     if (status) filter.status = status;
     if (priority) filter.priority = priority;
     if (projectId) filter.projectId = projectId;
+    // Soporte para filtro por repositorio (singular o dentro del array)
+    if (repositoryId) {
+      filter.repositoryIds = repositoryId; // Mongoose busca automáticamente en el array
+    }
 
     const tasks = await Task.find(filter)
+      .populate('repositoryIds', 'name githubRepoName')
+      .populate('projectId', 'name')
       .sort({ createdAt: -1 })
       .select('-__v')
       .lean();
@@ -102,7 +114,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 
     res.status(201).json({
       success: true,
-      data: task,
+      data: {
+        task: task,
+      },
       message: 'Task created successfully',
     });
   } catch (error) {
@@ -126,9 +140,12 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/start
  * Iniciar la orquestación de agentes para una tarea
+ * Recibe la descripción desde el primer mensaje del chat
  */
 router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
   try {
+    const validatedData = startTaskSchema.parse(req.body);
+
     const task = await Task.findOne({
       _id: req.params.id,
       userId: req.user!.id,
@@ -150,26 +167,41 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Actualizar estado
+    // Actualizar descripción desde el chat y estado
+    task.description = validatedData.description;
     task.status = 'in_progress';
     await task.save();
 
-    // Iniciar orquestación en background
-    agentService
+    console.log(`🚀 Starting orchestration for task: ${task._id}`);
+    console.log(`📝 Task description: ${task.description}`);
+
+    // Iniciar orquestación con team building dinámico
+    teamOrchestrator
       .orchestrateTask((task._id as any).toString())
       .catch((error) => {
-        console.error('Orchestration error:', error);
+        console.error('❌ Orchestration error:', error);
       });
 
     res.json({
       success: true,
-      message: 'Task orchestration started',
+      message: 'Dynamic team orchestration started',
       data: {
         taskId: (task._id as any).toString(),
         status: task.status,
+        description: task.description,
+        info: 'Team will be built dynamically based on task complexity',
       },
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid start data - description is required',
+        errors: error.errors,
+      });
+      return;
+    }
+
     console.error('Error starting task:', error);
     res.status(500).json({
       success: false,
@@ -203,13 +235,20 @@ router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
       success: true,
       data: {
         status: task.status,
-        currentAgent: task.orchestration.currentAgent,
-        pipeline: task.orchestration.pipeline.map((step) => ({
-          agent: step.agent,
-          status: step.status,
-          startedAt: step.startedAt,
-          completedAt: step.completedAt,
-        })),
+        currentPhase: task.orchestration.currentPhase,
+
+        // Phase statuses
+        productManager: task.orchestration.productManager?.status || 'pending',
+        projectManager: task.orchestration.projectManager?.status || 'pending',
+        techLead: task.orchestration.techLead?.status || 'pending',
+        qaEngineer: task.orchestration.qaEngineer?.status || 'pending',
+        mergeCoordinator: task.orchestration.mergeCoordinator?.status || 'pending',
+
+        // Team info
+        teamSize: task.orchestration.team?.length || 0,
+        storiesCount: task.orchestration.projectManager?.totalStories || 0,
+
+        // Metrics
         totalCost: task.orchestration.totalCost,
         totalTokens: task.orchestration.totalTokens,
       },

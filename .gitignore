@@ -109,11 +109,6 @@ build/
 # Docker
 .dockerignore
 
-# Educational data (sensitive)
-student-data/
-educational-records/
-
-
 # Certificates and keys
 *.pem
 *.key
