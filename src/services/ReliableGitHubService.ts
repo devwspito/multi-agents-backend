@@ -201,8 +201,8 @@ Attempts: ${this.maxRetries}`
   private async pushBranchWithVerification(
     branchName: string,
     repoPath: string,
-    taskId: string,
-    agentName: string
+    _taskId: string,
+    _agentName: string
   ): Promise<PushResult> {
     try {
       // Try regular push first

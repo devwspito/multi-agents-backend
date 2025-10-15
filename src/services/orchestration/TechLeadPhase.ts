@@ -40,12 +40,13 @@ export class TechLeadPhase extends BasePhase {
       if (context.task.orchestration.techLead.output) {
         context.setData('techLeadOutput', context.task.orchestration.techLead.output);
       }
-      if (context.task.orchestration.techLead.epics) {
-        context.setData('epics', context.task.orchestration.techLead.epics);
-      }
-      if (context.task.orchestration.techLead.storiesMap) {
-        context.setData('storiesMap', context.task.orchestration.techLead.storiesMap);
-      }
+      // TODO: Add epics and storiesMap to IAgentStep if needed
+      // if (context.task.orchestration.techLead.epics) {
+      //   context.setData('epics', context.task.orchestration.techLead.epics);
+      // }
+      // if (context.task.orchestration.techLead.storiesMap) {
+      //   context.setData('storiesMap', context.task.orchestration.techLead.storiesMap);
+      // }
 
       return true;
     }
@@ -75,7 +76,9 @@ export class TechLeadPhase extends BasePhase {
     });
 
     try {
-      const epicsIdentified = task.orchestration.productManager.epicsIdentified || [];
+      // TODO: Add epicsIdentified to IAgentStep if needed
+      // For now, extract epics from productManager output manually if needed
+      const epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
 
       // Build repositories information
       const repoInfo = context.repositories.length > 0
@@ -88,35 +91,20 @@ export class TechLeadPhase extends BasePhase {
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nDesign architecture considering all repositories.`
         : '';
 
-      // Check if this is a revision based on user feedback
-      const feedbackHistory = task.orchestration.techLead.feedbackHistory || [];
-      const hasRevision = feedbackHistory.length > 0;
-      const lastFeedback = hasRevision ? feedbackHistory[feedbackHistory.length - 1] : null;
+      // TODO: Add feedbackHistory to IAgentStep if revision support is needed
+      // For now, check if there's previous output for revision detection
       const previousOutput = task.orchestration.techLead.output;
+      const hasRevision = previousOutput && task.orchestration.techLead.status === 'in_progress';
 
       let revisionSection = '';
-      if (hasRevision && lastFeedback) {
+      if (hasRevision) {
         revisionSection = `
 
-# ⚠️ REVISION REQUIRED (Attempt ${feedbackHistory.length + 1})
-
-You previously provided a technical plan, but the user requested changes.
-
-## Your Previous Plan:
+# Previous Architecture Available
+Your previous architecture design is available if needed for reference:
 \`\`\`
-${previousOutput || '(no previous output)'}
+${previousOutput}
 \`\`\`
-
-## User Feedback:
-"${lastFeedback.feedback}"
-
-## What You Must Do:
-1. **Read the feedback carefully** - understand what the user wants changed
-2. **Apply the requested changes** - update your architecture and stories accordingly
-3. **Keep what was good** - don't discard work that the user approved implicitly
-4. **Provide updated plan** - make sure it addresses the feedback
-
-**Important**: This is revision ${feedbackHistory.length + 1}. The user is waiting for you to apply their feedback.
 `;
       }
 
@@ -318,42 +306,50 @@ const token = jwt.sign(
       if (task.attachments && task.attachments.length > 0) {
         console.log(`📎 [TechLead] Processing ${task.attachments.length} attachment(s)`);
 
-        for (const attachment of task.attachments) {
-          // Only process images
-          if (attachment.type === 'image') {
-            try {
-              // Convert URL path (/uploads/file.png) to filesystem path
-              let imagePath: string;
-              if (attachment.url.startsWith('/uploads/')) {
-                imagePath = path.join(process.cwd(), attachment.url);
-              } else if (path.isAbsolute(attachment.url)) {
-                imagePath = attachment.url;
-              } else {
-                imagePath = path.join(process.cwd(), attachment.url);
-              }
-
-              console.log(`  🔍 Resolving image path: ${attachment.url} -> ${imagePath}`);
-
-              if (fs.existsSync(imagePath)) {
-                const imageBuffer = fs.readFileSync(imagePath);
-                const base64Image = imageBuffer.toString('base64');
-
-                attachments.push({
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: attachment.mimeType,
-                    data: base64Image,
-                  },
-                });
-
-                console.log(`  ✅ Attached image: ${attachment.originalName} (${(attachment.size / 1024).toFixed(1)} KB)`);
-              } else {
-                console.warn(`  ⚠️ Image file not found: ${imagePath}`);
-              }
-            } catch (error: any) {
-              console.error(`  ❌ Failed to process image ${attachment.originalName}:`, error.message);
+        for (const attachmentUrl of task.attachments) {
+          // attachments are stored as URL strings
+          try {
+            // Convert URL path (/uploads/file.png) to filesystem path
+            let imagePath: string;
+            if (attachmentUrl.startsWith('/uploads/')) {
+              imagePath = path.join(process.cwd(), attachmentUrl);
+            } else if (path.isAbsolute(attachmentUrl)) {
+              imagePath = attachmentUrl;
+            } else {
+              imagePath = path.join(process.cwd(), attachmentUrl);
             }
+
+            console.log(`  🔍 Resolving image path: ${attachmentUrl} -> ${imagePath}`);
+
+            if (fs.existsSync(imagePath)) {
+              const imageBuffer = fs.readFileSync(imagePath);
+              const base64Image = imageBuffer.toString('base64');
+
+              // Detect mime type from file extension
+              const ext = path.extname(imagePath).toLowerCase();
+              let mimeType = 'image/jpeg';
+              if (ext === '.png') mimeType = 'image/png';
+              else if (ext === '.gif') mimeType = 'image/gif';
+              else if (ext === '.webp') mimeType = 'image/webp';
+
+              attachments.push({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: mimeType,
+                  data: base64Image,
+                },
+              });
+
+              const fileName = path.basename(imagePath);
+              const fileSizeKB = (imageBuffer.length / 1024).toFixed(1);
+              console.log(`  ✅ Attached image: ${fileName} (${fileSizeKB} KB)`);
+            } else {
+              console.warn(`  ⚠️ Image file not found: ${imagePath}`);
+            }
+          } catch (error: any) {
+            const fileName = path.basename(attachmentUrl);
+            console.error(`  ❌ Failed to process image ${fileName}:`, error.message);
           }
         }
       }
@@ -483,27 +479,30 @@ const token = jwt.sign(
         stories: epic.stories.map((s: any) => s.id),
         targetRepository: epic.targetRepository || undefined,
       }));
-      task.orchestration.techLead.epics = epicsWithStringIds;
-      task.orchestration.techLead.storiesMap = storiesMap;
+      // TODO: Add epics and storiesMap to IAgentStep if needed
+      // For now, store in output only
+      // task.orchestration.techLead.epics = epicsWithStringIds;
+      // task.orchestration.techLead.storiesMap = storiesMap;
       task.orchestration.techLead.architectureDesign = parsed.architectureDesign;
       task.orchestration.techLead.teamComposition = parsed.teamComposition;
       task.orchestration.techLead.storyAssignments = parsed.storyAssignments;
-      task.markModified('orchestration.techLead.epics');
-      task.markModified('orchestration.techLead.storiesMap');
+      // task.markModified('orchestration.techLead.epics');
+      // task.markModified('orchestration.techLead.storiesMap');
 
       // Store agent metadata
       task.orchestration.techLead.status = 'completed';
       task.orchestration.techLead.completedAt = new Date();
       task.orchestration.techLead.output = result.output;
       task.orchestration.techLead.sessionId = result.sessionId;
-      task.orchestration.techLead.canResumeSession = result.canResume;
+      // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
+      // task.orchestration.techLead.canResumeSession = result.canResume;
       task.orchestration.techLead.usage = result.usage;
       task.orchestration.techLead.cost_usd = result.cost;
 
-      if (result.todos) {
-        task.orchestration.techLead.todos = result.todos;
-        task.orchestration.techLead.lastTodoUpdate = new Date();
-      }
+      // if (result.todos) {
+      //   task.orchestration.techLead.todos = result.todos;
+      //   task.orchestration.techLead.lastTodoUpdate = new Date();
+      // }
 
       // Update costs
       task.orchestration.totalCost += result.cost;
@@ -539,20 +538,21 @@ const token = jwt.sign(
           `**Methodology**: ${costEstimate.methodology}\n\n` +
           `*This is an informational estimate and does not require approval.*`;
 
-        // Store cost data in Tech Lead metadata (informational only)
-        task.orchestration.techLead.costEstimate = {
-          estimated: costEstimate.totalEstimated,
-          minimum: costEstimate.totalMinimum,
-          maximum: costEstimate.totalMaximum,
-          perStory: costEstimate.perStoryEstimate,
-          duration: costEstimate.estimatedDuration,
-          confidence: costEstimate.confidence,
-          methodology: costEstimate.methodology,
-          informationalOnly: true
-        };
+        // TODO: Add costEstimate to IAgentStep if needed
+        // For now, cost estimate is already appended to output above
+        // task.orchestration.techLead.costEstimate = {
+        //   estimated: costEstimate.totalEstimated,
+        //   minimum: costEstimate.totalMinimum,
+        //   maximum: costEstimate.totalMaximum,
+        //   perStory: costEstimate.perStoryEstimate,
+        //   duration: costEstimate.estimatedDuration,
+        //   confidence: costEstimate.confidence,
+        //   methodology: costEstimate.methodology,
+        //   informationalOnly: true
+        // };
 
         // 🔥 CRITICAL: Mark nested object as modified for Mongoose
-        task.markModified('orchestration.techLead.costEstimate');
+        // task.markModified('orchestration.techLead.costEstimate');
 
         console.log(`✅ [Cost Estimation] Added to Tech Lead output (informational only)`);
       } catch (error: any) {

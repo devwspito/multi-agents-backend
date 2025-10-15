@@ -20,6 +20,7 @@ export class BranchSetupPhase extends BasePhase {
   readonly name = 'BranchSetup'; // Must match PHASE_ORDER
   readonly description = 'Creating and pushing epic branches to GitHub';
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(private _githubService: GitHubService) { // Prefixed with _ to indicate intentionally unused
     super();
   }

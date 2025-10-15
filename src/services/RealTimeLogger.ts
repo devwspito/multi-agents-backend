@@ -324,7 +324,7 @@ ${context ? `Context: ${JSON.stringify(context, null, 2)}` : ''}`
     this.currentLogs.get(taskId)!.push(entry);
   }
 
-  private emitRealTime(taskId: string, agent: string, entry: LogEntry) {
+  private emitRealTime(_taskId: string, _agent: string, _entry: LogEntry) {
     // This would emit via WebSocket for real-time viewing
     // Implementation depends on your WebSocket setup
   }

@@ -55,7 +55,10 @@
       "Bash(pkill:*)",
       "Bash(bash:*)",
       "WebFetch(domain:www.hetzner.com)",
-      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OGUxODhmOGIyZWEwNTg0YWZkNTRlODYiLCJnaXRodWJJZCI6IjIyMzAwNDg5NiIsImlhdCI6MTc2MDAxMDE2MCwiZXhwIjoxNzYwNjE0OTYwfQ.um6jEQCp6y823HjZj_R5dU-TGYl1ubSl0hThNnvwtOw\")"
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2OGUxODhmOGIyZWEwNTg0YWZkNTRlODYiLCJnaXRodWJJZCI6IjIyMzAwNDg5NiIsImlhdCI6MTc2MDAxMDE2MCwiZXhwIjoxNzYwNjE0OTYwfQ.um6jEQCp6y823HjZj_R5dU-TGYl1ubSl0hThNnvwtOw\")",
+      "Bash(git log:*)",
+      "Bash(git reflog:*)",
+      "Bash(git fsck:*)"
     ],
     "deny": [],
     "ask": []
