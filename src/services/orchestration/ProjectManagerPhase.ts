@@ -86,7 +86,7 @@ export class ProjectManagerPhase extends BasePhase {
       const previousOutput = task.orchestration.projectManager.output;
 
       let revisionSection = '';
-      if (previousOutput && task.orchestration.projectManager.status === 'pending') {
+      if (previousOutput && task.orchestration.projectManager.status === 'in_progress') {
         revisionSection = `
 
 # Previous Project Plan Available
@@ -200,14 +200,15 @@ ${repoInfo}${workspaceInfo}
       task.orchestration.projectManager.completedAt = new Date();
       task.orchestration.projectManager.output = result.output;
       task.orchestration.projectManager.sessionId = result.sessionId;
-      task.orchestration.projectManager.canResumeSession = result.canResume;
+      // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
+      // task.orchestration.projectManager.canResumeSession = result.canResume;
       task.orchestration.projectManager.usage = result.usage;
       task.orchestration.projectManager.cost_usd = result.cost;
 
-      if (result.todos) {
-        task.orchestration.projectManager.todos = result.todos;
-        task.orchestration.projectManager.lastTodoUpdate = new Date();
-      }
+      // if (result.todos) {
+      //   task.orchestration.projectManager.todos = result.todos;
+      //   task.orchestration.projectManager.lastTodoUpdate = new Date();
+      // }
 
       // Update costs
       task.orchestration.totalCost += result.cost;
