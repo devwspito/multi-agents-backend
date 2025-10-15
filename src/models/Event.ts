@@ -139,19 +139,19 @@ const eventSchema = new Schema<IEvent>(
 eventSchema.index({ taskId: 1, version: 1 }, { unique: true });
 
 // Prevent updates/deletes (append-only)
-eventSchema.pre('updateOne', function (next) {
+eventSchema.pre('updateOne', function (_next) {
   throw new Error('Events are immutable - updates not allowed');
 });
 
-eventSchema.pre('updateMany', function (next) {
+eventSchema.pre('updateMany', function (_next) {
   throw new Error('Events are immutable - updates not allowed');
 });
 
-eventSchema.pre('deleteOne', function (next) {
+eventSchema.pre('deleteOne', function (_next) {
   throw new Error('Events are immutable - deletes not allowed');
 });
 
-eventSchema.pre('deleteMany', function (next) {
+eventSchema.pre('deleteMany', function (_next) {
   throw new Error('Events are immutable - deletes not allowed');
 });
 

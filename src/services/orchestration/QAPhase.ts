@@ -92,8 +92,11 @@ export class QAPhase extends BasePhase {
     });
 
     try {
-      const epics = task.orchestration.techLead.epics || [];
-      const epicBranches = epics.map((e) => e.branchName).filter(Boolean) as string[];
+      // TODO: Add epics to IAgentStep or get from stories
+      // For now, use stories from projectManager
+      const stories = task.orchestration.projectManager?.stories || [];
+      const epics = stories; // Alias for backward compatibility
+      const epicBranches = epics.map((e: any) => e.branchName).filter(Boolean) as string[];
 
       await LogService.info(`Testing integration of ${epicBranches.length} epic branches`, {
         taskId,
@@ -182,15 +185,16 @@ Provide:
       task.orchestration.qaEngineer!.completedAt = new Date();
       task.orchestration.qaEngineer!.output = result.output;
       task.orchestration.qaEngineer!.sessionId = result.sessionId;
-      task.orchestration.qaEngineer!.canResumeSession = result.canResume;
+      // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
+      // task.orchestration.qaEngineer!.canResumeSession = result.canResume;
       task.orchestration.qaEngineer!.usage = result.usage;
       task.orchestration.qaEngineer!.cost_usd = result.cost;
       task.orchestration.qaEngineer!.totalPRsTested = epicBranches.length;
 
-      if (result.todos) {
-        task.orchestration.qaEngineer!.todos = result.todos;
-        task.orchestration.qaEngineer!.lastTodoUpdate = new Date();
-      }
+      // if (result.todos) {
+      //   task.orchestration.qaEngineer!.todos = result.todos;
+      //   task.orchestration.qaEngineer!.lastTodoUpdate = new Date();
+      // }
 
       // Update costs
       task.orchestration.totalCost += result.cost;

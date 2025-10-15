@@ -382,7 +382,7 @@ export class DuplicationDetector {
   /**
    * Genera sugerencias basadas en lo encontrado
    */
-  private generateSuggestions(features: ExistingFeature[], task: string): string[] {
+  private generateSuggestions(features: ExistingFeature[], _task: string): string[] {
     const suggestions: string[] = [];
 
     if (features.length === 0) {

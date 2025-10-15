@@ -182,7 +182,7 @@ export class DependencyResolver {
    */
   private groupIntoLevels(
     sortedEpics: IEpic[],
-    epicMap: Map<string, IEpic>
+    _epicMap: Map<string, IEpic>
   ): DependencyLevel[] {
     const epicLevels = new Map<string, number>();
     const levels: DependencyLevel[] = [];
@@ -246,6 +246,6 @@ export class DependencyResolver {
       return true;
     }
 
-    return epic.dependencies.every((depId) => completedEpicIds.has(depId));
+    return epic.dependencies.every((depId: string) => completedEpicIds.has(depId));
   }
 }
