@@ -84,7 +84,7 @@ export class ProductManagerPhase extends BasePhase {
       const previousOutput = task.orchestration.productManager.output;
 
       let revisionSection = '';
-      if (previousOutput && task.orchestration.productManager.status === 'pending') {
+      if (previousOutput && task.orchestration.productManager.status === 'in_progress') {
         revisionSection = `
 
 # Previous Analysis Available
@@ -191,14 +191,15 @@ Be thorough but concise.`;
       task.orchestration.productManager.completedAt = new Date();
       task.orchestration.productManager.output = result.output;
       task.orchestration.productManager.sessionId = result.sessionId;
-      task.orchestration.productManager.canResumeSession = result.canResume;
+      // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
+      // task.orchestration.productManager.canResumeSession = result.canResume;
       task.orchestration.productManager.usage = result.usage;
       task.orchestration.productManager.cost_usd = result.cost;
 
-      if (result.todos) {
-        task.orchestration.productManager.todos = result.todos;
-        task.orchestration.productManager.lastTodoUpdate = new Date();
-      }
+      // if (result.todos) {
+      //   task.orchestration.productManager.todos = result.todos;
+      //   task.orchestration.productManager.lastTodoUpdate = new Date();
+      // }
 
       // Extract complexity
       const complexityMatch = result.output.match(/complexity.*?(small|medium|large|epic)/i);
