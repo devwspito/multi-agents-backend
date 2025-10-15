@@ -25,8 +25,14 @@ export class BranchSetupPhase extends BasePhase {
 
   /**
    * Skip if branches already created for all epics
+   * NOTE: Currently skipped because IStory structure doesn't match epic structure needed
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
+    // Skip this phase - IStory doesn't have branch properties like epics did
+    console.log('✅ [SKIP] BranchSetup - Feature not compatible with IStory structure');
+    return true;
+
+    /* DISABLED - uncomment when IStory has branch support
     const task = context.task;
 
     // Refresh task from DB to get latest state
@@ -335,5 +341,14 @@ export class BranchSetupPhase extends BasePhase {
         error: error.message,
       };
     }
+    */
+  }
+
+  protected async executePhase(_context: OrchestrationContext): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
+    // This should never execute since shouldSkip returns true
+    return {
+      success: true,
+      data: { skipped: true }
+    };
   }
 }
