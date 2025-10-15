@@ -1,0 +1,97 @@
+  /**
+   * Determine which phase should execute next based on current task state
+   * 🔥 EVENT SOURCING: Reads state from events for maximum reliability
+   */
+  private async determineNextPhase(task: any): Promise<string | null> {
+    // If task is completed, no next phase
+    if (task.status === 'completed') {
+      return null;
+    }
+
+    // 🔥 EVENT SOURCING: Rebuild state from events
+    const { eventStore } = await import('./EventStore');
+    const state = await eventStore.getCurrentState(task._id);
+
+    console.log(`🔍 [determineNextPhase] State from events:`);
+    console.log(`   - PM completed: ${state.productManagerCompleted}, approved: ${state.productManagerApproved}`);
+    console.log(`   - PjM completed: ${state.projectManagerCompleted}, approved: ${state.projectManagerApproved}`);
+    console.log(`   - TL completed: ${state.techLeadCompleted}, approved: ${state.techLeadApproved}`);
+    console.log(`   - Branches created: ${state.branchSetupCompleted}`);
+    console.log(`   - Developers: ${state.developersCompleted}`);
+    console.log(`   - QA: ${state.qaCompleted}`);
+    console.log(`   - PR approved: ${state.prApproved}`);
+
+    // Phase 1: Product Manager
+    if (!state.productManagerCompleted) {
+      return 'ProductManager';
+    }
+
+    // Phase 2: Product Manager Approval
+    if (!state.productManagerApproved) {
+      return 'ProductManagerApproval';
+    }
+
+    // Phase 3: Project Manager
+    if (!state.projectManagerCompleted) {
+      return 'ProjectManager';
+    }
+
+    // Phase 4: Project Manager Approval
+    if (!state.projectManagerApproved) {
+      return 'ProjectManagerApproval';
+    }
+
+    // Phase 5: Tech Lead
+    if (!state.techLeadCompleted) {
+      return 'TechLead';
+    }
+
+    // Phase 6: Tech Lead Approval
+    if (!state.techLeadApproved) {
+      return 'TechLeadApproval';
+    }
+
+    // Phase 7: Branch Setup
+    const epics = state.epics || [];
+    console.log(`🔍 [Debug] Branch Setup check (from events):`);
+    console.log(`   - epics count: ${epics.length}`);
+
+    const allBranchesCreated = epics.length > 0 && epics.every((e: any) => e.branchesCreated === true);
+
+    if (epics.length > 0) {
+      epics.forEach((epic: any, index: number) => {
+        console.log(`   - Epic ${index + 1}: ${epic.name}`);
+        console.log(`     - branchesCreated flag: ${epic.branchesCreated === true ? '✅ true' : '❌ false/undefined'}`);
+      });
+    }
+
+    if (!allBranchesCreated) {
+      console.log(`   → Returning BranchSetup (not all epics have branches)`);
+      return 'BranchSetup';
+    }
+    console.log(`   → All branches created, continuing...`);
+
+    // Phase 8: Developers
+    const allEpicsCompleted = epics.length > 0 && epics.every((e: any) => e.status === 'completed');
+    if (!allEpicsCompleted) {
+      return 'Developers';
+    }
+
+    // Phase 9: QA
+    if (!state.qaCompleted) {
+      return 'QA';
+    }
+
+    // Phase 10: PR Approval
+    if (!state.prApproved) {
+      return 'PRApproval';
+    }
+
+    // Phase 11: Merge
+    if (!state.mergeCompleted) {
+      return 'Merge';
+    }
+
+    // All phases completed
+    return null;
+  }
