@@ -18,6 +18,8 @@ import taskRoutes from './routes/tasks';
 import projectRoutes from './routes/projects';
 import repositoryRoutes from './routes/repositories';
 import conversationRoutes from './routes/conversations';
+import codeRoutes from './routes/code';
+import analyticsRoutes from './routes/analytics';
 
 /**
  * Multi-Agent Software Development Platform
@@ -158,6 +160,8 @@ class AgentPlatformApp {
     this.app.use('/api/projects', projectRoutes);
     this.app.use('/api/repositories', repositoryRoutes);
     this.app.use('/api/conversations', conversationRoutes);
+    this.app.use('/api/code', codeRoutes);
+    this.app.use('/api/analytics', analyticsRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
