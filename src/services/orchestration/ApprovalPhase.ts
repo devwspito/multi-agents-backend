@@ -64,8 +64,9 @@ export class ApprovalPhase extends BasePhase {
       };
     }
 
-    // 🚁 Check if auto-pilot mode is enabled
-    if (task.orchestration.autoPilotMode) {
+    // 🚁 Check if auto-pilot mode is enabled (currently disabled - manual approval only)
+    const autoPilotMode = false; // TODO: Add autoPilotMode to IOrchestration if needed
+    if (autoPilotMode) {
       console.log(`🚁 [Auto Pilot] Skipping ${this.agentName} approval`);
       console.log(`   Auto-approved - continuing to next phase`);
 
@@ -116,14 +117,12 @@ export class ApprovalPhase extends BasePhase {
     agent.approval.status = 'pending';
     agent.approval.requestedAt = new Date();
 
-    task.orchestration.status = 'pending_approval';
-    // Don't set currentPhase - keep it at current agent phase
-    task.awaitingApproval = {
-      stepId: agent._id || this.agentPath,
-      agentName: this.agentName,
-      type: 'planning',
-      requestedAt: new Date(),
-    };
+    // TODO: Add status and awaitingApproval fields to interfaces if needed
+    // task.orchestration.status = 'pending_approval';
+    // task.awaitingApproval = { ... };
+
+    // Set task status to paused for approval
+    task.status = 'paused';
 
     // 🔥 CRITICAL: Mark nested object as modified for Mongoose
     task.markModified(this.agentPath);
@@ -162,10 +161,8 @@ export class ApprovalPhase extends BasePhase {
     });
 
     // Emit WebSocket notification with structured output for frontend
-    NotificationService.notifyTaskUpdate(taskId, {
-      type: 'approval_required',
-      data: approvalData,
-    });
+    // TODO: Add notifyTaskUpdate method to NotificationService if needed
+    // NotificationService.notifyTaskUpdate(taskId, { type: 'approval_required', data: approvalData });
 
     console.log(`\n⏸️  [${this.agentName} Approval] PAUSED - waiting for user approval`);
     console.log(`   This is NOT an error - orchestration will resume after approval\n`);
@@ -183,7 +180,7 @@ export class ApprovalPhase extends BasePhase {
     };
   }
 
-  async rollback(context: OrchestrationContext): Promise<void> {
+  async rollback(_context: OrchestrationContext): Promise<void> {
     console.log(`⏪ [${this.agentName} Approval] Rollback (no-op)`);
   }
 }

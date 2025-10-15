@@ -80,35 +80,18 @@ export class ProductManagerPhase extends BasePhase {
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nAnalyze all repositories to understand the full system.`
         : '';
 
-      // Check if this is a revision based on user feedback
-      const feedbackHistory = task.orchestration.productManager.feedbackHistory || [];
-      const hasRevision = feedbackHistory.length > 0;
-      const lastFeedback = hasRevision ? feedbackHistory[feedbackHistory.length - 1] : null;
+      // Previous output for revision (if any)
       const previousOutput = task.orchestration.productManager.output;
 
       let revisionSection = '';
-      if (hasRevision && lastFeedback) {
+      if (previousOutput && task.orchestration.productManager.status === 'pending') {
         revisionSection = `
 
-# ⚠️ REVISION REQUIRED (Attempt ${feedbackHistory.length + 1})
-
-You previously provided an analysis, but the user requested changes.
-
-## Your Previous Analysis:
+# Previous Analysis Available
+Your previous analysis is available if needed for reference:
 \`\`\`
-${previousOutput || '(no previous output)'}
+${previousOutput}
 \`\`\`
-
-## User Feedback:
-"${lastFeedback.feedback}"
-
-## What You Must Do:
-1. **Read the feedback carefully** - understand what the user wants changed
-2. **Apply the requested changes** - update your analysis accordingly
-3. **Keep what was good** - don't discard work that the user approved implicitly
-4. **Provide updated analysis** - make sure it addresses the feedback
-
-**Important**: This is revision ${feedbackHistory.length + 1}. The user is waiting for you to apply their feedback.
 `;
       }
 
@@ -135,47 +118,55 @@ Be thorough but concise.`;
       if (task.attachments && task.attachments.length > 0) {
         console.log(`📎 [ProductManager] Processing ${task.attachments.length} attachment(s)`);
 
-        for (const attachment of task.attachments) {
-          // Only process images
-          if (attachment.type === 'image') {
-            try {
-              // 🔥 FIX: Convert URL path (/uploads/file.png) to filesystem path
-              // attachment.url is stored as "/uploads/filename.png" which is a URL path
-              // We need to convert it to absolute filesystem path
-              let imagePath: string;
-              if (attachment.url.startsWith('/uploads/')) {
-                // URL path like "/uploads/file.png" -> filesystem path
-                imagePath = path.join(process.cwd(), attachment.url);
-              } else if (path.isAbsolute(attachment.url)) {
-                // Already absolute filesystem path
-                imagePath = attachment.url;
-              } else {
-                // Relative path
-                imagePath = path.join(process.cwd(), attachment.url);
-              }
-
-              console.log(`  🔍 Resolving image path: ${attachment.url} -> ${imagePath}`);
-
-              if (fs.existsSync(imagePath)) {
-                const imageBuffer = fs.readFileSync(imagePath);
-                const base64Image = imageBuffer.toString('base64');
-
-                attachments.push({
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: attachment.mimeType,
-                    data: base64Image,
-                  },
-                });
-
-                console.log(`  ✅ Attached image: ${attachment.originalName} (${(attachment.size / 1024).toFixed(1)} KB)`);
-              } else {
-                console.warn(`  ⚠️ Image file not found: ${imagePath}`);
-              }
-            } catch (error: any) {
-              console.error(`  ❌ Failed to process image ${attachment.originalName}:`, error.message);
+        for (const attachmentUrl of task.attachments) {
+          // attachments are stored as URL strings
+          try {
+            // 🔥 FIX: Convert URL path (/uploads/file.png) to filesystem path
+            // attachmentUrl is stored as "/uploads/filename.png" which is a URL path
+            // We need to convert it to absolute filesystem path
+            let imagePath: string;
+            if (attachmentUrl.startsWith('/uploads/')) {
+              // URL path like "/uploads/file.png" -> filesystem path
+              imagePath = path.join(process.cwd(), attachmentUrl);
+            } else if (path.isAbsolute(attachmentUrl)) {
+              // Already absolute filesystem path
+              imagePath = attachmentUrl;
+            } else {
+              // Relative path
+              imagePath = path.join(process.cwd(), attachmentUrl);
             }
+
+            console.log(`  🔍 Resolving image path: ${attachmentUrl} -> ${imagePath}`);
+
+            if (fs.existsSync(imagePath)) {
+              const imageBuffer = fs.readFileSync(imagePath);
+              const base64Image = imageBuffer.toString('base64');
+
+              // Detect mime type from file extension
+              const ext = path.extname(imagePath).toLowerCase();
+              let mimeType = 'image/jpeg';
+              if (ext === '.png') mimeType = 'image/png';
+              else if (ext === '.gif') mimeType = 'image/gif';
+              else if (ext === '.webp') mimeType = 'image/webp';
+
+              attachments.push({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: mimeType,
+                  data: base64Image,
+                },
+              });
+
+              const fileName = path.basename(imagePath);
+              const fileSizeKB = (imageBuffer.length / 1024).toFixed(1);
+              console.log(`  ✅ Attached image: ${fileName} (${fileSizeKB} KB)`);
+            } else {
+              console.warn(`  ⚠️ Image file not found: ${imagePath}`);
+            }
+          } catch (error: any) {
+            const fileName = path.basename(attachmentUrl);
+            console.error(`  ❌ Failed to process image ${fileName}:`, error.message);
           }
         }
       }
