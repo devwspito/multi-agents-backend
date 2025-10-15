@@ -85,7 +85,9 @@ export class BranchSetupPhase extends BasePhase {
       phase: 'architecture',
     });
 
-    const epics = task.orchestration.techLead.epics || [];
+    // Stories from Project Manager (not epics - that term is deprecated)
+    const stories = task.orchestration.projectManager?.stories || [];
+    const epics = stories; // Alias for backward compatibility
 
     if (epics.length === 0) {
       console.log('\n❌ [BranchSetup] CRITICAL ERROR: No epics found');
@@ -163,7 +165,7 @@ export class BranchSetupPhase extends BasePhase {
           try {
             // Check if branch already exists in database
             const existingBranch = epic.branches.find(
-              (b) => b.repository === repo.name
+              (b: any) => b.repository === repo.name
             );
 
             if (existingBranch && existingBranch.pushed) {
@@ -261,7 +263,7 @@ export class BranchSetupPhase extends BasePhase {
         agentName: 'branch-setup',
         payload: {
           epicsCount: epics.length,
-          branchesCreated: epics.reduce((sum, e) => sum + (e.branches?.length || 0), 0),
+          branchesCreated: epics.reduce((sum: number, e: any) => sum + (e.branches?.length || 0), 0),
         },
       });
 
@@ -274,7 +276,7 @@ export class BranchSetupPhase extends BasePhase {
         metadata: {
           epicsCount: epics.length,
           branchesCreated: epics.reduce(
-            (sum, e) => sum + (e.branches?.length || 0),
+            (sum: number, e: any) => sum + (e.branches?.length || 0),
             0
           ),
         },
@@ -284,7 +286,7 @@ export class BranchSetupPhase extends BasePhase {
       context.setData('branchesCreated', true);
       context.setData(
         'branchCount',
-        epics.reduce((sum, e) => sum + (e.branches?.length || 0), 0)
+        epics.reduce((sum: number, e: any) => sum + (e.branches?.length || 0), 0)
       );
 
       return {
@@ -292,14 +294,14 @@ export class BranchSetupPhase extends BasePhase {
         data: {
           epicsCount: epics.length,
           branchesCreated: epics.reduce(
-            (sum, e) => sum + (e.branches?.length || 0),
+            (sum: number, e: any) => sum + (e.branches?.length || 0),
             0
           ),
         },
         metrics: {
           epics_count: epics.length,
           branches_created: epics.reduce(
-            (sum, e) => sum + (e.branches?.length || 0),
+            (sum: number, e: any) => sum + (e.branches?.length || 0),
             0
           ),
         },
