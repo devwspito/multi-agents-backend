@@ -144,6 +144,8 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
   try {
+    console.log('🔍 [START] Received body:', JSON.stringify(req.body, null, 2));
+    console.log('🔍 [START] Task ID:', req.params.id);
     const validatedData = startTaskSchema.parse(req.body);
 
     const task = await Task.findOne({
