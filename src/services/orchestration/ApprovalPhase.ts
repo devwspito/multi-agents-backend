@@ -1,5 +1,4 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
-import { NotificationService } from '../NotificationService';
 
 /**
  * Approval Phase (Generic)
@@ -121,8 +120,9 @@ export class ApprovalPhase extends BasePhase {
     // task.orchestration.status = 'pending_approval';
     // task.awaitingApproval = { ... };
 
-    // Set task status to paused for approval
-    task.status = 'paused';
+    // Set task status to pending while waiting for approval
+    // Note: 'paused' is not in TaskStatus type, using 'pending' instead
+    task.status = 'pending';
 
     // 🔥 CRITICAL: Mark nested object as modified for Mongoose
     task.markModified(this.agentPath);

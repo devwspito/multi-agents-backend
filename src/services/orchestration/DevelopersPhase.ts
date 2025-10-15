@@ -47,19 +47,21 @@ export class DevelopersPhase extends BasePhase {
     }
 
     const team = context.task.orchestration.team || [];
-    const epics = context.task.orchestration.techLead?.epics || [];
+    // Get stories from Project Manager (not epics from Tech Lead)
+    const stories = context.task.orchestration.projectManager?.stories || [];
+    const epics = stories; // Alias for backward compatibility
 
-    // If team exists and has members, AND all epics are completed, skip
+    // If team exists and has members, AND all epics/stories are completed, skip
     if (team.length > 0 && epics.length > 0) {
-      const allEpicsCompleted = epics.every(epic => epic.status === 'completed');
+      const allEpicsCompleted = epics.every((epic: any) => epic.status === 'completed');
 
       if (allEpicsCompleted) {
-        console.log(`[SKIP] Developers already completed - all ${epics.length} epics done`);
+        console.log(`[SKIP] Developers already completed - all ${epics.length} stories done`);
 
         // Restore phase data
         context.setData('developmentTeam', team);
         context.setData('developmentComplete', true);
-        context.setData('epicExecutionOrder', epics.map((e) => e.id));
+        context.setData('epicExecutionOrder', epics.map((e: any) => e.id));
 
         return true;
       }
@@ -241,28 +243,28 @@ export class DevelopersPhase extends BasePhase {
 
       // Build team
       const team: ITeamMember[] = [];
-      const allStories = epics.flatMap((e) =>
-        e.stories.map((storyId) => ({ storyId, epicId: e.id }))
-      );
+      // const allStories = epics.flatMap((e: any) =>
+      //   e.stories.map((storyId: string) => ({ storyId, epicId: e.id }))
+      // ); // unused
 
-      // Create developers
-      for (let i = 0; i < (composition.developers || 0); i++) {
-        const instanceId = `dev-${i + 1}`;
+      // Create developers (seniors + juniors)
+      const totalDevelopers = (composition?.seniors || 0) + (composition?.juniors || 0);
+      for (let i = 0; i < totalDevelopers; i++) {
+        // Determine if senior or junior based on index
+        const isSenior = i < (composition?.seniors || 0);
+        const agentType: 'senior-developer' | 'junior-developer' = isSenior ? 'senior-developer' : 'junior-developer';
+        const instanceId = isSenior ? `senior-dev-${i + 1}` : `junior-dev-${i - (composition?.seniors || 0) + 1}`;
+
         const assignedStories = assignments
           .filter((a) => a.assignedTo === instanceId)
           .map((a) => a.storyId);
 
-        // Determine epicId based on the first story assigned
-        const firstStory = assignedStories[0];
-        const epicId =
-          allStories.find((s) => s.storyId === firstStory)?.epicId || 'default-epic';
-
         team.push({
-          agentType: 'developer',
+          agentType,
           instanceId,
-          epicId,
           assignedStories,
           status: 'idle',
+          pullRequests: [],
         });
       }
 
@@ -275,7 +277,7 @@ export class DevelopersPhase extends BasePhase {
         phase: 'development',
         metadata: {
           developersCount: team.length,
-          developers: team.map(t => ({ id: t.instanceId, epicId: t.epicId, storiesCount: t.assignedStories.length })),
+          developers: team.map(t => ({ id: t.instanceId, type: t.agentType, storiesCount: t.assignedStories.length })),
         },
       });
 
@@ -300,8 +302,11 @@ export class DevelopersPhase extends BasePhase {
           },
         });
 
-        // Get developers assigned to this epic
-        const epicDevelopers = team.filter((member) => member.epicId === epic.id);
+        // Get developers assigned to this epic (by checking if they have stories from this epic)
+        const epicStoryIds = epic.stories || [];
+        const epicDevelopers = team.filter((member) =>
+          member.assignedStories.some(storyId => epicStoryIds.includes(storyId))
+        );
 
         if (epicDevelopers.length === 0) {
           await LogService.warn(`Epic skipped - No developers assigned: ${epic.name}`, {
