@@ -47,7 +47,7 @@ Always provide:
 1. Task complexity assessment (small/medium/large/epic)
 2. High-level approach recommendation
 3. Success criteria`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'project-manager': {
@@ -79,7 +79,7 @@ CRITICAL: Your output MUST be valid JSON with this structure:
     "reasoning": "Why this team size"
   }
 }`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'tech-lead': {
@@ -114,7 +114,7 @@ CRITICAL: Your output MUST be valid JSON with this structure:
     }
   ]
 }`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'senior-developer': {
@@ -132,7 +132,7 @@ Always provide:
 1. Clean, well-tested code
 2. Documentation
 3. Security considerations`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'junior-developer': {
@@ -152,7 +152,7 @@ Always provide:
 1. Clean, readable code
 2. Basic tests
 3. Questions for senior review if needed`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'qa-engineer': {
@@ -172,7 +172,7 @@ Always provide:
 1. Integration test results
 2. Bug reports (if any)
 3. GO/NO-GO decision`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
 
       'merge-coordinator': {
@@ -190,7 +190,7 @@ Always provide:
 1. Conflict analysis
 2. Resolution strategy
 3. Final merge plan`,
-        model: 'sonnet',
+        model: 'haiku', // Using Haiku 4.5 for cost-efficiency
       },
     };
   }
