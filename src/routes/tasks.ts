@@ -18,8 +18,12 @@ const createTaskSchema = z.object({
 });
 
 const startTaskSchema = z.object({
-  description: z.string().min(1), // Descripción de la tarea desde el chat
+  description: z.string().min(1).optional(), // Descripción de la tarea desde el chat
+  content: z.string().min(1).optional(), // Compatibilidad con mensajes
   instructions: z.string().optional(),
+}).refine((data) => data.description || data.content, {
+  message: "Either 'description' or 'content' must be provided",
+  path: ['description'],
 });
 
 /**
@@ -146,6 +150,8 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
   try {
     console.log('🔍 [START] Received body:', JSON.stringify(req.body, null, 2));
     console.log('🔍 [START] Task ID:', req.params.id);
+    console.log('🔍 [START] description field:', req.body.description);
+    console.log('🔍 [START] content field:', req.body.content);
     const validatedData = startTaskSchema.parse(req.body);
 
     const task = await Task.findOne({
@@ -170,7 +176,8 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Actualizar descripción desde el chat y estado
-    task.description = validatedData.description;
+    // Usar description si existe, si no usar content (compatibilidad)
+    task.description = validatedData.description || validatedData.content || '';
     task.status = 'in_progress';
     await task.save();
 
@@ -196,9 +203,10 @@ router.post('/:id/start', authenticate, async (req: AuthRequest, res) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('🔍 [START] Validation error:', error.errors);
       res.status(400).json({
         success: false,
-        message: 'Invalid start data - description is required',
+        message: 'Invalid start data - either description or content is required',
         errors: error.errors,
       });
       return;
