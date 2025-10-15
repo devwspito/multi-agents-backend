@@ -1,7 +1,8 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { GitHubService } from '../GitHubService';
-import { LogService } from '../logging/LogService';
-import path from 'path';
+// Unused imports - phase is disabled (IStory incompatible with epic structure)
+// import { LogService } from '../logging/LogService';
+// import path from 'path';
 
 /**
  * Branch Setup Phase
@@ -19,7 +20,7 @@ export class BranchSetupPhase extends BasePhase {
   readonly name = 'BranchSetup'; // Must match PHASE_ORDER
   readonly description = 'Creating and pushing epic branches to GitHub';
 
-  constructor(private githubService: GitHubService) {
+  constructor(private _githubService: GitHubService) { // Prefixed with _ to indicate intentionally unused
     super();
   }
 
@@ -27,7 +28,7 @@ export class BranchSetupPhase extends BasePhase {
    * Skip if branches already created for all epics
    * NOTE: Currently skipped because IStory structure doesn't match epic structure needed
    */
-  async shouldSkip(context: OrchestrationContext): Promise<boolean> {
+  async shouldSkip(_context: OrchestrationContext): Promise<boolean> {
     // Skip this phase - IStory doesn't have branch properties like epics did
     console.log('✅ [SKIP] BranchSetup - Feature not compatible with IStory structure');
     return true;
