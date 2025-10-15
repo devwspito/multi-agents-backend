@@ -406,7 +406,8 @@ Be thorough but concise.`;
         prompt,
         workspacePath || this.workspaceDir,
         taskId,
-        'Product Manager'
+        'Product Manager',
+        task.attachments
       );
 
       task.orchestration.productManager.status = 'completed';
@@ -503,7 +504,8 @@ Break this task into implementable stories.
         prompt,
         workspacePath || this.workspaceDir,
         taskId,
-        'Project Manager'
+        'Project Manager',
+        task.attachments
       );
 
       // Parsear JSON response
@@ -624,7 +626,8 @@ ${workspaceInfo}
         prompt,
         workspacePath || this.workspaceDir,
         taskId,
-        'Tech Lead'
+        'Tech Lead',
+        task.attachments
       );
 
       // Parsear JSON response
@@ -799,7 +802,8 @@ ${workspaceInfo}
           prompt,
           workspacePath || this.workspaceDir,
           taskId,
-          displayName
+          displayName,
+          task.attachments
         );
 
         // Update member
@@ -1018,7 +1022,8 @@ Provide:
         prompt,
         workspacePath || this.workspaceDir,
         taskId,
-        'QA Engineer'
+        'QA Engineer',
+        task.attachments
       );
 
       task.orchestration.qaEngineer!.status = 'completed';
@@ -1102,11 +1107,21 @@ Provide:
     prompt: string,
     workDir: string,
     taskId?: string,
-    agentName?: string
+    agentName?: string,
+    attachments?: string[] // URLs de imágenes desde task.attachments
   ): Promise<{ output: string; usage: any; cost: number; sessionId: string }> {
     const agentDefinitions = this.getAgentDefinitions();
 
     try {
+      // Convertir attachments (URLs) a formato SDK
+      const sdkAttachments = attachments?.map(url => ({
+        type: 'image' as const,
+        source: {
+          type: 'url' as const,
+          url
+        }
+      })) || [];
+
       const sdkOptions: Options = {
         cwd: workDir,
         systemPrompt: {
@@ -1119,6 +1134,7 @@ Provide:
         permissionMode: 'bypassPermissions',
         settingSources: ['project'],
         maxTurns: 50,
+        ...(sdkAttachments.length > 0 && { attachments: sdkAttachments }),
       };
 
       let output = '';
