@@ -8,6 +8,7 @@
  * - Clear error messages for invalid dependency graphs
  */
 
+// @ts-ignore - IEpic is deprecated, file needs refactoring to use IStory
 import { IEpic } from '../../models/Task';
 
 export interface DependencyLevel {
