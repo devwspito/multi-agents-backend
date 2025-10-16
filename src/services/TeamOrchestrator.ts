@@ -3,6 +3,7 @@ import { Task, ITask, AgentType, IStory, ITeamMember } from '../models/Task';
 import { Repository } from '../models/Repository';
 import { GitHubService } from './GitHubService';
 import { NotificationService } from './NotificationService';
+import { ContextCompactionService } from './ContextCompactionService';
 import path from 'path';
 import os from 'os';
 
@@ -21,10 +22,12 @@ import os from 'os';
 export class TeamOrchestrator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
+  private readonly compactionService: ContextCompactionService;
 
   constructor() {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
+    this.compactionService = new ContextCompactionService();
   }
 
   /**
@@ -1132,8 +1135,9 @@ Provide:
         agents: agentDefinitions,
         allowedTools: agentDefinitions[agentType].tools,
         permissionMode: 'bypassPermissions',
-        settingSources: ['project'],
         maxTurns: 50,
+        // 🗜️ Context Compaction - SDK handles automatically when approaching limits
+        // We'll monitor via 'compact_boundary' messages
         ...(sdkAttachments.length > 0 && { attachments: sdkAttachments }),
       };
 
@@ -1213,7 +1217,54 @@ Provide:
           }
         }
 
-        // 3. Resultado final
+        // 3. Context Compaction (automatic by SDK)
+        if (message.type === 'system' && (message as any).subtype === 'compact_boundary') {
+          const compactMetadata = (message as any).compact_metadata;
+          const trigger = compactMetadata?.trigger || 'auto';
+          const preTokens = compactMetadata?.pre_tokens || 0;
+
+          console.log(`\n🗜️ =============== CONTEXT COMPACTION TRIGGERED ===============`);
+          console.log(`   Trigger: ${trigger === 'auto' ? 'Automatic (near limit)' : 'Manual'}`);
+          console.log(`   Pre-compaction tokens: ${preTokens.toLocaleString()}`);
+          console.log(`   Action: SDK automatically summarizing old messages`);
+          console.log(`================================================================\n`);
+
+          if (taskId && agentName) {
+            NotificationService.emitAgentMessage(
+              taskId,
+              agentName,
+              `🗜️ **Context Compaction**: Automatically summarizing conversation history (${preTokens.toLocaleString()} tokens → optimized)`
+            );
+          }
+
+          // Use our compaction service for monitoring
+          if (this.compactionService.shouldCompact(usage)) {
+            console.log(`   ⚠️ CompactionService also recommends compaction`);
+          }
+        }
+
+        // 4. Token usage monitoring (proactive warning)
+        if (message.type === 'assistant' && message.message.usage) {
+          const currentUsage = message.message.usage;
+          const totalTokens =
+            (currentUsage.input_tokens || 0) +
+            (currentUsage.output_tokens || 0);
+
+          // Check if approaching context limit (using our compaction service)
+          if (this.compactionService.shouldCompact(currentUsage)) {
+            console.log(`⚠️ [Token Monitor] Approaching context limit: ${totalTokens.toLocaleString()} tokens`);
+
+            if (taskId && agentName) {
+              NotificationService.emitAgentMessage(
+                taskId,
+                agentName,
+                `⚠️ **High token usage**: ${totalTokens.toLocaleString()} tokens (SDK will auto-compact if needed)`
+              );
+            }
+          }
+        }
+
+        // 5. Resultado final
         if (message.type === 'result') {
           usage = message.usage;
           sessionId = message.session_id;
