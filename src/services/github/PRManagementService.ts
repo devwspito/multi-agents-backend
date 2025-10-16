@@ -1,5 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
+// @ts-ignore - IEpic is deprecated, file needs refactoring to use IStory
 import { ITask, IEpic } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
