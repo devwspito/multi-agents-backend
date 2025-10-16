@@ -266,18 +266,18 @@ export class EventStore {
           state.teamComposition = payload;
           break;
 
-        // Branch Setup
-        case 'BranchPushed':
-          const epic = state.epics.find((e: any) => e.id === payload.epicId);
-          if (epic) {
-            epic.branchesCreated = true;
-          }
-          break;
+        // Branch Setup (DEPRECATED - BranchSetupPhase removed)
+        // case 'BranchPushed':
+        //   const epic = state.epics.find((e: any) => e.id === payload.epicId);
+        //   if (epic) {
+        //     epic.branchesCreated = true;
+        //   }
+        //   break;
 
-        case 'BranchSetupCompleted':
-          state.branchSetupCompleted = true;
-          state.currentPhase = 'development';
-          break;
+        // case 'BranchSetupCompleted':
+        //   state.branchSetupCompleted = true;
+        //   state.currentPhase = 'development';
+        //   break;
 
         // Developers
         case 'StoryStarted':
@@ -409,9 +409,10 @@ export class EventStore {
     }
 
     // Check phase progression
-    if (state.developersCompleted && !state.branchSetupCompleted) {
-      errors.push('Developers completed but BranchSetup never completed');
-    }
+    // BranchSetup phase removed - no longer needed
+    // if (state.developersCompleted && !state.branchSetupCompleted) {
+    //   errors.push('Developers completed but BranchSetup never completed');
+    // }
 
     if (state.qaCompleted && !state.developersCompleted) {
       errors.push('QA completed but Developers never completed');
