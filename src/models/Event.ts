@@ -38,12 +38,12 @@ export type EventType =
   | 'StoryCreated'
   | 'TeamCompositionDefined'
 
-  // Branch setup events
-  | 'BranchSetupStarted'
-  | 'BranchCreated'
-  | 'BranchPushed'
-  | 'BranchSetupCompleted'
-  | 'BranchSetupFailed'
+  // Branch setup events (DEPRECATED - BranchSetupPhase removed, incompatible with IStory)
+  // | 'BranchSetupStarted'
+  // | 'BranchCreated'
+  // | 'BranchPushed'
+  // | 'BranchSetupCompleted'
+  // | 'BranchSetupFailed'
 
   // Developer events
   | 'DeveloperStarted'
