@@ -83,7 +83,9 @@
       "Bash(awk:*)",
       "Bash(git ls-tree:*)",
       "Bash(echo $PATH)",
-      "Bash(echo \"PATH actual: $PATH\")"
+      "Bash(echo \"PATH actual: $PATH\")",
+      "Bash(git gc:*)",
+      "Bash(git stash:*)"
     ],
     "deny": [],
     "ask": []
