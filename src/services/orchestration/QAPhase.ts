@@ -92,11 +92,21 @@ export class QAPhase extends BasePhase {
     });
 
     try {
-      // TODO: Add epics to IAgentStep or get from stories
-      // For now, use stories from projectManager
-      const stories = task.orchestration.projectManager?.stories || [];
-      const epics = stories; // Alias for backward compatibility
-      const epicBranches = epics.map((e: any) => e.branchName).filter(Boolean) as string[];
+      // 🔥 EVENT SOURCING: Get stories from EventStore (same as other phases)
+      const { eventStore } = await import('../EventStore');
+      const state = await eventStore.getCurrentState(task._id as any);
+      const stories = state.stories || [];
+
+      console.log(`📋 [QA] Retrieved ${stories.length} stories from EventStore`);
+
+      // Get epic branches from stories (stories have branchName when developers create branches)
+      const epicBranches = stories.map((s: any) => s.branchName).filter(Boolean) as string[];
+
+      console.log(`🌿 [QA] Stories and their branches:`);
+      stories.forEach((s: any) => {
+        console.log(`  - Story ${s.id}: branchName="${s.branchName || 'NONE'}"`);
+      });
+      console.log(`🌿 [QA] Will test branches: ${JSON.stringify(epicBranches)}`);
 
       await LogService.info(`Testing integration of ${epicBranches.length} epic branches`, {
         taskId,
@@ -126,7 +136,7 @@ export class QAPhase extends BasePhase {
 
         await this.githubService.createIntegrationBranch(
           primaryRepoPath,
-          primaryRepo.branch,
+          primaryRepo.githubBranch || 'main', // Use githubBranch instead of branch
           integrationBranch
         );
 
@@ -172,12 +182,27 @@ Provide:
 2. Any bugs or issues found
 3. **GO/NO-GO decision**`;
 
+      // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+      // This ensures ALL agents receive the same multimedia context
+      const attachments = context.getData<any[]>('attachments') || [];
+      if (attachments.length > 0) {
+        console.log(`📎 [QA] Using ${attachments.length} attachment(s) from context`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📎 QA Engineer: Received ${attachments.length} image(s) from context for quality validation`
+        );
+      }
+
       const result = await this.executeAgentFn(
         'qa-engineer',
         prompt,
         workspacePath || this.workspaceDir,
         taskId,
-        'QA Engineer'
+        'QA Engineer',
+        undefined, // sessionId
+        undefined, // fork
+        attachments.length > 0 ? attachments : undefined // attachments
       );
 
       // Store results
@@ -203,8 +228,7 @@ Provide:
 
       await task.save();
 
-      // 🔥 EVENT SOURCING: Emit completion event
-      const { eventStore } = await import('../EventStore');
+      // 🔥 EVENT SOURCING: Emit completion event (reuse eventStore from line 96)
       await eventStore.append({
         taskId: task._id as any,
         eventType: 'QACompleted',
@@ -221,16 +245,68 @@ Provide:
 
       console.log(`📝 [QA] Emitted QACompleted event`);
 
+      // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `\n${'='.repeat(80)}\n🧪 QA ENGINEER - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
+      );
+
       // Send output to chat
       NotificationService.emitAgentMessage(taskId, 'QA Engineer', result.output);
 
-      // ✅ CRITICAL: Create PRs AFTER QA completes successfully
+      // 🔥 CHECK IF QA DETECTED ERRORS (lint/build/test failures)
+      const qaAttempt = context.getData<number>('qaAttempt') || 1;
+      const hasErrors = this.detectQAErrors(result.output);
+
+      if (hasErrors && qaAttempt === 1) {
+        // ❌ QA FAILED ON ATTEMPT 1 → Call Fixer
+        console.log(`❌ [QA] Detected errors on attempt 1 - calling Fixer`);
+
+        const errorDetails = this.extractErrorDetails(result.output);
+
+        context.setData('qaErrors', errorDetails.errorOutput);
+        context.setData('qaErrorType', errorDetails.errorType);
+        context.setData('qaAttempt', 1);
+
+        NotificationService.emitAgentMessage(
+          taskId,
+          'QA Engineer',
+          `⚠️ QA detected ${errorDetails.errorType} errors. Calling Fixer to resolve...`
+        );
+
+        await LogService.warn(`QA detected errors - Fixer will attempt fix`, {
+          taskId,
+          category: 'quality',
+          phase: 'qa',
+          metadata: {
+            errorType: errorDetails.errorType,
+            attempt: 1,
+          },
+        });
+
+        // Return success so Fixer phase executes
+        return {
+          success: true,
+          data: {
+            qaAttempt: 1,
+            hasErrors: true,
+            errorType: errorDetails.errorType,
+          },
+        };
+      }
+
+      // ✅ QA PASSED OR ATTEMPT 2 → Create PRs
+      // Note: If errors exist after Fixer attempt, they're documented in QA output
+
       await LogService.info('Creating Pull Requests after QA validation', {
         taskId,
         category: 'pr',
         phase: 'qa',
         metadata: {
-          epicsCount: epics.length,
+          epicBranchesCount: epicBranches.length,
+          qaAttempt,
+          hasErrors,
         },
       });
 
@@ -238,6 +314,7 @@ Provide:
         task,
         repositories,
         workspacePath
+        // Note: If hasErrors, QA output already documents the errors
       );
 
       const successfulPRs = prResults.filter((r) => r.success).length;
@@ -328,5 +405,62 @@ Provide:
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Detect if QA found errors (lint/build/test failures)
+   */
+  private detectQAErrors(qaOutput: string): boolean {
+    const errorIndicators = [
+      'eslint',
+      'lint error',
+      'build failed',
+      'compilation error',
+      'test failed',
+      'tests failed',
+      'error ts',
+      'typeerror',
+      'syntaxerror',
+      'npm err!',
+      'testsPass": false',
+      'buildSuccess": false',
+      'lintSuccess": false',
+    ];
+
+    const lowerOutput = qaOutput.toLowerCase();
+    return errorIndicators.some((indicator) => lowerOutput.includes(indicator));
+  }
+
+  /**
+   * Extract error details from QA output
+   */
+  private extractErrorDetails(qaOutput: string): {
+    errorType: string;
+    errorOutput: string;
+  } {
+    const lowerOutput = qaOutput.toLowerCase();
+
+    let errorType = 'unknown';
+    if (lowerOutput.includes('lint')) {
+      errorType = 'lint';
+    } else if (lowerOutput.includes('build') || lowerOutput.includes('compilation')) {
+      errorType = 'build';
+    } else if (lowerOutput.includes('test')) {
+      errorType = 'test';
+    }
+
+    // Extract relevant error section (first 2000 chars or until "Summary")
+    let errorOutput = qaOutput;
+    const summaryIndex = qaOutput.indexOf('## Summary');
+    if (summaryIndex > 0) {
+      errorOutput = qaOutput.substring(0, summaryIndex);
+    }
+
+    // Truncate if too long
+    if (errorOutput.length > 2000) {
+      errorOutput = errorOutput.substring(0, 2000) + '\n\n... (truncated)';
+    }
+
+    return { errorType, errorOutput };
   }
 }

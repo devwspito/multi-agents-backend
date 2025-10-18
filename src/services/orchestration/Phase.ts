@@ -12,6 +12,7 @@ export class OrchestrationContext {
   workspacePath: string | null;
   phaseResults: Map<string, PhaseResult>;
   sharedData: Map<string, any>;
+  conversationHistory: any[]; // For context compaction
 
   constructor(
     task: ITask,
@@ -23,6 +24,7 @@ export class OrchestrationContext {
     this.workspacePath = workspacePath;
     this.phaseResults = new Map();
     this.sharedData = new Map();
+    this.conversationHistory = []; // Initialize empty conversation history
   }
 
   /**

@@ -43,6 +43,15 @@ export interface TaskState {
     status: 'pending' | 'in_progress' | 'completed' | 'failed';
     priority: number;
     complexity: string;
+    estimatedComplexity?: string;
+    branchName?: string;
+    filesToRead?: string[];
+    filesToModify?: string[];
+    filesToCreate?: string[];
+    dependencies?: string[];
+    completedBy?: string;
+    completedAt?: Date;
+    error?: string;
   }>;
 
   // Team composition
@@ -258,8 +267,20 @@ export class EventStore {
             assignedTo: payload.assignedTo,
             status: 'pending',
             priority: payload.priority,
-            complexity: payload.complexity,
+            complexity: payload.complexity || payload.estimatedComplexity, // Support both field names
+            estimatedComplexity: payload.estimatedComplexity || payload.complexity,
+            filesToRead: payload.filesToRead || [],
+            filesToModify: payload.filesToModify || [],
+            filesToCreate: payload.filesToCreate || [],
+            dependencies: payload.dependencies || [],
           });
+          break;
+
+        case 'StoryBranchCreated':
+          const storyWithBranch = state.stories.find((s: any) => s.id === payload.storyId);
+          if (storyWithBranch) {
+            storyWithBranch.branchName = payload.branchName;
+          }
           break;
 
         case 'TeamCompositionDefined':

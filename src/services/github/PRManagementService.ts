@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import { ITask, IEpic } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
-import { AutoHealingService, IHealingContext } from '../quality/AutoHealingService';
+// import { AutoHealingService, IHealingContext } from '../quality/AutoHealingService'; // DEPRECATED - Service removed
 import { NotificationService } from '../NotificationService';
 
 const execAsync = promisify(exec);
@@ -26,14 +26,14 @@ export interface IPRCreationResult {
  * Handles all Pull Request creation and management logic
  * - Creates PRs after all developers complete
  * - Validates changes exist
- * - Handles PR creation failures with auto-healing
  * - Searches for existing PRs
+ * Note: Auto-healing feature temporarily disabled
  */
 export class PRManagementService {
-  private autoHealingService: AutoHealingService;
+  // private autoHealingService: AutoHealingService; // DEPRECATED
 
   constructor(private githubService: GitHubService) {
-    this.autoHealingService = new AutoHealingService(githubService);
+    // this.autoHealingService = new AutoHealingService(githubService); // DEPRECATED
   }
 
   /**
@@ -51,7 +51,10 @@ export class PRManagementService {
     const taskId = (task._id as any).toString();
     console.log(`\n🔀 [PR Management] Creating Pull Requests for completed epics (Multi-Repo)...`);
 
-    const epics = task.orchestration.techLead.epics || [];
+    // 🔥 EVENT SOURCING: Rebuild epics from events instead of reading from task model
+    const { eventStore } = await import('../EventStore');
+    const state = await eventStore.getCurrentState(task._id as any);
+    const epics = state.epics || [];
 
     if (repositories.length === 0 || !workspacePath) {
       console.log(`  ⚠️ No repository or workspace available for PR creation`);
@@ -276,93 +279,13 @@ export class PRManagementService {
       };
     }
 
-    // No existing PR, try auto-healing
-    const lastStory = epic.stories[epic.stories.length - 1];
-    const storiesMap = task.orchestration.techLead.storiesMap || {};
-    const storyObj = storiesMap[lastStory];
-
-    const healingContext: IHealingContext = {
-      repoPath: primaryRepoPath,
-      branchName,
-      userId: task.userId.toString(),
-      epic,
-      story: storyObj,
-      repository: primaryRepo,
-    };
-
-    const healingResult = await this.autoHealingService.healPRCreationFailure(healingContext);
-
-    if (!healingResult.success || healingResult.action === 'already_merged') {
-      console.log(`  ⚠️ Auto-healing could not resolve issue: ${healingResult.details}`);
-      return {
-        success: false,
-        error: healingResult.details,
-        action: 'skipped',
-      };
-    }
-
-    // Healing succeeded, retry PR creation
-    if (healingResult.action === 'changes_committed' || healingResult.action === 'branch_synced') {
-      console.log(`  🔄 Retrying PR creation after auto-healing...`);
-
-      try {
-        const retryRepoDoc = await Repository.findById(primaryRepo.id);
-        if (!retryRepoDoc) {
-          return {
-            success: false,
-            error: 'Repository document not found for retry',
-            action: 'skipped',
-          };
-        }
-
-        const retryPR = await this.githubService.createPullRequest(
-          retryRepoDoc,
-          (task.userId as any)._id.toString(),
-          {
-            title: `[Epic] ${epic.name}`,
-            description: `${epic.description}\n\n**Epic**: ${epic.id}`,
-            branch: branchName,
-          }
-        );
-
-        epic.pullRequestNumber = retryPR.number;
-        epic.pullRequestUrl = retryPR.url;
-        epic.pullRequestState = 'open';
-
-        // 🔥 CRITICAL: Set simple boolean flag for flow control (Mongoose persists reliably)
-        epic.prCreated = true;
-
-        // 🔥 CRITICAL: Mark nested array as modified for Mongoose
-        task.markModified('orchestration.techLead.epics');
-        await task.save();
-
-        console.log(`  ✅ PR created after auto-healing: #${retryPR.number}`);
-
-        NotificationService.emitAgentMessage(
-          taskId,
-          'Development Team',
-          `✅ **PR created after auto-healing**: ${retryPR.url}`
-        );
-
-        return {
-          success: true,
-          prNumber: retryPR.number,
-          prUrl: retryPR.url,
-          action: 'healed',
-        };
-      } catch (retryError: any) {
-        console.error(`  ❌ PR creation still failed after healing:`, retryError.message);
-        return {
-          success: false,
-          error: retryError.message,
-          action: 'skipped',
-        };
-      }
-    }
+    // AUTO-HEALING DISABLED: Feature temporarily disabled
+    // The auto-healing service was removed during cleanup
+    console.log(`  ⚠️ Auto-healing disabled. PR creation failed for epic "${epic.name}"`);
 
     return {
       success: false,
-      error: 'Healing did not result in actionable fix',
+      error: 'PR creation failed. Auto-healing feature is temporarily disabled.',
       action: 'skipped',
     };
   }

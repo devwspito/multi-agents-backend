@@ -95,9 +95,7 @@ ${previousOutput}
 `;
       }
 
-      const prompt = `Act as the product-manager agent.
-
-# Task Analysis
+      const prompt = `# Task to Analyze
 ${revisionSection}
 ## Task Details:
 - **Title**: ${task.title}
@@ -105,18 +103,35 @@ ${revisionSection}
 - **Priority**: ${task.priority}
 ${repoInfo}${workspaceInfo}
 
-## Your Mission:
-Analyze this task and provide:
-1. **Task Complexity** (small/medium/large/epic)
-2. **Recommended Approach**
-3. **Success Criteria**
+🔍 **CRITICAL**: You MUST explore the codebase FIRST before outputting JSON:
+1. Use Bash("ls -la") to see all repositories in workspace
+2. Use Bash("cd repo && find . -name '*.ts' -o -name '*.js' | head -30") to explore each repo
+3. Use Read("repo/package.json") to understand dependencies and scripts
+4. Use Grep("pattern") to find existing similar features
+5. ONLY THEN output the JSON
 
-Be thorough but concise.`;
+${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attachments.length} image(s) attached. Analyze them for visual requirements (UI mockups, diagrams, etc.).\n\n` : ''}**Output format** (match exactly - valid JSON only):
+\`\`\`json
+{
+  "complexity": "simple|moderate|complex|epic",
+  "affectedRepositories": ["exact-repo-name-1", "exact-repo-name-2"],
+  "successCriteria": ["measurable criterion 1", "measurable criterion 2"],
+  "recommendations": "Technical approach based on ACTUAL code exploration",
+  "challenges": ["technical challenge 1", "technical challenge 2"]
+}
+\`\`\`
+
+**DO NOT** output anything else. **DO NOT** talk about what you would do. **ACT**: Use tools, explore code, output JSON.`;
 
       // 🔥 IMAGES: Convert task attachments to SDK format
       const attachments: any[] = [];
       if (task.attachments && task.attachments.length > 0) {
         console.log(`📎 [ProductManager] Processing ${task.attachments.length} attachment(s)`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📎 Product Manager: Processing ${task.attachments.length} attachment(s) for visual context`
+        );
 
         for (const attachmentUrl of task.attachments) {
           // attachments are stored as URL strings
@@ -161,12 +176,27 @@ Be thorough but concise.`;
               const fileName = path.basename(imagePath);
               const fileSizeKB = (imageBuffer.length / 1024).toFixed(1);
               console.log(`  ✅ Attached image: ${fileName} (${fileSizeKB} KB)`);
+              NotificationService.emitConsoleLog(
+                taskId,
+                'info',
+                `  ✅ Image attached: ${fileName} (${fileSizeKB} KB, ${mimeType})`
+              );
             } else {
               console.warn(`  ⚠️ Image file not found: ${imagePath}`);
+              NotificationService.emitConsoleLog(
+                taskId,
+                'warn',
+                `  ⚠️ Image file not found: ${path.basename(attachmentUrl)}`
+              );
             }
           } catch (error: any) {
             const fileName = path.basename(attachmentUrl);
             console.error(`  ❌ Failed to process image ${fileName}:`, error.message);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `  ❌ Failed to process image ${fileName}: ${error.message}`
+            );
           }
         }
       }
@@ -232,6 +262,13 @@ Be thorough but concise.`;
 
       console.log(`📝 [ProductManager] Emitted ProductManagerCompleted event`);
 
+      // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `\n${'='.repeat(80)}\n📋 PRODUCT MANAGER - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
+      );
+
       // Send output to chat
       NotificationService.emitAgentMessage(taskId, 'Product Manager', result.output);
 
@@ -255,6 +292,18 @@ Be thorough but concise.`;
       // Store phase data for next phases
       context.setData('productManagerOutput', result.output);
       context.setData('taskComplexity', complexityMatch?.[1]?.toLowerCase() || 'medium');
+
+      // 🔥 CRITICAL: Store processed attachments in context for ALL subsequent agents
+      // This ensures images/multimedia travel through ALL agents with complete context
+      if (attachments.length > 0) {
+        context.setData('attachments', attachments);
+        console.log(`📎 [ProductManager] Stored ${attachments.length} attachment(s) in context for all agents`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📦 Stored ${attachments.length} image(s) in context - will be passed to ALL subsequent agents (Project Manager, Tech Lead, Developers, QA)`
+        );
+      }
 
       return {
         success: true,

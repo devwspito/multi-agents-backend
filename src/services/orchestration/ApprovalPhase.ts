@@ -1,186 +1,238 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { approvalEvents } from '../ApprovalEvents'; // Event-based approval system
+import { NotificationService } from '../NotificationService';
 
 /**
- * Approval Phase (Generic)
+ * Approval Phase
  *
- * Pauses execution for user approval after agent completion
+ * Implements human-in-the-loop approval between phases.
+ * Uses event-based system (no polling) following SDK best practices.
  *
- * Checks autoPilotMode flag:
- * - If autoPilotMode = true: Skip approval, continue immediately
- * - If autoPilotMode = false: Pause and wait for user approval
+ * FLOW:
+ * 1. Previous phase completes successfully
+ * 2. ApprovalPhase pauses orchestration
+ * 3. Frontend displays approval UI (Approve/Reject buttons)
+ * 4. User approves → emits approval event → orchestration continues
+ * 5. User rejects → marks task as failed → orchestration stops
  *
- * This phase is used after Product Manager, Project Manager, and Tech Lead
- * to allow human review before proceeding to the next phase.
+ * SDK COMPLIANCE:
+ * ✅ Human feedback loop (core agent pattern)
+ * ✅ Event-based (no polling, prevents infinite loops)
+ * ✅ Clear verification step before next phase
+ * ✅ Graceful failure handling
+ *
+ * INTEGRATION WITH EXISTING SYSTEM:
+ * - Uses approvalEvents from TeamOrchestrator (already implemented)
+ * - Frontend already has ApprovalPhase UI (ConsoleViewer.jsx)
+ * - Backend routes already emit approval events (/api/tasks/:id/approve/:phase)
  */
 export class ApprovalPhase extends BasePhase {
-  readonly name: string;
-  readonly description: string;
-  private agentName: string;
-  private agentPath: string;
+  readonly name = 'Approval';
+  readonly description = 'Waiting for human approval before proceeding';
 
-  constructor(agentName: string, agentPath: string) {
+  private readonly MAX_WAIT_TIME_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+  constructor() {
     super();
-    // Use agentName without spaces to match the switch case names
-    // e.g., "Product Manager" -> "ProductManagerApproval"
-    this.name = `${agentName.replace(/\s+/g, '')}Approval`;
-    this.description = `Waiting for ${agentName.toLowerCase()} approval`;
-    this.agentName = agentName;
-    this.agentPath = agentPath;
   }
 
-  protected async executePhase(context: OrchestrationContext): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
-    // 🔄 Refresh task from DB to get latest autoPilotMode value
+  /**
+   * Skip if auto-approval is enabled for previous phase
+   */
+  async shouldSkip(context: OrchestrationContext): Promise<boolean> {
+    const task = context.task;
+
+    // Refresh task to get latest state
     const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(context.task._id);
+    const freshTask = await Task.findById(task._id);
     if (freshTask) {
       context.task = freshTask;
     }
 
-    const { task } = context;
-    const taskId = (task._id as any).toString();
-
-    console.log(`\n✋ =============== ${this.agentName.toUpperCase()} APPROVAL ===============`);
-
-    // Navigate to agent data using agentPath
-    let agent: any = task;
-    const pathParts = this.agentPath.split('.');
-    for (const part of pathParts) {
-      agent = agent[part];
-      if (!agent) {
-        return {
-          success: false,
-          error: `Agent path not found: ${this.agentPath}`
-        };
-      }
+    // Get previous phase from context
+    const previousPhase = context.getData<string>('currentPhaseName');
+    if (!previousPhase) {
+      console.log(`[SKIP] No previous phase specified, skipping approval`);
+      return true;
     }
 
-    // 🔥 Check if already approved using simple boolean flag (Mongoose persists reliably)
-    if (agent.approved === true) {
-      console.log(`✅ [${this.agentName} Approval] Already approved (flag set) - continuing`);
-      return {
-        success: true,
-        data: { alreadyApproved: true }
-      };
-    }
+    // Check if auto-approval is enabled
+    const autoApprovalEnabled = context.task.orchestration.autoApprovalEnabled;
+    const autoApprovalPhases = context.task.orchestration.autoApprovalPhases || [];
 
-    // 🚁 Check if auto-pilot mode is enabled (currently disabled - manual approval only)
-    const autoPilotMode = false; // TODO: Add autoPilotMode to IOrchestration if needed
-    if (autoPilotMode) {
-      console.log(`🚁 [Auto Pilot] Skipping ${this.agentName} approval`);
-      console.log(`   Auto-approved - continuing to next phase`);
+    // Normalize phase name for comparison (ProductManager -> product-manager)
+    const normalizedPhaseName = this.normalizePhase(previousPhase);
 
-      // Mark as approved automatically
-      if (!agent.approval) {
-        agent.approval = {};
+    if (autoApprovalEnabled && autoApprovalPhases.includes(normalizedPhaseName as any)) {
+      console.log(`✅ [SKIP] Auto-approval enabled for phase: ${previousPhase} (normalized: ${normalizedPhaseName})`);
+
+      const taskId = (context.task._id as any).toString();
+      NotificationService.emitConsoleLog(taskId, 'info', `✅ Auto-approval enabled for ${previousPhase} - continuing without human approval`);
+
+      // Log auto-approval in history
+      if (!context.task.orchestration.approvalHistory) {
+        context.task.orchestration.approvalHistory = [];
       }
-      agent.approval.status = 'approved';
-      agent.approval.approvedAt = new Date();
-      agent.approval.approvedBy = task.userId as any;
 
-      // 🔥 CRITICAL: Set simple boolean flag for flow control (Mongoose persists reliably)
-      agent.approved = true;
-
-      // 🔥 CRITICAL: Mark nested object as modified for Mongoose
-      task.markModified(this.agentPath);
-
-      await task.save();
-
-      // 🔥 EVENT SOURCING: Emit approval event
-      const { eventStore } = await import('../EventStore');
-      const eventType = `${this.agentName.replace(' ', '')}Approved` as any;
-      await eventStore.append({
-        taskId: task._id as any,
-        eventType,
-        agentName: this.agentName.toLowerCase().replace(' ', '-'),
-        payload: {
-          autoApproved: true,
-        },
+      context.task.orchestration.approvalHistory.push({
+        phase: previousPhase,
+        phaseName: this.getPhaseName(previousPhase),
+        approved: true,
+        approvedAt: new Date(),
+        comments: 'Auto-approved',
+        autoApproved: true,
       });
 
-      console.log(`📝 [${this.agentName}] Emitted ${eventType} event (auto-pilot)`);
+      await context.task.save();
 
+      return true; // Skip human approval
+    }
+
+    return false; // Require human approval
+  }
+
+  protected async executePhase(
+    context: OrchestrationContext
+  ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
+    const task = context.task;
+    const taskId = (task._id as any).toString();
+    const previousPhase = context.getData<string>('currentPhaseName');
+
+    if (!previousPhase) {
       return {
-        success: true,
-        data: { autoApproved: true }
+        success: false,
+        error: 'No previous phase specified for approval',
       };
     }
 
-    // NOT AUTO-PILOT - PAUSE FOR APPROVAL
-    console.log(`⏸️  [${this.agentName} Approval] Waiting for user approval...`);
-    console.log(`👤 User must approve via POST /api/tasks/${taskId}/approve`);
+    const phaseName = this.getPhaseName(previousPhase);
+    const normalizedPhase = this.normalizePhase(previousPhase); // product-manager
 
-    // Mark as pending approval
-    if (!agent.approval) {
-      agent.approval = {};
-    }
-    agent.approval.status = 'pending';
-    agent.approval.requestedAt = new Date();
+    console.log(`⏸️  [Approval] Waiting for human approval of: ${phaseName}`);
+    NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Waiting for human approval of: ${phaseName}`);
 
-    // TODO: Add status and awaitingApproval fields to interfaces if needed
-    // task.orchestration.status = 'pending_approval';
-    // task.awaitingApproval = { ... };
+    // Marcar que hay aprobación pendiente para re-emit en join-task
+    context.setData('approvalPending', true);
 
-    // Set task status to pending while waiting for approval
-    // Note: 'paused' is not in TaskStatus type, using 'pending' instead
-    task.status = 'pending';
-
-    // 🔥 CRITICAL: Mark nested object as modified for Mongoose
-    task.markModified(this.agentPath);
-
-    await task.save();
-
-    // Debug: Log agent output length
-    console.log(`📝 [${this.agentName}] Output length: ${agent.output?.length || 0} characters`);
-    if (agent.output) {
-      console.log(`📝 [${this.agentName}] Output preview: ${agent.output.substring(0, 200)}...`);
-    } else {
-      console.warn(`⚠️  [${this.agentName}] NO OUTPUT FOUND - agent.output is empty!`);
-    }
-
-    // 🔥 CRITICAL: Prepare approval data with ALL required fields
-    const approvalData = {
-      agentName: this.agentName,
+    // Emit WebSocket notification to frontend
+    NotificationService.emitApprovalRequired(taskId, {
+      phase: normalizedPhase, // Send kebab-case for frontend API call
+      phaseName: phaseName,
+      agentName: phaseName, // Use human-readable name
       approvalType: 'planning',
-      agentPath: this.agentPath,
-      taskId: taskId,
-      // Frontend expects structured agentOutput object
-      agentOutput: {
-        fullResponse: agent.output || 'No output available',
-        prompt: `Analyze requirements and define product specifications for: ${task.title}`,
-        // Add additional fields if available
-        reasoning: agent.reasoning || undefined,
-        proposal: agent.proposal || undefined,
-      },
-    };
-
-    console.log(`\n🔔 [${this.agentName}] Emitting approval_required event with data:`, {
-      agentName: approvalData.agentName,
-      approvalType: approvalData.approvalType,
-      hasOutput: !!approvalData.agentOutput.fullResponse,
-      outputLength: approvalData.agentOutput.fullResponse?.length,
+      agentOutput: context.getPhaseResult(previousPhase)?.data || {},
     });
 
-    // Emit WebSocket notification with structured output for frontend
-    // TODO: Add notifyTaskUpdate method to NotificationService if needed
-    // NotificationService.notifyTaskUpdate(taskId, { type: 'approval_required', data: approvalData });
+    // === WAIT FOR APPROVAL EVENT (event-based, no polling) ===
+    try {
+      console.log(`📡 [Event] Waiting for approval event: approval:${taskId}:${normalizedPhase}`);
 
-    console.log(`\n⏸️  [${this.agentName} Approval] PAUSED - waiting for user approval`);
-    console.log(`   This is NOT an error - orchestration will resume after approval\n`);
+      const approved = await approvalEvents.waitForApproval(
+        taskId,
+        normalizedPhase, // Use kebab-case to match route emission
+        this.MAX_WAIT_TIME_MS
+      );
 
-    // Return PhaseResult indicating we need approval (this will pause the pipeline cleanly)
-    // When user approves, /approve endpoint will call orchestrateTask again
-    // and this time approval.approvedAt will exist, so it will continue
-    return {
-      success: true, // Not a failure - just paused
-      needsApproval: true, // THIS FLAG TELLS PIPELINE TO PAUSE
-      data: {
-        agentName: this.agentName,
-        status: 'awaiting_approval'
+      // Refresh task to get updated state after approval
+      const Task = require('../../models/Task').Task;
+      const freshTask = await Task.findById(task._id);
+      if (freshTask) {
+        Object.assign(task, freshTask);
+        context.task = freshTask;
       }
-    };
+
+      // Limpiar flag de aprobación pendiente
+      context.setData('approvalPending', false);
+
+      if (approved) {
+        console.log(`✅ [Approval] ${phaseName} approved by user (via event)`);
+        NotificationService.emitConsoleLog(taskId, 'info', `✅ ${phaseName} approved by user - continuing orchestration`);
+
+        NotificationService.emitApprovalGranted(taskId, normalizedPhase, phaseName);
+
+        return {
+          success: true,
+          data: {
+            phase: previousPhase,
+            approved: true,
+          },
+        };
+      } else {
+        console.log(`❌ [Approval] ${phaseName} rejected by user (via event)`);
+        NotificationService.emitConsoleLog(taskId, 'error', `❌ ${phaseName} rejected by user - stopping orchestration`);
+
+        return {
+          success: false,
+          error: `${phaseName} was rejected by user`,
+          data: {
+            phase: previousPhase,
+            approved: false,
+          },
+        };
+      }
+    } catch (error: any) {
+      // Limpiar flag de aprobación pendiente también en timeout
+      context.setData('approvalPending', false);
+
+      console.log(`⏱️  [Approval] Timeout waiting for ${phaseName} approval (24h exceeded)`);
+      NotificationService.emitConsoleLog(taskId, 'error', `⏱️ Approval timeout for ${phaseName} (24h exceeded) - task marked as failed`);
+
+      NotificationService.emitAgentMessage(
+        taskId,
+        'System',
+        `⚠️ Approval timeout for **${phaseName}**. Task will be marked as failed.`
+      );
+
+      return {
+        success: false,
+        error: `Approval timeout after 24 hours`,
+        data: {
+          phase: previousPhase,
+          timeout: true,
+        },
+      };
+    }
   }
 
-  async rollback(_context: OrchestrationContext): Promise<void> {
-    console.log(`⏪ [${this.agentName} Approval] Rollback (no-op)`);
+  /**
+   * Normalize phase name from PascalCase to kebab-case
+   * ProductManager -> product-manager
+   * QA -> qa-engineer
+   */
+  private normalizePhase(phase: string): string {
+    // Special case mappings to match API routes
+    const specialCases: Record<string, string> = {
+      'QA': 'qa-engineer',
+      'Merge': 'merge-coordinator',
+      'Judge': 'judge',
+      'Developers': 'development',
+    };
+
+    if (specialCases[phase]) {
+      return specialCases[phase];
+    }
+
+    // Default: PascalCase to kebab-case
+    return phase
+      .replace(/([A-Z])/g, '-$1')
+      .toLowerCase()
+      .replace(/^-/, '');
+  }
+
+  /**
+   * Get human-readable phase name
+   */
+  private getPhaseName(phase: string): string {
+    const phaseNames: Record<string, string> = {
+      'ProductManager': 'Product Manager',
+      'ProjectManager': 'Project Manager',
+      'TechLead': 'Tech Lead',
+      'Developers': 'Development Team',
+      'Judge': 'Judge Evaluation',
+      'QA': 'QA Engineer',
+      'Merge': 'Merge Coordinator',
+    };
+
+    return phaseNames[phase] || phase;
   }
 }

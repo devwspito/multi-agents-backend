@@ -244,7 +244,7 @@ export class LogService {
    * Convenience: Log agent started
    */
   static async agentStarted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -260,7 +260,7 @@ export class LogService {
    * Convenience: Log agent completed
    */
   static async agentCompleted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -276,7 +276,7 @@ export class LogService {
    * Convenience: Log agent failed
    */
   static async agentFailed(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
     taskId: string,
     error: Error | string,
     context?: Partial<LogContext>

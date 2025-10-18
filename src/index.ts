@@ -7,10 +7,10 @@ import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import mongoSanitize from 'express-mongo-sanitize';
 import cookieParser from 'cookie-parser';
+import path from 'path';
 import { env } from './config/env';
 import { connectDatabase } from './config/database';
 import { WorkspaceCleanupScheduler } from './services/WorkspaceCleanupScheduler';
-import { MergeCoordinatorScheduler } from './services/MergeCoordinatorScheduler';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -31,7 +31,6 @@ class AgentPlatformApp {
   private io: SocketServer;
   private port: number;
   private cleanupScheduler: WorkspaceCleanupScheduler;
-  private mergeCoordinatorScheduler: MergeCoordinatorScheduler;
   private isShuttingDown: boolean = false;
 
   constructor() {
@@ -50,7 +49,6 @@ class AgentPlatformApp {
     });
 
     this.cleanupScheduler = new WorkspaceCleanupScheduler();
-    this.mergeCoordinatorScheduler = new MergeCoordinatorScheduler();
 
     this.app.set('trust proxy', 1);
   }
@@ -98,6 +96,9 @@ class AgentPlatformApp {
 
     // Cookie parsing
     this.app.use(cookieParser());
+
+    // Serve static files from uploads directory (for task attachments/images)
+    this.app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
     // MongoDB injection prevention
     this.app.use(mongoSanitize());
@@ -221,6 +222,69 @@ class AgentPlatformApp {
         }
       });
 
+      // Event: join-task (usado por ConsoleViewer)
+      socket.on('join-task', async (taskId: string) => {
+        console.log(`📌 Socket ${socket.id} joining task room: ${taskId}`);
+        socket.join(`task:${taskId}`);
+
+        // Confirmar que se unió al room
+        socket.emit('task-joined', {
+          success: true,
+          taskId,
+          socketId: socket.id,
+        });
+
+        // Re-emitir logs históricos acumulados (para sobrevivir refresh)
+        try {
+          const { Task } = await import('./models/Task');
+          const task = await Task.findById(taskId).select('logs orchestration status').lean();
+
+          if (task) {
+            // 1. Emitir logs históricos uno por uno
+            if (task.logs && task.logs.length > 0) {
+              console.log(`📜 Re-emitting ${task.logs.length} historical logs to socket ${socket.id}`);
+              task.logs.forEach((log: any) => {
+                socket.emit('console:log', {
+                  level: log.level,
+                  message: log.message,
+                  timestamp: log.timestamp,
+                });
+              });
+            }
+
+            // 2. Si hay aprobación pendiente, re-emitir evento
+            // Detectamos aprobación pendiente cuando:
+            // - Task está in_progress
+            // - El último log menciona "Waiting for human approval"
+            if (task.status === 'in_progress' && task.logs && task.logs.length > 0) {
+              const lastLog = task.logs[task.logs.length - 1];
+              if (lastLog.message && lastLog.message.includes('Waiting for human approval')) {
+                // Extraer el nombre de la fase del mensaje (ej: "Product Manager")
+                const match = lastLog.message.match(/Waiting for human approval of: (.+)$/);
+                if (match) {
+                  const phaseName = match[1].trim();
+                  const phase = phaseName.replace(/\s+/g, ''); // "Product Manager" -> "ProductManager"
+
+                  console.log(`⏸️  Re-emitting approval_required for ${phaseName} to socket ${socket.id}`);
+                  socket.emit('notification', {
+                    type: 'approval_required',
+                    data: {
+                      phase: phase,
+                      phaseName: phaseName,
+                      agentName: phase,
+                      approvalType: 'planning',
+                      timestamp: new Date(),
+                    },
+                  });
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`❌ Error re-emitting historical data for task ${taskId}:`, error);
+        }
+      });
+
       // Event: identify (compatibilidad con frontend)
       socket.on('identify', (data: { userId: string }) => {
         console.log(`👤 Socket ${socket.id} identified as user: ${data.userId}`);
@@ -264,6 +328,16 @@ class AgentPlatformApp {
       // Conectar a MongoDB
       await connectDatabase();
 
+      // 🔄 Auto-recover interrupted orchestrations
+      console.log('🔄 Checking for interrupted orchestrations...');
+      const { OrchestrationRecoveryService } = await import('./services/orchestration/OrchestrationRecoveryService');
+      const recoveryService = new OrchestrationRecoveryService();
+
+      // Run recovery in background (don't block server startup)
+      recoveryService.recoverAllInterruptedOrchestrations().catch((error) => {
+        console.error('❌ Orchestration recovery failed:', error);
+      });
+
       // Inicializar middleware
       this.initializeMiddleware();
 
@@ -294,7 +368,6 @@ class AgentPlatformApp {
 
       // Iniciar schedulers
       this.cleanupScheduler.start();
-      this.mergeCoordinatorScheduler.start();
 
       // Graceful shutdown
       process.on('SIGTERM', () => this.shutdown());
@@ -340,7 +413,6 @@ class AgentPlatformApp {
 
       // Stop schedulers
       this.cleanupScheduler.stop();
-      this.mergeCoordinatorScheduler.stop();
 
       // Close database connection
       const { disconnectDatabase } = await import('./config/database');
