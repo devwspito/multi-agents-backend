@@ -190,8 +190,8 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     // Generar JWT
     const token = generateToken((user._id as any).toString(), user.githubId);
 
-    // Redirigir al frontend con el token
-    res.redirect(`${env.FRONTEND_URL}/auth/callback?token=${token}`);
+    // Redirigir al frontend con el token y el indicador de GitHub
+    res.redirect(`${env.FRONTEND_URL}/auth/callback?token=${token}&github=connected`);
   } catch (error) {
     console.error('GitHub OAuth callback error:', error);
     res.redirect(`${env.FRONTEND_URL}?error=auth_failed`);
