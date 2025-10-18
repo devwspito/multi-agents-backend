@@ -79,6 +79,18 @@ export class DevelopersPhase extends BasePhase {
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
 
+    // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+    const attachments = context.getData<any[]>('attachments') || [];
+    if (attachments.length > 0) {
+      console.log(`📎 [Developers] Using ${attachments.length} attachment(s) from context`);
+      const { NotificationService } = await import('../NotificationService');
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `📎 Developers: Received ${attachments.length} image(s) from context for implementation`
+      );
+    }
+
     await LogService.info('Development Team phase started - Spawning team members', {
       taskId,
       category: 'orchestration',
@@ -247,13 +259,11 @@ export class DevelopersPhase extends BasePhase {
       //   e.stories.map((storyId: string) => ({ storyId, epicId: e.id }))
       // ); // unused
 
-      // Create developers (seniors + juniors)
-      const totalDevelopers = (composition?.seniors || 0) + (composition?.juniors || 0);
+      // Create developers (unified - no senior/junior distinction)
+      const totalDevelopers = composition?.developers || 1;
       for (let i = 0; i < totalDevelopers; i++) {
-        // Determine if senior or junior based on index
-        const isSenior = i < (composition?.seniors || 0);
-        const agentType: 'senior-developer' | 'junior-developer' = isSenior ? 'senior-developer' : 'junior-developer';
-        const instanceId = isSenior ? `senior-dev-${i + 1}` : `junior-dev-${i - (composition?.seniors || 0) + 1}`;
+        const instanceId = `dev-${i + 1}`;
+        const agentType = 'developer'; // Unified developer type
 
         const assignedStories = assignments
           .filter((a) => a.assignedTo === instanceId)
@@ -339,7 +349,10 @@ export class DevelopersPhase extends BasePhase {
             member,
             repositories,
             workspacePath,
-            workspaceStructure
+            workspaceStructure,
+            attachments, // Pass attachments to developers
+            state.stories, // Pass stories from event store
+            state.epics // Pass epics from event store
           );
         }
 
@@ -367,6 +380,7 @@ export class DevelopersPhase extends BasePhase {
       context.setData('developmentComplete', true);
       context.setData('epicExecutionOrder', orderedEpics.map((e) => e.id));
       context.setData('dependencyResolution', resolutionResult);
+      context.setData('executeDeveloperFn', this.executeDeveloperFn); // Store for Judge retry mechanism
 
       // 🔥 EVENT SOURCING: Emit completion event (SUCCESS CASE)
       await eventStore.append({

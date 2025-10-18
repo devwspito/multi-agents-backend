@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'product-manager' | 'project-manager' | 'tech-lead' | 'senior-developer' | 'junior-developer' | 'qa-engineer' | 'merge-coordinator';
+export type AgentType = 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -13,12 +13,15 @@ export interface IStory {
   id: string;
   title: string;
   description: string;
-  assignedTo?: string; // instanceId del developer (ej: "senior-dev-1")
-  supervisedBy?: string; // Para juniors, el senior que supervisa
+  assignedTo?: string; // instanceId del developer (ej: "dev-1")
   priority: number;
   estimatedComplexity: StoryComplexity;
   status: TaskStatus;
   dependencies?: string[]; // IDs de otras stories que deben completarse primero
+
+  // Multi-repo support
+  repositoryId?: string; // Which repository this story targets
+  repositoryName?: string; // Human-readable repository name (e.g., "backend", "frontend")
 
   // GitHub integration
   branchName?: string;
@@ -31,26 +34,24 @@ export interface IStory {
   startedAt?: Date;
   completedAt?: Date;
 
-  // Code review (para juniors)
-  reviewedBy?: string; // Senior instanceId que revisó
-  reviewStatus?: ReviewStatus;
-  reviewComments?: string;
-  reviewIterations?: number; // Cuántas veces tuvo que corregir
+  // Judge review
+  judgeStatus?: ReviewStatus; // Judge evaluation result
+  judgeComments?: string; // Judge feedback
+  judgeIterations?: number; // Retry count
 }
 
 /**
- * TeamMember - Developer (Senior o Junior)
+ * TeamMember - Developer
  * Instancia dinámica de un agente developer
  */
 export interface ITeamMember {
-  agentType: 'senior-developer' | 'junior-developer';
-  instanceId: string; // "senior-dev-1", "junior-dev-2", etc.
+  agentType: 'developer';
+  instanceId: string; // "dev-1", "dev-2", etc.
   assignedStories: string[]; // Story IDs asignados
-  status: 'idle' | 'working' | 'reviewing' | 'completed' | 'blocked';
+  status: 'idle' | 'working' | 'completed' | 'blocked';
 
   // GitHub integration
   pullRequests: number[]; // PRs creados por este developer
-  reviewing?: number[]; // PRs que está revisando (seniors only)
 
   // Execution details
   sessionId?: string;
@@ -83,6 +84,15 @@ export interface IAgentStep {
     cache_read_input_tokens?: number;
   };
   cost_usd?: number;
+
+  // Human approval
+  approved?: boolean; // User must approve before continuing
+  approval?: {
+    status: 'pending' | 'approved' | 'rejected';
+    approvedBy?: mongoose.Types.ObjectId;
+    approvedAt?: Date;
+    requestedAt?: Date;
+  };
 }
 
 /**
@@ -112,8 +122,7 @@ export interface IOrchestration {
     stories?: IStory[]; // Stories creadas dinámicamente
     totalStories?: number;
     recommendedTeamSize?: {
-      seniors: number;
-      juniors: number;
+      developers: number;
       reasoning: string;
     };
   };
@@ -122,19 +131,43 @@ export interface IOrchestration {
   techLead: IAgentStep & {
     architectureDesign?: string;
     teamComposition?: {
-      seniors: number;
-      juniors: number;
+      developers: number;
       reasoning: string;
     };
     storyAssignments?: {
       storyId: string;
-      assignedTo: string; // instanceId
-      supervisedBy?: string; // Para juniors
+      assignedTo: string; // instanceId (dev-1, dev-2, etc.)
+    }[];
+    // Branch tracking per repository
+    epicBranches?: {
+      epicId: string;
+      repositoryId: string;
+      repositoryName: string;
+      branchName: string;
     }[];
   };
 
   // Fase 4: Development Team (MÚLTIPLES - dinámico)
   team?: ITeamMember[];
+
+  // Fase 4.5: Judge (evalúa código de developers)
+  judge?: IAgentStep & {
+    evaluations?: {
+      storyId: string;
+      developerId: string;
+      status: ReviewStatus;
+      feedback: string;
+      iteration: number;
+    }[];
+  };
+
+  // Fase 4.7: Fixer (arregla errores reportados por QA)
+  fixer?: IAgentStep & {
+    errorType?: string; // lint, build, test
+    filesModified?: string[];
+    changes?: string[];
+    fixed?: boolean;
+  };
 
   // Fase 5: QA Engineer (único)
   qaEngineer?: IAgentStep & {
@@ -158,6 +191,29 @@ export interface IOrchestration {
   currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed';
   totalCost: number;
   totalTokens: number;
+
+  // Control de ejecución (pausar/reanudar/cancelar)
+  paused?: boolean; // Usuario pausó manualmente la orquestación
+  pausedAt?: Date;
+  pausedBy?: mongoose.Types.ObjectId;
+  cancelRequested?: boolean; // Usuario solicitó cancelación
+  cancelRequestedAt?: Date;
+  cancelRequestedBy?: mongoose.Types.ObjectId;
+
+  // Auto-aprobación opcional
+  autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
+  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'development' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
+
+  // Historial de aprobaciones
+  approvalHistory?: {
+    phase: string;
+    phaseName: string;
+    approved: boolean;
+    approvedBy?: mongoose.Types.ObjectId;
+    approvedAt: Date;
+    comments?: string;
+    autoApproved?: boolean; // Indica si fue auto-aprobado
+  }[];
 }
 
 /**
@@ -178,6 +234,14 @@ export interface ITask extends Document {
   // Metadata
   attachments?: string[];
   tags?: string[];
+
+  // Console logs para ConsoleViewer (persistidos para sobrevivir refresh)
+  logs?: {
+    level: 'log' | 'info' | 'warn' | 'error';
+    message: string;
+    timestamp: Date;
+  }[];
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -190,7 +254,6 @@ const storySchema = new Schema<IStory>(
     title: { type: String, required: true },
     description: { type: String, required: true },
     assignedTo: String,
-    supervisedBy: String,
     priority: { type: Number, default: 1 },
     estimatedComplexity: {
       type: String,
@@ -210,14 +273,13 @@ const storySchema = new Schema<IStory>(
     error: String,
     startedAt: Date,
     completedAt: Date,
-    reviewedBy: String,
-    reviewStatus: {
+    judgeStatus: {
       type: String,
       enum: ['pending', 'approved', 'changes_requested', 'not_required'],
       default: 'not_required',
     },
-    reviewComments: String,
-    reviewIterations: { type: Number, default: 0 },
+    judgeComments: String,
+    judgeIterations: { type: Number, default: 0 },
   },
   { _id: false }
 );
@@ -226,18 +288,17 @@ const teamMemberSchema = new Schema<ITeamMember>(
   {
     agentType: {
       type: String,
-      enum: ['senior-developer', 'junior-developer'],
+      enum: ['developer'],
       required: true,
     },
     instanceId: { type: String, required: true },
     assignedStories: [String],
     status: {
       type: String,
-      enum: ['idle', 'working', 'reviewing', 'completed', 'blocked'],
+      enum: ['idle', 'working', 'completed', 'blocked'],
       default: 'idle',
     },
     pullRequests: [Number],
-    reviewing: [Number],
     sessionId: String,
     usage: {
       input_tokens: Number,
@@ -256,7 +317,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'senior-developer', 'junior-developer', 'qa-engineer', 'merge-coordinator'],
+      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer'],
       required: true,
     },
     status: {
@@ -355,8 +416,7 @@ const taskSchema = new Schema<ITask>(
         stories: [storySchema],
         totalStories: Number,
         recommendedTeamSize: {
-          seniors: Number,
-          juniors: Number,
+          developers: Number,
           reasoning: String,
         },
       },
@@ -377,17 +437,59 @@ const taskSchema = new Schema<ITask>(
         cost_usd: Number,
         architectureDesign: String,
         teamComposition: {
-          seniors: Number,
-          juniors: Number,
+          developers: Number,
           reasoning: String,
         },
         storyAssignments: [{
           storyId: String,
           assignedTo: String,
-          supervisedBy: String,
         }],
       },
       team: [teamMemberSchema],
+      judge: {
+        agent: { type: String, default: 'judge' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        evaluations: [{
+          storyId: String,
+          developerId: String,
+          status: { type: String, enum: ['approved', 'changes_requested'] },
+          feedback: String,
+          iteration: Number,
+          timestamp: Date,
+        }],
+      },
+      fixer: {
+        agent: { type: String, default: 'fixer' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        errorType: String,
+        filesModified: [String],
+        changes: [String],
+        fixed: Boolean,
+      },
       qaEngineer: {
         agent: { type: String, default: 'qa-engineer' },
         status: { type: String, default: 'pending' },
@@ -443,9 +545,63 @@ const taskSchema = new Schema<ITask>(
         type: Number,
         default: 0,
       },
+      paused: {
+        type: Boolean,
+        default: false,
+      },
+      pausedAt: Date,
+      pausedBy: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+      },
+      cancelRequested: {
+        type: Boolean,
+        default: false,
+      },
+      cancelRequestedAt: Date,
+      cancelRequestedBy: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+      },
+      autoApprovalEnabled: {
+        type: Boolean,
+        default: false, // ❌ Auto-aprobación DESHABILITADA por defecto - requiere configuración explícita del usuario
+      },
+      autoApprovalPhases: {
+        type: [String],
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'development', 'qa-engineer', 'merge-coordinator'],
+        default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
+      },
+      approvalHistory: [{
+        phase: String,
+        phaseName: String,
+        approved: Boolean,
+        approvedBy: {
+          type: Schema.Types.ObjectId,
+          ref: 'User',
+        },
+        approvedAt: Date,
+        comments: String,
+        autoApproved: Boolean,
+      }],
     },
     attachments: [String],
     tags: [String],
+    logs: [{
+      level: {
+        type: String,
+        enum: ['log', 'info', 'warn', 'error'],
+        required: true,
+      },
+      message: {
+        type: String,
+        required: true,
+      },
+      timestamp: {
+        type: Date,
+        default: Date.now,
+      },
+    }],
   },
   {
     timestamps: true,

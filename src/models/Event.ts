@@ -48,6 +48,7 @@ export type EventType =
   // Developer events
   | 'DeveloperStarted'
   | 'StoryStarted'
+  | 'StoryBranchCreated'
   | 'StoryCompleted'
   | 'StoryFailed'
   | 'DevelopersCompleted'

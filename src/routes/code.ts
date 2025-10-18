@@ -4,7 +4,6 @@
  */
 
 import express from 'express';
-import RealTimeLogger from '../services/RealTimeLogger';
 import path from 'path';
 import fs from 'fs';
 

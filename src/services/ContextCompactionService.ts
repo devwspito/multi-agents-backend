@@ -1,23 +1,38 @@
 /**
  * Context Compaction Service
  *
- * Implements best practice: "Automatically summarize previous messages near context limits"
+ * Implements Anthropic best practice: "Automatically summarize previous messages near context limits"
+ * https://www.anthropic.com/engineering/context-management
  *
  * Monitors token usage and compacts conversation history when approaching limits
  * to prevent context overflow errors in long-running agent sessions.
+ *
+ * Uses Claude itself to create intelligent summaries of conversation history.
  */
 export class ContextCompactionService {
+  private anthropic: any;
+
   // Model context limits (conservative estimates)
   private readonly CONTEXT_LIMITS = {
     'claude-3-5-sonnet-20241022': 200000,
     'claude-3-opus-20240229': 200000,
     'claude-3-sonnet-20240229': 200000,
     'claude-3-haiku-20240307': 200000,
+    'claude-haiku-4-5-20251001': 200000,
+    'claude-sonnet-4-5-20250929': 200000,
     default: 200000,
   };
 
   // Threshold to trigger compaction (80% of limit)
   private readonly COMPACTION_THRESHOLD = 0.8;
+
+  constructor() {
+    // Initialize Anthropic client for summarization
+    const Anthropic = require('@anthropic-ai/sdk');
+    this.anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+  }
 
   /**
    * Check if context should be compacted
@@ -108,7 +123,96 @@ export class ContextCompactionService {
   }
 
   /**
-   * Summarize a list of messages
+   * Compact conversation history using Claude for intelligent summarization
+   *
+   * Following Anthropic best practice: Use Claude to summarize conversation history
+   * https://www.anthropic.com/engineering/context-management
+   */
+  async compactWithClaude(
+    conversationHistory: any[],
+    preserveCount: number = 10
+  ): Promise<{ compacted: any[]; summary: string }> {
+    console.log(`🤖 [Context Compaction] Using Claude for intelligent summarization...`);
+    console.log(`  Original messages: ${conversationHistory.length}`);
+    console.log(`  Preserving last ${preserveCount} messages`);
+
+    if (conversationHistory.length <= preserveCount) {
+      return {
+        compacted: conversationHistory,
+        summary: 'No compaction needed - history within limits',
+      };
+    }
+
+    // Split into old (to be summarized) and recent (to be preserved)
+    const cutoffIndex = conversationHistory.length - preserveCount;
+    const oldMessages = conversationHistory.slice(0, cutoffIndex);
+    const recentMessages = conversationHistory.slice(cutoffIndex);
+
+    // Ask Claude to summarize the old messages
+    try {
+      const messagesToSummarize = oldMessages
+        .map((msg: any, idx: number) => {
+          const role = msg.role || 'unknown';
+          const content = typeof msg.content === 'string'
+            ? msg.content
+            : JSON.stringify(msg.content).substring(0, 500);
+          return `[${idx + 1}] ${role}: ${content}`;
+        })
+        .join('\n\n');
+
+      const response = await this.anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001', // Use Haiku for cost efficiency
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: `Summarize this conversation history concisely. Focus on:
+- Key requirements and decisions
+- Important technical details
+- Actions taken and their outcomes
+- Any errors or issues encountered
+
+Keep the summary under 500 words but capture all critical information.
+
+CONVERSATION HISTORY:
+${messagesToSummarize}
+
+Provide a structured summary:`
+        }]
+      });
+
+      const summary = response.content[0].type === 'text'
+        ? response.content[0].text
+        : 'Summary generation failed';
+
+      // Create compacted history with Claude's summary
+      const compactedHistory = [
+        {
+          role: 'user',
+          content: `--- CONVERSATION HISTORY SUMMARY (${oldMessages.length} messages) ---\n${summary}\n--- END SUMMARY ---`
+        },
+        ...recentMessages
+      ];
+
+      console.log(`✅ [Context Compaction] Claude summarization complete`);
+      console.log(`  Compacted messages: ${compactedHistory.length} (from ${conversationHistory.length})`);
+      console.log(`  Reduction: ${((1 - compactedHistory.length / conversationHistory.length) * 100).toFixed(1)}%`);
+
+      return {
+        compacted: compactedHistory,
+        summary: `Claude summarized ${oldMessages.length} messages`
+      };
+    } catch (error: any) {
+      console.error(`❌ [Context Compaction] Claude summarization failed:`, error.message);
+      // Fallback to simple summarization
+      return this.compactHistory(
+        conversationHistory.map((msg: any) => JSON.stringify(msg)),
+        preserveCount
+      );
+    }
+  }
+
+  /**
+   * Summarize a list of messages (simple fallback method)
    */
   private summarizeMessages(messages: string[]): string {
     // Simple summarization strategy:

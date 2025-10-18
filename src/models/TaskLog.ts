@@ -40,7 +40,7 @@ export interface ITaskLog extends Document {
 
   // Context (optional but recommended)
   phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed';
-  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge';
+  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -121,7 +121,7 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     agentType: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge'],
+      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer'],
     },
     agentInstanceId: String,
     epicId: String,

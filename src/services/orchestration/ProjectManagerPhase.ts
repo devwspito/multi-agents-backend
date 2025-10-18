@@ -125,59 +125,16 @@ ${repoInfo}${workspaceInfo}
 
 **Output a detailed project plan following the format in your agent instructions.**`;
 
-      // 🔥 IMAGES: Convert task attachments to SDK format (same as Product Manager)
-      const fs = require('fs');
-      const path = require('path');
-      const attachments: any[] = [];
-      if (task.attachments && task.attachments.length > 0) {
-        console.log(`📎 [ProjectManager] Processing ${task.attachments.length} attachment(s)`);
-
-        for (const attachmentUrl of task.attachments) {
-          // attachments are stored as URL strings
-          try {
-            // Convert URL path (/uploads/file.png) to filesystem path
-            let imagePath: string;
-            if (attachmentUrl.startsWith('/uploads/')) {
-              imagePath = path.join(process.cwd(), attachmentUrl);
-            } else if (path.isAbsolute(attachmentUrl)) {
-              imagePath = attachmentUrl;
-            } else {
-              imagePath = path.join(process.cwd(), attachmentUrl);
-            }
-
-            console.log(`  🔍 Resolving image path: ${attachmentUrl} -> ${imagePath}`);
-
-            if (fs.existsSync(imagePath)) {
-              const imageBuffer = fs.readFileSync(imagePath);
-              const base64Image = imageBuffer.toString('base64');
-
-              // Detect mime type from file extension
-              const ext = path.extname(imagePath).toLowerCase();
-              let mimeType = 'image/jpeg';
-              if (ext === '.png') mimeType = 'image/png';
-              else if (ext === '.gif') mimeType = 'image/gif';
-              else if (ext === '.webp') mimeType = 'image/webp';
-
-              attachments.push({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType,
-                  data: base64Image,
-                },
-              });
-
-              const fileName = path.basename(imagePath);
-              const fileSizeKB = (imageBuffer.length / 1024).toFixed(1);
-              console.log(`  ✅ Attached image: ${fileName} (${fileSizeKB} KB)`);
-            } else {
-              console.warn(`  ⚠️ Image file not found: ${imagePath}`);
-            }
-          } catch (error: any) {
-            const fileName = path.basename(attachmentUrl);
-            console.error(`  ❌ Failed to process image ${fileName}:`, error.message);
-          }
-        }
+      // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+      // This ensures ALL agents receive the same multimedia context without re-processing
+      const attachments = context.getData<any[]>('attachments') || [];
+      if (attachments.length > 0) {
+        console.log(`📎 [ProjectManager] Using ${attachments.length} attachment(s) from context`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📎 Project Manager: Received ${attachments.length} image(s) from context for visual analysis`
+        );
       }
 
       // Progress notification
@@ -233,6 +190,13 @@ ${repoInfo}${workspaceInfo}
       });
 
       console.log(`📝 [ProjectManager] Emitted ProjectManagerCompleted event`);
+
+      // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `\n${'='.repeat(80)}\n📋 PROJECT MANAGER - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
+      );
 
       // Send output to chat
       NotificationService.emitAgentMessage(taskId, 'Project Manager', result.output);

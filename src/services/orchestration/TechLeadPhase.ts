@@ -255,8 +255,9 @@ const token = jwt.sign(
           "estimatedComplexity": "simple|moderate|complex",
           "dependencies": [],
           "status": "pending",
-          "filesToModify": ["src/path/to/file1.ts", "src/path/to/file2.ts"],
-          "maxReadsAllowed": 5
+          "filesToRead": ["src/path/to/file1.ts"],
+          "filesToModify": ["src/path/to/file2.ts", "src/path/to/file3.ts"],
+          "filesToCreate": ["src/path/to/newfile.ts"]
         }
       ],
       "status": "pending"
@@ -283,8 +284,7 @@ const token = jwt.sign(
   3. Use Read tool to examine key files (package.json, main entry points, existing models)
   4. Identify EXACTLY which files exist and need modification
   5. ONLY THEN output the JSON with real file paths
-- ⚠️ **filesToModify MUST contain REAL paths** - Use paths from your exploration (e.g., "src/services/AuthService.ts")
-- ⚠️ **maxReadsAllowed = filesToModify.length + 3** - This prevents developers from wasting time
+- ⚠️ **filesToRead, filesToModify, filesToCreate MUST contain REAL paths** - Use paths from your exploration (e.g., "src/services/AuthService.ts")
 - ⚠️ **STORY DESCRIPTIONS MUST BE DETAILED**: Include ALL 6 sections above (Acceptance Criteria, Technical Specs, Guidelines, Testing, Definition of Done, Examples)
 - ⚠️ **BE SPECIFIC**: No vague descriptions like "Implement feature X". Instead: "Create LoginForm.tsx component with email/password fields, validate inputs, call AuthService.login(), handle errors, redirect on success"
 - ⚠️ **EACH STORY MUST BE SELF-CONTAINED**: Developer should know exactly what files to create/modify, what functions to write, what tests to add
@@ -298,61 +298,19 @@ const token = jwt.sign(
 - Stories should be implementable in 1-3 hours max
 - Break complex features into multiple stories if needed`;
 
-      // Progress notification
-      // 🔥 IMAGES: Convert task attachments to SDK format (same as Product Manager)
-      const fs = require('fs');
-      const path = require('path');
-      const attachments: any[] = [];
-      if (task.attachments && task.attachments.length > 0) {
-        console.log(`📎 [TechLead] Processing ${task.attachments.length} attachment(s)`);
-
-        for (const attachmentUrl of task.attachments) {
-          // attachments are stored as URL strings
-          try {
-            // Convert URL path (/uploads/file.png) to filesystem path
-            let imagePath: string;
-            if (attachmentUrl.startsWith('/uploads/')) {
-              imagePath = path.join(process.cwd(), attachmentUrl);
-            } else if (path.isAbsolute(attachmentUrl)) {
-              imagePath = attachmentUrl;
-            } else {
-              imagePath = path.join(process.cwd(), attachmentUrl);
-            }
-
-            console.log(`  🔍 Resolving image path: ${attachmentUrl} -> ${imagePath}`);
-
-            if (fs.existsSync(imagePath)) {
-              const imageBuffer = fs.readFileSync(imagePath);
-              const base64Image = imageBuffer.toString('base64');
-
-              // Detect mime type from file extension
-              const ext = path.extname(imagePath).toLowerCase();
-              let mimeType = 'image/jpeg';
-              if (ext === '.png') mimeType = 'image/png';
-              else if (ext === '.gif') mimeType = 'image/gif';
-              else if (ext === '.webp') mimeType = 'image/webp';
-
-              attachments.push({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType,
-                  data: base64Image,
-                },
-              });
-
-              const fileName = path.basename(imagePath);
-              const fileSizeKB = (imageBuffer.length / 1024).toFixed(1);
-              console.log(`  ✅ Attached image: ${fileName} (${fileSizeKB} KB)`);
-            } else {
-              console.warn(`  ⚠️ Image file not found: ${imagePath}`);
-            }
-          } catch (error: any) {
-            const fileName = path.basename(attachmentUrl);
-            console.error(`  ❌ Failed to process image ${fileName}:`, error.message);
-          }
-        }
+      // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+      // This ensures ALL agents receive the same multimedia context without re-processing
+      const attachments = context.getData<any[]>('attachments') || [];
+      if (attachments.length > 0) {
+        console.log(`📎 [TechLead] Using ${attachments.length} attachment(s) from context`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📎 Tech Lead: Received ${attachments.length} image(s) from context for architecture design`
+        );
       }
+
+      // Progress notification
 
       NotificationService.emitAgentProgress(
         taskId,
@@ -375,31 +333,116 @@ const token = jwt.sign(
       // Parse JSON response with better error handling
       let parsed: any;
 
-      // Try to extract JSON from code blocks first
-      const codeBlockMatch = result.output.match(/```json\n([\s\S]*?)\n```/);
-      if (codeBlockMatch) {
-        try {
-          parsed = JSON.parse(codeBlockMatch[1]);
-        } catch (e) {
-          console.log('❌ Failed to parse JSON from code block, trying raw extraction...');
+      // Try parsing as pure JSON first (no markdown)
+      try {
+        const trimmed = result.output.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          parsed = JSON.parse(trimmed);
+          if (parsed.epics && Array.isArray(parsed.epics)) {
+            console.log('✅ [TechLead] Parsed as pure JSON (no markdown blocks)');
+          } else {
+            parsed = null; // Not the right structure
+          }
         }
+      } catch (e) {
+        // Not pure JSON, try markdown patterns
       }
 
-      // Fallback: try to find JSON object in output
+      // Try multiple extraction patterns (most specific to least specific)
+      const patterns = [
+        /```json\s*\n([\s\S]*?)\n```/,       // ```json\n{...}\n``` (strict)
+        /```json\s*\n([\s\S]*?)```/,         // ```json\n{...}``` (newline after json)
+        /```json\s*([\s\S]*?)```/,           // ```json{...}``` (no newlines)
+        /```\s*\n([\s\S]*?)\n```/,           // ```\n{...}\n``` (no json keyword)
+        /```\s*([\s\S]*?)```/                // ``` {...} ``` (minimal)
+      ];
+
+      // Try markdown patterns if pure JSON failed
       if (!parsed) {
-        const jsonMatch = result.output.match(/{[\s\S]*}/);
-        if (jsonMatch) {
-          try {
-            parsed = JSON.parse(jsonMatch[0]);
-          } catch (e) {
-            console.log('❌ Failed to parse JSON from raw match');
+        for (const pattern of patterns) {
+          const match = result.output.match(pattern);
+          if (match) {
+            try {
+              // Use captured group if available, otherwise full match
+              const jsonText = match[1] || match[0];
+              const trimmed = jsonText.trim();
+              parsed = JSON.parse(trimmed);
+
+              // Verify it has the required structure
+              if (parsed.epics && Array.isArray(parsed.epics)) {
+                console.log(`✅ [TechLead] Parsed JSON using pattern: ${pattern.toString().substring(0, 50)}...`);
+                break;
+              } else {
+                console.log(`⚠️  [TechLead] Parsed JSON but missing epics array with pattern: ${pattern.toString().substring(0, 50)}...`);
+                parsed = null; // Reset and try next pattern
+                continue;
+              }
+            } catch (e) {
+              console.log(`⚠️  [TechLead] Failed to parse with pattern: ${pattern.toString().substring(0, 50)}...`);
+              continue;
+            }
           }
         }
       }
 
-      // Final validation
+      // Final fallback: find the longest valid JSON object with "epics" key
+      if (!parsed) {
+        console.log('⚠️  [TechLead] Standard patterns failed, trying fallback extraction...');
+
+        // Strategy: Find all positions where '{' appears, then try to parse from each position
+        const output = result.output;
+        const candidates: Array<{text: string, length: number}> = [];
+
+        for (let i = 0; i < output.length; i++) {
+          if (output[i] === '{') {
+            // Try to find balanced braces from this position
+            let braceCount = 0;
+            let j = i;
+            let startFound = false;
+
+            while (j < output.length) {
+              if (output[j] === '{') {
+                braceCount++;
+                startFound = true;
+              } else if (output[j] === '}') {
+                braceCount--;
+                if (startFound && braceCount === 0) {
+                  // Found a complete object
+                  const candidate = output.substring(i, j + 1);
+                  candidates.push({ text: candidate, length: candidate.length });
+                  break;
+                }
+              }
+              j++;
+            }
+          }
+        }
+
+        // Sort by length (longest first) and try to parse
+        candidates.sort((a, b) => b.length - a.length);
+
+        for (const candidate of candidates) {
+          try {
+            const candidateParsed = JSON.parse(candidate.text);
+            if (candidateParsed.epics && Array.isArray(candidateParsed.epics) && candidateParsed.epics.length > 0) {
+              parsed = candidateParsed;
+              console.log(`✅ [TechLead] Parsed JSON using fallback extraction (found ${candidate.length} char object with epics)`);
+              break;
+            }
+          } catch (e) {
+            // Not valid JSON, continue
+          }
+        }
+      }
+
+      if (!parsed) {
+        console.log('❌ [TechLead] All JSON extraction patterns failed');
+      }
+
+      // Final validation - MUST have both epics[] and storyAssignments[]
       if (!parsed || !parsed.epics || !Array.isArray(parsed.epics)) {
-        console.log('\n🔍 [TechLead] Agent output (first 1000 chars):\n', result.output.substring(0, 1000));
+        console.log('\n🔍 [TechLead] FULL Agent output:\n', result.output);
+        NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead parsing failed. Full output:\n${result.output}`);
         throw new Error(`Tech Lead did not return valid JSON with epics array. Found ${parsed?.epics ? 'non-array epics' : 'no epics'}`);
       }
 
@@ -408,7 +451,18 @@ const token = jwt.sign(
         throw new Error('Tech Lead returned empty epics array - cannot proceed with development');
       }
 
-      console.log(`✅ [TechLead] Successfully parsed ${parsed.epics.length} epic(s)`);
+      // Validate storyAssignments[] exists (critical for developers)
+      if (!parsed.storyAssignments || !Array.isArray(parsed.storyAssignments)) {
+        console.log('\n🔍 [TechLead] Missing storyAssignments in output');
+        throw new Error('Tech Lead did not return storyAssignments array - developers need file paths');
+      }
+
+      if (parsed.storyAssignments.length === 0) {
+        console.log('\n⚠️  [TechLead] Agent returned empty storyAssignments array');
+        throw new Error('Tech Lead returned empty storyAssignments - developers need work assignments');
+      }
+
+      console.log(`✅ [TechLead] Successfully parsed ${parsed.epics.length} epic(s) with ${parsed.storyAssignments.length} story assignment(s)`);
 
       // Build complete stories map - Preserve all story data from Tech Lead
       const storiesMap: { [storyId: string]: any } = {};
@@ -459,7 +513,12 @@ const token = jwt.sign(
               description: story.description,
               priority: story.priority,
               complexity: story.estimatedComplexity,
+              estimatedComplexity: story.estimatedComplexity, // For backward compatibility
               assignedTo: parsed.storyAssignments?.find((a: any) => a.storyId === story.id)?.assignedTo,
+              filesToRead: story.filesToRead || [],
+              filesToModify: story.filesToModify || [],
+              filesToCreate: story.filesToCreate || [],
+              dependencies: story.dependencies || [],
             },
           });
         }
@@ -579,6 +638,13 @@ const token = jwt.sign(
       });
 
       console.log(`📝 [TechLead] Emitted ${parsed.epics.length} EpicCreated + ${Object.keys(storiesMap).length} StoryCreated events`);
+
+      // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `\n${'='.repeat(80)}\n🏗️ TECH LEAD - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
+      );
 
       // Send output to chat
       NotificationService.emitAgentMessage(taskId, 'Tech Lead', result.output);

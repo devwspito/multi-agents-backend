@@ -159,7 +159,9 @@ export class NotificationService {
       },
     };
 
-    io.to(`task:${taskId}`).emit('notification', notification.notification);
+    // Emit the full notification object (not just notification.notification)
+    // This matches what the frontend expects in ConsoleViewer and WebSocketContext
+    io.to(`task:${taskId}`).emit('notification', notification);
 
     console.log(`📬 [WebSocket] Notification emitted:`, {
       taskId,
@@ -208,8 +210,21 @@ export class NotificationService {
     this.emitNotification(taskId, 'orchestration_started', {});
   }
 
-  static emitOrchestrationCompleted(taskId: string): void {
-    this.emitNotification(taskId, 'orchestration_completed', {});
+  static emitOrchestrationCompleted(taskId: string, costSummary?: {
+    totalCost: number;
+    totalTokens: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+    breakdown?: {
+      phase: string;
+      cost: number;
+      inputTokens: number;
+      outputTokens: number;
+    }[];
+  }): void {
+    this.emitNotification(taskId, 'orchestration_completed', costSummary || {});
   }
 
   static emitOrchestrationFailed(taskId: string, error: string): void {
@@ -239,5 +254,128 @@ export class NotificationService {
       agentType: prData.agentType,
       prUrl: prData.prUrl,
     });
+  }
+
+  /**
+   * Emitir solicitud de aprobación (Human-in-loop)
+   * Compatible con ConsoleViewer frontend
+   */
+  static emitApprovalRequired(taskId: string, approvalData: {
+    phase: string;
+    phaseName: string;
+    agentName: string;
+    approvalType?: 'planning' | 'code_change' | 'test_results' | 'evaluation' | 'merge';
+    agentOutput?: any;
+  }): void {
+    this.emitNotification(taskId, 'approval_required', {
+      phase: approvalData.phase,
+      phaseName: approvalData.phaseName,
+      agentName: approvalData.agentName,
+      approvalType: approvalData.approvalType || 'planning',
+      agentOutput: approvalData.agentOutput || {},
+    });
+
+    console.log(`⏸️ [WebSocket] Approval required emitted:`, {
+      taskId,
+      phase: approvalData.phase,
+      phaseName: approvalData.phaseName,
+    });
+  }
+
+  /**
+   * Emitir aprobación concedida
+   */
+  static emitApprovalGranted(taskId: string, phase: string, phaseName: string): void {
+    this.emitNotification(taskId, 'approval_granted', {
+      phase,
+      phaseName,
+    });
+
+    console.log(`✅ [WebSocket] Approval granted emitted:`, {
+      taskId,
+      phase,
+    });
+  }
+
+  /**
+   * Emitir evento de tarea iniciada (orchestration started)
+   */
+  static emitTaskStarted(taskId: string, data?: any): void {
+    this.emitNotification(taskId, 'task_started', {
+      ...data,
+    });
+
+    console.log(`🚀 [WebSocket] Task started emitted:`, {
+      taskId,
+      data,
+    });
+  }
+
+  /**
+   * Emitir evento de tarea fallida
+   */
+  static emitTaskFailed(taskId: string, data?: any): void {
+    this.emitNotification(taskId, 'task_failed', {
+      ...data,
+    });
+
+    console.log(`❌ [WebSocket] Task failed emitted:`, {
+      taskId,
+      error: data?.error,
+    });
+  }
+
+  /**
+   * Emitir log de consola al frontend
+   *
+   * Este método envía logs del backend al ConsoleViewer del frontend
+   * para mostrar la ejecución en tiempo real.
+   *
+   * IMPORTANTE: También persiste el log en la base de datos para que sobreviva
+   * al refresh del frontend.
+   *
+   * @param taskId - ID de la tarea
+   * @param level - Nivel del log (log, info, warn, error)
+   * @param message - Mensaje del log
+   */
+  static async emitConsoleLog(
+    taskId: string,
+    level: 'log' | 'info' | 'warn' | 'error',
+    message: string
+  ): Promise<void> {
+    const io = this.getIO();
+    const timestamp = new Date();
+
+    const logData = {
+      level,
+      message,
+      timestamp: timestamp.toISOString(),
+    };
+
+    // 1. Emitir al evento específico que espera ConsoleViewer (tiempo real)
+    if (io) {
+      io.to(`task:${taskId}`).emit('console:log', logData);
+    }
+
+    // 2. Persistir en base de datos para sobrevivir refresh
+    try {
+      const { Task } = await import('../models/Task');
+      await Task.findByIdAndUpdate(
+        taskId,
+        {
+          $push: {
+            logs: {
+              level,
+              message,
+              timestamp,
+            },
+          },
+        },
+        { new: false } // No necesitamos retornar el documento
+      );
+    } catch (error) {
+      console.error(`❌ Error persisting log to DB:`, error);
+      // No lanzar error - los logs no deben romper la orquestación
+    }
   }
 }

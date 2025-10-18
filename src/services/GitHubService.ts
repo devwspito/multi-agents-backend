@@ -79,6 +79,77 @@ export class GitHubService {
   }
 
   /**
+   * Clona un repositorio para multi-repo orchestration
+   * @param githubRepoName - Nombre del repositorio (e.g., "user/repo")
+   * @param branch - Branch a clonar
+   * @param githubToken - Token de acceso de GitHub
+   * @param targetDir - Directorio donde clonar (el repo se clonará dentro de esta carpeta)
+   * @returns Ruta al repositorio clonado
+   */
+  async cloneRepositoryForOrchestration(
+    githubRepoName: string,
+    branch: string,
+    githubToken: string,
+    targetDir: string
+  ): Promise<string> {
+    // Extract repo name from "user/repo" format
+    const repoName = githubRepoName.split('/').pop() || githubRepoName;
+    const repoPath = path.join(targetDir, repoName);
+
+    // Check if already cloned
+    try {
+      await fs.access(repoPath);
+      console.log(`📂 Repository already cloned: ${repoPath}`);
+      return repoPath;
+    } catch {
+      // Doesn't exist, clone it
+    }
+
+    // Retry logic for network errors (SSL, connection issues)
+    const maxRetries = 3;
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`📥 Cloning ${githubRepoName} (branch: ${branch}) to ${repoPath}... (attempt ${attempt}/${maxRetries})`);
+
+        // Build authenticated GitHub URL
+        const githubRepoUrl = `https://github.com/${githubRepoName}`;
+        const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
+
+        // Clone repository
+        await execAsync(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
+          cwd: targetDir,
+        });
+
+        console.log(`✅ Repository cloned successfully: ${repoName}`);
+        return repoPath;
+      } catch (error: any) {
+        lastError = error;
+        console.error(`❌ Clone attempt ${attempt}/${maxRetries} failed:`, error.message);
+
+        // If SSL or connection error and not last attempt, retry with exponential backoff
+        if (attempt < maxRetries && (
+          error.message.includes('SSL_ERROR') ||
+          error.message.includes('unable to access') ||
+          error.message.includes('Connection refused')
+        )) {
+          const waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+          console.log(`⏳ Retrying in ${waitTime / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+
+        // If not retryable or last attempt, throw
+        break;
+      }
+    }
+
+    console.error(`❌ All ${maxRetries} clone attempts failed for ${githubRepoName}`);
+    throw new Error(`Failed to clone repository ${githubRepoName} after ${maxRetries} attempts: ${lastError.message}`);
+  }
+
+  /**
    * Crea un nuevo branch para trabajar
    */
   async createBranch(workspacePath: string, branchName: string): Promise<void> {
@@ -423,39 +494,48 @@ export class GitHubService {
   ): Promise<{ success: boolean; conflicts: string[] }> {
     const conflicts: string[] = [];
 
-    try {
-      for (const branchName of prBranches) {
-        try {
-          // Fetch la rama remota
-          await execAsync(`git fetch origin ${branchName}`, { cwd: workspacePath });
+    for (const branchName of prBranches) {
+      try {
+        // Fetch la rama remota
+        await execAsync(`git fetch origin ${branchName}`, { cwd: workspacePath });
 
-          // Intentar merge
-          await execAsync(`git merge origin/${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
-            cwd: workspacePath,
-          });
+        // Intentar merge
+        await execAsync(`git merge origin/${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
+          cwd: workspacePath,
+        });
 
-          console.log(`✅ Merged ${branchName} successfully`);
-        } catch (error: any) {
-          // Si hay conflicto, registrarlo
-          if (error.message.includes('CONFLICT')) {
-            conflicts.push(branchName);
-            console.log(`⚠️ Conflict detected when merging ${branchName}`);
+        console.log(`✅ Merged ${branchName} successfully`);
+      } catch (error: any) {
+        // Detectar conflictos de merge (múltiples indicadores)
+        const errorMsg = error.message || '';
+        const isMergeConflict =
+          errorMsg.includes('CONFLICT') ||
+          errorMsg.includes('Automatic merge failed') ||
+          errorMsg.includes('Recorded preimage') ||
+          errorMsg.includes('Merge conflict');
 
-            // Abortar el merge
+        if (isMergeConflict) {
+          conflicts.push(branchName);
+          console.log(`⚠️ Merge conflict detected when merging ${branchName}`);
+
+          // Abortar el merge para limpiar el estado
+          try {
             await execAsync('git merge --abort', { cwd: workspacePath });
-          } else {
-            throw error;
+          } catch (abortError) {
+            console.warn(`⚠️ Could not abort merge (may already be clean)`);
           }
+        } else {
+          // Error no relacionado con conflictos - reportar pero continuar
+          console.error(`❌ Error merging ${branchName} (non-conflict):`, errorMsg);
+          conflicts.push(branchName);
         }
       }
-
-      return {
-        success: conflicts.length === 0,
-        conflicts,
-      };
-    } catch (error: any) {
-      throw new Error(`Failed to merge PRs locally: ${error.message}`);
     }
+
+    return {
+      success: conflicts.length === 0,
+      conflicts,
+    };
   }
 
   /**
