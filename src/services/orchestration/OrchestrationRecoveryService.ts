@@ -41,41 +41,58 @@ export class OrchestrationRecoveryService {
     try {
       console.log('🔄 [Recovery] Starting orchestration recovery...');
 
-      // Buscar tasks interrumpidas (in_progress pero NO pausadas manualmente)
-      const interruptedTasks = await Task.find({
+      // Buscar tasks interrumpidas usando lean() para evitar validación de esquema
+      const interruptedTasksRaw = await Task.find({
         status: 'in_progress',
         'orchestration.paused': { $ne: true }, // Excluir tasks pausadas manualmente
-      }).populate('userId');
+      })
+        .lean()
+        .exec();
 
-      if (interruptedTasks.length === 0) {
+      if (interruptedTasksRaw.length === 0) {
         console.log('✅ [Recovery] No interrupted orchestrations found');
         return;
       }
 
-      console.log(`📋 [Recovery] Found ${interruptedTasks.length} interrupted task(s):`);
-      interruptedTasks.forEach((task) => {
+      console.log(`📋 [Recovery] Found ${interruptedTasksRaw.length} interrupted task(s):`);
+      interruptedTasksRaw.forEach((task: any) => {
         console.log(`  - Task ${task._id}: ${task.title} (Phase: ${task.orchestration.currentPhase})`);
       });
 
       // Recuperar cada task (secuencialmente para evitar sobrecarga)
-      for (const task of interruptedTasks) {
+      for (const taskRaw of interruptedTasksRaw) {
         try {
+          // Convertir a documento de Mongoose solo para recoverTask
+          const task = await Task.findById(taskRaw._id);
+          if (!task) {
+            console.log(`⚠️  [Recovery] Task ${taskRaw._id} not found, skipping`);
+            continue;
+          }
+
           await this.recoverTask(task);
         } catch (error: any) {
-          console.error(`❌ [Recovery] Failed to recover task ${(task._id as any).toString()}:`, error.message);
+          console.error(`❌ [Recovery] Failed to recover task ${taskRaw._id}:`, error.message);
 
-          // Marcar como fallida pero NO detener recovery de otras tasks
-          task.status = 'failed';
-          task.orchestration.currentPhase = 'completed';
-          await task.save();
+          // Marcar como fallida directamente en la DB (sin save que valida)
+          const mongoose = require('mongoose');
+          await mongoose.connection.collection('tasks').updateOne(
+            { _id: taskRaw._id },
+            {
+              $set: {
+                status: 'failed',
+                'orchestration.currentPhase': 'completed',
+                updatedAt: new Date(),
+              },
+            }
+          );
 
           await LogService.error(`Failed to recover task after server restart`, {
-            taskId: (task._id as any).toString(),
+            taskId: taskRaw._id.toString(),
             category: 'orchestration',
             error,
           });
 
-          NotificationService.emitTaskFailed((task._id as any).toString(), {
+          NotificationService.emitTaskFailed(taskRaw._id.toString(), {
             error: `Recovery failed: ${error.message}`,
           });
         }
@@ -97,34 +114,72 @@ export class OrchestrationRecoveryService {
 
     console.log(`🔄 [Recovery] Recovering task ${taskId}: ${task.title}`);
 
-    await LogService.info(`Auto-recovering interrupted orchestration`, {
-      taskId,
-      category: 'orchestration',
-      phase: task.orchestration.currentPhase as any,
-      metadata: {
-        lastPhase: task.orchestration.currentPhase,
-      },
-    });
+    try {
+      await LogService.info(`Auto-recovering interrupted orchestration`, {
+        taskId,
+        category: 'orchestration',
+        phase: task.orchestration.currentPhase as any,
+        metadata: {
+          lastPhase: task.orchestration.currentPhase,
+        },
+      });
 
-    // Notificar al frontend que la task se está recuperando
-    NotificationService.emitConsoleLog(
-      taskId,
-      'info',
-      `🔄 Server restarted - Auto-recovering orchestration from phase: ${task.orchestration.currentPhase}`
-    );
+      // Notificar al frontend que la task se está recuperando
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔄 Server restarted - Auto-recovering orchestration from phase: ${task.orchestration.currentPhase}`
+      );
 
-    // Verificar integridad del workspace
-    const workspaceExists = await this.verifyWorkspace(task);
-    if (!workspaceExists) {
-      console.log(`⚠️  [Recovery] Workspace missing for task ${taskId} - will re-clone`);
+      // Verificar integridad del workspace
+      const workspaceExists = await this.verifyWorkspace(task);
+      if (!workspaceExists) {
+        console.log(`⚠️  [Recovery] Workspace missing for task ${taskId} - will re-clone`);
+      }
+
+      console.log(`✅ [Recovery] Starting orchestration for task ${taskId}`);
+
+      // Reanudar orquestación (el coordinador detectará qué fases ya completaron)
+      await this.orchestrator.orchestrateTask(taskId);
+
+      console.log(`✅ [Recovery] Task ${taskId} recovered successfully`);
+    } catch (error: any) {
+      // Manejar errores de validación de esquema (ej: attachments legacy)
+      if (error.name === 'ValidationError' && error.errors) {
+        console.error(`⚠️  [Recovery] Schema validation error for task ${taskId}:`, error.message);
+        console.log(`📝 [Recovery] Attempting to fix schema issues...`);
+
+        // Marcar como failed directamente en la DB sin usar save() (que valida)
+        const mongoose = require('mongoose');
+        await mongoose.connection.collection('tasks').updateOne(
+          { _id: task._id },
+          {
+            $set: {
+              status: 'failed',
+              'orchestration.currentPhase': 'completed',
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        console.log(`✅ [Recovery] Task ${taskId} marked as failed due to schema issues`);
+
+        await LogService.error(`Recovery failed due to schema validation`, {
+          taskId,
+          category: 'orchestration',
+          error,
+        });
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ Task recovery failed: Schema validation error. Please check the task data.`
+        );
+      } else {
+        // Re-throw otros errores para que sean manejados por el caller
+        throw error;
+      }
     }
-
-    console.log(`✅ [Recovery] Starting orchestration for task ${taskId}`);
-
-    // Reanudar orquestación (el coordinador detectará qué fases ya completaron)
-    await this.orchestrator.orchestrateTask(taskId);
-
-    console.log(`✅ [Recovery] Task ${taskId} recovered successfully`);
   }
 
   /**
