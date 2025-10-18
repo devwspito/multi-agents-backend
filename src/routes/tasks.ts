@@ -34,7 +34,7 @@ const approvePhaseSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['product-manager', 'project-manager', 'tech-lead', 'development', 'qa-engineer', 'merge-coordinator'])
+    z.enum(['product-manager', 'project-manager', 'tech-lead', 'development', 'judge', 'qa-engineer', 'merge-coordinator'])
   ).optional(),
 });
 

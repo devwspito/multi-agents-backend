@@ -202,7 +202,7 @@ export interface IOrchestration {
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'development' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
 
   // Historial de aprobaciones
   approvalHistory?: {
@@ -569,7 +569,7 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['product-manager', 'project-manager', 'tech-lead', 'development', 'qa-engineer', 'merge-coordinator'],
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'development', 'judge', 'qa-engineer', 'merge-coordinator'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       approvalHistory: [{
