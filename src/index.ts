@@ -225,7 +225,7 @@ class AgentPlatformApp {
 
       // Event: subscribe (suscribirse a eventos)
       socket.on('subscribe', (data: { eventType: string }) => {
-        console.log(`📬 Socket ${socket.id} subscribed to: ${data.eventType}`);
+        console.log(`📮 Socket ${socket.id} subscribed to: ${data.eventType}`);
         socket.join(`event:${data.eventType}`);
       });
 
