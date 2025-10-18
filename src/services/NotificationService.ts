@@ -161,7 +161,7 @@ export class NotificationService {
 
     io.to(`task:${taskId}`).emit('notification', notification.notification);
 
-    console.log(`📬 [WebSocket] Notification emitted:`, {
+    console.log(`📮 [WebSocket] Notification emitted:`, {
       taskId,
       type: notificationType,
     });
