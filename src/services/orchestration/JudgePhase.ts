@@ -406,7 +406,15 @@ export class JudgePhase extends BasePhase {
       throw new Error(`Invalid developer object - missing instanceId field`);
     }
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath);
+    // Get commit SHA if available
+    const commitSHA = context.getData<string>('commitSHA');
+    if (commitSHA) {
+      console.log(`📍 [Judge] Will review EXACT commit: ${commitSHA}`);
+    } else {
+      console.warn(`⚠️  [Judge] No commit SHA provided - will review current HEAD`);
+    }
+
+    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA);
 
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
     // This ensures ALL agents receive the same multimedia context
@@ -483,7 +491,8 @@ export class JudgePhase extends BasePhase {
     task: any,
     story: any, // Using 'any' because EventStore stories have more fields than IStory model
     developer: any,
-    workspacePath: string | null
+    workspacePath: string | null,
+    commitSHA?: string
   ): string {
     const techLeadInstructions = task.orchestration.techLead?.output || '';
 
@@ -492,6 +501,9 @@ export class JudgePhase extends BasePhase {
 ## Story to Evaluate:
 **Title**: ${story.title}
 **Description**: ${story.description}
+**Developer**: ${developer.instanceId}
+**Branch**: ${story.branchName || 'unknown'}
+${commitSHA ? `**Commit SHA**: ${commitSHA} (EXACT commit you must review)` : ''}
 
 ## Tech Lead Instructions:
 ${techLeadInstructions}
