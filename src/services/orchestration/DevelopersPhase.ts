@@ -781,15 +781,42 @@ export class DevelopersPhase extends BasePhase {
       console.error(`❌ [Merge] Failed to merge story ${story.id}: ${error.message}`);
 
       // Check if it's a merge conflict
-      if (error.message.includes('CONFLICT')) {
+      if (error.message.includes('CONFLICT') || error.message.includes('Recorded preimage')) {
         console.error(`🔥 [Merge] MERGE CONFLICT detected!`);
         console.error(`   Story: ${story.title}`);
         console.error(`   Branch: ${story.branchName}`);
         console.error(`   Epic: epic/${epic.id}`);
-        console.error(`\n   This requires manual resolution!`);
+        console.error(`\n   📋 ACTION REQUIRED:`);
+        console.error(`   1. This story modifies files that were changed in another story`);
+        console.error(`   2. Aborting merge and marking story for manual resolution`);
+        console.error(`   3. Story will NOT block other stories in the epic`);
+
+        // Abort the conflicted merge
+        try {
+          const { execSync } = require('child_process');
+          const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+          const repoPath = `${workspacePath}/${targetRepo}`;
+          execSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
+          console.log(`✅ [Merge] Aborted conflicted merge`);
+        } catch (abortError) {
+          console.error(`⚠️  Could not abort merge: ${abortError}`);
+        }
+
+        // Mark story as having conflict (don't throw - let other stories continue)
+        story.mergeConflict = true;
+        story.mergeConflictDetails = error.message;
+
+        const { NotificationService } = await import('../NotificationService');
+        NotificationService.emitConsoleLog(
+          'system',
+          'warn',
+          `⚠️  Story "${story.title}" has merge conflicts - marked for manual resolution`
+        );
+
+        return; // Don't throw - let pipeline continue with other stories
       }
 
-      throw error; // Re-throw to halt epic execution
+      throw error; // Re-throw non-conflict errors
     }
   }
 }
