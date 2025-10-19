@@ -2,6 +2,18 @@ import mongoose from 'mongoose';
 import { Event, EventType, IEvent } from '../models/Event';
 
 /**
+ * EventCounter - Atomic counter for event versioning
+ * Used to prevent duplicate version numbers in concurrent event writes
+ */
+const eventCounterSchema = new mongoose.Schema({
+  taskId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+  sequence: { type: Number, default: 0 }
+});
+
+// Only create model if it doesn't exist (prevents OverwriteModelError)
+const EventCounter = mongoose.models.EventCounter || mongoose.model('EventCounter', eventCounterSchema);
+
+/**
  * Task State - Reconstructed from events
  */
 export interface TaskState {
@@ -123,17 +135,8 @@ export class EventStore {
    * even when multiple teams write events concurrently
    */
   private async getNextVersion(taskId: mongoose.Types.ObjectId): Promise<number> {
-    // Create a counter collection for atomic version tracking
-    const Counter = mongoose.model(
-      'EventCounter',
-      new mongoose.Schema({
-        taskId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
-        sequence: { type: Number, default: 0 }
-      })
-    );
-
     // Atomically increment and return new version
-    const counter = await Counter.findOneAndUpdate(
+    const counter = await EventCounter.findOneAndUpdate(
       { taskId },
       { $inc: { sequence: 1 } },
       { new: true, upsert: true }
