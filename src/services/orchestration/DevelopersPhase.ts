@@ -337,6 +337,15 @@ export class DevelopersPhase extends BasePhase {
           member.assignedStories.some(storyId => epicStoryIds.includes(storyId))
         );
 
+        // 🔥 DEBUG: Log what we found
+        console.log(`\n🔍 [DEBUG] Epic "${epic.name}" (${epic.id}):`);
+        console.log(`   Epic stories (${epicStoryIds.length}): ${epicStoryIds.join(', ')}`);
+        console.log(`   Total team members: ${team.length}`);
+        team.forEach(m => {
+          console.log(`   - ${m.instanceId}: assigned ${m.assignedStories.length} stories: ${m.assignedStories.join(', ')}`);
+        });
+        console.log(`   Developers matched for this epic: ${epicDevelopers.length}`);
+
         if (epicDevelopers.length === 0) {
           await LogService.warn(`Epic skipped - No developers assigned: ${epic.name}`, {
             taskId,
@@ -345,6 +354,8 @@ export class DevelopersPhase extends BasePhase {
             epicId: epic.id,
             epicName: epic.name,
           });
+          console.error(`\n❌ [CRITICAL] No developers assigned to epic "${epic.name}"!`);
+          console.error(`   This means story IDs don't match between epic.stories and team.assignedStories`);
           continue;
         }
 
