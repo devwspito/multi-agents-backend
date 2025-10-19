@@ -482,7 +482,10 @@ export class OrchestrationCoordinator {
         return new TechLeadPhase(this.executeAgent.bind(this));
 
       case 'Developers':
-        return new DevelopersPhase(this.executeDeveloper.bind(this));
+        return new DevelopersPhase(
+          this.executeDeveloper.bind(this),
+          this.executeAgent.bind(this) // For Judge execution
+        );
 
       case 'Judge':
         return new JudgePhase(this.executeAgent.bind(this));

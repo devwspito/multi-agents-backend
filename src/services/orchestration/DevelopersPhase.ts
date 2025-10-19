@@ -28,7 +28,8 @@ export class DevelopersPhase extends BasePhase {
   readonly description = 'Implementing features with production-ready code';
 
   constructor(
-    private executeDeveloperFn: Function
+    private executeDeveloperFn: Function,
+    private executeAgentFn?: Function // For Judge execution (optional for backward compatibility)
   ) {
     super();
   }
@@ -597,7 +598,13 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('commitSHA', commitSHA); // 🔥 CRITICAL: Exact commit to review
 
       const { JudgePhase } = await import('./JudgePhase');
-      const judgePhase = new JudgePhase(this.executeDeveloperFn as any);
+
+      // Use executeAgentFn for Judge (NOT executeDeveloperFn)
+      if (!this.executeAgentFn) {
+        throw new Error('executeAgentFn is required for Judge evaluation');
+      }
+
+      const judgePhase = new JudgePhase(this.executeAgentFn);
       const judgeResult = await judgePhase.execute(judgeContext);
 
       if (judgeResult.success && judgeResult.data?.status === 'approved') {
@@ -674,7 +681,11 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
 
       // Execute Judge phase
-      const judgePhase = new JudgePhase(this.executeDeveloperFn as any); // Judge needs executeAgent, not executeDeveloper
+      if (!this.executeAgentFn) {
+        throw new Error('executeAgentFn is required for Judge evaluation');
+      }
+
+      const judgePhase = new JudgePhase(this.executeAgentFn); // Judge needs executeAgent, not executeDeveloper
       const result = await judgePhase.execute(judgeContext);
 
       if (result.success && result.data?.status === 'approved') {

@@ -286,7 +286,10 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Execute team pipeline
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
-      const developersPhase = new DevelopersPhase(this.executeDeveloperFn);
+      const developersPhase = new DevelopersPhase(
+        this.executeDeveloperFn,
+        this.executeAgentFn // For Judge execution inside DevelopersPhase
+      );
       // Note: Judge phase runs per-story inside DevelopersPhase, not as a separate batch
       const qaPhase = new QAPhase(
         this.executeAgentFn,
