@@ -359,6 +359,13 @@ export class NotificationService {
 
     // 2. Persistir en base de datos para sobrevivir refresh
     try {
+      // Validate taskId is a valid ObjectId (24 hex chars)
+      const mongoose = await import('mongoose');
+      if (!mongoose.default.Types.ObjectId.isValid(taskId)) {
+        // Skip DB persistence for invalid IDs (e.g., "system", "unknown")
+        return;
+      }
+
       const { Task } = await import('../models/Task');
       await Task.findByIdAndUpdate(
         taskId,
