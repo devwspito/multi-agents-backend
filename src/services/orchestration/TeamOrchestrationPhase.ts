@@ -3,7 +3,7 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
-import { JudgePhase } from './JudgePhase';
+// JudgePhase runs per-story inside DevelopersPhase, not as separate batch in multi-team mode
 import { QAPhase } from './QAPhase';
 import { GitHubService } from '../GitHubService';
 import { PRManagementService } from '../github/PRManagementService';
@@ -287,7 +287,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       // Execute team pipeline
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
       const developersPhase = new DevelopersPhase(this.executeDeveloperFn);
-      const judgePhase = new JudgePhase(this.executeAgentFn);
+      // Note: Judge phase runs per-story inside DevelopersPhase, not as a separate batch
       const qaPhase = new QAPhase(
         this.executeAgentFn,
         this.githubService,
@@ -309,12 +309,10 @@ export class TeamOrchestrationPhase extends BasePhase {
         throw new Error(`Developers failed: ${developersResult.error}`);
       }
 
-      // Judge: Review code quality
-      console.log(`\n[Team ${teamNumber}] Phase 3: Judge (Code Review)`);
-      const judgeResult = await judgePhase.execute(teamContext);
-      if (!judgeResult.success) {
-        throw new Error(`Judge failed: ${judgeResult.error}`);
-      }
+      // 🔥 SKIP Judge batch review - already done per-story in DevelopersPhase
+      // Each story was reviewed by Judge immediately after developer completed it
+      // Only approved stories were merged to epic branch
+      console.log(`\n[Team ${teamNumber}] Phase 3: Judge (Code Review) - SKIPPED (already done per-story)`);
 
       // QA: Test integration
       console.log(`\n[Team ${teamNumber}] Phase 4: QA (Testing)`);
