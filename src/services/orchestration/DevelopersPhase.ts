@@ -377,43 +377,37 @@ export class DevelopersPhase extends BasePhase {
           },
         });
 
-        // Execute developers for this epic with Judge review + merge workflow
-        // New workflow: Dev → Judge → Merge (per story)
-        for (const member of epicDevelopers) {
-          // 1. Developer implements story
-          await this.executeDeveloperFn(
-            task,
-            member,
-            repositories,
-            workspacePath,
-            workspaceStructure,
-            attachments, // Pass attachments to developers
-            state.stories, // Pass stories from event store
-            state.epics // Pass epics from event store
-          );
+        // 🔥 NEW PATTERN: 1 Story = 1 Isolated Pipeline (Dev + Judge + QA + Fixer)
+        // Each story gets its OWN workspace to avoid git conflicts
+        console.log(`\n📦 [EPIC] Starting isolated story pipelines for epic: ${epic.name}`);
 
-          // 2. Get story details for Judge review
+        for (const member of epicDevelopers) {
           const assignedStories = member.assignedStories || [];
+
           for (const storyId of assignedStories) {
             const story = state.stories.find((s: any) => s.id === storyId);
-            if (!story || !story.branchName) {
-              console.warn(`⚠️  [Developers] Story ${storyId} has no branch, skipping Judge + Merge`);
+            if (!story) {
+              console.warn(`⚠️  Story ${storyId} not found in EventStore`);
               continue;
             }
 
-            // 3. Judge reviews story branch
-            console.log(`\n⚖️  [Developers] Calling Judge to review story branch: ${story.branchName}`);
-            // Pass team to context for Judge to find developer
-            context.setData('developmentTeam', team);
-            const judgeApproved = await this.reviewStoryBranch(story, task, workspacePath, context);
+            console.log(`\n🚀 [STORY PIPELINE] Starting isolated pipeline for: ${story.title}`);
+            console.log(`   Story ID: ${storyId}`);
+            console.log(`   Developer: ${member.instanceId}`);
 
-            // 4. If approved → Merge to epic branch
-            if (judgeApproved) {
-              await this.mergeStoryToEpic(story, epic, workspacePath, repositories);
-            } else {
-              console.error(`❌ [Developers] Story ${storyId} rejected by Judge - NOT merging`);
-              // TODO: Implement retry mechanism if needed
-            }
+            // Execute complete isolated story pipeline
+            await this.executeIsolatedStoryPipeline(
+              task,
+              story,
+              member,
+              epic,
+              repositories,
+              workspacePath,
+              workspaceStructure,
+              attachments,
+              state,
+              context
+            );
           }
         }
 
@@ -501,6 +495,82 @@ export class DevelopersPhase extends BasePhase {
         success: false,
         error: error.message,
       };
+    }
+  }
+
+  /**
+   * Execute isolated story pipeline: 1 Story = 1 Dev + 1 Judge + 1 QA + 1 Fixer
+   * Each story works in the SAME workspace (no checkout conflicts)
+   */
+  private async executeIsolatedStoryPipeline(
+    task: any,
+    story: any,
+    developer: any,
+    epic: any,
+    repositories: any[],
+    workspacePath: string | null,
+    workspaceStructure: string,
+    attachments: any[],
+    state: any,
+    context: OrchestrationContext
+  ): Promise<void> {
+    const taskId = (task._id as any).toString();
+
+    try {
+      // STEP 1: Developer implements story
+      console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
+      await this.executeDeveloperFn(
+        task,
+        developer,
+        repositories,
+        workspacePath,
+        workspaceStructure,
+        attachments,
+        state.stories,
+        state.epics
+      );
+
+      // Verify story has branch
+      const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
+      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+      if (!updatedStory || !updatedStory.branchName) {
+        console.error(`❌ [PIPELINE] Story ${story.id} has no branch after developer - FAILED`);
+        return;
+      }
+
+      // STEP 2: Judge reviews code (in SAME workspace, SAME branch)
+      console.log(`\n⚖️  [STEP 2/3] Judge reviewing story in branch: ${updatedStory.branchName}`);
+      console.log(`   Workspace: ${workspacePath}`);
+      console.log(`   Branch should already be checked out by developer`);
+
+      // Create isolated context for Judge
+      const judgeContext = new OrchestrationContext(task, repositories, workspacePath);
+      judgeContext.setData('storyToReview', updatedStory);
+      judgeContext.setData('reviewMode', 'single-story');
+      judgeContext.setData('developmentTeam', [developer]); // Only this developer
+      judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
+
+      const { JudgePhase } = await import('./JudgePhase');
+      const judgePhase = new JudgePhase(this.executeDeveloperFn as any);
+      const judgeResult = await judgePhase.execute(judgeContext);
+
+      if (judgeResult.success && judgeResult.data?.status === 'approved') {
+        console.log(`✅ [STEP 2/3] Judge APPROVED story: ${story.title}`);
+
+        // STEP 3: Merge to epic branch
+        console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
+        await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories);
+
+        console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
+      } else {
+        console.error(`❌ [STEP 2/3] Judge REJECTED story: ${story.title}`);
+        console.error(`   Feedback: ${judgeResult.data?.feedback || judgeResult.error}`);
+        console.error(`❌ [PIPELINE] Story pipeline FAILED - NOT merging`);
+      }
+
+    } catch (error: any) {
+      console.error(`❌ [PIPELINE] Story pipeline failed for ${story.id}: ${error.message}`);
     }
   }
 
