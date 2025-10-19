@@ -1212,6 +1212,35 @@ After writing code, you MUST:
           console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify git push: ${verifyError.message}`);
         }
 
+        // 🔥 CRITICAL DEBUG: Show EXACTLY what code Developer wrote
+        console.log(`\n${'='.repeat(80)}`);
+        console.log(`📝 DEVELOPER ${member.instanceId} - CODE CHANGES VERIFICATION`);
+        console.log(`${'='.repeat(80)}`);
+
+        try {
+          const { execSync } = require('child_process');
+          const repoPath = `${workspacePath}/${targetRepository}`;
+
+          // Show files that were modified
+          const modifiedFiles = execSync(`cd "${repoPath}" && git diff --name-only`, { encoding: 'utf8' });
+          console.log(`\n📂 Modified files:\n${modifiedFiles || '(no files modified)'}`);
+
+          // Show actual code changes (full diff)
+          const diffOutput = execSync(`cd "${repoPath}" && git diff`, { encoding: 'utf8' });
+          console.log(`\n📝 FULL CODE DIFF:\n${diffOutput || '(no changes)'}`);
+
+          // Emit to frontend
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `\n${'='.repeat(80)}\n📝 CODE CHANGES BY ${member.instanceId}\n${'='.repeat(80)}\n\nModified files:\n${modifiedFiles}\n\nFull diff:\n${diffOutput}\n${'='.repeat(80)}`
+          );
+        } catch (diffError: any) {
+          console.error(`⚠️  Could not get git diff: ${diffError.message}`);
+        }
+
+        console.log(`${'='.repeat(80)}\n`);
+
         // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
         NotificationService.emitConsoleLog(
           taskId,
