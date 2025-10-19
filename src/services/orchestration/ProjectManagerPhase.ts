@@ -152,7 +152,7 @@ ${repoInfo}${workspaceInfo}
         attachments.length > 0 ? attachments : undefined // Pass attachments
       );
 
-      // Parse JSON response to extract stories
+      // Parse JSON response to extract EPICS (not stories)
       let parsed: any;
 
       // Try parsing as pure JSON first (no markdown)
@@ -160,7 +160,7 @@ ${repoInfo}${workspaceInfo}
         const trimmed = result.output.trim();
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
           parsed = JSON.parse(trimmed);
-          if (parsed.stories && Array.isArray(parsed.stories)) {
+          if (parsed.epics && Array.isArray(parsed.epics)) {
             console.log('✅ [ProjectManager] Parsed as pure JSON (no markdown blocks)');
           } else {
             parsed = null; // Not the right structure
@@ -188,7 +188,7 @@ ${repoInfo}${workspaceInfo}
               const trimmed = jsonText.trim();
               parsed = JSON.parse(trimmed);
 
-              if (parsed.stories && Array.isArray(parsed.stories)) {
+              if (parsed.epics && Array.isArray(parsed.epics)) {
                 console.log(`✅ [ProjectManager] Parsed JSON using pattern: ${pattern.toString().substring(0, 50)}...`);
                 break;
               } else {
@@ -202,28 +202,28 @@ ${repoInfo}${workspaceInfo}
         }
       }
 
-      // Validate stories array exists
-      if (!parsed || !parsed.stories || !Array.isArray(parsed.stories)) {
+      // Validate epics array exists
+      if (!parsed || !parsed.epics || !Array.isArray(parsed.epics)) {
         console.log('\n🔍 [ProjectManager] FULL Agent output:\n', result.output);
         NotificationService.emitConsoleLog(taskId, 'error', `❌ Project Manager parsing failed. Full output:\n${result.output}`);
-        throw new Error(`Project Manager did not return valid JSON with stories array. Found ${parsed?.stories ? 'non-array stories' : 'no stories'}`);
+        throw new Error(`Project Manager did not return valid JSON with epics array. Found ${parsed?.epics ? 'non-array epics' : 'no epics'}`);
       }
 
-      if (parsed.stories.length === 0) {
-        console.log('\n⚠️  [ProjectManager] Agent returned empty stories array');
-        throw new Error('Project Manager returned empty stories array - cannot proceed with team orchestration');
+      if (parsed.epics.length === 0) {
+        console.log('\n⚠️  [ProjectManager] Agent returned empty epics array');
+        throw new Error('Project Manager returned empty epics array - cannot proceed with team orchestration');
       }
 
-      console.log(`✅ [ProjectManager] Successfully parsed ${parsed.stories.length} story/stories`);
+      console.log(`✅ [ProjectManager] Successfully parsed ${parsed.epics.length} epic(s) - will create ${parsed.epics.length} team(s)`);
 
       // Store results
       task.orchestration.projectManager.status = 'completed';
       task.orchestration.projectManager.completedAt = new Date();
       task.orchestration.projectManager.output = result.output;
       task.orchestration.projectManager.sessionId = result.sessionId;
-      // Store parsed stories and team composition
-      (task.orchestration.projectManager as any).stories = parsed.stories;
-      (task.orchestration.projectManager as any).recommendedTeamSize = parsed.recommendedTeamSize;
+      // Store parsed epics and total teams needed
+      (task.orchestration.projectManager as any).epics = parsed.epics;
+      (task.orchestration.projectManager as any).totalTeamsNeeded = parsed.totalTeamsNeeded || parsed.epics.length;
       // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
       // task.orchestration.projectManager.canResumeSession = result.canResume;
       task.orchestration.projectManager.usage = result.usage;
@@ -286,8 +286,8 @@ ${repoInfo}${workspaceInfo}
 
       // Store phase data for next phases
       context.setData('projectManagerOutput', result.output);
-      context.setData('stories', parsed.stories);
-      context.setData('recommendedTeamSize', parsed.recommendedTeamSize);
+      context.setData('epics', parsed.epics);
+      context.setData('totalTeamsNeeded', parsed.totalTeamsNeeded || parsed.epics.length);
 
       return {
         success: true,

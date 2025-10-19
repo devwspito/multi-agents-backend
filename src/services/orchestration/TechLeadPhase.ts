@@ -76,13 +76,16 @@ export class TechLeadPhase extends BasePhase {
     });
 
     try {
-      // 🔥 MULTI-TEAM MODE: Check if we're working on a single story (from TeamOrchestrationPhase)
-      const teamStory = context.getData<any>('teamStory');
-      const multiTeamMode = !!teamStory;
+      // 🔥 MULTI-TEAM MODE: Check if we're working on a single EPIC (from TeamOrchestrationPhase)
+      const teamEpic = context.getData<any>('teamEpic');
+      const epicBranch = context.getData<string>('epicBranch');
+      const multiTeamMode = !!teamEpic;
 
       if (multiTeamMode) {
-        console.log(`\n🎯 [TechLead] Multi-Team Mode: Working on single story: ${teamStory.id}`);
-        console.log(`   Story: ${teamStory.title}`);
+        console.log(`\n🎯 [TechLead] Multi-Team Mode: Working on epic: ${teamEpic.id}`);
+        console.log(`   Epic: ${teamEpic.title}`);
+        console.log(`   Branch: ${epicBranch}`);
+        console.log(`   Complexity: ${teamEpic.estimatedComplexity}`);
       }
 
       // TODO: Add epicsIdentified to IAgentStep if needed
@@ -117,9 +120,9 @@ ${previousOutput}
 `;
       }
 
-      // 🔥 MULTI-TEAM MODE: Different prompt for single story breakdown
+      // 🔥 MULTI-TEAM MODE: Different prompt for epic breakdown into stories
       const firstRepoName = context.repositories[0]?.full_name || context.repositories[0]?.githubRepoName || 'repository-name';
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamStory, repoInfo, workspaceInfo, firstRepoName) : `Act as the tech-lead agent.
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, firstRepoName, epicBranch) : `Act as the tech-lead agent.
 
 # Architecture Design & Team Building
 ${revisionSection}
@@ -741,28 +744,33 @@ const token = jwt.sign(
   }
 
   /**
-   * Build prompt for Multi-Team mode (single story breakdown)
+   * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
    */
-  private buildMultiTeamPrompt(story: any, repoInfo: string, workspaceInfo: string, firstRepo?: string): string {
-    const targetRepo = story.affectedRepositories?.[0] || firstRepo || 'repository-name';
-    return `Act as the tech-lead agent in MULTI-TEAM MODE.
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, firstRepo?: string, branchName?: string): string {
+    const targetRepo = epic.affectedRepositories?.[0] || firstRepo || 'repository-name';
+    return `Act as the TECH LEAD in MULTI-TEAM MODE.
 
-# Single Story Architecture Design
+# Epic Architecture Design & Team Building
 
-You are working on ONE story from a larger epic. Your job is to break THIS story into detailed, implementable sub-stories.
+You are the TEAM LEAD for this epic. Your job is to:
+1. **Break this epic into 2-5 implementable stories**
+2. **Decide how many developers you need** (1-5 devs recommended)
+3. **Assign each story to a specific developer**
+4. **Provide detailed technical specifications** for each story
 
-## Story to Implement:
-**ID**: ${story.id}
-**Title**: ${story.title}
-**Description**: ${story.description}
-**Complexity**: ${story.estimatedComplexity}
-**Affected Repositories**: ${story.affectedRepositories?.join(', ') || 'Not specified'}
-**Dependencies**: ${story.dependencies?.length > 0 ? story.dependencies.join(', ') : 'None'}
+## Epic Assignment:
+**ID**: ${epic.id}
+**Title**: ${epic.title}
+**Description**: ${epic.description}
+**Complexity**: ${epic.estimatedComplexity}
+**Affected Repositories**: ${epic.affectedRepositories?.join(', ') || 'Not specified'}
+**Dependencies**: ${epic.dependencies?.length > 0 ? epic.dependencies.join(', ') : 'None'}
+**Branch**: ${branchName || `epic/${epic.id}`}
 
 ${repoInfo}${workspaceInfo}
 
-## Your Mission:
-Break this story into 1-3 implementable sub-stories with:
+## Your Mission (as Team Lead):
+Break this EPIC into 2-5 implementable STORIES with:
 1. **Exact file paths** to read/modify/create
 2. **Detailed acceptance criteria** (Given/When/Then)
 3. **Technical specifications** (functions, classes, APIs)
@@ -773,25 +781,27 @@ Break this story into 1-3 implementable sub-stories with:
 **CRITICAL RULES**:
 - 🚨 **EXPLORE CODEBASE FIRST** - Use tools to find actual file paths
 - ⚠️ **REAL PATHS ONLY** - No placeholder paths like "src/path/to/file.ts"
-- ⚠️ **1-3 SUB-STORIES MAX** - Keep it focused on THIS story
-- ⚠️ **IMPLEMENTABLE** - Each sub-story should be 1-3 hours max
+- ⚠️ **2-5 STORIES RECOMMENDED** - Break epic into manageable stories
+- ⚠️ **GRANULAR** - Each story = 1-3 hours of work for 1 developer
+- ⚠️ **ASSIGN DEVS** - Decide team size (1-5 devs) and assign stories
+- ⚠️ **1 DEV = 1 STORY** - Each developer gets exactly one story to work on
 
 **RESPOND ONLY WITH VALID JSON** in this exact format:
 \`\`\`json
 {
   "epics": [
     {
-      "id": "${story.id}",
-      "name": "${story.title}",
-      "description": "Architecture for ${story.title}",
-      "branchName": "epic/${story.id}",
+      "id": "${epic.id}",
+      "name": "${epic.title}",
+      "description": "Architecture for ${epic.title}",
+      "branchName": "${branchName || `epic/${epic.id}`}",
       "targetRepository": "${targetRepo}",
       "stories": [
         {
-          "id": "${story.id}-1",
-          "title": "Sub-story title (e.g., 'Create AuthService with login method')",
-          "description": "COMPLETE description with ALL sections: Acceptance Criteria (Given/When/Then), Technical Specifications (files, functions, types), Implementation Guidelines (patterns, security), Testing Requirements, Definition of Done, Code Examples",
-          "epicId": "${story.id}",
+          "id": "${epic.id}-story-1",
+          "title": "Story title (e.g., 'Create AuthService with JWT login')",
+          "description": "COMPLETE description with ALL sections: Acceptance Criteria (Given/When/Then), Technical Specifications (files, functions, types, APIs), Implementation Guidelines (patterns, security, performance), Testing Requirements, Definition of Done, Code Examples",
+          "epicId": "${epic.id}",
           "priority": 1,
           "estimatedComplexity": "simple|moderate|complex",
           "dependencies": [],
@@ -799,24 +809,49 @@ Break this story into 1-3 implementable sub-stories with:
           "filesToRead": ["real/path/file1.ts"],
           "filesToModify": ["real/path/file2.ts"],
           "filesToCreate": ["real/path/newfile.ts"]
+        },
+        {
+          "id": "${epic.id}-story-2",
+          "title": "Another story (e.g., 'Add JWT middleware to routes')",
+          "description": "COMPLETE description with ALL sections...",
+          "epicId": "${epic.id}",
+          "priority": 2,
+          "estimatedComplexity": "simple|moderate|complex",
+          "dependencies": ["${epic.id}-story-1"],
+          "status": "pending",
+          "filesToRead": ["real/path/file3.ts"],
+          "filesToModify": ["real/path/file4.ts"],
+          "filesToCreate": []
         }
       ],
       "status": "pending"
     }
   ],
-  "architectureDesign": "Technical architecture for ${story.title} including: approach, patterns, security, performance",
+  "architectureDesign": "Technical architecture for ${epic.title} including: system design, data flow, component interactions, API contracts, security, performance, error handling",
   "teamComposition": {
-    "developers": 1,
-    "reasoning": "Single developer sufficient for ${story.estimatedComplexity} complexity story"
+    "developers": 2,
+    "reasoning": "2 developers needed - story-1 and story-2 can run in parallel after dependencies resolved"
   },
   "storyAssignments": [
     {
-      "storyId": "${story.id}-1",
+      "storyId": "${epic.id}-story-1",
       "assignedTo": "dev-1"
+    },
+    {
+      "storyId": "${epic.id}-story-2",
+      "assignedTo": "dev-2"
     }
   ]
 }
 \`\`\`
+
+🎯 **TEAM SIZE DECISION**:
+- ${epic.estimatedComplexity === 'simple' ? '1-2 developers' : ''}
+- ${epic.estimatedComplexity === 'moderate' ? '2-3 developers' : ''}
+- ${epic.estimatedComplexity === 'complex' ? '3-4 developers' : ''}
+- ${epic.estimatedComplexity === 'epic' ? '4-5 developers' : ''}
+
+Each developer = 1 story. If epic has 3 stories, assign 3 developers.
 
 **Start by exploring the codebase, then output the JSON.**`;
   }

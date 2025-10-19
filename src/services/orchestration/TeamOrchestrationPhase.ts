@@ -91,45 +91,45 @@ export class TeamOrchestrationPhase extends BasePhase {
     });
 
     try {
-      // Get stories from Project Manager via context
-      const projectManagerStories = context.getData<any[]>('stories') || [];
+      // Get EPICS from Project Manager via context
+      const projectManagerEpics = context.getData<any[]>('epics') || [];
 
-      if (projectManagerStories.length === 0) {
+      if (projectManagerEpics.length === 0) {
         // Fallback: try to get from task model directly
-        const storiesFromTask = (task.orchestration.projectManager as any)?.stories || [];
-        if (storiesFromTask.length > 0) {
-          context.setData('stories', storiesFromTask);
-          projectManagerStories.push(...storiesFromTask);
+        const epicsFromTask = (task.orchestration.projectManager as any)?.epics || [];
+        if (epicsFromTask.length > 0) {
+          context.setData('epics', epicsFromTask);
+          projectManagerEpics.push(...epicsFromTask);
         } else {
-          throw new Error('No stories found from Project Manager - cannot create teams');
+          throw new Error('No epics found from Project Manager - cannot create teams');
         }
       }
 
-      console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerStories.length} stories from Project Manager`);
-      console.log(`   Creating ${projectManagerStories.length} parallel teams...\n`);
+      console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
+      console.log(`   Creating ${projectManagerEpics.length} parallel team(s) - 1 team per epic...\n`);
 
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `🎯 Creating ${projectManagerStories.length} parallel teams for epic execution`
+        `🎯 Creating ${projectManagerEpics.length} parallel teams (1 team per epic)`
       );
 
-      // Create team execution promises
-      const teamPromises = projectManagerStories.map((story: any, index: number) =>
-        this.executeTeam(story, index + 1, context)
+      // Create team execution promises (1 team per epic)
+      const teamPromises = projectManagerEpics.map((epic: any, index: number) =>
+        this.executeTeam(epic, index + 1, context)
       );
 
       // Execute all teams in parallel
-      console.log(`\n🚀 [TeamOrchestration] Launching ${teamPromises.length} teams in parallel...\n`);
+      console.log(`\n🚀 [TeamOrchestration] Launching ${teamPromises.length} team(s) in parallel...\n`);
       const teamResults = await Promise.allSettled(teamPromises);
 
       // Aggregate results
       const successfulTeams = teamResults.filter(r => r.status === 'fulfilled' && r.value.success);
       const failedTeams = teamResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success));
 
-      console.log(`\n✅ [TeamOrchestration] ${successfulTeams.length}/${teamResults.length} teams completed successfully`);
+      console.log(`\n✅ [TeamOrchestration] ${successfulTeams.length}/${teamResults.length} team(s) completed successfully`);
       if (failedTeams.length > 0) {
-        console.log(`❌ [TeamOrchestration] ${failedTeams.length} teams failed`);
+        console.log(`❌ [TeamOrchestration] ${failedTeams.length} team(s) failed`);
       }
 
       // Store results in task
@@ -138,13 +138,15 @@ export class TeamOrchestrationPhase extends BasePhase {
       (context.task.orchestration as any).teamOrchestration.teams = teamResults.map((result, idx) => {
         if (result.status === 'fulfilled') {
           return {
-            storyId: projectManagerStories[idx].id,
+            epicId: projectManagerEpics[idx].id,
+            epicTitle: projectManagerEpics[idx].title,
             status: result.value.success ? 'completed' : 'failed',
             error: result.value.error,
           };
         } else {
           return {
-            storyId: projectManagerStories[idx].id,
+            epicId: projectManagerEpics[idx].id,
+            epicTitle: projectManagerEpics[idx].title,
             status: 'failed',
             error: (result as PromiseRejectedResult).reason?.message || 'Unknown error',
           };
@@ -200,28 +202,66 @@ export class TeamOrchestrationPhase extends BasePhase {
   /**
    * Execute a single team for one epic
    *
-   * Team pipeline: TechLead → Developers → Judge → QA
+   * Team pipeline:
+   * 1. Create branch for epic
+   * 2. TechLead divides epic into stories + assigns devs
+   * 3. Developers implement (each dev works on 1 story)
+   * 4. Judge reviews code
+   * 5. QA tests integration
    */
   private async executeTeam(
-    story: any,
+    epic: any,
     teamNumber: number,
     parentContext: OrchestrationContext
   ): Promise<{ success: boolean; error?: string }> {
     const taskId = (parentContext.task._id as any).toString();
 
     console.log(`\n${'='.repeat(80)}`);
-    console.log(`🏃 [Team ${teamNumber}] Starting execution for story: ${story.id}`);
-    console.log(`   Story: ${story.title}`);
+    console.log(`🏃 [Team ${teamNumber}] Starting execution for EPIC: ${epic.id}`);
+    console.log(`   Epic: ${epic.title}`);
+    console.log(`   Complexity: ${epic.estimatedComplexity}`);
+    console.log(`   Repositories: ${epic.affectedRepositories?.join(', ') || 'Not specified'}`);
     console.log(`${'='.repeat(80)}\n`);
 
     NotificationService.emitConsoleLog(
       taskId,
       'info',
-      `\n🏃 Team ${teamNumber} starting: ${story.title}\n`
+      `\n🏃 Team ${teamNumber} starting epic: ${epic.title}\n`
     );
 
     try {
-      // Create isolated context for this team
+      // 1️⃣ Create branch for this epic
+      const branchName = `epic/${epic.id}`;
+      const workspacePath = parentContext.workspacePath;
+
+      if (workspacePath) {
+        console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
+
+        try {
+          // Navigate to repository and create branch
+          const { execSync: exec } = await import('child_process');
+          exec(`cd "${workspacePath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
+          console.log(`✅ [Team ${teamNumber}] Branch created: ${branchName}`);
+
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `✅ Team ${teamNumber}: Created branch ${branchName}`
+          );
+        } catch (gitError: any) {
+          // Branch might already exist
+          console.log(`⚠️  [Team ${teamNumber}] Branch might already exist: ${gitError.message}`);
+          try {
+            const { execSync: exec } = await import('child_process');
+            exec(`cd "${workspacePath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+            console.log(`✅ [Team ${teamNumber}] Checked out existing branch: ${branchName}`);
+          } catch (checkoutError: any) {
+            console.error(`❌ [Team ${teamNumber}] Failed to create/checkout branch: ${checkoutError.message}`);
+          }
+        }
+      }
+
+      // 2️⃣ Create isolated context for this team
       const teamContext = new OrchestrationContext(
         parentContext.task,
         parentContext.repositories,
@@ -232,8 +272,9 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamContext.setData('workspaceStructure', parentContext.getData('workspaceStructure'));
       teamContext.setData('attachments', parentContext.getData('attachments'));
 
-      // Store single story for this team to work on
-      teamContext.setData('teamStory', story);
+      // Store epic for this team to work on (Tech Lead will divide into stories)
+      teamContext.setData('teamEpic', epic);
+      teamContext.setData('epicBranch', branchName);
 
       // Execute team pipeline
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
@@ -274,20 +315,20 @@ export class TeamOrchestrationPhase extends BasePhase {
         throw new Error(`QA failed: ${qaResult.error}`);
       }
 
-      console.log(`\n✅ [Team ${teamNumber}] Completed successfully!\n`);
+      console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `✅ Team ${teamNumber} completed: ${story.title}`
+        `✅ Team ${teamNumber} completed epic: ${epic.title}`
       );
 
       return { success: true };
     } catch (error: any) {
-      console.error(`\n❌ [Team ${teamNumber}] Failed: ${error.message}\n`);
+      console.error(`\n❌ [Team ${teamNumber}] Failed for epic ${epic.title}: ${error.message}\n`);
       NotificationService.emitConsoleLog(
         taskId,
         'error',
-        `❌ Team ${teamNumber} failed: ${error.message}`
+        `❌ Team ${teamNumber} failed (epic: ${epic.title}): ${error.message}`
       );
 
       return { success: false, error: error.message };
