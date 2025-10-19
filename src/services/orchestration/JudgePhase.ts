@@ -99,19 +99,25 @@ export class JudgePhase extends BasePhase {
       };
     }
 
-    // Initialize judge step in task
-    if (!task.orchestration.judge) {
-      task.orchestration.judge = {
-        agent: 'judge',
-        status: 'in_progress',
-        startedAt: new Date(),
-        evaluations: [],
-      } as any;
-    }
+    // 🔥 MULTI-TEAM MODE: Check if we're in team mode
+    const reviewMode = context.getData<string>('reviewMode');
+    const multiTeamMode = reviewMode === 'single-story'; // Called from DevelopersPhase per-story
 
-    task.orchestration.judge.status = 'in_progress';
-    task.orchestration.judge.startedAt = new Date();
-    await task.save();
+    // Initialize judge step in task (skip in multi-team mode to avoid conflicts)
+    if (!multiTeamMode) {
+      if (!task.orchestration.judge) {
+        task.orchestration.judge = {
+          agent: 'judge',
+          status: 'in_progress',
+          startedAt: new Date(),
+          evaluations: [],
+        } as any;
+      }
+
+      task.orchestration.judge.status = 'in_progress';
+      task.orchestration.judge.startedAt = new Date();
+      await task.save();
+    }
 
     NotificationService.emitAgentStarted(taskId, 'Judge');
 
@@ -148,9 +154,12 @@ export class JudgePhase extends BasePhase {
     // === JUDGE VERDICT ===
     const allPassed = totalFailed === 0;
 
-    task.orchestration.judge.status = allPassed ? 'completed' : 'failed';
-    task.orchestration.judge.completedAt = new Date();
-    await task.save();
+    // Save results (skip in multi-team mode to avoid conflicts)
+    if (!multiTeamMode) {
+      task.orchestration.judge.status = allPassed ? 'completed' : 'failed';
+      task.orchestration.judge.completedAt = new Date();
+      await task.save();
+    }
 
     if (allPassed) {
       NotificationService.emitAgentCompleted(
@@ -227,12 +236,21 @@ export class JudgePhase extends BasePhase {
       console.log(`🔍 [Judge] Story "${story.title}" - Evaluation attempt ${attempt}/${this.MAX_RETRIES}`);
 
       // Get developer who worked on this story
-      const developer = task.orchestration.team?.find((m: any) =>
+      // In multi-team mode, read from context instead of task
+      const team = multiTeamMode
+        ? context.getData<any[]>('developmentTeam') || []
+        : task.orchestration.team || [];
+
+      const developer = team.find((m: any) =>
         m.assignedStories.includes(story.id)
       );
 
       if (!developer) {
         console.warn(`⚠️  No developer assigned to story ${story.id}`);
+        console.warn(`   Team size: ${team.length}, Story ID: ${story.id}`);
+        if (team.length > 0) {
+          console.warn(`   Available developers: ${team.map((m: any) => `${m.instanceId} (${m.assignedStories.join(',')})`).join(', ')}`);
+        }
         continue;
       }
 
@@ -265,15 +283,20 @@ export class JudgePhase extends BasePhase {
         task.orchestration.judge.evaluations.push(evaluationRecord);
       }
 
-      task.markModified('orchestration.judge.evaluations');
-      await task.save();
+      // Save evaluation (skip in multi-team mode to avoid conflicts)
+      if (!multiTeamMode) {
+        task.markModified('orchestration.judge.evaluations');
+        await task.save();
+      }
 
       // === CHECK RESULT ===
       if (evaluation.status === 'approved') {
         // ✅ CODE PASSED - move to next story
         story.judgeStatus = 'approved';
         story.status = 'completed';
-        await task.save();
+        if (!multiTeamMode) {
+          await task.save();
+        }
 
         NotificationService.emitAgentMessage(
           (task._id as any).toString(),
@@ -286,7 +309,9 @@ export class JudgePhase extends BasePhase {
         // ❌ CODE NEEDS CHANGES
         story.judgeStatus = 'changes_requested';
         story.judgeComments = evaluation.feedback;
-        await task.save();
+        if (!multiTeamMode) {
+          await task.save();
+        }
 
         NotificationService.emitAgentMessage(
           (task._id as any).toString(),
@@ -308,7 +333,9 @@ export class JudgePhase extends BasePhase {
           // MAX RETRIES REACHED
           story.status = 'failed';
           story.judgeStatus = 'changes_requested';
-          await task.save();
+          if (!multiTeamMode) {
+            await task.save();
+          }
 
           return {
             status: 'failed',

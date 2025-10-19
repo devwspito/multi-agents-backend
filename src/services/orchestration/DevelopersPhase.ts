@@ -403,6 +403,8 @@ export class DevelopersPhase extends BasePhase {
 
             // 3. Judge reviews story branch
             console.log(`\n⚖️  [Developers] Calling Judge to review story branch: ${story.branchName}`);
+            // Pass team to context for Judge to find developer
+            context.setData('developmentTeam', team);
             const judgeApproved = await this.reviewStoryBranch(story, task, workspacePath, context);
 
             // 4. If approved → Merge to epic branch
