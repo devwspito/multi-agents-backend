@@ -140,6 +140,7 @@ export class JudgePhase extends BasePhase {
     // === EVALUATE EACH STORY WITH RETRY MECHANISM ===
     let totalApproved = 0;
     let totalFailed = 0;
+    let lastFeedback: string | undefined;
 
     for (const story of stories) {
       console.log(`\n📋 [Judge] Evaluating story: ${story.title}`);
@@ -157,6 +158,7 @@ export class JudgePhase extends BasePhase {
         console.log(`✅ [Judge] Story "${story.title}" APPROVED`);
       } else {
         totalFailed++;
+        lastFeedback = result.feedback; // Store feedback for single-story mode
         console.error(`❌ [Judge] Story "${story.title}" FAILED after ${this.MAX_RETRIES} attempts`);
       }
     }
@@ -182,6 +184,7 @@ export class JudgePhase extends BasePhase {
           status: storyStatus,
           approved: totalApproved,
           failed: totalFailed,
+          feedback: lastFeedback, // Include feedback for rejected stories
         },
       };
     }
