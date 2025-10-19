@@ -391,6 +391,14 @@ export class JudgePhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string }> {
 
+    // Validate inputs
+    if (!task?._id) {
+      throw new Error(`Invalid task object - missing _id field`);
+    }
+    if (!developer?.instanceId) {
+      throw new Error(`Invalid developer object - missing instanceId field`);
+    }
+
     const prompt = this.buildJudgePrompt(task, story, developer, workspacePath);
 
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
