@@ -158,7 +158,13 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      const epics = state.epics;
+      // 🔥 MULTI-TEAM MODE: Filter to only this team's epic
+      let epics = state.epics;
+      if (multiTeamMode && teamEpic) {
+        // In multi-team mode, only work on the team's assigned epic
+        epics = state.epics.filter(e => e.id === teamEpic.id);
+        console.log(`🎯 [Developers] Multi-Team: Filtered to team epic ${teamEpic.id} (was ${state.epics.length} epics, now ${epics.length})`);
+      }
 
       if (epics.length === 0) {
         // 🔥 CRITICAL: Emit completion event to prevent infinite loop
