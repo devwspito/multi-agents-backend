@@ -97,14 +97,30 @@ export class DevelopersPhase extends BasePhase {
       phase: 'development',
     });
 
-    const composition = task.orchestration.techLead.teamComposition;
-    const assignments = task.orchestration.techLead.storyAssignments || [];
+    // 🔥 MULTI-TEAM MODE: Check if we're in team mode and use context data
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    // Get composition and assignments (from context in multi-team mode, from task otherwise)
+    const composition = multiTeamMode
+      ? context.getData<any>('teamComposition')
+      : task.orchestration.techLead.teamComposition;
+
+    const assignments = multiTeamMode
+      ? context.getData<any[]>('storyAssignments') || []
+      : task.orchestration.techLead.storyAssignments || [];
 
     if (!composition) {
       return {
         success: false,
         error: 'Team composition not defined by Tech Lead',
       };
+    }
+
+    if (multiTeamMode) {
+      console.log(`🎯 [Developers] Multi-Team Mode: Working on epic: ${teamEpic.id}`);
+      console.log(`   Team size: ${composition.developers} developer(s)`);
+      console.log(`   Story assignments: ${assignments.length}`);
     }
 
     try {
@@ -278,8 +294,11 @@ export class DevelopersPhase extends BasePhase {
         });
       }
 
-      task.orchestration.team = team;
-      await task.save();
+      // Save team to task (skip in multi-team mode to avoid version conflicts)
+      if (!multiTeamMode) {
+        task.orchestration.team = team;
+        await task.save();
+      }
 
       await LogService.success(`Development team spawned: ${team.length} developers`, {
         taskId,
