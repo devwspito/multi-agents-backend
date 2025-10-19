@@ -472,6 +472,9 @@ export class GitHubService {
     integrationBranchName: string
   ): Promise<void> {
     try {
+      // Stash any uncommitted changes to avoid blocking checkout
+      await execAsync('git stash', { cwd: workspacePath });
+
       // Asegurar que estamos en el branch base actualizado
       await execAsync(`git checkout ${baseBranch}`, { cwd: workspacePath });
       await execAsync('git pull origin', { cwd: workspacePath });
