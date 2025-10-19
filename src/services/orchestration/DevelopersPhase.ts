@@ -378,23 +378,34 @@ export class DevelopersPhase extends BasePhase {
           },
         });
 
-        // 🔥 NEW PATTERN: 1 Story = 1 Isolated Pipeline (Dev + Judge + QA + Fixer)
-        // Each story gets its OWN workspace to avoid git conflicts
-        console.log(`\n📦 [EPIC] Starting isolated story pipelines for epic: ${epic.name}`);
+        // 🔥 SEQUENTIAL EXECUTION: Stories execute one-by-one within epic
+        // This prevents merge conflicts when multiple stories modify the same files
+        // Each story starts from the LATEST epic branch (includes previous stories' changes)
+        console.log(`\n📦 [EPIC] Starting SEQUENTIAL story execution for epic: ${epic.name}`);
+        console.log(`   Stories will execute one at a time to avoid conflicts`);
+        console.log(`   Each story will include changes from all previous stories`);
+
+        let storyNumber = 0;
+        const totalStories = epicDevelopers.reduce((sum, dev) => sum + (dev.assignedStories?.length || 0), 0);
 
         for (const member of epicDevelopers) {
           const assignedStories = member.assignedStories || [];
 
           for (const storyId of assignedStories) {
+            storyNumber++;
             const story = state.stories.find((s: any) => s.id === storyId);
             if (!story) {
               console.warn(`⚠️  Story ${storyId} not found in EventStore`);
               continue;
             }
 
-            console.log(`\n🚀 [STORY PIPELINE] Starting isolated pipeline for: ${story.title}`);
+            console.log(`\n${'='.repeat(80)}`);
+            console.log(`🚀 [STORY ${storyNumber}/${totalStories}] Starting pipeline: ${story.title}`);
             console.log(`   Story ID: ${storyId}`);
             console.log(`   Developer: ${member.instanceId}`);
+            console.log(`   Epic: ${epic.name}`);
+            console.log(`   Branch strategy: Story will start from epic branch (includes ${storyNumber - 1} previous stories)`);
+            console.log(`${'='.repeat(80)}`);
 
             // Execute complete isolated story pipeline
             await this.executeIsolatedStoryPipeline(
