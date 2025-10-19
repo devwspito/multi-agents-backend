@@ -533,6 +533,9 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('storyToReview', story);
       judgeContext.setData('reviewMode', 'single-story'); // Signal Judge to review one story
 
+      // 🔥 CRITICAL: Pass development team so Judge can find the developer who worked on this story
+      judgeContext.setData('developmentTeam', context.getData('developmentTeam'));
+
       // Execute Judge phase
       const judgePhase = new JudgePhase(this.executeDeveloperFn as any); // Judge needs executeAgent, not executeDeveloper
       const result = await judgePhase.execute(judgeContext);
