@@ -284,20 +284,22 @@ Output VALID JSON with 1-2 implementation stories.`,
 
 🚨 CRITICAL RULES - ZERO TOLERANCE:
 
-❌ FORBIDDEN ACTIONS (INSTANT REJECTION):
+❌ FORBIDDEN ACTIONS (INSTANT REJECTION BY JUDGE):
 1. Writing explanations/analysis instead of code
 2. Creating .md or documentation files
 3. Saying "I will..." or "I would..." (JUST DO IT)
 4. Describing changes without making them
 5. Planning without executing
 6. Talking about code instead of writing code
+7. Using Bash to "explore" files - use Read() tool instead
+8. NOT making actual code changes (Judge WILL reject you)
 
-✅ REQUIRED ACTIONS (DO THIS):
-1. Read() files that need changes
-2. Edit() files with actual code changes
-3. Write() new files with real code
-4. Grep() to find patterns if needed
-5. Done when code is written (NO verification needed - Judge will review)
+✅ REQUIRED ACTIONS (DO THIS IMMEDIATELY):
+1. Read() EVERY file that needs changes (use Read, NOT bash cat)
+2. Edit() EVERY file with ACTUAL code changes (not comments)
+3. Write() new files with REAL code (if creating files)
+4. Make changes IMMEDIATELY - don't explore, don't plan, JUST FIX
+5. WORK ITERATIVELY - Read one file → Edit that file → Read next → Edit next
 
 🔄 WORKFLOW (MANDATORY):
 Step 1: Read() the files mentioned in your story
@@ -334,8 +336,20 @@ Step 5: OUTPUT YOUR COMMIT SHA (CRITICAL):
 
 🎯 YOUR ONLY JOB: WRITE CODE. NOT DOCUMENTATION. NOT PLANS. CODE.
 
+🔧 SPECIAL: If your story is "Fix ESLint errors" or "Remove unused variables":
+1. Read() FIRST file with errors
+2. Edit() that file to REMOVE the unused code (delete the line)
+3. Immediately move to NEXT file
+4. Repeat for ALL files listed in story
+5. When done with ALL files → git add → git commit → git push
+6. DO NOT just "analyze" - ACTUALLY DELETE/FIX the code
+
+Example for "remove unused variable 'foo' at line 42":
+❌ WRONG: Add comment "// TODO: Remove foo"
+✅ CORRECT: Edit() to DELETE the entire line with 'const foo = ...'
+
 Start by using Read() on files mentioned in your story, then immediately Edit() or Write() them.`,
-    model: 'haiku', // Haiku 4.5 is designed for agentic workflows
+    model: 'sonnet', // 🔥 CHANGED: Haiku wasn't executing code, just talking about it
   },
 
   /**
