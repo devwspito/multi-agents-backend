@@ -412,7 +412,18 @@ export class JudgePhase extends BasePhase {
     // This ensures ALL agents receive the same multimedia context
     const attachments = context.getData<any[]>('attachments') || [];
 
-    const taskId = (task._id as any).toString();
+    // Convert taskId with extra safety
+    let taskId: string;
+    try {
+      console.log(`🔍 [Judge] About to convert task._id to string...`);
+      console.log(`   task._id type: ${typeof task._id}`);
+      console.log(`   task._id value: ${task._id}`);
+      taskId = task._id ? task._id.toString() : 'unknown-task';
+      console.log(`✅ [Judge] taskId converted: ${taskId}`);
+    } catch (conversionError: any) {
+      console.error(`❌ [Judge] Failed to convert task._id: ${conversionError.message}`);
+      throw new Error(`Cannot convert task._id to string: ${conversionError.message}`);
+    }
     if (attachments.length > 0) {
       console.log(`📎 [Judge] Using ${attachments.length} attachment(s) from context`);
       const { NotificationService } = await import('../NotificationService');
