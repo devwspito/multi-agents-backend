@@ -390,7 +390,15 @@ export class JudgePhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string }> {
 
-    // Validate inputs
+    // Validate inputs with detailed logging
+    console.log(`🔍 [Judge.evaluateCode] Validating inputs...`);
+    console.log(`   task: ${task ? 'exists' : 'MISSING'}`);
+    console.log(`   task._id: ${task?._id ? task._id : 'MISSING'}`);
+    console.log(`   developer: ${developer ? 'exists' : 'MISSING'}`);
+    console.log(`   developer.instanceId: ${developer?.instanceId ? developer.instanceId : 'MISSING'}`);
+    console.log(`   story: ${story ? 'exists' : 'MISSING'}`);
+    console.log(`   story.id: ${story?.id ? story.id : 'MISSING'}`);
+
     if (!task?._id) {
       throw new Error(`Invalid task object - missing _id field`);
     }

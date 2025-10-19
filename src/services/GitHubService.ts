@@ -472,6 +472,14 @@ export class GitHubService {
     integrationBranchName: string
   ): Promise<void> {
     try {
+      // Clean up any stale git locks
+      const lockFile = `${workspacePath}/.git/index.lock`;
+      const fs = require('fs');
+      if (fs.existsSync(lockFile)) {
+        console.log(`🧹 Removing stale git lock: ${lockFile}`);
+        fs.unlinkSync(lockFile);
+      }
+
       // Stash any uncommitted changes to avoid blocking checkout
       await execAsync('git stash', { cwd: workspacePath });
 
