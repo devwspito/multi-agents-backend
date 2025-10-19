@@ -62,11 +62,17 @@ export class TechLeadPhase extends BasePhase {
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
 
-    // Update task status
+    // 🔥 MULTI-TEAM MODE: Check if we're in team mode BEFORE updating task
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    // Update task status (skip in multi-team mode to avoid conflicts)
     const startTime = new Date();
-    task.orchestration.techLead.status = 'in_progress';
-    task.orchestration.techLead.startedAt = startTime;
-    await task.save();
+    if (!multiTeamMode) {
+      task.orchestration.techLead.status = 'in_progress';
+      task.orchestration.techLead.startedAt = startTime;
+      await task.save();
+    }
 
     // Notify agent started
     NotificationService.emitAgentStarted(taskId, 'Tech Lead');
@@ -76,10 +82,8 @@ export class TechLeadPhase extends BasePhase {
     });
 
     try {
-      // 🔥 MULTI-TEAM MODE: Check if we're working on a single EPIC (from TeamOrchestrationPhase)
-      const teamEpic = context.getData<any>('teamEpic');
+      // Get epic branch if in multi-team mode
       const epicBranch = context.getData<string>('epicBranch');
-      const multiTeamMode = !!teamEpic;
 
       if (multiTeamMode) {
         console.log(`\n🎯 [TechLead] Multi-Team Mode: Working on epic: ${teamEpic.id}`);
@@ -633,7 +637,10 @@ const token = jwt.sign(
         task.orchestration.techLead.output += `\n\n---\n\n## 💰 Cost Estimate\n\n*Cost estimation unavailable: ${error.message}*`;
       }
 
-      await task.save();
+      // Save task (skip in multi-team mode to avoid version conflicts)
+      if (!multiTeamMode) {
+        await task.save();
+      }
 
       // 🔥 EVENT SOURCING: Emit completion event
       await eventStore.append({
@@ -708,9 +715,12 @@ const token = jwt.sign(
         },
       };
     } catch (error: any) {
-      task.orchestration.techLead.status = 'failed';
-      task.orchestration.techLead.error = error.message;
-      await task.save();
+      // Skip task updates in multi-team mode to avoid version conflicts
+      if (!multiTeamMode) {
+        task.orchestration.techLead.status = 'failed';
+        task.orchestration.techLead.error = error.message;
+        await task.save();
+      }
 
       // Notify failure
       NotificationService.emitAgentFailed(taskId, 'Tech Lead', error.message);

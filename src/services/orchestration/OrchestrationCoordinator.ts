@@ -1068,8 +1068,9 @@ ${judgeFeedback}
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
-      // Generate branch name for this story (epic-based hierarchy)
-      const branchName = `epic/${epic.id}/${story.id}`;
+      // Generate branch name for this story (flat naming to avoid git ref conflicts)
+      // Git doesn't allow both 'epic/epic-1' and 'epic/epic-1/story-1' to exist
+      const branchName = `story/${story.id}`;
 
       // 1️⃣ Create feature branch for this story BEFORE developer starts
       console.log(`\n🌿 [Developer ${member.instanceId}] Creating story branch: ${branchName}`);
