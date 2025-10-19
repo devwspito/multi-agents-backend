@@ -341,9 +341,10 @@ export class DevelopersPhase extends BasePhase {
           },
         });
 
-        // Execute developers for this epic sequentially (avoids git conflicts)
-        // ⚠️ NO usar Promise.all porque múltiples agentes en el mismo repo causan race conditions
+        // Execute developers for this epic with Judge review + merge workflow
+        // New workflow: Dev → Judge → Merge (per story)
         for (const member of epicDevelopers) {
+          // 1. Developer implements story
           await this.executeDeveloperFn(
             task,
             member,
@@ -354,6 +355,28 @@ export class DevelopersPhase extends BasePhase {
             state.stories, // Pass stories from event store
             state.epics // Pass epics from event store
           );
+
+          // 2. Get story details for Judge review
+          const assignedStories = member.assignedStories || [];
+          for (const storyId of assignedStories) {
+            const story = state.stories.find((s: any) => s.id === storyId);
+            if (!story || !story.branchName) {
+              console.warn(`⚠️  [Developers] Story ${storyId} has no branch, skipping Judge + Merge`);
+              continue;
+            }
+
+            // 3. Judge reviews story branch
+            console.log(`\n⚖️  [Developers] Calling Judge to review story branch: ${story.branchName}`);
+            const judgeApproved = await this.reviewStoryBranch(story, task, workspacePath, context);
+
+            // 4. If approved → Merge to epic branch
+            if (judgeApproved) {
+              await this.mergeStoryToEpic(story, epic, workspacePath, repositories);
+            } else {
+              console.error(`❌ [Developers] Story ${storyId} rejected by Judge - NOT merging`);
+              // TODO: Implement retry mechanism if needed
+            }
+          }
         }
 
         await LogService.success(`Epic completed: ${epic.name}`, {
@@ -440,6 +463,144 @@ export class DevelopersPhase extends BasePhase {
         success: false,
         error: error.message,
       };
+    }
+  }
+
+  /**
+   * Review a story branch with Judge
+   * Returns true if approved, false if changes requested
+   */
+  private async reviewStoryBranch(
+    story: any,
+    task: any,
+    workspacePath: string | null,
+    context: OrchestrationContext
+  ): Promise<boolean> {
+    console.log(`\n⚖️  [Judge] Reviewing story branch: ${story.branchName}`);
+    console.log(`   Story: ${story.title}`);
+
+    try {
+      // Import JudgePhase
+      const { JudgePhase } = await import('./JudgePhase');
+      const { NotificationService } = await import('../NotificationService');
+
+      // Create isolated context for Judge with only this story
+      const judgeContext = new OrchestrationContext(
+        task,
+        context.repositories,
+        workspacePath
+      );
+
+      // Pass only this story for review
+      judgeContext.setData('storyToReview', story);
+      judgeContext.setData('reviewMode', 'single-story'); // Signal Judge to review one story
+
+      // Execute Judge phase
+      const judgePhase = new JudgePhase(this.executeDeveloperFn as any); // Judge needs executeAgent, not executeDeveloper
+      const result = await judgePhase.execute(judgeContext);
+
+      if (result.success && result.data?.status === 'approved') {
+        console.log(`✅ [Judge] Story ${story.id} APPROVED`);
+        NotificationService.emitConsoleLog(
+          (task._id as any).toString(),
+          'info',
+          `✅ Judge APPROVED story: ${story.title}`
+        );
+        return true;
+      } else {
+        console.log(`❌ [Judge] Story ${story.id} REJECTED`);
+        console.log(`   Feedback: ${result.data?.feedback || result.error || 'No feedback provided'}`);
+        NotificationService.emitConsoleLog(
+          (task._id as any).toString(),
+          'warn',
+          `❌ Judge REJECTED story: ${story.title}\nFeedback: ${result.data?.feedback || result.error}`
+        );
+        return false;
+      }
+    } catch (error: any) {
+      console.error(`❌ [Judge] Error reviewing story ${story.id}: ${error.message}`);
+      return false; // On error, don't merge
+    }
+  }
+
+  /**
+   * Merge approved story branch into epic branch
+   */
+  private async mergeStoryToEpic(
+    story: any,
+    epic: any,
+    workspacePath: string | null,
+    repositories: any[]
+  ): Promise<void> {
+    console.log(`\n🔀 [Merge] Merging story branch → epic branch`);
+    console.log(`   From: ${story.branchName}`);
+    console.log(`   To: epic/${epic.id}`);
+
+    if (!workspacePath) {
+      console.error(`❌ [Merge] No workspace path available`);
+      throw new Error('Workspace path required for merge');
+    }
+
+    try {
+      const { execSync } = require('child_process');
+      const { NotificationService } = await import('../NotificationService');
+
+      // Get target repository
+      const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+      const repoPath = `${workspacePath}/${targetRepo}`;
+      const epicBranch = `epic/${epic.id}`;
+
+      console.log(`📂 [Merge] Repository: ${targetRepo}`);
+      console.log(`📂 [Merge] Path: ${repoPath}`);
+
+      // 1. Checkout epic branch
+      execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+      console.log(`✅ [Merge] Checked out ${epicBranch}`);
+
+      // 2. Pull latest changes from epic branch
+      try {
+        execSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, { encoding: 'utf8' });
+        console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
+      } catch (pullError) {
+        console.warn(`⚠️  [Merge] Pull failed (branch might not exist on remote yet)`);
+      }
+
+      // 3. Merge story branch
+      const mergeOutput = execSync(
+        `cd "${repoPath}" && git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`,
+        { encoding: 'utf8' }
+      );
+      console.log(`✅ [Merge] Merged ${story.branchName} → ${epicBranch}`);
+      console.log(`   Output: ${mergeOutput.substring(0, 200)}...`);
+
+      // 4. Push epic branch
+      execSync(`cd "${repoPath}" && git push origin ${epicBranch}`, { encoding: 'utf8' });
+      console.log(`✅ [Merge] Pushed ${epicBranch} to remote`);
+
+      NotificationService.emitConsoleLog(
+        'system', // No task ID in this context
+        'info',
+        `🔀 Merged story ${story.title} → ${epicBranch}`
+      );
+
+      // 5. Update story status
+      story.mergedToEpic = true;
+      story.mergedAt = new Date();
+
+      console.log(`\n✅ [Merge] Story ${story.id} successfully merged to epic branch!\n`);
+    } catch (error: any) {
+      console.error(`❌ [Merge] Failed to merge story ${story.id}: ${error.message}`);
+
+      // Check if it's a merge conflict
+      if (error.message.includes('CONFLICT')) {
+        console.error(`🔥 [Merge] MERGE CONFLICT detected!`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Branch: ${story.branchName}`);
+        console.error(`   Epic: epic/${epic.id}`);
+        console.error(`\n   This requires manual resolution!`);
+      }
+
+      throw error; // Re-throw to halt epic execution
     }
   }
 }
