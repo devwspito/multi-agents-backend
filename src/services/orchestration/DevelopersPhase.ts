@@ -518,6 +518,25 @@ export class DevelopersPhase extends BasePhase {
     console.log(`   Story: ${story.title}`);
 
     try {
+      // 🔥 CRITICAL: Checkout story branch so Judge can see the developer's code
+      if (workspacePath && story.branchName) {
+        const repositories = context.repositories;
+        const targetRepo = repositories.length > 0 ? repositories[0] : null;
+        if (targetRepo) {
+          const { execSync } = require('child_process');
+          const repoPath = `${workspacePath}/${targetRepo.name}`;
+          console.log(`🔀 [Judge] Checking out branch ${story.branchName} in ${repoPath}`);
+
+          try {
+            execSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [Judge] Successfully checked out ${story.branchName}`);
+          } catch (error: any) {
+            console.error(`❌ [Judge] Failed to checkout ${story.branchName}: ${error.message}`);
+            // Continue anyway - Judge might still be on correct branch
+          }
+        }
+      }
+
       // Import JudgePhase
       const { JudgePhase } = await import('./JudgePhase');
       const { NotificationService } = await import('../NotificationService');
