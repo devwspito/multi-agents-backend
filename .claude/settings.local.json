@@ -87,7 +87,8 @@
       "Bash(git gc:*)",
       "Bash(git stash:*)",
       "Read(//private/var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68f3b7c24f033ad865cda86c/**)",
-      "Bash(echo \"ANTHROPIC_API_KEY length: $#ANTHROPIC_API_KEY\")"
+      "Bash(echo \"ANTHROPIC_API_KEY length: $#ANTHROPIC_API_KEY\")",
+      "Read(//private/var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/**)"
     ],
     "deny": [],
     "ask": []

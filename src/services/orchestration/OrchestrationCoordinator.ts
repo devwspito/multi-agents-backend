@@ -996,7 +996,7 @@ export class OrchestrationCoordinator {
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
     judgeFeedback?: string // Judge feedback for retry attempts
-  ): Promise<void> {
+  ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
 
     // Get all stories for this developer
@@ -1015,6 +1015,10 @@ export class OrchestrationCoordinator {
     const assignedStories = member.assignedStories || [];
 
     console.log(`👨‍💻 [Developer ${member.instanceId}] Starting work on ${assignedStories.length} stories`);
+
+    // 🔥 IMPORTANT: When called from isolated story pipeline, only process ONE story
+    // assignedStories will contain exactly 1 story ID
+    let lastResult: { output?: string; cost?: number } | undefined;
 
     for (const storyId of assignedStories) {
       const story = stories.find((s: any) => s.id === storyId);
@@ -1168,6 +1172,9 @@ After writing code, you MUST:
         console.log(`✅ [Developer ${member.instanceId}] Completed story: ${story.title}`);
         console.log(`📊 [Developer ${member.instanceId}] Cost: $${result.cost?.toFixed(4) || 0}`);
 
+        // Store result for return (isolated pipeline uses single-story execution)
+        lastResult = { output: result.output, cost: result.cost };
+
         // 2️⃣ Verify that code was pushed to the story branch
         console.log(`\n🔍 [Developer ${member.instanceId}] Verifying git push to branch ${branchName}...`);
 
@@ -1254,6 +1261,9 @@ After writing code, you MUST:
     await task.save();
 
     console.log(`✅ [Developer ${member.instanceId}] All stories completed`);
+
+    // Return last result (for isolated story pipeline - contains commit SHA in output)
+    return lastResult;
   }
 
   /**
