@@ -536,6 +536,9 @@ export class DevelopersPhase extends BasePhase {
       // 🔥 CRITICAL: Pass development team so Judge can find the developer who worked on this story
       judgeContext.setData('developmentTeam', context.getData('developmentTeam'));
 
+      // 🔥 CRITICAL: Pass executeDeveloperFn so Judge can retry failed stories
+      judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
+
       // Execute Judge phase
       const judgePhase = new JudgePhase(this.executeDeveloperFn as any); // Judge needs executeAgent, not executeDeveloper
       const result = await judgePhase.execute(judgeContext);
