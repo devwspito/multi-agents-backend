@@ -234,26 +234,33 @@ export class TeamOrchestrationPhase extends BasePhase {
       const branchName = `epic/${epic.id}`;
       const workspacePath = parentContext.workspacePath;
 
-      if (workspacePath) {
+      // Determine target repository (use first affected repo or first repo in context)
+      const targetRepository = epic.affectedRepositories?.[0] || parentContext.repositories[0]?.name;
+
+      if (workspacePath && targetRepository) {
         console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
+        console.log(`   Repository: ${targetRepository}`);
+
+        // 🔥 FIX: Navigate into the actual repository directory
+        const repoPath = `${workspacePath}/${targetRepository}`;
 
         try {
           // Navigate to repository and create branch
           const { execSync: exec } = await import('child_process');
-          exec(`cd "${workspacePath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
+          exec(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
           console.log(`✅ [Team ${teamNumber}] Branch created: ${branchName}`);
 
           NotificationService.emitConsoleLog(
             taskId,
             'info',
-            `✅ Team ${teamNumber}: Created branch ${branchName}`
+            `✅ Team ${teamNumber}: Created branch ${branchName} in ${targetRepository}`
           );
         } catch (gitError: any) {
           // Branch might already exist
           console.log(`⚠️  [Team ${teamNumber}] Branch might already exist: ${gitError.message}`);
           try {
             const { execSync: exec } = await import('child_process');
-            exec(`cd "${workspacePath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+            exec(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
             console.log(`✅ [Team ${teamNumber}] Checked out existing branch: ${branchName}`);
           } catch (checkoutError: any) {
             console.error(`❌ [Team ${teamNumber}] Failed to create/checkout branch: ${checkoutError.message}`);
@@ -275,6 +282,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       // Store epic for this team to work on (Tech Lead will divide into stories)
       teamContext.setData('teamEpic', epic);
       teamContext.setData('epicBranch', branchName);
+      teamContext.setData('targetRepository', targetRepository); // 🔥 Pass repository name to team
 
       // Execute team pipeline
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
