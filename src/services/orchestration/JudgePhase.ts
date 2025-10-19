@@ -451,6 +451,28 @@ export class JudgePhase extends BasePhase {
     console.log(`   Developer: ${developer.instanceId}`);
     console.log(`   If this fails, problem is in executeAgentFn SDK call`);
 
+    // 🔥 DEBUG: Show workspace contents to verify files exist
+    if (workspacePath) {
+      try {
+        const { execSync } = require('child_process');
+        const lsOutput = execSync(`ls -la "${workspacePath}"`, { encoding: 'utf8' });
+        console.log(`\n📂 [Judge] Workspace contents:\n${lsOutput}`);
+
+        // Also show repository subdirectories
+        const repos = execSync(`ls -d "${workspacePath}"/*/ 2>/dev/null || echo "no subdirectories"`, { encoding: 'utf8' });
+        console.log(`\n📂 [Judge] Repository directories:\n${repos}`);
+
+        const { NotificationService: NS } = await import('../NotificationService');
+        NS.emitConsoleLog(
+          taskId,
+          'info',
+          `📂 Judge workspace: ${workspacePath}\n\nContents:\n${lsOutput}\n\nRepositories:\n${repos}`
+        );
+      } catch (lsError: any) {
+        console.error(`⚠️  Could not list workspace: ${lsError.message}`);
+      }
+    }
+
     try {
       const result = await this.executeAgentFn(
         'judge',
