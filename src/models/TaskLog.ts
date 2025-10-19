@@ -39,8 +39,8 @@ export interface ITaskLog extends Document {
   message: string;
 
   // Context (optional but recommended)
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed';
-  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed' | 'multi-team';
+  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -117,11 +117,11 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     phase: {
       type: String,
-      enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'completed'],
+      enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'completed', 'multi-team'],
     },
     agentType: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer'],
+      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration'],
     },
     agentInstanceId: String,
     epicId: String,
