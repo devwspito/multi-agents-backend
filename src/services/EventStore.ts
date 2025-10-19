@@ -117,15 +117,29 @@ export class EventStore {
   }
 
   /**
-   * Get next version number for a task (atomic)
+   * Get next version number for a task (atomic using MongoDB counter)
+   *
+   * Uses findOneAndUpdate with $inc to guarantee atomic version increments
+   * even when multiple teams write events concurrently
    */
   private async getNextVersion(taskId: mongoose.Types.ObjectId): Promise<number> {
-    const lastEvent = await Event.findOne({ taskId })
-      .sort({ version: -1 })
-      .select('version')
-      .lean();
+    // Create a counter collection for atomic version tracking
+    const Counter = mongoose.model(
+      'EventCounter',
+      new mongoose.Schema({
+        taskId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+        sequence: { type: Number, default: 0 }
+      })
+    );
 
-    return lastEvent ? lastEvent.version + 1 : 1;
+    // Atomically increment and return new version
+    const counter = await Counter.findOneAndUpdate(
+      { taskId },
+      { $inc: { sequence: 1 } },
+      { new: true, upsert: true }
+    );
+
+    return counter!.sequence;
   }
 
   /**
