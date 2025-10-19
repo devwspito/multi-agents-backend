@@ -65,24 +65,34 @@ export class QAPhase extends BasePhase {
     const repositories = context.repositories;
     const workspacePath = context.workspacePath;
 
+    // 🔥 MULTI-TEAM MODE: Detect if we're in team mode
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    if (multiTeamMode) {
+      console.log(`🎯 [QA] Multi-Team Mode: Working on epic: ${teamEpic.id}`);
+    }
+
     await LogService.info('QA Engineer phase started - Integration testing', {
       taskId,
       category: 'orchestration',
       phase: 'qa',
     });
 
-    // Initialize QA Engineer state if not exists
-    if (!task.orchestration.qaEngineer) {
-      task.orchestration.qaEngineer = {
-        agent: 'qa-engineer',
-        status: 'pending',
-      } as any;
-    }
+    // Initialize QA Engineer state if not exists (skip in multi-team mode)
+    if (!multiTeamMode) {
+      if (!task.orchestration.qaEngineer) {
+        task.orchestration.qaEngineer = {
+          agent: 'qa-engineer',
+          status: 'pending',
+        } as any;
+      }
 
-    const startTime = new Date();
-    task.orchestration.qaEngineer!.status = 'in_progress';
-    task.orchestration.qaEngineer!.startedAt = startTime;
-    await task.save();
+      const startTime = new Date();
+      task.orchestration.qaEngineer!.status = 'in_progress';
+      task.orchestration.qaEngineer!.startedAt = startTime;
+      await task.save();
+    }
 
     // Notify agent started
     NotificationService.emitAgentStarted(taskId, 'QA Engineer');
@@ -221,12 +231,14 @@ Provide:
       //   task.orchestration.qaEngineer!.lastTodoUpdate = new Date();
       // }
 
-      // Update costs
-      task.orchestration.totalCost += result.cost;
-      task.orchestration.totalTokens +=
-        (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
+      // Update costs (skip in multi-team mode to avoid conflicts)
+      if (!multiTeamMode) {
+        task.orchestration.totalCost += result.cost;
+        task.orchestration.totalTokens +=
+          (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
 
-      await task.save();
+        await task.save();
+      }
 
       // 🔥 EVENT SOURCING: Emit completion event (reuse eventStore from line 96)
       await eventStore.append({
@@ -372,9 +384,12 @@ Provide:
         warnings: !mergeSuccess ? [`Merge conflicts detected: ${mergeConflicts.join(', ')}`] : undefined,
       };
     } catch (error: any) {
-      task.orchestration.qaEngineer!.status = 'failed';
-      task.orchestration.qaEngineer!.error = error.message;
-      await task.save();
+      // Save error state (skip in multi-team mode to avoid conflicts)
+      if (!multiTeamMode) {
+        task.orchestration.qaEngineer!.status = 'failed';
+        task.orchestration.qaEngineer!.error = error.message;
+        await task.save();
+      }
 
       // Notify failure
       NotificationService.emitAgentFailed(taskId, 'QA Engineer', error.message);
