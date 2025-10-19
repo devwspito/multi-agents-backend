@@ -1068,8 +1068,48 @@ ${judgeFeedback}
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
-      // Generate branch name for this story
-      const branchName = `feature/${story.id}`;
+      // Generate branch name for this story (epic-based hierarchy)
+      const branchName = `epic/${epic.id}/${story.id}`;
+
+      // 1️⃣ Create feature branch for this story BEFORE developer starts
+      console.log(`\n🌿 [Developer ${member.instanceId}] Creating story branch: ${branchName}`);
+
+      try {
+        const { execSync } = require('child_process');
+        const repoPath = `${workspacePath}/${targetRepository}`;
+
+        // First, ensure we're on the epic base branch
+        const epicBranch = `epic/${epic.id}`;
+        try {
+          execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+          console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
+        } catch (epicCheckoutError) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Epic branch ${epicBranch} doesn't exist, using current branch`);
+        }
+
+        // Create story branch from epic branch
+        try {
+          execSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
+          console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
+        } catch (branchError: any) {
+          // Branch might already exist
+          if (branchError.message.includes('already exists')) {
+            execSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+          } else {
+            throw branchError;
+          }
+        }
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🌿 Developer ${member.instanceId}: Working on branch ${branchName}`
+        );
+      } catch (gitError: any) {
+        console.error(`❌ [Developer ${member.instanceId}] Failed to create branch: ${gitError.message}`);
+        throw new Error(`Git branch creation failed: ${gitError.message}`);
+      }
 
       prompt += `
 
@@ -1094,15 +1134,15 @@ All file paths must be prefixed with: ${targetRepository}/
 ${judgeFeedback ? 'Fix the code based on Judge feedback above.' : 'Implement this story completely with production-ready code. Work iteratively - read, edit, verify, repeat.'}
 
 ## 🚨 MANDATORY: Git workflow (MUST DO):
+⚠️ **You are already on branch: ${branchName}** (branch was created for you)
+
 After writing code, you MUST:
 1. cd ${targetRepository}
-2. git checkout -b ${branchName}
-3. git add .
-4. git commit -m "Implement: ${story.title}"
-5. git push -u origin ${branchName}
+2. git add .
+3. git commit -m "Implement: ${story.title}"
+4. git push origin ${branchName}
 
-**Branch name to use: ${branchName}**
-**CRITICAL: You MUST create this branch and push your code. QA depends on it.**`;
+**CRITICAL: You MUST commit and push your code. Judge will review your branch.**`;
 
       // 🔥 DEBUG: Log if attachments are being passed
       if (attachments && attachments.length > 0) {
@@ -1126,6 +1166,40 @@ After writing code, you MUST:
 
         console.log(`✅ [Developer ${member.instanceId}] Completed story: ${story.title}`);
         console.log(`📊 [Developer ${member.instanceId}] Cost: $${result.cost?.toFixed(4) || 0}`);
+
+        // 2️⃣ Verify that code was pushed to the story branch
+        console.log(`\n🔍 [Developer ${member.instanceId}] Verifying git push to branch ${branchName}...`);
+
+        try {
+          const { execSync } = require('child_process');
+          const repoPath = `${workspacePath}/${targetRepository}`;
+
+          // Check if branch exists on remote
+          const remoteBranches = execSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, { encoding: 'utf8' });
+
+          if (remoteBranches.includes(branchName)) {
+            console.log(`✅ [Developer ${member.instanceId}] Branch ${branchName} found on remote`);
+
+            // Check if there are commits
+            const commitCount = execSync(`cd "${repoPath}" && git rev-list --count ${branchName}`, { encoding: 'utf8' }).trim();
+            console.log(`✅ [Developer ${member.instanceId}] Branch has ${commitCount} commit(s)`);
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ Developer ${member.instanceId}: Code pushed successfully to ${branchName}`
+            );
+          } else {
+            console.warn(`⚠️  [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote - developer may have skipped git push`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⚠️  Developer ${member.instanceId}: Branch ${branchName} not pushed to remote`
+            );
+          }
+        } catch (verifyError: any) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify git push: ${verifyError.message}`);
+        }
 
         // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
         NotificationService.emitConsoleLog(
