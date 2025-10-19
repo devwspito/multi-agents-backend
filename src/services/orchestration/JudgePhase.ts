@@ -139,7 +139,8 @@ export class JudgePhase extends BasePhase {
         task,
         story,
         workspacePath,
-        context
+        context,
+        multiTeamMode
       );
 
       if (result.status === 'approved') {
@@ -229,7 +230,8 @@ export class JudgePhase extends BasePhase {
     task: any,
     story: IStory,
     workspacePath: string | null,
-    context: OrchestrationContext
+    context: OrchestrationContext,
+    multiTeamMode: boolean
   ): Promise<{ status: 'approved' | 'failed'; feedback?: string }> {
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
