@@ -442,6 +442,15 @@ export class JudgePhase extends BasePhase {
       );
     }
 
+    // 🔥 CRITICAL: Log workspace BEFORE executing Judge
+    console.log(`\n🔍 [Judge] About to execute Judge agent with:`);
+    console.log(`   Workspace: ${workspacePath}`);
+    console.log(`   Task ID: ${taskId}`);
+    console.log(`   Story: ${story.title}`);
+    console.log(`   Commit SHA: ${commitSHA || 'NOT PROVIDED'}`);
+    console.log(`   Developer: ${developer.instanceId}`);
+    console.log(`   If this fails, problem is in executeAgentFn SDK call`);
+
     try {
       const result = await this.executeAgentFn(
         'judge',
@@ -457,6 +466,9 @@ export class JudgePhase extends BasePhase {
           timeout: 300000, // 5 minutes
         }
       );
+
+      console.log(`✅ [Judge] executeAgentFn completed successfully`);
+      console.log(`   Output length: ${result.output?.length || 0} chars`);
 
       // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
       const { NotificationService: NS } = await import('../NotificationService');
