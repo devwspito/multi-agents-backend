@@ -76,6 +76,15 @@ export class TechLeadPhase extends BasePhase {
     });
 
     try {
+      // 🔥 MULTI-TEAM MODE: Check if we're working on a single story (from TeamOrchestrationPhase)
+      const teamStory = context.getData<any>('teamStory');
+      const multiTeamMode = !!teamStory;
+
+      if (multiTeamMode) {
+        console.log(`\n🎯 [TechLead] Multi-Team Mode: Working on single story: ${teamStory.id}`);
+        console.log(`   Story: ${teamStory.title}`);
+      }
+
       // TODO: Add epicsIdentified to IAgentStep if needed
       // For now, extract epics from productManager output manually if needed
       const epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
@@ -108,7 +117,9 @@ ${previousOutput}
 `;
       }
 
-      const prompt = `Act as the tech-lead agent.
+      // 🔥 MULTI-TEAM MODE: Different prompt for single story breakdown
+      const firstRepoName = context.repositories[0]?.full_name || context.repositories[0]?.githubRepoName || 'repository-name';
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamStory, repoInfo, workspaceInfo, firstRepoName) : `Act as the tech-lead agent.
 
 # Architecture Design & Team Building
 ${revisionSection}
@@ -727,5 +738,86 @@ const token = jwt.sign(
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Build prompt for Multi-Team mode (single story breakdown)
+   */
+  private buildMultiTeamPrompt(story: any, repoInfo: string, workspaceInfo: string, firstRepo?: string): string {
+    const targetRepo = story.affectedRepositories?.[0] || firstRepo || 'repository-name';
+    return `Act as the tech-lead agent in MULTI-TEAM MODE.
+
+# Single Story Architecture Design
+
+You are working on ONE story from a larger epic. Your job is to break THIS story into detailed, implementable sub-stories.
+
+## Story to Implement:
+**ID**: ${story.id}
+**Title**: ${story.title}
+**Description**: ${story.description}
+**Complexity**: ${story.estimatedComplexity}
+**Affected Repositories**: ${story.affectedRepositories?.join(', ') || 'Not specified'}
+**Dependencies**: ${story.dependencies?.length > 0 ? story.dependencies.join(', ') : 'None'}
+
+${repoInfo}${workspaceInfo}
+
+## Your Mission:
+Break this story into 1-3 implementable sub-stories with:
+1. **Exact file paths** to read/modify/create
+2. **Detailed acceptance criteria** (Given/When/Then)
+3. **Technical specifications** (functions, classes, APIs)
+4. **Implementation guidelines** (patterns, security, performance)
+5. **Testing requirements**
+6. **Definition of done**
+
+**CRITICAL RULES**:
+- 🚨 **EXPLORE CODEBASE FIRST** - Use tools to find actual file paths
+- ⚠️ **REAL PATHS ONLY** - No placeholder paths like "src/path/to/file.ts"
+- ⚠️ **1-3 SUB-STORIES MAX** - Keep it focused on THIS story
+- ⚠️ **IMPLEMENTABLE** - Each sub-story should be 1-3 hours max
+
+**RESPOND ONLY WITH VALID JSON** in this exact format:
+\`\`\`json
+{
+  "epics": [
+    {
+      "id": "${story.id}",
+      "name": "${story.title}",
+      "description": "Architecture for ${story.title}",
+      "branchName": "epic/${story.id}",
+      "targetRepository": "${targetRepo}",
+      "stories": [
+        {
+          "id": "${story.id}-1",
+          "title": "Sub-story title (e.g., 'Create AuthService with login method')",
+          "description": "COMPLETE description with ALL sections: Acceptance Criteria (Given/When/Then), Technical Specifications (files, functions, types), Implementation Guidelines (patterns, security), Testing Requirements, Definition of Done, Code Examples",
+          "epicId": "${story.id}",
+          "priority": 1,
+          "estimatedComplexity": "simple|moderate|complex",
+          "dependencies": [],
+          "status": "pending",
+          "filesToRead": ["real/path/file1.ts"],
+          "filesToModify": ["real/path/file2.ts"],
+          "filesToCreate": ["real/path/newfile.ts"]
+        }
+      ],
+      "status": "pending"
+    }
+  ],
+  "architectureDesign": "Technical architecture for ${story.title} including: approach, patterns, security, performance",
+  "teamComposition": {
+    "developers": 1,
+    "reasoning": "Single developer sufficient for ${story.estimatedComplexity} complexity story"
+  },
+  "storyAssignments": [
+    {
+      "storyId": "${story.id}-1",
+      "assignedTo": "dev-1"
+    }
+  ]
+}
+\`\`\`
+
+**Start by exploring the codebase, then output the JSON.**`;
   }
 }

@@ -152,11 +152,78 @@ ${repoInfo}${workspaceInfo}
         attachments.length > 0 ? attachments : undefined // Pass attachments
       );
 
+      // Parse JSON response to extract stories
+      let parsed: any;
+
+      // Try parsing as pure JSON first (no markdown)
+      try {
+        const trimmed = result.output.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          parsed = JSON.parse(trimmed);
+          if (parsed.stories && Array.isArray(parsed.stories)) {
+            console.log('✅ [ProjectManager] Parsed as pure JSON (no markdown blocks)');
+          } else {
+            parsed = null; // Not the right structure
+          }
+        }
+      } catch (e) {
+        // Not pure JSON, try markdown patterns
+      }
+
+      // Try multiple extraction patterns if pure JSON failed
+      const patterns = [
+        /```json\s*\n([\s\S]*?)\n```/,
+        /```json\s*\n([\s\S]*?)```/,
+        /```json\s*([\s\S]*?)```/,
+        /```\s*\n([\s\S]*?)\n```/,
+        /```\s*([\s\S]*?)```/
+      ];
+
+      if (!parsed) {
+        for (const pattern of patterns) {
+          const match = result.output.match(pattern);
+          if (match) {
+            try {
+              const jsonText = match[1] || match[0];
+              const trimmed = jsonText.trim();
+              parsed = JSON.parse(trimmed);
+
+              if (parsed.stories && Array.isArray(parsed.stories)) {
+                console.log(`✅ [ProjectManager] Parsed JSON using pattern: ${pattern.toString().substring(0, 50)}...`);
+                break;
+              } else {
+                parsed = null;
+                continue;
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+        }
+      }
+
+      // Validate stories array exists
+      if (!parsed || !parsed.stories || !Array.isArray(parsed.stories)) {
+        console.log('\n🔍 [ProjectManager] FULL Agent output:\n', result.output);
+        NotificationService.emitConsoleLog(taskId, 'error', `❌ Project Manager parsing failed. Full output:\n${result.output}`);
+        throw new Error(`Project Manager did not return valid JSON with stories array. Found ${parsed?.stories ? 'non-array stories' : 'no stories'}`);
+      }
+
+      if (parsed.stories.length === 0) {
+        console.log('\n⚠️  [ProjectManager] Agent returned empty stories array');
+        throw new Error('Project Manager returned empty stories array - cannot proceed with team orchestration');
+      }
+
+      console.log(`✅ [ProjectManager] Successfully parsed ${parsed.stories.length} story/stories`);
+
       // Store results
       task.orchestration.projectManager.status = 'completed';
       task.orchestration.projectManager.completedAt = new Date();
       task.orchestration.projectManager.output = result.output;
       task.orchestration.projectManager.sessionId = result.sessionId;
+      // Store parsed stories and team composition
+      (task.orchestration.projectManager as any).stories = parsed.stories;
+      (task.orchestration.projectManager as any).recommendedTeamSize = parsed.recommendedTeamSize;
       // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
       // task.orchestration.projectManager.canResumeSession = result.canResume;
       task.orchestration.projectManager.usage = result.usage;
@@ -219,6 +286,8 @@ ${repoInfo}${workspaceInfo}
 
       // Store phase data for next phases
       context.setData('projectManagerOutput', result.output);
+      context.setData('stories', parsed.stories);
+      context.setData('recommendedTeamSize', parsed.recommendedTeamSize);
 
       return {
         success: true,
