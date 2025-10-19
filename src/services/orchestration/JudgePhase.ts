@@ -84,24 +84,33 @@ export class JudgePhase extends BasePhase {
     const taskId = (task._id as any).toString();
     const workspacePath = context.workspacePath;
 
-    // 🔥 EVENT SOURCING: Get stories from EventStore (same as DevelopersPhase)
-    const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
-    const stories = state.stories || [];
-
-    console.log(`📋 [Judge] Retrieved ${stories.length} stories from EventStore`);
-
-    if (stories.length === 0) {
-      console.warn('⚠️ [Judge] No stories found in EventStore - TechLead may not have created stories');
-      return {
-        success: false,
-        error: 'No stories to evaluate - TechLead phase may have failed',
-      };
-    }
-
-    // 🔥 MULTI-TEAM MODE: Check if we're in team mode
+    // 🔥 CHECK REVIEW MODE: Single story or all stories?
     const reviewMode = context.getData<string>('reviewMode');
     const multiTeamMode = reviewMode === 'single-story'; // Called from DevelopersPhase per-story
+    const storyToReview = context.getData<IStory>('storyToReview');
+
+    // Determine which stories to evaluate
+    let stories: IStory[];
+
+    if (multiTeamMode && storyToReview) {
+      // Single-story review mode (called from DevelopersPhase after story completion)
+      stories = [storyToReview];
+      console.log(`📋 [Judge] Single-story review mode: ${storyToReview.title}`);
+    } else {
+      // Full batch review mode (called from orchestration)
+      const { eventStore } = await import('../EventStore');
+      const state = await eventStore.getCurrentState(task._id as any);
+      stories = state.stories || [];
+      console.log(`📋 [Judge] Batch review mode: Retrieved ${stories.length} stories from EventStore`);
+    }
+
+    if (stories.length === 0) {
+      console.warn('⚠️ [Judge] No stories found to evaluate');
+      return {
+        success: false,
+        error: 'No stories to evaluate',
+      };
+    }
 
     // Initialize judge step in task (skip in multi-team mode to avoid conflicts)
     if (!multiTeamMode) {
@@ -162,6 +171,22 @@ export class JudgePhase extends BasePhase {
       await task.save();
     }
 
+    // 🔥 SINGLE-STORY MODE: Return simple approval status
+    if (multiTeamMode && storyToReview) {
+      const storyStatus = allPassed ? 'approved' : 'rejected';
+      console.log(`⚖️ [Judge] Single-story verdict: ${storyStatus.toUpperCase()}`);
+
+      return {
+        success: true,
+        data: {
+          status: storyStatus,
+          approved: totalApproved,
+          failed: totalFailed,
+        },
+      };
+    }
+
+    // 🔥 BATCH MODE: Return full verdict
     if (allPassed) {
       NotificationService.emitAgentCompleted(
         taskId,
