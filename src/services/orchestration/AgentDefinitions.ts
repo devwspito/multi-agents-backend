@@ -88,7 +88,7 @@ Output MUST be valid JSON:
   "recommendations": "Technical approach based on actual codebase analysis across all repos",
   "challenges": ["challenge 1", "challenge 2"]
 }`,
-    model: 'haiku', // SDK accepts 'haiku' | 'sonnet' | 'opus'
+    model: 'sonnet', // 🔥 ORCHESTRATOR: Sonnet 4.5 for high-level planning
   },
 
   /**
@@ -161,7 +161,7 @@ Example for authentication:
 - story-2: "Frontend login UI" (affectedRepositories: ["frontend"], dependencies: ["story-1"])
 
 This allows parallel development when stories are independent!`,
-    model: 'haiku',
+    model: 'sonnet', // 🔥 ORCHESTRATOR: Sonnet 4.5 for epic breakdown
   },
 
   /**

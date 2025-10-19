@@ -12,6 +12,7 @@ import { DevelopersPhase } from './DevelopersPhase';
 import { JudgePhase } from './JudgePhase';
 import { QAPhase } from './QAPhase';
 import { ApprovalPhase } from './ApprovalPhase';
+import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -80,17 +81,12 @@ export class OrchestrationCoordinator {
    * - Human approval gates (must wait for approval before next phase)
    */
   private readonly PHASE_ORDER = [
-    'ProductManager',      // 1. Analyze requirements
+    'ProductManager',      // 1. Analyze requirements (Sonnet 4.5 orchestrator)
     'Approval',            // 1.5 Human approval gate
-    'ProjectManager',      // 2. Break into stories
+    'ProjectManager',      // 2. Break into epics (Sonnet 4.5 orchestrator)
     'Approval',            // 2.5 Human approval gate
-    'TechLead',            // 3. Design architecture + create branches + assign files
-    'Approval',            // 3.5 Human approval gate
-    'Developers',          // 4. Implement features (spawns multiple devs internally)
-    'Judge',               // 4.5 Evaluate code quality (retry if fails)
-    'Approval',            // 4.7 Human approval gate
-    'QA',                  // 5. Integration testing and PR creation
-    'Approval',            // 5.5 Human approval gate (final approval - PRs are created and ready)
+    'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
+    'Approval',            // 3.5 Human approval gate (final approval - all teams done)
   ];
 
   constructor() {
@@ -430,6 +426,13 @@ export class OrchestrationCoordinator {
           console.log(`✅ [${phaseName}] Completed successfully`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Phase ${phaseName} completed successfully`);
 
+          // 🔥 RATE LIMIT PROTECTION: Wait 2 seconds between phases to avoid Anthropic rate limits
+          // Each agent makes many API calls, waiting prevents hitting limits
+          if (phaseName !== 'Approval') {
+            console.log(`⏱️  [Orchestration] Waiting 2s before next phase (rate limit protection)...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+
           // 🔥 CRITICAL: Store current phase name for ApprovalPhase
           // ApprovalPhase needs to know which phase just completed to check auto-approval
           // IMPORTANT: Only store if phase actually executed (not skipped)
@@ -465,6 +468,15 @@ export class OrchestrationCoordinator {
 
       case 'ProjectManager':
         return new ProjectManagerPhase(this.executeAgent.bind(this));
+
+      case 'TeamOrchestration':
+        return new TeamOrchestrationPhase(
+          this.executeAgent.bind(this),
+          this.executeDeveloper.bind(this),
+          this.githubService,
+          this.prManagementService,
+          this.workspaceDir
+        );
 
       case 'TechLead':
         return new TechLeadPhase(this.executeAgent.bind(this));
@@ -623,6 +635,14 @@ export class OrchestrationCoordinator {
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
     console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);
     console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
+    console.log(`🔧 [ExecuteAgent] Agent config:`, {
+      agentType,
+      model: sdkModel,
+      fullModelId,
+      hasAgentDef: !!agentDef,
+      promptLength: prompt.length,
+      workspaceExists: require('fs').existsSync(workspacePath),
+    });
 
     // Build final prompt
     // When images are present, use generator function (required by SDK)
@@ -674,26 +694,62 @@ export class OrchestrationCoordinator {
 
       // Let SDK manage everything - tools, turns, iterations
       console.log(`🤖 [ExecuteAgent] Starting ${agentType} agent with SDK`);
+      console.log(`🔑 [ExecuteAgent] Environment check:`, {
+        hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
+        keyLength: process.env.ANTHROPIC_API_KEY?.length || 0,
+        nodeVersion: process.version,
+        platform: process.platform,
+      });
 
       // SDK query - minimal config, let SDK handle env inheritance
+      console.log(`📡 [ExecuteAgent] Calling SDK query() with options:`, {
+        cwd: workspacePath,
+        model: fullModelId,
+        permissionMode: 'bypassPermissions',
+        hasPrompt: !!promptContent,
+      });
+
       const stream = query({
         prompt: promptContent as any,
         options: {
           cwd: workspacePath,
           model: fullModelId,
-          maxTurns: 100,
+          // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
           permissionMode: 'bypassPermissions',
           // env is NOT set - SDK inherits from process automatically
         },
       });
+
+      console.log(`✅ [ExecuteAgent] SDK query() call successful, stream created`);
 
       // Simply collect the result - SDK handles everything
       let finalResult: any = null;
       const allMessages: any[] = [];
       let turnCount = 0;
 
+      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
+
       for await (const message of stream) {
         allMessages.push(message);
+
+        // 🔥 CRITICAL: Log FULL message if it has an error flag
+        if ((message as any).is_error === true) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
+          console.error(`${'='.repeat(80)}`);
+          console.error(`Message type: ${message.type}`);
+          console.error(`Full message object:`);
+          console.error(JSON.stringify(message, null, 2));
+          console.error(`${'='.repeat(80)}\n`);
+        }
+
+        // Log every message type for debugging
+        if (message.type !== 'tool_use' && message.type !== 'tool_result' && message.type !== 'text') {
+          console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
+            hasSubtype: !!(message as any).subtype,
+            isError: !!(message as any).is_error,
+          });
+        }
 
         // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
         if (message.type === 'turn_start') {
@@ -768,6 +824,19 @@ export class OrchestrationCoordinator {
 
         if (message.type === 'result') {
           finalResult = message;
+
+          // 🔥 CHECK FOR ERROR RESULT
+          if ((message as any).is_error || (message as any).subtype === 'error') {
+            console.error(`❌ [ExecuteAgent] SDK returned error result:`, {
+              subtype: (message as any).subtype,
+              is_error: (message as any).is_error,
+              result: (message as any).result,
+              error: (message as any).error,
+              error_message: (message as any).error_message,
+              fullMessage: JSON.stringify(message, null, 2),
+            });
+          }
+
           console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
         }
       }
@@ -804,7 +873,22 @@ export class OrchestrationCoordinator {
       };
     } catch (error: any) {
       console.error(`❌ [ExecuteAgent] ${agentType} failed:`, error.message);
+      console.error(`❌ [ExecuteAgent] Error type:`, error.constructor.name);
+      console.error(`❌ [ExecuteAgent] Error code:`, error.code);
+      console.error(`❌ [ExecuteAgent] Exit code:`, error.exitCode);
+      console.error(`❌ [ExecuteAgent] Signal:`, error.signal);
+      console.error(`❌ [ExecuteAgent] Full error object:`, JSON.stringify(error, null, 2));
       console.error(`❌ [ExecuteAgent] Stack:`, error.stack);
+
+      // Check if workspace still exists
+      const fs = require('fs');
+      const workspaceStillExists = fs.existsSync(workspacePath);
+      console.error(`❌ [ExecuteAgent] Workspace exists after error:`, workspaceStillExists);
+
+      // Check if .env has API key
+      const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
+      console.error(`❌ [ExecuteAgent] ANTHROPIC_API_KEY still set:`, hasEnvKey);
+
       throw error;
     }
   }

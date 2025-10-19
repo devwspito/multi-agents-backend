@@ -16,8 +16,8 @@ export interface LogContext {
   taskId: string | mongoose.Types.ObjectId;
   level?: LogLevel;
   category?: LogCategory;
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed';
-  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed' | 'multi-team';
+  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration';
   agentInstanceId?: string;
   epicId?: string;
   epicName?: string;
@@ -244,7 +244,7 @@ export class LogService {
    * Convenience: Log agent started
    */
   static async agentStarted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -260,7 +260,7 @@ export class LogService {
    * Convenience: Log agent completed
    */
   static async agentCompleted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -276,7 +276,7 @@ export class LogService {
    * Convenience: Log agent failed
    */
   static async agentFailed(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration',
     taskId: string,
     error: Error | string,
     context?: Partial<LogContext>
