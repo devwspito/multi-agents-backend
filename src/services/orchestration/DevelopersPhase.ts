@@ -530,7 +530,7 @@ export class DevelopersPhase extends BasePhase {
         state.epics
       );
 
-      // Verify story has branch
+      // Verify story has branch AND commit SHA
       const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
@@ -539,10 +539,33 @@ export class DevelopersPhase extends BasePhase {
         return;
       }
 
-      // STEP 2: Judge reviews code (in SAME workspace, SAME branch)
-      console.log(`\n⚖️  [STEP 2/3] Judge reviewing story in branch: ${updatedStory.branchName}`);
+      // Get commit SHA from git
+      const { execSync } = require('child_process');
+      const targetRepo = repositories.length > 0 ? repositories[0] : null;
+      if (!targetRepo || !workspacePath) {
+        console.error(`❌ [PIPELINE] No repository or workspace for commit verification`);
+        return;
+      }
+
+      const repoPath = `${workspacePath}/${targetRepo.name}`;
+      let commitSHA: string;
+      try {
+        commitSHA = execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
+        console.log(`📍 [PIPELINE] Developer commit SHA: ${commitSHA}`);
+        console.log(`   Branch: ${updatedStory.branchName}`);
+        console.log(`   This is the EXACT code Judge will review`);
+      } catch (error: any) {
+        console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
+        console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
+        return;
+      }
+
+      // STEP 2: Judge reviews code (in SAME workspace, SAME branch, EXACT commit)
+      console.log(`\n⚖️  [STEP 2/3] Judge reviewing EXACT commit:`);
+      console.log(`   Commit SHA: ${commitSHA}`);
+      console.log(`   Branch: ${updatedStory.branchName}`);
       console.log(`   Workspace: ${workspacePath}`);
-      console.log(`   Branch should already be checked out by developer`);
+      console.log(`   If Judge fails to access this commit → Pipeline STOPS`);
 
       // Create isolated context for Judge
       const judgeContext = new OrchestrationContext(task, repositories, workspacePath);
@@ -550,6 +573,7 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('reviewMode', 'single-story');
       judgeContext.setData('developmentTeam', [developer]); // Only this developer
       judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
+      judgeContext.setData('commitSHA', commitSHA); // 🔥 CRITICAL: Exact commit to review
 
       const { JudgePhase } = await import('./JudgePhase');
       const judgePhase = new JudgePhase(this.executeDeveloperFn as any);
