@@ -519,7 +519,7 @@ export class DevelopersPhase extends BasePhase {
     try {
       // STEP 1: Developer implements story
       console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
-      await this.executeDeveloperFn(
+      const developerResult = await this.executeDeveloperFn(
         task,
         developer,
         repositories,
@@ -530,7 +530,7 @@ export class DevelopersPhase extends BasePhase {
         state.epics
       );
 
-      // Verify story has branch AND commit SHA
+      // Verify story has branch
       const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
@@ -539,25 +539,46 @@ export class DevelopersPhase extends BasePhase {
         return;
       }
 
-      // Get commit SHA from git
-      const { execSync } = require('child_process');
-      const targetRepo = repositories.length > 0 ? repositories[0] : null;
-      if (!targetRepo || !workspacePath) {
-        console.error(`❌ [PIPELINE] No repository or workspace for commit verification`);
-        return;
+      // 🔥 CRITICAL FIX: Extract commit SHA from Developer's output
+      // Following Anthropic best practice: "subagents should verify details"
+      // Developer REPORTS their commit SHA, we don't guess it
+      let commitSHA: string | null = null;
+
+      if (developerResult?.output) {
+        // Look for pattern: "📍 Commit SHA: abc123def456..."
+        const commitMatch = developerResult.output.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
+        if (commitMatch && commitMatch[1]) {
+          commitSHA = commitMatch[1];
+          console.log(`✅ [PIPELINE] Developer reported commit SHA: ${commitSHA}`);
+          console.log(`   Branch: ${updatedStory.branchName}`);
+          console.log(`   This is the EXACT code Judge will review`);
+        } else {
+          console.warn(`⚠️  [PIPELINE] Developer did NOT report commit SHA in output`);
+          console.warn(`   Developer output length: ${developerResult.output.length} chars`);
+          console.warn(`   Searching output for commit SHA...`);
+        }
       }
 
-      const repoPath = `${workspacePath}/${targetRepo.name}`;
-      let commitSHA: string;
-      try {
-        commitSHA = execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
-        console.log(`📍 [PIPELINE] Developer commit SHA: ${commitSHA}`);
-        console.log(`   Branch: ${updatedStory.branchName}`);
-        console.log(`   This is the EXACT code Judge will review`);
-      } catch (error: any) {
-        console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
-        console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
-        return;
+      // Fallback: Try to get commit SHA from git (old way - not recommended)
+      if (!commitSHA) {
+        console.warn(`⚠️  [PIPELINE] Falling back to git rev-parse HEAD (NOT RECOMMENDED)`);
+        const { execSync } = require('child_process');
+        const targetRepo = repositories.length > 0 ? repositories[0] : null;
+        if (!targetRepo || !workspacePath) {
+          console.error(`❌ [PIPELINE] No repository or workspace for commit verification`);
+          console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
+          return;
+        }
+
+        const repoPath = `${workspacePath}/${targetRepo.name}`;
+        try {
+          commitSHA = execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
+          console.log(`📍 [PIPELINE] Fallback commit SHA from git: ${commitSHA}`);
+        } catch (error: any) {
+          console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
+          console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
+          return;
+        }
       }
 
       // STEP 2: Judge reviews code (in SAME workspace, SAME branch, EXACT commit)

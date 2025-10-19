@@ -307,7 +307,15 @@ Step 3: Create branch and commit your changes using Bash:
    - git add .
    - git commit -m "Implement story: [story title]"
    - git push -u origin feature/story-name
-Step 4: Done (Judge will verify your work)
+Step 4: Get commit SHA using Bash:
+   - git rev-parse HEAD
+Step 5: OUTPUT YOUR COMMIT SHA (CRITICAL):
+   At the very end, output EXACTLY this format:
+
+   ✅ Story implemented successfully
+   📍 Commit SHA: [paste the exact commit SHA from git rev-parse HEAD]
+
+   Judge needs this EXACT commit to review your work.
 
 ⚠️ EXAMPLES:
 
