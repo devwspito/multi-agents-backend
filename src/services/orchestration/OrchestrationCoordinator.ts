@@ -1221,15 +1221,19 @@ After writing code, you MUST:
           const { execSync } = require('child_process');
           const repoPath = `${workspacePath}/${targetRepository}`;
 
-          // Show files that were modified
-          const modifiedFiles = execSync(`cd "${repoPath}" && git diff --name-only`, { encoding: 'utf8' });
-          console.log(`\n📂 Modified files:\n${modifiedFiles || '(no files modified)'}`);
+          // 🔥 IMPORTANT: Developer already committed, so we need to see the LAST commit
+          // git diff would be empty because changes are already committed
+          // Use git show HEAD to see what was in the last commit
 
-          // Show actual code changes (full diff)
-          const diffOutput = execSync(`cd "${repoPath}" && git diff`, { encoding: 'utf8' });
-          console.log(`\n📝 FULL CODE DIFF:\n${diffOutput || '(no changes)'}`);
+          // Show files that were modified in last commit
+          const modifiedFiles = execSync(`cd "${repoPath}" && git show --name-only --pretty=format: HEAD`, { encoding: 'utf8' });
+          console.log(`\n📂 Modified files in last commit:\n${modifiedFiles || '(no files modified)'}`);
 
-          // Emit to frontend
+          // Show actual code changes in last commit (full diff)
+          const diffOutput = execSync(`cd "${repoPath}" && git show HEAD`, { encoding: 'utf8' });
+          console.log(`\n📝 LAST COMMIT DIFF:\n${diffOutput.substring(0, 2000)}...\n(truncated, full diff has ${diffOutput.length} chars)`);
+
+          // Emit to frontend (full diff, no truncation)
           NotificationService.emitConsoleLog(
             taskId,
             'info',
