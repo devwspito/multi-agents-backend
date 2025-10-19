@@ -1086,11 +1086,22 @@ ${judgeFeedback}
         const { execSync } = require('child_process');
         const repoPath = `${workspacePath}/${targetRepository}`;
 
-        // First, ensure we're on the epic base branch
+        // First, ensure we're on the epic base branch WITH LATEST CHANGES
         const epicBranch = `epic/${epic.id}`;
         try {
           execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
           console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
+
+          // 🔥 CRITICAL: Pull latest changes from epic branch
+          // This ensures story branches include changes from previously merged stories
+          try {
+            execSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, { encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes from ${epicBranch}`);
+            console.log(`   Story will include all previously merged stories`);
+          } catch (pullError: any) {
+            // Pull might fail if branch doesn't exist remotely yet (first story in epic)
+            console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed (branch might not be on remote yet)`);
+          }
         } catch (epicCheckoutError) {
           console.warn(`⚠️  [Developer ${member.instanceId}] Epic branch ${epicBranch} doesn't exist, using current branch`);
         }
