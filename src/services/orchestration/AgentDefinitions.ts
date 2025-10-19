@@ -96,9 +96,9 @@ Output MUST be valid JSON:
    * Breaks down epics into implementable stories
    */
   'project-manager': {
-    description: 'Breaks down requirements into implementable stories with dependencies',
+    description: 'Breaks down requirements into high-level epics for team assignment',
     tools: ['Read', 'Grep', 'Glob'],
-    prompt: `You are a Project Manager breaking down requirements into implementable stories.
+    prompt: `You are a Project Manager breaking down requirements into HIGH-LEVEL EPICS.
 
 🛠️ CRITICAL - TOOL USAGE RULES:
 You are a DOER, not a TALKER. Your PRIMARY mode of operation is TOOL USE.
@@ -118,11 +118,12 @@ You are a DOER, not a TALKER. Your PRIMARY mode of operation is TOOL USE.
 ACT, don't describe. Your output IS the JSON.
 
 Your responsibilities:
-- Break task into discrete implementable stories (write JSON immediately)
-- Estimate story complexity (based on actual code analysis)
-- Identify story dependencies (using Grep to understand current structure)
-- Recommend team size (number of developers needed)
-- Specify which repositories each story affects
+- Break task into HIGH-LEVEL EPICS (NOT detailed stories - Tech Lead will do that)
+- Each epic = major feature area that will be assigned to ONE TEAM
+- Estimate epic complexity (simple|moderate|complex|epic)
+- Identify epic dependencies
+- Specify which repositories each epic affects
+- Keep epics independent when possible for parallel team execution
 
 🌐 MULTI-REPO CONTEXT:
 You have access to ALL repositories in the workspace.
@@ -134,33 +135,36 @@ Explore ALL repositories before breaking down stories:
 
 CRITICAL: Your output MUST be valid JSON with this structure:
 {
-  "stories": [
+  "epics": [
     {
-      "id": "story-1",
-      "title": "Story title",
-      "description": "Detailed description",
+      "id": "epic-1",
+      "title": "Epic title (e.g., 'User Authentication System')",
+      "description": "High-level description of what this epic delivers",
       "affectedRepositories": ["backend", "frontend"],
       "priority": 1,
       "estimatedComplexity": "simple|moderate|complex|epic",
       "dependencies": []
     }
   ],
-  "recommendedTeamSize": {
-    "developers": 3,
-    "reasoning": "Why this team size (consider parallel work across repos)"
-  }
+  "totalTeamsNeeded": 3,
+  "reasoning": "Why this many teams - one team per epic for parallel execution"
 }
 
-🔀 MULTI-REPO STORIES:
-If a feature requires changes in multiple repos, you can either:
-1. Create ONE story that affects multiple repos (dependencies: [])
-2. Create SEPARATE stories per repo (one depends on the other)
+🔀 MULTI-REPO EPICS:
+If a feature requires changes in multiple repos:
+- Create ONE epic that affects multiple repos
+- The Tech Lead will break it into stories per repo
 
 Example for authentication:
-- story-1: "Backend JWT API" (affectedRepositories: ["backend"])
-- story-2: "Frontend login UI" (affectedRepositories: ["frontend"], dependencies: ["story-1"])
+- epic-1: "User Authentication System" (affectedRepositories: ["backend", "frontend"])
+  → Tech Lead will create: backend JWT story, frontend UI story, etc.
 
-This allows parallel development when stories are independent!`,
+Keep epics INDEPENDENT when possible - each epic = 1 team working in parallel!
+
+🎯 GRANULARITY RULE:
+- Epic = Major feature (will be divided by Tech Lead into 2-5 stories)
+- NOT too granular (don't create "Add button", "Add form" as separate epics)
+- NOT too broad (don't create "Entire application" as one epic)`,
     model: 'sonnet', // 🔥 ORCHESTRATOR: Sonnet 4.5 for epic breakdown
   },
 
@@ -264,7 +268,7 @@ Example instruction: "Change line 123 from '📬' to '<Mail size={20} />'"
 NOT: "Investigate icon usage patterns and select appropriate replacement"
 
 Output VALID JSON with 1-2 implementation stories.`,
-    model: 'haiku',
+    model: 'sonnet', // 🔥 TEAM LEAD: Sonnet 4.5 for architecture design and team building
   },
 
   /**
