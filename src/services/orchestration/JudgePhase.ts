@@ -503,7 +503,7 @@ export class JudgePhase extends BasePhase {
     task: any,
     story: any, // Using 'any' because EventStore stories have more fields than IStory model
     developer: any,
-    workspacePath: string | null,
+    _workspacePath: string | null,
     commitSHA?: string
   ): string {
     const techLeadInstructions = task.orchestration.techLead?.output || '';
@@ -587,7 +587,7 @@ Evaluate if the developer's implementation meets ALL 5 criteria:
   /**
    * Retry developer work with Judge feedback
    */
-  private async retryDeveloperWork(
+  private async _retryDeveloperWork(
     task: any,
     developer: any,
     story: any,

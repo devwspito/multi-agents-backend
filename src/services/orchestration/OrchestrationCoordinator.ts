@@ -68,7 +68,7 @@ export class OrchestrationCoordinator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
   private readonly prManagementService: PRManagementService;
-  private readonly compactionService: ContextCompactionService;
+  private readonly _compactionService: ContextCompactionService;
 
   /**
    * Ordered phases - executes sequentially with approval gates
@@ -93,7 +93,7 @@ export class OrchestrationCoordinator {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
     this.prManagementService = new PRManagementService(this.githubService);
-    this.compactionService = new ContextCompactionService();
+    this._compactionService = new ContextCompactionService();
   }
 
   /**
@@ -105,7 +105,7 @@ export class OrchestrationCoordinator {
    * - No file changes in git
    * - Execution timeout
    */
-  private async checkDeveloperProgress(
+  private async _checkDeveloperProgress(
     progress: DeveloperProgress,
     workspacePath: string,
     story: any,
@@ -461,7 +461,7 @@ export class OrchestrationCoordinator {
    * Each phase is a "subagent" with isolated context and specialized tools.
    * Following SDK pattern: each subagent has specific description and tool restrictions.
    */
-  private createPhase(phaseName: string, context: OrchestrationContext): IPhase | null {
+  private createPhase(phaseName: string, _context: OrchestrationContext): IPhase | null {
     switch (phaseName) {
       case 'ProductManager':
         return new ProductManagerPhase(this.executeAgent.bind(this));
@@ -535,7 +535,7 @@ export class OrchestrationCoordinator {
   /**
    * Get workspace structure for agent context
    */
-  private async getWorkspaceStructure(workspacePath: string): Promise<string> {
+  private async getWorkspaceStructure(_workspacePath: string): Promise<string> {
     // TODO: Implement tree command or fs-based directory listing
     return 'Workspace structure loading...';
   }
@@ -611,11 +611,11 @@ export class OrchestrationCoordinator {
     prompt: string,
     workspacePath: string,
     taskId?: string,
-    agentName?: string,
+    _agentName?: string,
     sessionId?: string,
-    fork?: boolean,
+    _fork?: boolean,
     attachments?: any[],
-    options?: {
+    _options?: {
       maxIterations?: number;
       timeout?: number;
     }
@@ -991,7 +991,7 @@ export class OrchestrationCoordinator {
     member: any,
     repositories: any[],
     workspacePath: string,
-    workspaceStructure: string,
+    _workspaceStructure: string,
     attachments?: any[], // Receive attachments from context
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
@@ -1276,7 +1276,7 @@ After writing code, you MUST:
   /**
    * Handle orchestration completion
    */
-  private async handleOrchestrationComplete(task: ITask, context: OrchestrationContext): Promise<void> {
+  private async handleOrchestrationComplete(task: ITask, _context: OrchestrationContext): Promise<void> {
     task.status = 'completed';
     task.orchestration.currentPhase = 'completed';
     await task.save();

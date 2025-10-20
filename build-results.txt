@@ -1,0 +1,65 @@
+
+> multi-agents-backend-ts@2.0.0 build
+> tsc
+
+src/routes/code.ts(9,10): error TS2300: Duplicate identifier 'NotificationService'.
+src/routes/code.ts(237,10): error TS2300: Duplicate identifier 'NotificationService'.
+src/services/orchestration/DevelopersPhase.ts(517,11): error TS6133: '_taskId' is declared but its value is never read.
+src/services/orchestration/DevelopersPhase.ts(605,17): error TS6133: 'reviewStoryBranch' is declared but its value is never read.
+src/services/orchestration/JudgePhase.ts(103,7): error TS2322: Type '{ id: string; epicId: string; title: string; description: string; assignedTo?: string | undefined; status: "pending" | "in_progress" | "completed" | "failed"; priority: number; complexity: string; ... 8 more ...; error?: string | undefined; }[]' is not assignable to type 'IStory[]'.
+  Type '{ id: string; epicId: string; title: string; description: string; assignedTo?: string | undefined; status: "pending" | "in_progress" | "completed" | "failed"; priority: number; complexity: string; ... 8 more ...; error?: string | undefined; }' is not assignable to type 'IStory'.
+    Types of property 'estimatedComplexity' are incompatible.
+      Type 'string | undefined' is not assignable to type 'StoryComplexity'.
+        Type 'undefined' is not assignable to type 'StoryComplexity'.
+src/services/orchestration/JudgePhase.ts(126,7): error TS18048: 'task.orchestration.judge' is possibly 'undefined'.
+src/services/orchestration/JudgePhase.ts(127,7): error TS18048: 'task.orchestration.judge' is possibly 'undefined'.
+src/services/orchestration/JudgePhase.ts(171,7): error TS18048: 'task.orchestration.judge' is possibly 'undefined'.
+src/services/orchestration/JudgePhase.ts(172,7): error TS18048: 'task.orchestration.judge' is possibly 'undefined'.
+src/services/orchestration/JudgePhase.ts(590,17): error TS6133: 'retryDeveloperWork' is declared but its value is never read.
+src/services/orchestration/JudgePhase.ts(600,11): error TS6133: '_workspacePath' is declared but its value is never read.
+src/services/orchestration/JudgePhase.ts(629,9): error TS2552: Cannot find name 'workspacePath'. Did you mean '_workspacePath'?
+src/services/orchestration/OrchestrationCoordinator.ts(71,20): error TS6133: '_compactionService' is declared but its value is never read.
+src/services/orchestration/OrchestrationCoordinator.ts(108,17): error TS6133: '_checkDeveloperProgress' is declared but its value is never read.
+src/services/orchestration/OrchestrationCoordinator.ts(747,13): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"tool_use"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(747,44): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"tool_result"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(747,78): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"text"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(755,13): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"turn_start"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(763,13): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"tool_use"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(803,13): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"tool_result"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(817,13): error TS2367: This comparison appears to be unintentional because the types '"user" | "system" | "assistant" | "result" | "stream_event"' and '"text"' have no overlap.
+src/services/orchestration/OrchestrationCoordinator.ts(1297,22): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1298,23): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1300,27): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1301,28): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1302,30): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1303,26): error TS18048: 'pm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1312,22): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1313,23): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1315,27): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1316,28): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1317,30): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1318,26): error TS18048: 'pjm.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1327,22): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1328,23): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1330,27): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1331,28): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1332,30): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1333,26): error TS18048: 'tl.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1360,22): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1361,23): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1363,27): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1364,28): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1365,30): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1366,26): error TS18048: 'judge.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1375,22): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1376,23): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1378,27): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1379,28): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1380,30): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1381,26): error TS18048: 'fixer.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1390,22): error TS18048: 'qa.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1391,23): error TS18048: 'qa.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1393,27): error TS18048: 'qa.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1394,28): error TS18048: 'qa.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1395,30): error TS18048: 'qa.usage' is possibly 'undefined'.
+src/services/orchestration/OrchestrationCoordinator.ts(1396,26): error TS18048: 'qa.usage' is possibly 'undefined'.

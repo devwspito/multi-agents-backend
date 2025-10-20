@@ -232,7 +232,7 @@ export class PRManagementService {
     error: Error,
     epic: IEpic,
     branchName: string,
-    primaryRepo: any,
+    _primaryRepo: any,
     primaryRepoPath: string,
     task: ITask,
     taskId: string

@@ -512,10 +512,8 @@ export class DevelopersPhase extends BasePhase {
     workspaceStructure: string,
     attachments: any[],
     state: any,
-    context: OrchestrationContext
+    _context: OrchestrationContext
   ): Promise<void> {
-    const taskId = (task._id as any).toString();
-
     try {
       // STEP 1: Developer implements story
       console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
@@ -602,7 +600,7 @@ export class DevelopersPhase extends BasePhase {
    * Review a story branch with Judge
    * Returns true if approved, false if changes requested
    */
-  private async reviewStoryBranch(
+  private async _reviewStoryBranch(
     story: any,
     task: any,
     workspacePath: string | null,

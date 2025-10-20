@@ -80,6 +80,7 @@ export class QAPhase extends BasePhase {
     });
 
     // Initialize QA Engineer state if not exists (skip in multi-team mode)
+    const startTime = new Date();
     if (!multiTeamMode) {
       if (!task.orchestration.qaEngineer) {
         task.orchestration.qaEngineer = {
@@ -88,7 +89,6 @@ export class QAPhase extends BasePhase {
         } as any;
       }
 
-      const startTime = new Date();
       task.orchestration.qaEngineer!.status = 'in_progress';
       task.orchestration.qaEngineer!.startedAt = startTime;
       await task.save();
