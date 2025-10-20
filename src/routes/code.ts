@@ -6,6 +6,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { NotificationService } from '../services/NotificationService';
 
 const router = express.Router();
 
@@ -48,10 +49,10 @@ router.get('/:taskId', async (req, res) => {
       }))
     };
 
-    res.json(response);
+    return res.json(response);
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    res.status(500).json({ error: 'Failed to retrieve code logs' });
+    return res.status(500).json({ error: 'Failed to retrieve code logs' });
   }
 });
 
@@ -109,14 +110,14 @@ router.get('/:taskId/files', async (req, res) => {
       totalOperations: file.operations.length
     }));
 
-    res.json({
+    return res.json({
       taskId,
       totalFiles: files.length,
       files
     });
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    res.status(500).json({ error: 'Failed to retrieve file list' });
+    return res.status(500).json({ error: 'Failed to retrieve file list' });
   }
 });
 
@@ -143,7 +144,7 @@ router.get('/:taskId/file', async (req, res) => {
     const logs = JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
 
     // Buscar la última versión del archivo
-    let lastContent = null;
+    let lastContent: string | null = null;
     let history: any[] = [];
 
     logs.forEach((entry: any) => {
@@ -160,19 +161,19 @@ router.get('/:taskId/file', async (req, res) => {
           });
 
           if (entry.tool === 'Write') {
-            lastContent = entry.input?.content;
-          } else if (entry.tool === 'Edit' && lastContent) {
+            lastContent = entry.input?.content || null;
+          } else if (entry.tool === 'Edit' && lastContent !== null) {
             // Intentar aplicar la edición (simplificado)
             lastContent = lastContent.replace(
-              entry.input?.old_string,
-              entry.input?.new_string
+              entry.input?.old_string || '',
+              entry.input?.new_string || ''
             );
           }
         }
       }
     });
 
-    res.json({
+    return res.json({
       taskId,
       filePath,
       currentContent: lastContent,
@@ -181,7 +182,7 @@ router.get('/:taskId/file', async (req, res) => {
     });
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    res.status(500).json({ error: 'Failed to retrieve file content' });
+    return res.status(500).json({ error: 'Failed to retrieve file content' });
   }
 });
 

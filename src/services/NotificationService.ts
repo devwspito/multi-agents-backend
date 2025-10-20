@@ -1,4 +1,7 @@
 import { Server as SocketServer } from 'socket.io';
+import { EventEmitter } from 'events';
+
+const eventEmitter = new EventEmitter();
 
 export interface OrchestrationEvent {
   taskId: string;
@@ -377,5 +380,20 @@ export class NotificationService {
       console.error(`❌ Error persisting log to DB:`, error);
       // No lanzar error - los logs no deben romper la orquestación
     }
+  }
+
+  /**
+   * EventEmitter methods for subscribing to code write/edit events
+   */
+  static on(event: string, handler: (data: any) => void): void {
+    eventEmitter.on(event, handler);
+  }
+
+  static off(event: string, handler: (data: any) => void): void {
+    eventEmitter.off(event, handler);
+  }
+
+  static emitEvent(event: string, data: any): void {
+    eventEmitter.emit(event, data);
   }
 }
