@@ -2,7 +2,7 @@ import { Task, ITask } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
 import { PRManagementService } from '../github/PRManagementService';
-import { ContextCompactionService } from '../ContextCompactionService';
+// import { ContextCompactionService } from '../ContextCompactionService'; // Not currently used
 import { NotificationService } from '../NotificationService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
 import { ProductManagerPhase } from './ProductManagerPhase';
@@ -68,7 +68,8 @@ export class OrchestrationCoordinator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
   private readonly prManagementService: PRManagementService;
-  private readonly _compactionService: ContextCompactionService;
+  // NOTE: Context compaction service not currently used but kept for future optimization
+  // private readonly _compactionService: ContextCompactionService;
 
   /**
    * Ordered phases - executes sequentially with approval gates
@@ -93,11 +94,13 @@ export class OrchestrationCoordinator {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
     this.prManagementService = new PRManagementService(this.githubService);
-    this._compactionService = new ContextCompactionService();
+    // Context compaction not currently used
+    // this._compactionService = new ContextCompactionService();
   }
 
   /**
    * Check developer progress to detect loops and inactivity
+   * NOTE: Not currently used - monitoring is handled by individual agents
    *
    * Detects:
    * - Read/Write ratio too high (only reading, not coding)
@@ -105,6 +108,7 @@ export class OrchestrationCoordinator {
    * - No file changes in git
    * - Execution timeout
    */
+  // @ts-expect-error - Method reserved for future use
   private async _checkDeveloperProgress(
     progress: DeveloperProgress,
     workspacePath: string,
@@ -744,15 +748,16 @@ export class OrchestrationCoordinator {
         }
 
         // Log every message type for debugging
-        if (message.type !== 'tool_use' && message.type !== 'tool_result' && message.type !== 'text') {
-          console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
+        const msgType = (message as any).type;
+        if (msgType !== 'tool_use' && msgType !== 'tool_result' && msgType !== 'text') {
+          console.log(`📨 [ExecuteAgent] Received message type: ${msgType}`, {
             hasSubtype: !!(message as any).subtype,
             isError: !!(message as any).is_error,
           });
         }
 
         // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
-        if (message.type === 'turn_start') {
+        if (msgType === 'turn_start') {
           turnCount++;
           console.log(`\n🔄 [${agentType}] Turn ${turnCount} started`);
           if (taskId) {
@@ -760,7 +765,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'tool_use') {
+        if (msgType === 'tool_use') {
           const tool = (message as any).name || 'unknown';
           const input = (message as any).input || {};
           console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
@@ -800,7 +805,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'tool_result') {
+        if (msgType === 'tool_result') {
           const status = (message as any).is_error ? '❌' : '✅';
           const result = (message as any).content || (message as any).result || '';
 
@@ -814,7 +819,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'text') {
+        if (msgType === 'text') {
           const text = (message as any).text || '';
           if (text.length > 0) {
             const preview = text.substring(0, 100);
@@ -1291,46 +1296,49 @@ After writing code, you MUST:
     // Product Manager
     if (task.orchestration.productManager?.usage) {
       const pm = task.orchestration.productManager;
+      const pmUsage = pm.usage!;
       breakdown.push({
         phase: 'Product Manager',
         cost: pm.cost_usd || 0,
-        inputTokens: pm.usage.input_tokens || 0,
-        outputTokens: pm.usage.output_tokens || 0,
+        inputTokens: pmUsage.input_tokens || 0,
+        outputTokens: pmUsage.output_tokens || 0,
       });
-      totalInputTokens += pm.usage.input_tokens || 0;
-      totalOutputTokens += pm.usage.output_tokens || 0;
-      cacheCreationTokens += pm.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += pm.usage.cache_read_input_tokens || 0;
+      totalInputTokens += pmUsage.input_tokens || 0;
+      totalOutputTokens += pmUsage.output_tokens || 0;
+      cacheCreationTokens += pmUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += pmUsage.cache_read_input_tokens || 0;
     }
 
     // Project Manager
     if (task.orchestration.projectManager?.usage) {
       const pjm = task.orchestration.projectManager;
+      const pjmUsage = pjm.usage!;
       breakdown.push({
         phase: 'Project Manager',
         cost: pjm.cost_usd || 0,
-        inputTokens: pjm.usage.input_tokens || 0,
-        outputTokens: pjm.usage.output_tokens || 0,
+        inputTokens: pjmUsage.input_tokens || 0,
+        outputTokens: pjmUsage.output_tokens || 0,
       });
-      totalInputTokens += pjm.usage.input_tokens || 0;
-      totalOutputTokens += pjm.usage.output_tokens || 0;
-      cacheCreationTokens += pjm.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += pjm.usage.cache_read_input_tokens || 0;
+      totalInputTokens += pjmUsage.input_tokens || 0;
+      totalOutputTokens += pjmUsage.output_tokens || 0;
+      cacheCreationTokens += pjmUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += pjmUsage.cache_read_input_tokens || 0;
     }
 
     // Tech Lead
     if (task.orchestration.techLead?.usage) {
       const tl = task.orchestration.techLead;
+      const tlUsage = tl.usage!;
       breakdown.push({
         phase: 'Tech Lead',
         cost: tl.cost_usd || 0,
-        inputTokens: tl.usage.input_tokens || 0,
-        outputTokens: tl.usage.output_tokens || 0,
+        inputTokens: tlUsage.input_tokens || 0,
+        outputTokens: tlUsage.output_tokens || 0,
       });
-      totalInputTokens += tl.usage.input_tokens || 0;
-      totalOutputTokens += tl.usage.output_tokens || 0;
-      cacheCreationTokens += tl.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += tl.usage.cache_read_input_tokens || 0;
+      totalInputTokens += tlUsage.input_tokens || 0;
+      totalOutputTokens += tlUsage.output_tokens || 0;
+      cacheCreationTokens += tlUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += tlUsage.cache_read_input_tokens || 0;
     }
 
     // Developers (team)
@@ -1354,46 +1362,49 @@ After writing code, you MUST:
     // Judge
     if (task.orchestration.judge?.usage) {
       const judge = task.orchestration.judge;
+      const judgeUsage = judge.usage!;
       breakdown.push({
         phase: 'Judge',
         cost: judge.cost_usd || 0,
-        inputTokens: judge.usage.input_tokens || 0,
-        outputTokens: judge.usage.output_tokens || 0,
+        inputTokens: judgeUsage.input_tokens || 0,
+        outputTokens: judgeUsage.output_tokens || 0,
       });
-      totalInputTokens += judge.usage.input_tokens || 0;
-      totalOutputTokens += judge.usage.output_tokens || 0;
-      cacheCreationTokens += judge.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += judge.usage.cache_read_input_tokens || 0;
+      totalInputTokens += judgeUsage.input_tokens || 0;
+      totalOutputTokens += judgeUsage.output_tokens || 0;
+      cacheCreationTokens += judgeUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += judgeUsage.cache_read_input_tokens || 0;
     }
 
     // Fixer
     if (task.orchestration.fixer?.usage) {
       const fixer = task.orchestration.fixer;
+      const fixerUsage = fixer.usage!;
       breakdown.push({
         phase: 'Fixer',
         cost: fixer.cost_usd || 0,
-        inputTokens: fixer.usage.input_tokens || 0,
-        outputTokens: fixer.usage.output_tokens || 0,
+        inputTokens: fixerUsage.input_tokens || 0,
+        outputTokens: fixerUsage.output_tokens || 0,
       });
-      totalInputTokens += fixer.usage.input_tokens || 0;
-      totalOutputTokens += fixer.usage.output_tokens || 0;
-      cacheCreationTokens += fixer.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += fixer.usage.cache_read_input_tokens || 0;
+      totalInputTokens += fixerUsage.input_tokens || 0;
+      totalOutputTokens += fixerUsage.output_tokens || 0;
+      cacheCreationTokens += fixerUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += fixerUsage.cache_read_input_tokens || 0;
     }
 
     // QA Engineer
     if (task.orchestration.qaEngineer?.usage) {
       const qa = task.orchestration.qaEngineer;
+      const qaUsage = qa.usage!;
       breakdown.push({
         phase: 'QA Engineer',
         cost: qa.cost_usd || 0,
-        inputTokens: qa.usage.input_tokens || 0,
-        outputTokens: qa.usage.output_tokens || 0,
+        inputTokens: qaUsage.input_tokens || 0,
+        outputTokens: qaUsage.output_tokens || 0,
       });
-      totalInputTokens += qa.usage.input_tokens || 0;
-      totalOutputTokens += qa.usage.output_tokens || 0;
-      cacheCreationTokens += qa.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += qa.usage.cache_read_input_tokens || 0;
+      totalInputTokens += qaUsage.input_tokens || 0;
+      totalOutputTokens += qaUsage.output_tokens || 0;
+      cacheCreationTokens += qaUsage.cache_creation_input_tokens || 0;
+      cacheReadTokens += qaUsage.cache_read_input_tokens || 0;
     }
 
     // Emit orchestration completed with detailed cost summary

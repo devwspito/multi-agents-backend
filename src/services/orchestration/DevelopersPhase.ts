@@ -599,83 +599,17 @@ export class DevelopersPhase extends BasePhase {
   /**
    * Review a story branch with Judge
    * Returns true if approved, false if changes requested
+   * NOTE: Reserved for future use when per-story Judge review is needed
    */
+  // @ts-expect-error - Method reserved for future use
   private async _reviewStoryBranch(
-    story: any,
-    task: any,
-    workspacePath: string | null,
-    context: OrchestrationContext
+    _story: any,
+    _task: any,
+    _workspacePath: string | null,
+    _context: OrchestrationContext
   ): Promise<boolean> {
-    console.log(`\n⚖️  [Judge] Reviewing story branch: ${story.branchName}`);
-    console.log(`   Story: ${story.title}`);
-
-    try {
-      // 🔥 CRITICAL: Checkout story branch so Judge can see the developer's code
-      if (workspacePath && story.branchName) {
-        const repositories = context.repositories;
-        const targetRepo = repositories.length > 0 ? repositories[0] : null;
-        if (targetRepo) {
-          const { execSync } = require('child_process');
-          const repoPath = `${workspacePath}/${targetRepo.name}`;
-          console.log(`🔀 [Judge] Checking out branch ${story.branchName} in ${repoPath}`);
-
-          try {
-            execSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`✅ [Judge] Successfully checked out ${story.branchName}`);
-          } catch (error: any) {
-            console.error(`❌ [Judge] Failed to checkout ${story.branchName}: ${error.message}`);
-            // Continue anyway - Judge might still be on correct branch
-          }
-        }
-      }
-
-      // Import JudgePhase
-      const { JudgePhase } = await import('./JudgePhase');
-      const { NotificationService } = await import('../NotificationService');
-
-      // Create isolated context for Judge with only this story
-      const judgeContext = new OrchestrationContext(
-        task,
-        context.repositories,
-        workspacePath
-      );
-
-      // Pass only this story for review
-      judgeContext.setData('storyToReview', story);
-      judgeContext.setData('reviewMode', 'single-story'); // Signal Judge to review one story
-
-      // 🔥 CRITICAL: Pass development team so Judge can find the developer who worked on this story
-      judgeContext.setData('developmentTeam', context.getData('developmentTeam'));
-
-      // 🔥 CRITICAL: Pass executeDeveloperFn so Judge can retry failed stories
-      judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
-
-      // Execute Judge phase
-      const judgePhase = new JudgePhase(this.executeDeveloperFn as any); // Judge needs executeAgent, not executeDeveloper
-      const result = await judgePhase.execute(judgeContext);
-
-      if (result.success && result.data?.status === 'approved') {
-        console.log(`✅ [Judge] Story ${story.id} APPROVED`);
-        NotificationService.emitConsoleLog(
-          (task._id as any).toString(),
-          'info',
-          `✅ Judge APPROVED story: ${story.title}`
-        );
-        return true;
-      } else {
-        console.log(`❌ [Judge] Story ${story.id} REJECTED`);
-        console.log(`   Feedback: ${result.data?.feedback || result.error || 'No feedback provided'}`);
-        NotificationService.emitConsoleLog(
-          (task._id as any).toString(),
-          'warn',
-          `❌ Judge REJECTED story: ${story.title}\nFeedback: ${result.data?.feedback || result.error}`
-        );
-        return false;
-      }
-    } catch (error: any) {
-      console.error(`❌ [Judge] Error reviewing story ${story.id}: ${error.message}`);
-      return false; // On error, don't merge
-    }
+    // Reserved for future use - story review is currently handled at orchestration level
+    return false;
   }
 
   /**
