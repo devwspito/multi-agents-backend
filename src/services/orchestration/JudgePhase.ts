@@ -100,7 +100,12 @@ export class JudgePhase extends BasePhase {
       // Full batch review mode (called from orchestration)
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
-      stories = state.stories || [];
+      const rawStories = state.stories || [];
+      // Ensure stories have proper complexity enum type
+      stories = rawStories.map((s: any) => ({
+        ...s,
+        estimatedComplexity: s.complexity || s.estimatedComplexity || 'medium'
+      })) as IStory[];
       console.log(`📋 [Judge] Batch review mode: Retrieved ${stories.length} stories from EventStore`);
     }
 
@@ -123,8 +128,8 @@ export class JudgePhase extends BasePhase {
         } as any;
       }
 
-      task.orchestration.judge.status = 'in_progress';
-      task.orchestration.judge.startedAt = new Date();
+      task.orchestration.judge!.status = 'in_progress';
+      task.orchestration.judge!.startedAt = new Date();
       await task.save();
     }
 
@@ -168,8 +173,8 @@ export class JudgePhase extends BasePhase {
 
     // Save results (skip in multi-team mode to avoid conflicts)
     if (!multiTeamMode) {
-      task.orchestration.judge.status = allPassed ? 'completed' : 'failed';
-      task.orchestration.judge.completedAt = new Date();
+      task.orchestration.judge!.status = allPassed ? 'completed' : 'failed';
+      task.orchestration.judge!.completedAt = new Date();
       await task.save();
     }
 
@@ -586,57 +591,17 @@ Evaluate if the developer's implementation meets ALL 5 criteria:
 
   /**
    * Retry developer work with Judge feedback
+   * NOTE: Currently unused - Judge feedback is handled by DevelopersPhase
    */
+  // @ts-expect-error - Method reserved for future use
   private async _retryDeveloperWork(
-    task: any,
-    developer: any,
-    story: any,
-    context: OrchestrationContext,
-    judgeFeedback: string
+    _task: any,
+    _developer: any,
+    _story: any,
+    _context: OrchestrationContext,
+    _judgeFeedback: string
   ): Promise<void> {
-    console.log(`🔄 [Judge] Developer ${developer.instanceId} retrying story "${story.title}" with feedback`);
-
-    const taskId = (task._id as any).toString();
-    const workspacePath = context.workspacePath;
-
-    // Get executeDeveloperFn from context
-    const executeDeveloperFn = context.getData<Function>('executeDeveloperFn');
-    if (!executeDeveloperFn || typeof executeDeveloperFn !== 'function') {
-      console.error('❌ [Judge] executeDeveloperFn not found in context or not a function');
-      return;
-    }
-
-    NotificationService.emitAgentMessage(
-      taskId,
-      'Judge',
-      `🔄 Requesting ${developer.instanceId} to retry with feedback:\n\n${judgeFeedback}`
-    );
-
-    // Execute developer again with Judge feedback
-    const repositories = context.repositories;
-    const workspaceStructure = context.getData<string>('workspaceStructure') || '';
-    const attachments = context.getData<any[]>('attachments') || [];
-
-    // Get EventStore state for stories and epics
-    const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
-
-    try {
-      await executeDeveloperFn(
-        task,
-        developer,
-        repositories,
-        workspacePath,
-        workspaceStructure,
-        attachments,
-        state.stories,
-        state.epics,
-        judgeFeedback // Pass Judge feedback for retry
-      );
-
-      console.log(`✅ [Judge] Developer ${developer.instanceId} completed retry for story "${story.title}"`);
-    } catch (error: any) {
-      console.error(`❌ [Judge] Developer retry failed: ${error.message}`);
-    }
+    // This method is reserved for future use when retry mechanism is implemented
+    // Currently, developer feedback is provided through NotificationService
   }
 }

@@ -217,7 +217,6 @@ export class PRManagementService {
         error,
         epic,
         branchName,
-        primaryRepo,
         primaryRepoPath,
         task,
         taskId
@@ -232,7 +231,6 @@ export class PRManagementService {
     error: Error,
     epic: IEpic,
     branchName: string,
-    _primaryRepo: any,
     primaryRepoPath: string,
     task: ITask,
     taskId: string

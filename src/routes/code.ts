@@ -8,13 +8,16 @@ import path from 'path';
 import fs from 'fs';
 import { NotificationService } from '../services/NotificationService';
 
+// Import NotificationService type (needed for event handlers)
+// Already imported above, no duplicate needed
+
 const router = express.Router();
 
 /**
  * GET /api/code/:taskId
  * Obtiene todo el código generado para una tarea
  */
-router.get('/:taskId', async (req, res) => {
+router.get('/:taskId', async (req, res): Promise<void> => {
   try {
     const { taskId } = req.params;
 
@@ -22,7 +25,8 @@ router.get('/:taskId', async (req, res) => {
     const logsPath = path.join(process.cwd(), 'agent-logs', `${taskId}.json`);
 
     if (!fs.existsSync(logsPath)) {
-      return res.status(404).json({ error: 'No logs found for this task' });
+      res.status(404).json({ error: 'No logs found for this task' });
+      return;
     }
 
     const logs = JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
@@ -49,10 +53,10 @@ router.get('/:taskId', async (req, res) => {
       }))
     };
 
-    return res.json(response);
+    res.json(response);
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    return res.status(500).json({ error: 'Failed to retrieve code logs' });
+    res.status(500).json({ error: 'Failed to retrieve code logs' });
   }
 });
 
@@ -60,14 +64,15 @@ router.get('/:taskId', async (req, res) => {
  * GET /api/code/:taskId/files
  * Lista todos los archivos creados/modificados
  */
-router.get('/:taskId/files', async (req, res) => {
+router.get('/:taskId/files', async (req, res): Promise<void> => {
   try {
     const { taskId } = req.params;
 
     const logsPath = path.join(process.cwd(), 'agent-logs', `${taskId}.json`);
 
     if (!fs.existsSync(logsPath)) {
-      return res.status(404).json({ error: 'No logs found for this task' });
+      res.status(404).json({ error: 'No logs found for this task' });
+      return;
     }
 
     const logs = JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
@@ -110,14 +115,14 @@ router.get('/:taskId/files', async (req, res) => {
       totalOperations: file.operations.length
     }));
 
-    return res.json({
+    res.json({
       taskId,
       totalFiles: files.length,
       files
     });
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    return res.status(500).json({ error: 'Failed to retrieve file list' });
+    res.status(500).json({ error: 'Failed to retrieve file list' });
   }
 });
 
@@ -126,26 +131,28 @@ router.get('/:taskId/files', async (req, res) => {
  * Obtiene el contenido específico de un archivo
  * Query param: path=/path/to/file
  */
-router.get('/:taskId/file', async (req, res) => {
+router.get('/:taskId/file', async (req, res): Promise<void> => {
   try {
     const { taskId } = req.params;
     const { path: filePath } = req.query;
 
     if (!filePath) {
-      return res.status(400).json({ error: 'File path required' });
+      res.status(400).json({ error: 'File path required' });
+      return;
     }
 
     const logsPath = path.join(process.cwd(), 'agent-logs', `${taskId}.json`);
 
     if (!fs.existsSync(logsPath)) {
-      return res.status(404).json({ error: 'No logs found for this task' });
+      res.status(404).json({ error: 'No logs found for this task' });
+      return;
     }
 
     const logs = JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
 
     // Buscar la última versión del archivo
     let lastContent: string | null = null;
-    let history: any[] = [];
+    const history: any[] = [];
 
     logs.forEach((entry: any) => {
       if (entry.type === 'tool' && ['Write', 'Edit'].includes(entry.tool)) {
@@ -173,7 +180,7 @@ router.get('/:taskId/file', async (req, res) => {
       }
     });
 
-    return res.json({
+    res.json({
       taskId,
       filePath,
       currentContent: lastContent,
@@ -182,7 +189,7 @@ router.get('/:taskId/file', async (req, res) => {
     });
   } catch (error: any) {
     console.error('[Code Route] Error:', error);
-    return res.status(500).json({ error: 'Failed to retrieve file content' });
+    res.status(500).json({ error: 'Failed to retrieve file content' });
   }
 });
 
@@ -232,8 +239,5 @@ router.get('/:taskId/stream', (req, res) => {
     clearInterval(keepAlive);
   });
 });
-
-// Import NotificationService type
-import { NotificationService } from '../services/NotificationService';
 
 export default router;
