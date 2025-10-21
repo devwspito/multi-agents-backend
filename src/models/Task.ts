@@ -202,7 +202,23 @@ export interface IOrchestration {
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
+
+  // Model configuration
+  modelConfig?: {
+    preset?: 'premium' | 'standard' | 'economy' | 'custom';
+    customConfig?: {
+      productManager?: string;
+      projectManager?: string;
+      techLead?: string;
+      seniorDeveloper?: string;
+      juniorDeveloper?: string;
+      judge?: string;
+      qaEngineer?: string;
+      fixer?: string;
+      mergeCoordinator?: string;
+    };
+  };
 
   // Historial de aprobaciones
   approvalHistory?: {
@@ -569,8 +585,26 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['product-manager', 'project-manager', 'tech-lead', 'development', 'judge', 'qa-engineer', 'merge-coordinator'],
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
+      },
+      modelConfig: {
+        preset: {
+          type: String,
+          enum: ['premium', 'standard', 'economy', 'custom'],
+          default: 'standard',
+        },
+        customConfig: {
+          productManager: String,
+          projectManager: String,
+          techLead: String,
+          seniorDeveloper: String,
+          juniorDeveloper: String,
+          judge: String,
+          qaEngineer: String,
+          fixer: String,
+          mergeCoordinator: String,
+        },
       },
       approvalHistory: [{
         phase: String,

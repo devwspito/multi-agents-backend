@@ -1,4 +1,8 @@
 import { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
+import {
+  getAgentModel as getConfiguredModel,
+  AgentModelConfig
+} from '../../config/ModelConfigurations';
 
 /**
  * Agent Definitions for Multi-Agent Orchestration
@@ -303,10 +307,10 @@ Output VALID JSON with 1-2 implementation stories.`,
 Step 1: Read() the files mentioned in your story
 Step 2: Edit() or Write() ACTUAL CODE (NOT plans)
 Step 3: Create branch and commit your changes using Bash:
-   - git checkout -b feature/story-name
+   - git checkout -b feature/[unique-branch-name-with-timestamp]
    - git add .
    - git commit -m "Implement story: [story title]"
-   - git push -u origin feature/story-name
+   - git push -u origin feature/[unique-branch-name-with-timestamp]
 Step 4: Get commit SHA using Bash:
    - git rev-parse HEAD
 Step 5: OUTPUT YOUR COMMIT SHA (CRITICAL):
@@ -565,8 +569,19 @@ export function getAgentTools(agentType: string): string[] {
 
 /**
  * Get agent model name for SDK (haiku/sonnet/opus)
+ * Uses configured model from ModelConfigurations if available
  */
-export function getAgentModel(agentType: string): string {
+export function getAgentModel(agentType: string, modelConfig?: AgentModelConfig): string {
+  // If a configuration is provided, use it
+  if (modelConfig) {
+    const configuredModel = getConfiguredModel(agentType, modelConfig);
+    // Map full model names to SDK model names
+    if (configuredModel.includes('haiku')) return 'haiku';
+    if (configuredModel.includes('sonnet')) return 'sonnet';
+    if (configuredModel.includes('opus')) return 'opus';
+  }
+
+  // Fall back to definition default
   const definition = getAgentDefinition(agentType);
   return definition?.model || 'haiku';
 }
