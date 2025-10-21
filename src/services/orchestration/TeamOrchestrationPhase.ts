@@ -552,6 +552,10 @@ export class TeamOrchestrationPhase extends BasePhase {
         `✅ Team ${teamNumber} completed epic: ${epic.title}`
       );
 
+      // 🚀 AUTO-CREATE PULL REQUEST
+      // Now that epic is complete, create a PR for user to review and merge
+      await this.createPullRequest(epic, branchName, workspacePath, repositories, taskId);
+
       return {
         success: true,
         teamCosts: teamCosts,
@@ -569,6 +573,108 @@ export class TeamOrchestrationPhase extends BasePhase {
         success: false,
         error: error.message
       };
+    }
+  }
+
+  /**
+   * Create Pull Request for completed epic
+   *
+   * Automatically creates a PR from epic branch to main branch
+   * so user just needs to review and merge (no manual branch management)
+   */
+  private async createPullRequest(
+    epic: any,
+    epicBranch: string,
+    workspacePath: string | null,
+    repositories: any[],
+    taskId: string
+  ): Promise<void> {
+    if (!workspacePath || repositories.length === 0) {
+      console.log(`⚠️  [PR] No workspace/repository - skipping PR creation`);
+      return;
+    }
+
+    try {
+      const { execSync } = require('child_process');
+      const { NotificationService } = await import('../NotificationService');
+
+      const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+      const repoPath = `${workspacePath}/${targetRepo}`;
+
+      console.log(`\n📬 [PR] Creating Pull Request for epic: ${epic.title}`);
+      console.log(`   Branch: ${epicBranch} → main`);
+      console.log(`   Repository: ${targetRepo}`);
+
+      // Push epic branch to remote
+      try {
+        execSync(`cd "${repoPath}" && git push -u origin ${epicBranch}`, { encoding: 'utf8' });
+        console.log(`✅ [PR] Pushed ${epicBranch} to remote`);
+      } catch (pushError: any) {
+        console.error(`❌ [PR] Failed to push branch: ${pushError.message}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warning',
+          `⚠️  Could not push ${epicBranch} - PR creation skipped. Push manually and create PR.`
+        );
+        return;
+      }
+
+      // Create PR using GitHub CLI
+      const prTitle = `Epic: ${epic.title}`;
+      const prBody = `## 🎯 Epic Summary\n\n${epic.description || 'No description provided'}\n\n## 📊 Details\n\n- **Complexity**: ${epic.estimatedComplexity || 'Unknown'}\n- **Stories**: ${epic.stories?.length || 0}\n- **Affected Repositories**: ${epic.affectedRepositories?.join(', ') || targetRepo}\n\n## ✅ Validation\n\n- ✅ Code reviewed by Judge (per story)\n- ✅ Integration tested by QA Engineer\n- ✅ All stories merged to epic branch\n\n## 📝 Instructions\n\n1. Review the changes\n2. Approve and merge this PR\n3. Epic will be deployed to production\n\n---\n🤖 Generated with Multi-Agent Platform`;
+
+      try {
+        const prOutput = execSync(
+          `cd "${repoPath}" && gh pr create --base main --head ${epicBranch} --title "${prTitle}" --body "${prBody}"`,
+          { encoding: 'utf8' }
+        );
+
+        // Extract PR URL from output
+        const prUrlMatch = prOutput.match(/https:\/\/github\.com\/[^\s]+/);
+        const prUrl = prUrlMatch ? prUrlMatch[0] : 'PR created (URL not found)';
+
+        console.log(`✅ [PR] Pull Request created successfully!`);
+        console.log(`   URL: ${prUrl}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'success',
+          `📬 Pull Request created: ${prUrl}`
+        );
+
+        // Store PR URL in epic metadata
+        const { eventStore } = await import('../EventStore');
+        await eventStore.append({
+          taskId: taskId as any,
+          eventType: 'PullRequestCreated',
+          agentName: 'team-orchestration',
+          payload: {
+            epicId: epic.id,
+            epicTitle: epic.title,
+            prUrl: prUrl,
+            epicBranch: epicBranch
+          }
+        });
+
+      } catch (ghError: any) {
+        // GitHub CLI not available or other error
+        console.warn(`⚠️  [PR] Could not create PR automatically: ${ghError.message}`);
+        console.log(`\n📋 [PR] Manual PR instructions:`);
+        console.log(`   1. Go to your repository`);
+        console.log(`   2. Create a new Pull Request`);
+        console.log(`   3. Base: main ← Compare: ${epicBranch}`);
+        console.log(`   4. Title: ${prTitle}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📋 Epic completed! Create PR manually: ${epicBranch} → main`
+        );
+      }
+
+    } catch (error: any) {
+      console.error(`❌ [PR] Unexpected error creating PR: ${error.message}`);
+      // Non-critical - don't fail the whole epic
     }
   }
 }
