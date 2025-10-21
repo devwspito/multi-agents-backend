@@ -696,6 +696,7 @@ export class DevelopersPhase extends BasePhase {
         await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories);
 
         // 🧹 CLEANUP: Delete story branch after successful merge
+        // ✅ ONLY if Judge APPROVED - rejected stories keep their branches for investigation
         // Story is now part of epic branch, no need to keep individual story branch
         if (workspacePath && repositories.length > 0) {
           try {
@@ -714,9 +715,31 @@ export class DevelopersPhase extends BasePhase {
 
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
       } else {
+        // Judge REJECTED - keep branch for investigation
         console.error(`❌ [STEP 2/3] Judge REJECTED story: ${story.title}`);
         console.error(`   Feedback: ${judgeResult.data?.feedback || judgeResult.error}`);
         console.error(`❌ [PIPELINE] Story pipeline FAILED - NOT merging`);
+
+        // 📋 IMPORTANT: Branch preserved for investigation
+        console.log(`\n📋 [REJECTED STORY] Branch preserved for investigation:`);
+        console.log(`   Branch: ${updatedStory.branchName}`);
+        console.log(`   Story: ${story.title}`);
+        console.log(`   Judge Feedback:`);
+        const feedback = judgeResult.data?.feedback || judgeResult.error || 'No feedback provided';
+        console.log(`   ${feedback}`);
+        console.log(`\n💡 Next steps:`);
+        console.log(`   1. Review the code in branch: ${updatedStory.branchName}`);
+        console.log(`   2. Fix issues based on Judge feedback`);
+        console.log(`   3. Re-run orchestration or manually fix and merge`);
+
+        // Emit notification so user sees this in the UI
+        const { NotificationService } = await import('../NotificationService');
+        const taskId = (task._id as any).toString();
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ Story rejected by Judge: ${story.title}\nBranch: ${updatedStory.branchName}\nFeedback: ${feedback}`
+        );
       }
 
       return {
