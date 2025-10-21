@@ -91,18 +91,28 @@ export class TeamOrchestrationPhase extends BasePhase {
     });
 
     try {
-      // Get EPICS from Project Manager via context
-      const projectManagerEpics = context.getData<any[]>('epics') || [];
+      // Get EPICS from Project Manager - MUST support recovery after restart
+      let projectManagerEpics = context.getData<any[]>('epics') || [];
 
+      // CRITICAL: Always check task model for epics (recovery after restart)
       if (projectManagerEpics.length === 0) {
-        // Fallback: try to get from task model directly
         const epicsFromTask = (task.orchestration.projectManager as any)?.epics || [];
-        if (epicsFromTask.length > 0) {
+        if (epicsFromTask && epicsFromTask.length > 0) {
+          // Restore epics to context for this execution
           context.setData('epics', epicsFromTask);
-          projectManagerEpics.push(...epicsFromTask);
-        } else {
-          throw new Error('No epics found from Project Manager - cannot create teams');
+          projectManagerEpics = [...epicsFromTask]; // Create new array
+          console.log(`🔄 [TeamOrchestration] RECOVERY: Restored ${epicsFromTask.length} epic(s) from database after restart`);
         }
+      }
+
+      // Final validation - MUST have epics to proceed
+      if (!projectManagerEpics || projectManagerEpics.length === 0) {
+        // Check if ProjectManager phase completed
+        const pmStatus = task.orchestration.projectManager?.status;
+        if (pmStatus !== 'completed') {
+          throw new Error(`Cannot start TeamOrchestration: Project Manager phase is ${pmStatus || 'not started'}. Must complete Project Manager first.`);
+        }
+        throw new Error('No epics found from Project Manager - cannot create teams. Database may be corrupted or Project Manager output was invalid.');
       }
 
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
@@ -127,6 +137,32 @@ export class TeamOrchestrationPhase extends BasePhase {
       const successfulTeams = teamResults.filter(r => r.status === 'fulfilled' && r.value.success);
       const failedTeams = teamResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success));
 
+      // 🔥 CIRCUIT BREAKER: Stop if too many teams fail
+      const failureRate = failedTeams.length / teamResults.length;
+      const failureThreshold = parseFloat(process.env.TEAM_FAILURE_THRESHOLD || '0.5'); // 50% default
+
+      if (failureRate > failureThreshold && teamResults.length > 1) {
+        const { CircuitBreakerError } = await import('./RetryService');
+
+        console.error(`\n❌ [CIRCUIT BREAKER] Too many teams failed: ${failedTeams.length}/${teamResults.length} (${(failureRate * 100).toFixed(1)}%)`);
+        console.error(`   Threshold: ${(failureThreshold * 100).toFixed(0)}%`);
+        console.error(`   Aborting orchestration to prevent further cost accumulation\n`);
+
+        // Notify frontend
+        NotificationService.emitNotification(taskId, 'circuit_breaker_triggered', {
+          failedTeams: failedTeams.length,
+          totalTeams: teamResults.length,
+          threshold: failureThreshold,
+          message: `Circuit breaker: ${failedTeams.length}/${teamResults.length} teams failed`
+        });
+
+        throw new CircuitBreakerError(
+          failedTeams.length,
+          teamResults.length,
+          failureThreshold
+        );
+      }
+
       console.log(`\n✅ [TeamOrchestration] ${successfulTeams.length}/${teamResults.length} team(s) completed successfully`);
       if (failedTeams.length > 0) {
         console.log(`❌ [TeamOrchestration] ${failedTeams.length} team(s) failed`);
@@ -135,8 +171,55 @@ export class TeamOrchestrationPhase extends BasePhase {
       // Store results in task
       (context.task.orchestration as any).teamOrchestration.status = failedTeams.length === 0 ? 'completed' : 'partial';
       (context.task.orchestration as any).teamOrchestration.completedAt = new Date();
+
+      // 🔥 CRITICAL: Aggregate costs AND token usage from all teams for proper breakdown display
+      let totalTechLeadCost = 0;
+      let totalJudgeCost = 0;
+      let totalDevelopersCost = 0;
+      let totalQACost = 0;
+
+      // Token tracking for each agent type
+      let techLeadTokens = { input: 0, output: 0 };
+      let judgeTokens = { input: 0, output: 0 };
+      let developersTokens = { input: 0, output: 0 };
+      let qaTokens = { input: 0, output: 0 };
+
       (context.task.orchestration as any).teamOrchestration.teams = teamResults.map((result, idx) => {
-        if (result.status === 'fulfilled') {
+        if (result.status === 'fulfilled' && result.value.teamCosts) {
+          const costs = result.value.teamCosts;
+
+          // Accumulate costs and tokens from each team
+          totalTechLeadCost += costs.techLead || 0;
+          totalJudgeCost += costs.judge || 0;
+          totalDevelopersCost += costs.developers || 0;
+          totalQACost += costs.qa || 0;
+
+          // Accumulate token usage
+          if (costs.techLeadUsage) {
+            techLeadTokens.input += costs.techLeadUsage.input || 0;
+            techLeadTokens.output += costs.techLeadUsage.output || 0;
+          }
+          if (costs.judgeUsage) {
+            judgeTokens.input += costs.judgeUsage.input || 0;
+            judgeTokens.output += costs.judgeUsage.output || 0;
+          }
+          if (costs.developersUsage) {
+            developersTokens.input += costs.developersUsage.input || 0;
+            developersTokens.output += costs.developersUsage.output || 0;
+          }
+          if (costs.qaUsage) {
+            qaTokens.input += costs.qaUsage.input || 0;
+            qaTokens.output += costs.qaUsage.output || 0;
+          }
+
+          return {
+            epicId: projectManagerEpics[idx].id,
+            epicTitle: projectManagerEpics[idx].title,
+            status: result.value.success ? 'completed' : 'failed',
+            error: result.value.error,
+            costs: costs, // Store individual team costs
+          };
+        } else if (result.status === 'fulfilled') {
           return {
             epicId: projectManagerEpics[idx].id,
             epicTitle: projectManagerEpics[idx].title,
@@ -152,6 +235,69 @@ export class TeamOrchestrationPhase extends BasePhase {
           };
         }
       });
+
+      // Update aggregated costs AND token usage in the main orchestration fields for breakdown display
+      if (totalTechLeadCost > 0) {
+        if (!task.orchestration.techLead) {
+          task.orchestration.techLead = { agent: 'tech-lead', status: 'completed' } as any;
+        }
+        // Preserve existing usage data if it exists, or create new
+        if (!task.orchestration.techLead.usage) {
+          task.orchestration.techLead.usage = {
+            input_tokens: techLeadTokens.input,
+            output_tokens: techLeadTokens.output,
+          };
+        }
+        task.orchestration.techLead.cost_usd = totalTechLeadCost;
+        console.log(`💰 Total Tech Lead cost across all teams: $${totalTechLeadCost.toFixed(4)}`);
+      }
+
+      if (totalJudgeCost > 0) {
+        if (!task.orchestration.judge) {
+          task.orchestration.judge = { agent: 'judge', status: 'completed' } as any;
+        }
+        if (!task.orchestration.judge!.usage) {
+          task.orchestration.judge!.usage = {
+            input_tokens: judgeTokens.input,
+            output_tokens: judgeTokens.output,
+          };
+        }
+        task.orchestration.judge!.cost_usd = totalJudgeCost;
+        console.log(`💰 Total Judge cost across all teams: $${totalJudgeCost.toFixed(4)}`);
+      }
+
+      if (totalQACost > 0) {
+        if (!task.orchestration.qaEngineer) {
+          task.orchestration.qaEngineer = { agent: 'qa-engineer', status: 'completed' } as any;
+        }
+        if (!task.orchestration.qaEngineer!.usage) {
+          task.orchestration.qaEngineer!.usage = {
+            input_tokens: qaTokens.input,
+            output_tokens: qaTokens.output,
+          };
+        }
+        task.orchestration.qaEngineer!.cost_usd = totalQACost;
+        console.log(`💰 Total QA cost across all teams: $${totalQACost.toFixed(4)}`);
+      }
+
+      // Also track developers cost separately
+      if (totalDevelopersCost > 0) {
+        console.log(`💰 Total Developers cost across all teams: $${totalDevelopersCost.toFixed(4)}`);
+        // Note: Developers cost is not shown separately in the breakdown UI
+      }
+
+      // For developers, add to team array
+      if (totalDevelopersCost > 0 && !task.orchestration.team) {
+        task.orchestration.team = [];
+      }
+
+      // 🔥 CRITICAL: Accumulate ALL team costs to the main orchestration total
+      const totalTeamsCost = totalTechLeadCost + totalJudgeCost + totalDevelopersCost + totalQACost;
+      if (totalTeamsCost > 0) {
+        task.orchestration.totalCost = (task.orchestration.totalCost || 0) + totalTeamsCost;
+        console.log(`💰 [TeamOrchestration] Total cost from all teams: $${totalTeamsCost.toFixed(4)}`);
+        console.log(`💰 [TeamOrchestration] Running orchestration total: $${task.orchestration.totalCost.toFixed(4)}`);
+      }
 
       await task.save();
 
@@ -213,7 +359,22 @@ export class TeamOrchestrationPhase extends BasePhase {
     epic: any,
     teamNumber: number,
     parentContext: OrchestrationContext
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    teamCosts?: {
+      techLead: number;
+      developers: number;
+      judge: number;
+      qa: number;
+      total: number;
+      techLeadUsage?: { input: number; output: number };
+      developersUsage?: { input: number; output: number };
+      judgeUsage?: { input: number; output: number };
+      qaUsage?: { input: number; output: number };
+    };
+    epicId?: string;
+  }> {
     const taskId = (parentContext.task._id as any).toString();
 
     console.log(`\n${'='.repeat(80)}`);
@@ -231,7 +392,12 @@ export class TeamOrchestrationPhase extends BasePhase {
 
     try {
       // 1️⃣ Create branch for this epic
-      const branchName = `epic/${epic.id}`;
+      // 🔥 UNIQUE BRANCH NAMING: Include taskId + timestamp + random suffix to prevent ANY conflicts
+      const taskShortId = (parentContext.task._id as any).toString().slice(-8); // Last 8 chars of taskId
+      const timestamp = Date.now();
+      const randomSuffix = Math.random().toString(36).substring(2, 8);
+      const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize epic id
+      const branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
       const workspacePath = parentContext.workspacePath;
 
       // Determine target repository (use first affected repo or first repo in context)
@@ -280,7 +446,9 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamContext.setData('attachments', parentContext.getData('attachments'));
 
       // Store epic for this team to work on (Tech Lead will divide into stories)
-      teamContext.setData('teamEpic', epic);
+      // 🔥 CRITICAL: Add the unique branchName to the epic object
+      const epicWithBranch = { ...epic, branchName: branchName };
+      teamContext.setData('teamEpic', epicWithBranch);
       teamContext.setData('epicBranch', branchName);
       teamContext.setData('targetRepository', targetRepository); // 🔥 Pass repository name to team
 
@@ -298,11 +466,31 @@ export class TeamOrchestrationPhase extends BasePhase {
         this.workspaceDir
       );
 
+      // Initialize cost tracking for this team
+      const teamCosts = {
+        techLead: 0,
+        developers: 0,
+        judge: 0,
+        qa: 0,
+        total: 0
+      };
+
       // Tech Lead: Design architecture for this epic
       console.log(`\n[Team ${teamNumber}] Phase 1: Tech Lead (Architecture)`);
       const techLeadResult = await techLeadPhase.execute(teamContext);
       if (!techLeadResult.success) {
         throw new Error(`Tech Lead failed: ${techLeadResult.error}`);
+      }
+      // Track Tech Lead cost and tokens (check both metadata and metrics)
+      const techLeadCost = Number(techLeadResult.metadata?.cost || techLeadResult.metrics?.cost_usd || 0);
+      const techLeadUsage = {
+        input: Number(techLeadResult.metadata?.input_tokens || techLeadResult.metrics?.input_tokens || 0),
+        output: Number(techLeadResult.metadata?.output_tokens || techLeadResult.metrics?.output_tokens || 0),
+      };
+      if (techLeadCost > 0) {
+        (teamCosts as any).techLead = techLeadCost;
+        (teamCosts as any).techLeadUsage = techLeadUsage;
+        console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
       }
 
       // Developers: Implement the epic
@@ -310,6 +498,24 @@ export class TeamOrchestrationPhase extends BasePhase {
       const developersResult = await developersPhase.execute(teamContext);
       if (!developersResult.success) {
         throw new Error(`Developers failed: ${developersResult.error}`);
+      }
+      // Track Developers cost and tokens (includes individual developer costs)
+      if (developersResult.metadata?.cost) {
+        (teamCosts as any).developers = developersResult.metadata.cost;
+        (teamCosts as any).developersUsage = {
+          input: Number(developersResult.metadata?.input_tokens || 0),
+          output: Number(developersResult.metadata?.output_tokens || 0),
+        };
+        console.log(`💰 [Team ${teamNumber}] Developers cost: $${developersResult.metadata.cost.toFixed(4)}`);
+      }
+      // Track Judge costs and tokens (from within DevelopersPhase)
+      if (developersResult.metadata?.judgeCost) {
+        (teamCosts as any).judge = developersResult.metadata.judgeCost;
+        (teamCosts as any).judgeUsage = {
+          input: Number(developersResult.metadata?.judge_input_tokens || 0),
+          output: Number(developersResult.metadata?.judge_output_tokens || 0),
+        };
+        console.log(`💰 [Team ${teamNumber}] Judge cost: $${developersResult.metadata.judgeCost.toFixed(4)}`);
       }
 
       // 🔥 SKIP Judge batch review - already done per-story in DevelopersPhase
@@ -323,6 +529,21 @@ export class TeamOrchestrationPhase extends BasePhase {
       if (!qaResult.success) {
         throw new Error(`QA failed: ${qaResult.error}`);
       }
+      // Track QA cost and tokens (check both metadata and metrics)
+      const qaCost = Number(qaResult.metadata?.cost || qaResult.metrics?.cost_usd || 0);
+      const qaUsage = {
+        input: Number(qaResult.metadata?.input_tokens || qaResult.metrics?.input_tokens || 0),
+        output: Number(qaResult.metadata?.output_tokens || qaResult.metrics?.output_tokens || 0),
+      };
+      if (qaCost > 0) {
+        (teamCosts as any).qa = qaCost;
+        (teamCosts as any).qaUsage = qaUsage;
+        console.log(`💰 [Team ${teamNumber}] QA cost: $${qaCost.toFixed(4)} (${qaUsage.input + qaUsage.output} tokens)`);
+      }
+
+      // Calculate total team cost
+      teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge + teamCosts.qa;
+      console.log(`💰 [Team ${teamNumber}] Total team cost: $${teamCosts.total.toFixed(4)}`);
 
       console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);
       NotificationService.emitConsoleLog(
@@ -331,7 +552,11 @@ export class TeamOrchestrationPhase extends BasePhase {
         `✅ Team ${teamNumber} completed epic: ${epic.title}`
       );
 
-      return { success: true };
+      return {
+        success: true,
+        teamCosts: teamCosts,
+        epicId: epic.id
+      };
     } catch (error: any) {
       console.error(`\n❌ [Team ${teamNumber}] Failed for epic ${epic.title}: ${error.message}\n`);
       NotificationService.emitConsoleLog(
@@ -340,7 +565,10 @@ export class TeamOrchestrationPhase extends BasePhase {
         `❌ Team ${teamNumber} failed (epic: ${epic.title}): ${error.message}`
       );
 
-      return { success: false, error: error.message };
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 }

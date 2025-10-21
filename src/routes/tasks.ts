@@ -34,8 +34,23 @@ const approvePhaseSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['product-manager', 'project-manager', 'tech-lead', 'development', 'judge', 'qa-engineer', 'merge-coordinator'])
+    z.enum(['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator'])
   ).optional(),
+});
+
+const modelConfigSchema = z.object({
+  preset: z.enum(['premium', 'standard', 'economy', 'custom']).optional(),
+  customConfig: z.object({
+    productManager: z.string().optional(),
+    projectManager: z.string().optional(),
+    techLead: z.string().optional(),
+    seniorDeveloper: z.string().optional(),
+    juniorDeveloper: z.string().optional(),
+    judge: z.string().optional(),
+    qaEngineer: z.string().optional(),
+    fixer: z.string().optional(),
+    mergeCoordinator: z.string().optional(),
+  }).optional(),
 });
 
 const approveStorySchema = z.object({
@@ -122,22 +137,34 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
   try {
     const validatedData = createTaskSchema.parse(req.body);
 
-    // 🔧 AUTO-POPULATE REPOSITORIES FROM PROJECT
-    // Si el task tiene projectId pero no repositoryIds, copiar los repositorios del proyecto
+    // 🔧 USE ONLY SELECTED REPOSITORIES
+    // The frontend sends specific repositoryIds selected by the user
+    // We should NEVER auto-populate all repositories from the project
     let repositoryIds: any[] = validatedData.repositoryIds || [];
 
-    if (validatedData.projectId && repositoryIds.length === 0) {
-      console.log(`📦 Task has projectId but no repositories, fetching from project...`);
+    // Validate that repositories were selected
+    if (repositoryIds.length === 0) {
+      console.log(`⚠️ Task created without repository selection`);
+      // This is valid - some tasks might not need repositories
+      // But log it for debugging
+    } else {
+      console.log(`✅ Task created with ${repositoryIds.length} selected repositories:`, repositoryIds);
 
-      const repositories = await Repository.find({
-        projectId: validatedData.projectId,
+      // Verify the selected repositories exist and are active
+      const validRepos = await Repository.find({
+        _id: { $in: repositoryIds },
         isActive: true,
-      }).select('_id');
+      }).select('_id name githubRepoName');
 
-      // Keep as ObjectIds (NOT strings) for Mongoose compatibility
-      repositoryIds = repositories.map((repo) => repo._id);
+      if (validRepos.length !== repositoryIds.length) {
+        console.warn(`⚠️ Some selected repositories not found or inactive`);
+        console.warn(`   Requested: ${repositoryIds.length}, Found: ${validRepos.length}`);
+      }
 
-      console.log(`✅ Auto-populated ${repositoryIds.length} repositories from project ${validatedData.projectId}`);
+      // Log which repositories were selected for debugging
+      validRepos.forEach(repo => {
+        console.log(`   - ${repo.name} (${repo.githubRepoName})`);
+      });
     }
 
     const task = await Task.create({
@@ -462,7 +489,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/approve/:phase
  * Aprobar o rechazar una fase de la orquestación
- * Phases: product-manager, project-manager, tech-lead, development, qa-engineer, merge-coordinator
+ * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator
  */
 router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -566,10 +593,53 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = task.orchestration.mergeCoordinator;
         phaseName = 'Merge Coordinator';
         break;
+      case 'team-orchestration':
+        // Team orchestration phase - approval to START multi-team execution
+        // This approval happens BEFORE teams are created, not after
+
+        // Find or create the TeamOrchestration phase in phases array
+        let teamOrchestrationStep = task.orchestration.phases?.find((p: any) =>
+          p.name === 'TeamOrchestration'
+        );
+
+        if (!teamOrchestrationStep) {
+          // Create the phase step if it doesn't exist
+          teamOrchestrationStep = {
+            name: 'TeamOrchestration',
+            status: 'pending',
+            startedAt: new Date(),
+            approval: {
+              status: 'pending',
+              requestedAt: new Date(),
+            }
+          };
+
+          if (!task.orchestration.phases) {
+            task.orchestration.phases = [];
+          }
+          task.orchestration.phases.push(teamOrchestrationStep);
+        }
+
+        // For team-orchestration, we treat it like other phases
+        // Allow approval even if status is 'pending' (waiting to start)
+        if (!teamOrchestrationStep.approval) {
+          teamOrchestrationStep.approval = {
+            status: 'pending',
+            requestedAt: new Date(),
+          };
+        }
+
+        // Override the status check for team-orchestration
+        // It can be approved while 'pending' to allow it to start
+        teamOrchestrationStep.status = 'completed'; // Mark as completed to pass validation
+
+        agentStep = teamOrchestrationStep;
+        phaseName = 'Team Orchestration';
+        break;
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, judge, qa-engineer, merge-coordinator`,
+          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator`,
         });
         return;
     }
@@ -730,6 +800,7 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
         'product-manager',
         'project-manager',
         'tech-lead',
+        'team-orchestration',
         'development',
         'qa-engineer',
         'merge-coordinator'
@@ -1219,6 +1290,127 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to cancel task',
+    });
+  }
+});
+
+/**
+ * GET /api/tasks/:id/model-config
+ * Get model configuration for a task
+ */
+router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    // Import model configurations
+    const { PREMIUM_CONFIG, STANDARD_CONFIG, ECONOMY_CONFIG } = await import('../config/ModelConfigurations');
+
+    // Get current configuration
+    const modelConfig = task.orchestration.modelConfig || {
+      preset: 'standard',
+      customConfig: undefined,
+    };
+
+    // Get preset configurations for reference
+    const presets = {
+      premium: PREMIUM_CONFIG,
+      standard: STANDARD_CONFIG,
+      economy: ECONOMY_CONFIG,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        current: modelConfig,
+        presets,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting model config:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get model configuration',
+    });
+  }
+});
+
+/**
+ * PUT /api/tasks/:id/model-config
+ * Update model configuration for a task
+ */
+router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const validatedData = modelConfigSchema.parse(req.body);
+
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    // Update model configuration
+    if (!task.orchestration.modelConfig) {
+      task.orchestration.modelConfig = {
+        preset: 'standard',
+      };
+    }
+
+    if (validatedData.preset) {
+      task.orchestration.modelConfig.preset = validatedData.preset;
+    }
+
+    if (validatedData.customConfig) {
+      task.orchestration.modelConfig.customConfig = validatedData.customConfig;
+    }
+
+    await task.save();
+
+    console.log(
+      `✅ [Model Config] Updated for task ${task._id}:`,
+      `Preset: ${task.orchestration.modelConfig.preset}`,
+      validatedData.customConfig ? 'with custom config' : ''
+    );
+
+    res.json({
+      success: true,
+      message: 'Model configuration updated successfully',
+      data: {
+        modelConfig: task.orchestration.modelConfig,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error updating model config:', error);
+
+    if (error.name === 'ZodError') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid model configuration',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update model configuration',
     });
   }
 });

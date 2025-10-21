@@ -79,6 +79,15 @@ export interface PhaseResult {
   metrics?: {
     [key: string]: number | string;
   };
+  metadata?: {
+    cost?: number;
+    judgeCost?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    judge_input_tokens?: number;
+    judge_output_tokens?: number;
+    [key: string]: any;
+  };
 }
 
 /**

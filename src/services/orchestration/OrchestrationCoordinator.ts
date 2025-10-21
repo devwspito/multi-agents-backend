@@ -13,6 +13,14 @@ import { JudgePhase } from './JudgePhase';
 import { QAPhase } from './QAPhase';
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
+import { AgentModelConfig } from '../../config/ModelConfigurations';
+
+// 🔥 NEW: Best practice services
+import { RetryService } from './RetryService';
+import { SchemaValidationService } from './SchemaValidation';
+import { CostBudgetService } from './CostBudgetService';
+import { SecretsDetectionService } from './SecretsDetectionService';
+
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -357,11 +365,42 @@ export class OrchestrationCoordinator {
           continue;
         }
 
+        // 🔥 COST BUDGET CHECK: Verify we're within budget before executing
+        const budgetCheck = await CostBudgetService.checkBudgetBeforePhase(
+          task,
+          phaseName,
+          CostBudgetService.getPhaseEstimate(phaseName)
+        );
+
+        if (!budgetCheck.allowed) {
+          console.error(`❌ [BUDGET] ${budgetCheck.reason}`);
+          NotificationService.emitConsoleLog(taskId, 'error', `❌ ${budgetCheck.reason}`);
+          throw new Error(budgetCheck.reason);
+        }
+
+        if (budgetCheck.warning) {
+          console.warn(`⚠️ [BUDGET] ${budgetCheck.warning}`);
+          NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ ${budgetCheck.warning}`);
+        }
+
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
-        // Execute phase
-        const result = await phase.execute(context);
+        // Execute phase with retry logic for transient failures
+        const result = await RetryService.executeWithRetry(
+          () => phase.execute(context),
+          {
+            maxRetries: 3,
+            onRetry: (attempt, error, delayMs) => {
+              console.warn(`⚠️ [${phaseName}] Retry attempt ${attempt} after ${delayMs}ms. Error: ${error.message}`);
+              NotificationService.emitConsoleLog(
+                taskId,
+                'warn',
+                `⚠️ Retrying ${phaseName} (attempt ${attempt}) after transient error: ${error.message}`
+              );
+            }
+          }
+        );
 
         // 🔥 SPECIAL HANDLING: QA → Fixer → QA retry loop
         if (phaseName === 'QA' && result.success && result.data?.hasErrors) {
@@ -511,18 +550,27 @@ export class OrchestrationCoordinator {
 
   /**
    * Setup workspace for multi-repo development
-   * Clones all repositories into a single workspace directory
+   * Clones ONLY the repositories selected by the user for this specific task
    */
   private async setupWorkspace(taskId: string, repositories: any[], githubToken: string): Promise<string> {
     const taskWorkspace = path.join(this.workspaceDir, `task-${taskId}`);
+
+    console.log(`📦 Setting up workspace for task ${taskId}`);
+    console.log(`   Selected repositories count: ${repositories.length}`);
+
+    // Log which repositories will be cloned (for debugging)
+    repositories.forEach((repo, index) => {
+      console.log(`   ${index + 1}. ${repo.name} (${repo.githubRepoName})`);
+    });
 
     // Create workspace directory
     if (!fs.existsSync(taskWorkspace)) {
       fs.mkdirSync(taskWorkspace, { recursive: true });
     }
 
-    // Clone all repositories using user's GitHub token
+    // Clone ONLY the selected repositories using user's GitHub token
     for (const repo of repositories) {
+      console.log(`   🔄 Cloning: ${repo.githubRepoName} (branch: ${repo.githubBranch || 'main'})`);
       await this.githubService.cloneRepositoryForOrchestration(
         repo.githubRepoName,
         repo.githubBranch || 'main',
@@ -531,7 +579,24 @@ export class OrchestrationCoordinator {
       );
     }
 
+    // Verify workspace contains only selected repos
+    const clonedRepos = fs.readdirSync(taskWorkspace).filter(name => !name.startsWith('.'));
+    console.log(`   📁 Workspace contents: ${clonedRepos.join(', ')}`);
+
+    if (clonedRepos.length !== repositories.length) {
+      console.warn(`⚠️  Workspace repo count mismatch!`);
+      console.warn(`   Expected: ${repositories.length} repos`);
+      console.warn(`   Found: ${clonedRepos.length} directories`);
+      console.warn(`   This might indicate an issue with repository cloning`);
+    }
+
     console.log(`✅ Workspace setup complete: ${taskWorkspace}`);
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `✅ Workspace ready with ${repositories.length} selected repositories: ${repositories.map(r => r.name).join(', ')}`
+    );
+
     return taskWorkspace;
   }
 
@@ -632,7 +697,33 @@ export class OrchestrationCoordinator {
       throw new Error(`Agent type "${agentType}" not found in agent definitions`);
     }
 
-    const sdkModel = getAgentModel(agentType); // 'haiku', 'sonnet', 'opus'
+    // Get model configuration from task if available
+    let modelConfig: AgentModelConfig | undefined;
+    if (taskId) {
+      const task = await Task.findById(taskId);
+      if (task?.orchestration?.modelConfig) {
+        const { preset, customConfig } = task.orchestration.modelConfig;
+        if (preset === 'custom' && customConfig) {
+          modelConfig = customConfig as AgentModelConfig;
+        } else if (preset) {
+          const configs = await import('../../config/ModelConfigurations');
+          switch (preset) {
+            case 'premium':
+              modelConfig = configs.PREMIUM_CONFIG;
+              break;
+            case 'economy':
+              modelConfig = configs.ECONOMY_CONFIG;
+              break;
+            case 'standard':
+            default:
+              modelConfig = configs.STANDARD_CONFIG;
+              break;
+          }
+        }
+      }
+    }
+
+    const sdkModel = getAgentModel(agentType, modelConfig); // 'haiku', 'sonnet', 'opus' - with model config support
     const fullModelId = getFullModelId(sdkModel); // 'claude-haiku-4-5-20251001'
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
@@ -863,11 +954,70 @@ export class OrchestrationCoordinator {
       console.log(`\n📝 [ExecuteAgent] Extracted output length: ${output.length} chars`);
       console.log(`📝 [ExecuteAgent] Output preview: ${output.substring(0, 200)}...`);
 
+      // 🔥 SECRETS DETECTION: Sanitize output before returning
+      const { sanitized, warning } = SecretsDetectionService.sanitizeAgentOutput(
+        agentType,
+        output
+      );
+
+      if (warning) {
+        console.warn(warning);
+        if (taskId) {
+          NotificationService.emitConsoleLog(taskId, 'warn', warning);
+        }
+      }
+
+      // Calculate cost with ACTUAL pricing for Claude models (from official docs)
+      // Claude 3.5 Sonnet (claude-sonnet-4-5-20250929) pricing:
+      // - Input: $3 per MTok (million tokens)
+      // - Output: $15 per MTok
+      // Claude 3.5 Haiku (claude-haiku-4-5-20251001) pricing:
+      // - Input: $1 per MTok
+      // - Output: $5 per MTok
+      // Claude Opus 4.1 (claude-opus-4-1-20250805) pricing:
+      // - Input: $15 per MTok
+      // - Output: $75 per MTok
+
+      const inputTokens = (finalResult as any)?.usage?.input_tokens || 0;
+      const outputTokens = (finalResult as any)?.usage?.output_tokens || 0;
+
+      // Determine pricing based on actual model used
+      let inputPricePerMillion = 3;   // Default to Sonnet pricing
+      let outputPricePerMillion = 15;  // Default to Sonnet pricing
+
+      // Get pricing from MODEL_PRICING based on the actual model ID
+      const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
+
+      // Map SDK model to actual model name for pricing lookup
+      let actualModel: string;
+      if (fullModelId.includes('haiku')) {
+        actualModel = 'claude-3-5-haiku-20241022';
+      } else if (fullModelId.includes('opus')) {
+        actualModel = 'claude-3-opus-20240229';
+      } else {
+        actualModel = 'claude-3-5-sonnet-20241022'; // Default
+      }
+
+      if (MODEL_PRICING[actualModel as keyof typeof MODEL_PRICING]) {
+        const pricing = MODEL_PRICING[actualModel as keyof typeof MODEL_PRICING];
+        inputPricePerMillion = pricing.inputPerMillion;
+        outputPricePerMillion = pricing.outputPerMillion;
+      }
+
+      console.log(`   Using model: ${actualModel} (${sdkModel})`)
+
+      // Calculate cost: price is per million tokens, so divide by 1,000,000
+      const cost = (inputTokens * inputPricePerMillion / 1_000_000) + (outputTokens * outputPricePerMillion / 1_000_000);
+
+      console.log(`💰 [ExecuteAgent] ${agentType} cost calculation:`);
+      console.log(`   Input tokens: ${inputTokens} @ $${inputPricePerMillion}/MTok = $${(inputTokens * inputPricePerMillion / 1_000_000).toFixed(4)}`);
+      console.log(`   Output tokens: ${outputTokens} @ $${outputPricePerMillion}/MTok = $${(outputTokens * outputPricePerMillion / 1_000_000).toFixed(4)}`);
+      console.log(`   Total cost: $${cost.toFixed(4)}`);
+
       return {
-        output,
+        output: sanitized, // Use sanitized output
         usage: (finalResult as any)?.usage || {},
-        cost: ((finalResult as any)?.usage?.input_tokens || 0) * 0.003 / 1000 +
-              ((finalResult as any)?.usage?.output_tokens || 0) * 0.015 / 1000,
+        cost: cost,
         stopReason: (finalResult as any)?.stop_reason,
         sessionId: sessionId,
         canResume: false,
@@ -1052,7 +1202,13 @@ export class OrchestrationCoordinator {
       // Build developer prompt - Rich context per SDK philosophy
       let prompt = `# Story: ${story.title}
 
-${story.description}`;
+${story.description}
+
+## 🎯 TARGET REPOSITORY: ${targetRepository}
+**CRITICAL**: You MUST work ONLY in the "${targetRepository}" directory.
+- All file paths must start with: ${targetRepository}/
+- Navigate to this repository first: cd ${workspacePath}/${targetRepository}
+- DO NOT modify files in other repositories`;
 
       // Add Judge feedback if this is a retry
       if (judgeFeedback) {
@@ -1077,7 +1233,12 @@ ${judgeFeedback}
 
       // Generate branch name for this story (flat naming to avoid git ref conflicts)
       // Git doesn't allow both 'epic/epic-1' and 'epic/epic-1/story-1' to exist
-      const branchName = `story/${story.id}`;
+      // 🔥 UNIQUE BRANCH NAMING: Include taskId + timestamp + random suffix to prevent ANY conflicts
+      const taskShortId = taskId.slice(-8); // Last 8 chars of taskId
+      const timestamp = Date.now();
+      const randomSuffix = Math.random().toString(36).substring(2, 8);
+      const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize story id
+      const branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
 
       // 1️⃣ Create feature branch for this story BEFORE developer starts
       console.log(`\n🌿 [Developer ${member.instanceId}] Creating story branch: ${branchName}`);
@@ -1453,10 +1614,19 @@ After writing code, you MUST:
       cacheReadTokens += qa.usage.cache_read_input_tokens || 0;
     }
 
+    // Calculate REAL total cost by summing all agent costs
+    const realTotalCost = breakdown.reduce((sum, item) => sum + item.cost, 0);
+    const realTotalTokens = totalInputTokens + totalOutputTokens;
+
+    // Update task with REAL totals
+    task.orchestration.totalCost = realTotalCost;
+    task.orchestration.totalTokens = realTotalTokens;
+    await task.save();
+
     // Emit orchestration completed with detailed cost summary
     NotificationService.emitOrchestrationCompleted((task._id as any).toString(), {
-      totalCost: task.orchestration.totalCost,
-      totalTokens: task.orchestration.totalTokens,
+      totalCost: realTotalCost,
+      totalTokens: realTotalTokens,
       totalInputTokens,
       totalOutputTokens,
       cacheCreationTokens: cacheCreationTokens > 0 ? cacheCreationTokens : undefined,
@@ -1466,8 +1636,12 @@ After writing code, you MUST:
 
     console.log(`\n${'='.repeat(80)}`);
     console.log(`✅ Orchestration completed successfully!`);
-    console.log(`💰 Total Cost: $${task.orchestration.totalCost.toFixed(4)}`);
-    console.log(`🎯 Total Tokens: ${task.orchestration.totalTokens.toLocaleString()}`);
+    console.log(`💰 Total Cost: $${realTotalCost.toFixed(4)}`);
+    console.log(`🎯 Total Tokens: ${realTotalTokens.toLocaleString()}`);
+    console.log(`📊 Cost Breakdown:`);
+    breakdown.forEach(item => {
+      console.log(`   - ${item.phase}: $${item.cost.toFixed(4)}`);
+    });
     console.log(`${'='.repeat(80)}\n`);
   }
 

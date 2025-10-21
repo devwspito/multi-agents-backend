@@ -80,6 +80,12 @@ export class DevelopersPhase extends BasePhase {
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
 
+    // Initialize cost tracking
+    let totalDeveloperCost = 0;
+    let totalJudgeCost = 0;
+    let totalDeveloperTokens = { input: 0, output: 0 };
+    let totalJudgeTokens = { input: 0, output: 0 };
+
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
     const attachments = context.getData<any[]>('attachments') || [];
     if (attachments.length > 0) {
@@ -408,7 +414,7 @@ export class DevelopersPhase extends BasePhase {
             console.log(`${'='.repeat(80)}`);
 
             // Execute complete isolated story pipeline
-            await this.executeIsolatedStoryPipeline(
+            const costs = await this.executeIsolatedStoryPipeline(
               task,
               story,
               member,
@@ -420,6 +426,16 @@ export class DevelopersPhase extends BasePhase {
               state,
               context
             );
+
+            // Accumulate costs and tokens
+            if (costs) {
+              totalDeveloperCost += costs.developerCost;
+              totalJudgeCost += costs.judgeCost;
+              totalDeveloperTokens.input += costs.developerTokens?.input || 0;
+              totalDeveloperTokens.output += costs.developerTokens?.output || 0;
+              totalJudgeTokens.input += costs.judgeTokens?.input || 0;
+              totalJudgeTokens.output += costs.judgeTokens?.output || 0;
+            }
           }
         }
 
@@ -463,6 +479,12 @@ export class DevelopersPhase extends BasePhase {
 
       console.log(`📝 [Developers] Emitted DevelopersCompleted event (success)`);
 
+      // Log cost summary
+      console.log(`\n💰 Development Phase Cost Summary:`);
+      console.log(`   Developers total: $${totalDeveloperCost.toFixed(4)} (${totalDeveloperTokens.input + totalDeveloperTokens.output} tokens)`);
+      console.log(`   Judge total: $${totalJudgeCost.toFixed(4)} (${totalJudgeTokens.input + totalJudgeTokens.output} tokens)`);
+      console.log(`   Phase total: $${(totalDeveloperCost + totalJudgeCost).toFixed(4)}`);
+
       return {
         success: true,
         data: {
@@ -480,6 +502,14 @@ export class DevelopersPhase extends BasePhase {
           stories_count: team.reduce((sum, m) => sum + m.assignedStories.length, 0),
           epics_count: orderedEpics.length,
           dependencies_added: policyResult.addedDependencies.length,
+        },
+        metadata: {
+          cost: totalDeveloperCost,  // Main phase cost (developers)
+          judgeCost: totalJudgeCost,  // Additional judge cost to track separately
+          input_tokens: totalDeveloperTokens.input,
+          output_tokens: totalDeveloperTokens.output,
+          judge_input_tokens: totalJudgeTokens.input,
+          judge_output_tokens: totalJudgeTokens.output,
         },
       };
     } catch (error: any) {
@@ -525,7 +555,12 @@ export class DevelopersPhase extends BasePhase {
     attachments: any[],
     state: any,
     context: OrchestrationContext
-  ): Promise<void> {
+  ): Promise<{
+    developerCost: number;
+    judgeCost: number;
+    developerTokens: { input: number; output: number };
+    judgeTokens: { input: number; output: number };
+  }> {
     const taskId = (task._id as any).toString();
 
     try {
@@ -542,13 +577,28 @@ export class DevelopersPhase extends BasePhase {
         state.epics
       );
 
+      // Track developer cost and tokens
+      const developerCost = developerResult?.cost || 0;
+      const developerTokens = {
+        input: developerResult?.usage?.input_tokens || 0,
+        output: developerResult?.usage?.output_tokens || 0,
+      };
+      if (developerCost > 0) {
+        console.log(`💰 [Developer ${developer.instanceId}] Cost: $${developerCost.toFixed(4)} (${developerTokens.input + developerTokens.output} tokens)`);
+      }
+
       // Verify story has branch
       const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       if (!updatedStory || !updatedStory.branchName) {
         console.error(`❌ [PIPELINE] Story ${story.id} has no branch after developer - FAILED`);
-        return;
+        return {
+          developerCost: 0,
+          judgeCost: 0,
+          developerTokens: { input: 0, output: 0 },
+          judgeTokens: { input: 0, output: 0 }
+        };
       }
 
       // 🔥 CRITICAL FIX: Extract commit SHA from Developer's output
@@ -579,7 +629,12 @@ export class DevelopersPhase extends BasePhase {
         if (!targetRepo || !workspacePath) {
           console.error(`❌ [PIPELINE] No repository or workspace for commit verification`);
           console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
-          return;
+          return {
+            developerCost: 0,
+            judgeCost: 0,
+            developerTokens: { input: 0, output: 0 },
+            judgeTokens: { input: 0, output: 0 }
+          };
         }
 
         const repoPath = `${workspacePath}/${targetRepo.name}`;
@@ -589,7 +644,12 @@ export class DevelopersPhase extends BasePhase {
         } catch (error: any) {
           console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
           console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
-          return;
+          return {
+            developerCost: 0,
+            judgeCost: 0,
+            developerTokens: { input: 0, output: 0 },
+            judgeTokens: { input: 0, output: 0 }
+          };
         }
       }
 
@@ -618,6 +678,16 @@ export class DevelopersPhase extends BasePhase {
       const judgePhase = new JudgePhase(this.executeAgentFn);
       const judgeResult = await judgePhase.execute(judgeContext);
 
+      // Track judge cost and tokens
+      const judgeCost = judgeResult.metadata?.cost || 0;
+      const judgeTokens = {
+        input: Number(judgeResult.metadata?.input_tokens || judgeResult.metrics?.input_tokens || 0),
+        output: Number(judgeResult.metadata?.output_tokens || judgeResult.metrics?.output_tokens || 0),
+      };
+      if (judgeCost > 0) {
+        console.log(`💰 [Judge] Cost: $${judgeCost.toFixed(4)} (${judgeTokens.input + judgeTokens.output} tokens)`);
+      }
+
       if (judgeResult.success && judgeResult.data?.status === 'approved') {
         console.log(`✅ [STEP 2/3] Judge APPROVED story: ${story.title}`);
 
@@ -632,8 +702,21 @@ export class DevelopersPhase extends BasePhase {
         console.error(`❌ [PIPELINE] Story pipeline FAILED - NOT merging`);
       }
 
+      return {
+        developerCost,
+        judgeCost,
+        developerTokens,
+        judgeTokens
+      };
+
     } catch (error: any) {
       console.error(`❌ [PIPELINE] Story pipeline failed for ${story.id}: ${error.message}`);
+      return {
+        developerCost: 0,
+        judgeCost: 0,
+        developerTokens: { input: 0, output: 0 },
+        judgeTokens: { input: 0, output: 0 }
+      };
     }
   }
 
@@ -748,7 +831,8 @@ export class DevelopersPhase extends BasePhase {
       // Get target repository
       const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
       const repoPath = `${workspacePath}/${targetRepo}`;
-      const epicBranch = `epic/${epic.id}`;
+      // 🔥 CRITICAL: Use the unique branch name from epic, NOT a generic one
+      const epicBranch = epic.branchName || `epic/${epic.id}-fallback`;
 
       console.log(`📂 [Merge] Repository: ${targetRepo}`);
       console.log(`📂 [Merge] Path: ${repoPath}`);
