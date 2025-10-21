@@ -695,6 +695,23 @@ export class DevelopersPhase extends BasePhase {
         console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
         await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories);
 
+        // 🧹 CLEANUP: Delete story branch after successful merge
+        // Story is now part of epic branch, no need to keep individual story branch
+        if (workspacePath && repositories.length > 0) {
+          try {
+            const { execSync } = require('child_process');
+            const targetRepo = repositories[0];
+            const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+            const storyBranch = updatedStory.branchName;
+
+            execSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
+            console.log(`🧹 Cleaned up story branch: ${storyBranch} (already merged to epic)`);
+          } catch (cleanupError: any) {
+            // Non-critical error - branch might not exist or already deleted
+            console.warn(`⚠️  Could not cleanup story branch: ${cleanupError.message}`);
+          }
+        }
+
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
       } else {
         console.error(`❌ [STEP 2/3] Judge REJECTED story: ${story.title}`);
