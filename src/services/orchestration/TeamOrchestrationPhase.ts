@@ -554,7 +554,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // 🚀 AUTO-CREATE PULL REQUEST
       // Now that epic is complete, create a PR for user to review and merge
-      await this.createPullRequest(epic, branchName, workspacePath, repositories, taskId);
+      await this.createPullRequest(epic, branchName, workspacePath, parentContext.repositories, taskId);
 
       return {
         success: true,
@@ -605,6 +605,26 @@ export class TeamOrchestrationPhase extends BasePhase {
       console.log(`   Branch: ${epicBranch} → main`);
       console.log(`   Repository: ${targetRepo}`);
 
+      // Check if GitHub CLI is available (and install if needed)
+      const ghAvailable = await this.ensureGitHubCLI();
+      if (!ghAvailable) {
+        console.log(`⚠️  [PR] GitHub CLI not available - showing manual instructions`);
+        const prTitle = `Epic: ${epic.title}`;
+        console.log(`\n📋 [PR] Manual PR instructions:`);
+        console.log(`   1. Push branch: git push -u origin ${epicBranch}`);
+        console.log(`   2. Go to your repository on GitHub`);
+        console.log(`   3. Create a new Pull Request`);
+        console.log(`   4. Base: main ← Compare: ${epicBranch}`);
+        console.log(`   5. Title: ${prTitle}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📋 Epic completed! Create PR manually: ${epicBranch} → main`
+        );
+        return;
+      }
+
       // Push epic branch to remote
       try {
         execSync(`cd "${repoPath}" && git push -u origin ${epicBranch}`, { encoding: 'utf8' });
@@ -613,7 +633,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.error(`❌ [PR] Failed to push branch: ${pushError.message}`);
         NotificationService.emitConsoleLog(
           taskId,
-          'warning',
+          'warn',
           `⚠️  Could not push ${epicBranch} - PR creation skipped. Push manually and create PR.`
         );
         return;
@@ -638,7 +658,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         NotificationService.emitConsoleLog(
           taskId,
-          'success',
+          'info',
           `📬 Pull Request created: ${prUrl}`
         );
 
@@ -646,13 +666,14 @@ export class TeamOrchestrationPhase extends BasePhase {
         const { eventStore } = await import('../EventStore');
         await eventStore.append({
           taskId: taskId as any,
-          eventType: 'PullRequestCreated',
+          eventType: 'TeamCompleted' as any, // Store PR info in TeamCompleted event
           agentName: 'team-orchestration',
           payload: {
             epicId: epic.id,
             epicTitle: epic.title,
             prUrl: prUrl,
-            epicBranch: epicBranch
+            epicBranch: epicBranch,
+            prCreated: true
           }
         });
 
@@ -675,6 +696,74 @@ export class TeamOrchestrationPhase extends BasePhase {
     } catch (error: any) {
       console.error(`❌ [PR] Unexpected error creating PR: ${error.message}`);
       // Non-critical - don't fail the whole epic
+    }
+  }
+
+  /**
+   * Ensure GitHub CLI is available
+   *
+   * Checks if gh is installed, and attempts to install it if not
+   * Returns true if gh is available, false otherwise
+   */
+  private async ensureGitHubCLI(): Promise<boolean> {
+    try {
+      const { execSync } = require('child_process');
+
+      // Check if gh is already installed
+      try {
+        execSync('gh --version', { encoding: 'utf8', stdio: 'pipe' });
+        console.log(`✅ [PR] GitHub CLI (gh) is available`);
+        return true;
+      } catch (checkError) {
+        console.log(`⚠️  [PR] GitHub CLI (gh) not found - attempting to install...`);
+      }
+
+      // Attempt to install based on OS
+      const platform = process.platform;
+
+      if (platform === 'darwin') {
+        // macOS - use Homebrew
+        console.log(`📦 [PR] Installing GitHub CLI via Homebrew...`);
+        try {
+          execSync('brew install gh', { encoding: 'utf8', stdio: 'inherit' });
+          console.log(`✅ [PR] GitHub CLI installed successfully`);
+          return true;
+        } catch (installError) {
+          console.warn(`⚠️  [PR] Homebrew not available or installation failed`);
+        }
+      } else if (platform === 'linux') {
+        // Linux - try apt-get (Debian/Ubuntu)
+        console.log(`📦 [PR] Installing GitHub CLI via apt-get...`);
+        try {
+          execSync('sudo apt-get update && sudo apt-get install -y gh', {
+            encoding: 'utf8',
+            stdio: 'inherit'
+          });
+          console.log(`✅ [PR] GitHub CLI installed successfully`);
+          return true;
+        } catch (installError) {
+          console.warn(`⚠️  [PR] apt-get not available or installation failed`);
+        }
+      } else if (platform === 'win32') {
+        // Windows - use winget
+        console.log(`📦 [PR] Installing GitHub CLI via winget...`);
+        try {
+          execSync('winget install --id GitHub.cli', { encoding: 'utf8', stdio: 'inherit' });
+          console.log(`✅ [PR] GitHub CLI installed successfully`);
+          return true;
+        } catch (installError) {
+          console.warn(`⚠️  [PR] winget not available or installation failed`);
+        }
+      }
+
+      // Installation failed or unsupported platform
+      console.log(`⚠️  [PR] Could not auto-install GitHub CLI`);
+      console.log(`💡 [PR] Install manually: https://cli.github.com/manual/installation`);
+      return false;
+
+    } catch (error: any) {
+      console.error(`❌ [PR] Error checking/installing GitHub CLI: ${error.message}`);
+      return false;
     }
   }
 }
