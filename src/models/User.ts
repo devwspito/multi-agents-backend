@@ -8,6 +8,7 @@ export interface IUser extends Document {
   accessToken: string;
   refreshToken?: string;
   tokenExpiry?: Date;
+  defaultApiKey?: string; // Default Anthropic API key for all projects
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,6 +41,11 @@ const userSchema = new Schema<IUser>(
     },
     tokenExpiry: {
       type: Date,
+    },
+    defaultApiKey: {
+      type: String,
+      required: false,
+      select: false, // Don't include in queries by default (security)
     },
   },
   {

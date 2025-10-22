@@ -414,7 +414,23 @@ export class JudgePhase extends BasePhase {
       console.warn(`⚠️  [Judge] No commit SHA provided - will review current HEAD`);
     }
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA);
+    // Get target repository from context or story's epic
+    let targetRepository = context.getData<string>('targetRepository');
+    if (!targetRepository && story.epicId) {
+      // Try to get from epic
+      const { eventStore } = await import('../EventStore');
+      const state = await eventStore.getCurrentState(task._id as any);
+      const epic = state.epics?.find((e: any) => e.id === story.epicId);
+      targetRepository = epic?.targetRepository || epic?.affectedRepositories?.[0];
+    }
+    if (!targetRepository) {
+      // Fallback to first repository
+      targetRepository = context.repositories[0]?.name || context.repositories[0]?.githubRepoName;
+    }
+
+    console.log(`📂 [Judge] Target repository: ${targetRepository || 'not specified'}`);
+
+    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository);
 
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
     // This ensures ALL agents receive the same multimedia context
@@ -526,7 +542,8 @@ export class JudgePhase extends BasePhase {
     story: any, // Using 'any' because EventStore stories have more fields than IStory model
     developer: any,
     workspacePath: string | null,
-    commitSHA?: string
+    commitSHA?: string,
+    targetRepository?: string
   ): string {
     const techLeadInstructions = task.orchestration.techLead?.output || '';
 
@@ -538,6 +555,12 @@ export class JudgePhase extends BasePhase {
 **Developer**: ${developer.instanceId}
 **Branch**: ${story.branchName || 'unknown'}
 ${commitSHA ? `**Commit SHA**: ${commitSHA} (EXACT commit you must review)` : ''}
+${targetRepository ? `
+## 🎯 TARGET REPOSITORY: ${targetRepository}
+**CRITICAL**: Review code ONLY in the "${targetRepository}" directory.
+- All file paths should start with: ${targetRepository}/
+- Navigate to repository: cd ${workspacePath}/${targetRepository}
+- DO NOT review files in other repositories` : ''}
 
 ## Tech Lead Instructions:
 ${techLeadInstructions}
@@ -643,6 +666,10 @@ Evaluate if the developer's implementation meets ALL 5 criteria:
     const { eventStore } = await import('../EventStore');
     const state = await eventStore.getCurrentState(task._id as any);
 
+    // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
+    const epicBranchName = context.getData<string>('epicBranch');
+    console.log(`📂 [Judge] Passing epic branch to developer for retry: ${epicBranchName || 'not specified'}`);
+
     try {
       await executeDeveloperFn(
         task,
@@ -653,7 +680,8 @@ Evaluate if the developer's implementation meets ALL 5 criteria:
         attachments,
         state.stories,
         state.epics,
-        judgeFeedback // Pass Judge feedback for retry
+        judgeFeedback, // Pass Judge feedback for retry
+        epicBranchName // Epic branch name from TeamOrchestrationPhase
       );
 
       console.log(`✅ [Judge] Developer ${developer.instanceId} completed retry for story "${story.title}"`);

@@ -481,11 +481,32 @@ export class GitHubService {
       }
 
       // Stash any uncommitted changes to avoid blocking checkout
-      await execAsync('git stash', { cwd: workspacePath });
+      try {
+        await execAsync('git stash', { cwd: workspacePath });
+      } catch (stashError) {
+        console.log('No changes to stash');
+      }
 
-      // Asegurar que estamos en el branch base actualizado
-      await execAsync(`git checkout ${baseBranch}`, { cwd: workspacePath });
-      await execAsync('git pull origin', { cwd: workspacePath });
+      // First, check if base branch exists locally
+      const branchExists = await execAsync(
+        `git show-ref --verify --quiet refs/heads/${baseBranch} && echo "exists" || echo "not-exists"`,
+        { cwd: workspacePath }
+      ).then(r => r.stdout.trim() === 'exists').catch(() => false);
+
+      if (branchExists) {
+        // Branch exists, just checkout
+        console.log(`📋 Checking out existing branch: ${baseBranch}`);
+        await execAsync(`git checkout ${baseBranch}`, { cwd: workspacePath });
+      } else {
+        // Branch doesn't exist, checkout from main/master
+        console.log(`📋 Branch ${baseBranch} doesn't exist, checking out from main`);
+        try {
+          await execAsync(`git checkout main`, { cwd: workspacePath });
+        } catch {
+          // Try master if main doesn't exist
+          await execAsync(`git checkout master`, { cwd: workspacePath });
+        }
+      }
 
       // Crear nueva rama de integración
       await execAsync(`git checkout -b ${integrationBranchName}`, { cwd: workspacePath });
@@ -507,13 +528,23 @@ export class GitHubService {
 
     for (const branchName of prBranches) {
       try {
-        // Fetch la rama remota
-        await execAsync(`git fetch origin ${branchName}`, { cwd: workspacePath });
+        // Check if branch exists locally first
+        const localBranchExists = await execAsync(
+          `git show-ref --verify --quiet refs/heads/${branchName} && echo "exists" || echo "not-exists"`,
+          { cwd: workspacePath }
+        ).then(r => r.stdout.trim() === 'exists').catch(() => false);
 
-        // Intentar merge
-        await execAsync(`git merge origin/${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
-          cwd: workspacePath,
-        });
+        if (localBranchExists) {
+          console.log(`📋 Branch ${branchName} exists locally, merging...`);
+          // Merge the local branch directly
+          await execAsync(`git merge ${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
+            cwd: workspacePath,
+          });
+        } else {
+          console.log(`📋 Branch ${branchName} not found locally, skipping...`);
+          // Branch doesn't exist locally, which is fine - it might not have been pushed
+          continue;
+        }
 
         console.log(`✅ Merged ${branchName} successfully`);
       } catch (error: any) {

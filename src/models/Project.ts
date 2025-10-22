@@ -6,6 +6,7 @@ export interface IProject extends Document {
   type?: string;
   status?: string;
   userId: mongoose.Types.ObjectId;
+  apiKey?: string; // Project-specific Anthropic API key (falls back to user's defaultApiKey)
 
   // Settings
   settings?: {
@@ -67,6 +68,11 @@ const projectSchema = new Schema<IProject>(
       ref: 'User',
       required: true,
       index: true,
+    },
+    apiKey: {
+      type: String,
+      required: false,
+      select: false, // Don't include in queries by default (security)
     },
     settings: {
       defaultBranch: { type: String, default: 'main' },

@@ -79,6 +79,9 @@ export class QAPhase extends BasePhase {
       phase: 'qa',
     });
 
+    // Track start time for duration calculation
+    const startTime = new Date();
+
     // Initialize QA Engineer state if not exists (skip in multi-team mode)
     if (!multiTeamMode) {
       if (!task.orchestration.qaEngineer) {
@@ -88,7 +91,6 @@ export class QAPhase extends BasePhase {
         } as any;
       }
 
-      const startTime = new Date();
       task.orchestration.qaEngineer!.status = 'in_progress';
       task.orchestration.qaEngineer!.startedAt = startTime;
       await task.save();
@@ -102,29 +104,58 @@ export class QAPhase extends BasePhase {
     });
 
     try {
-      // 🔥 EVENT SOURCING: Get stories from EventStore (same as other phases)
+      // 🔥 EVENT SOURCING: Get epics and their branches from EventStore
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
+      const epics = state.epics || [];
       const stories = state.stories || [];
 
-      console.log(`📋 [QA] Retrieved ${stories.length} stories from EventStore`);
+      console.log(`📋 [QA] Retrieved ${epics.length} epics and ${stories.length} stories from EventStore`);
 
-      // Get epic branches from stories (stories have branchName when developers create branches)
-      const epicBranches = stories.map((s: any) => s.branchName).filter(Boolean) as string[];
+      // 🔥 CRITICAL FIX: Use EPIC branches (not story branches)
+      // Developers merge all stories into epic branches and push those
+      // 🔥 CRITICAL: Use epic.branchName from TeamOrchestrationPhase (stored in context or EventStore)
+      // Epic branches have unique timestamps (e.g., epic/358cdca9-epic-1-1761118801698-l5tvun)
 
-      console.log(`🌿 [QA] Stories and their branches:`);
-      stories.forEach((s: any) => {
-        console.log(`  - Story ${s.id}: branchName="${s.branchName || 'NONE'}"`);
+      // Try to get epicBranch from context (for single-team mode)
+      const contextEpicBranch = context.getData<string>('epicBranch');
+      if (contextEpicBranch) {
+        console.log(`📂 [QA] Found epic branch in context: ${contextEpicBranch}`);
+      }
+
+      const epicBranches = epics.map((epic: any) => {
+        // Priority: 1) epic.branchName from EventStore, 2) context epicBranch, 3) fallback to constructed name
+        const branch = epic.branchName || contextEpicBranch || `epic/${epic.id}`;
+        console.log(`  - Epic ${epic.id}: using branch ${branch}`);
+        return branch;
+      }).filter(Boolean) as string[];
+
+      // Also check if there are any recent epic branches with timestamps
+      // Pattern: epic/{id}-{timestamp}-{randomSuffix}
+      const epicBranchesWithTimestamps = stories
+        .map((s: any) => s.epicBranch)
+        .filter((branch: string) => branch && branch.startsWith('epic/'))
+        .filter((branch: string, index: number, self: string[]) => self.indexOf(branch) === index); // unique
+
+      // Combine both patterns
+      const allEpicBranches = [...new Set([...epicBranches, ...epicBranchesWithTimestamps])];
+
+      console.log(`🌿 [QA] Epic branches to test:`);
+      allEpicBranches.forEach((branch: string) => {
+        console.log(`  - ${branch}`);
       });
-      console.log(`🌿 [QA] Will test branches: ${JSON.stringify(epicBranches)}`);
+      console.log(`🌿 [QA] Total epic branches: ${allEpicBranches.length}`);
 
-      await LogService.info(`Testing integration of ${epicBranches.length} epic branches`, {
+      // Use the combined epic branches for testing
+      const branchesToTest = allEpicBranches;
+
+      await LogService.info(`Testing integration of ${branchesToTest.length} epic branches`, {
         taskId,
         category: 'quality',
         phase: 'qa',
         metadata: {
-          epicBranchesCount: epicBranches.length,
-          branches: epicBranches,
+          epicBranchesCount: branchesToTest.length,
+          branches: branchesToTest,
         },
       });
 
@@ -132,7 +163,7 @@ export class QAPhase extends BasePhase {
       NotificationService.emitAgentProgress(
         taskId,
         'QA Engineer',
-        `Testing integration of ${epicBranches.length} epic branches...`
+        `Testing integration of ${branchesToTest.length} epic branches...`
       );
 
       // Create integration branch in primary repo
@@ -141,7 +172,10 @@ export class QAPhase extends BasePhase {
       let mergeConflicts: string[] = [];
 
       if (primaryRepo && workspacePath) {
-        const integrationBranch = `integration-test-${task._id}`;
+        // 🔥 UNIQUE BRANCH NAMING: Use timestamp + random suffix to prevent conflicts
+        const timestamp = Date.now();
+        const randomSuffix = Math.random().toString(36).substring(2, 8);
+        const integrationBranch = `integration-test-${timestamp}-${randomSuffix}`;
         const primaryRepoPath = path.join(workspacePath, primaryRepo.name);
 
         await this.githubService.createIntegrationBranch(
@@ -152,10 +186,15 @@ export class QAPhase extends BasePhase {
 
         task.orchestration.qaEngineer!.integrationBranch = integrationBranch;
 
+        // 🔥 NOTE: No need to fetch - we're working with local branches
+        // The epic branches were already created and merged locally by Developers
+        console.log(`🔄 [QA] Using local branches (no fetch needed)`);
+        console.log(`   Epic branches are already in the local repository`);
+
         // Merge all epic branches locally
         const mergeResult = await this.githubService.mergeMultiplePRsLocally(
           primaryRepoPath,
-          epicBranches
+          branchesToTest
         );
 
         if (!mergeResult.success) {
@@ -173,24 +212,43 @@ export class QAPhase extends BasePhase {
         }
       }
 
+      // Build repository context for QA
+      const repoContext = repositories.map(repo => ({
+        name: repo.githubRepoName.split('/').pop(),
+        fullName: repo.githubRepoName,
+        type: repo.type || 'unknown',
+        path: workspacePath ? path.join(workspacePath, repo.githubRepoName.split('/').pop() || '') : ''
+      }));
+
       // Execute QA agent
       const prompt = `Act as the qa-engineer agent.
 
 # Integration Testing
 
+## CRITICAL CONTEXT - Selected Repositories
+**You are working ONLY on these ${repositories.length} repository(ies):**
+${repoContext.map(r => `- ${r.name} (${r.fullName}): Located at ${r.path}`).join('\n')}
+
+**IMPORTANT INSTRUCTIONS:**
+1. ONLY validate code in the repositories listed above
+2. Do NOT look for components outside these repositories
+3. If you see references to other repositories (e.g., ConsoleViewer in frontend when testing backend), that's EXPECTED
+4. Focus on testing functionality within the selected repositories only
+
 ## Task:
 ${task.title}
 
 ## Epic Branches to Test:
-${epicBranches.map((branch) => `- Branch: ${branch}`).join('\n')}
+${branchesToTest.map((branch) => `- Branch: ${branch}`).join('\n')}
 
 ## Your Mission:
 Test the integrated solution with all epic branches merged together.
+Test ONLY within the ${repositories.length} selected repository(ies).
 
 Provide:
-1. Integration test results
-2. Any bugs or issues found
-3. **GO/NO-GO decision**`;
+1. Integration test results FOR THE SELECTED REPOSITORIES
+2. Any bugs or issues found IN THE SELECTED REPOSITORIES
+3. **GO/NO-GO decision** based on the selected repositories only`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context
@@ -224,7 +282,7 @@ Provide:
       // task.orchestration.qaEngineer!.canResumeSession = result.canResume;
       task.orchestration.qaEngineer!.usage = result.usage;
       task.orchestration.qaEngineer!.cost_usd = result.cost;
-      task.orchestration.qaEngineer!.totalPRsTested = epicBranches.length;
+      task.orchestration.qaEngineer!.totalPRsTested = branchesToTest.length;
 
       // if (result.todos) {
       //   task.orchestration.qaEngineer!.todos = result.todos;
@@ -247,7 +305,7 @@ Provide:
         agentName: 'qa-engineer',
         payload: {
           output: result.output,
-          epicsBranches: epicBranches.length,
+          epicsBranches: branchesToTest.length,
         },
         metadata: {
           cost: result.cost,
@@ -316,7 +374,7 @@ Provide:
         category: 'pr',
         phase: 'qa',
         metadata: {
-          epicBranchesCount: epicBranches.length,
+          epicBranchesCount: branchesToTest.length,
           qaAttempt,
           hasErrors,
         },
@@ -344,13 +402,13 @@ Provide:
       NotificationService.emitAgentCompleted(
         taskId,
         'QA Engineer',
-        `Integration testing complete. Tested ${epicBranches.length} epic branches. Created ${successfulPRs} PRs.`
+        `Integration testing complete. Tested ${branchesToTest.length} epic branches. Created ${successfulPRs} PRs.`
       );
 
       await LogService.agentCompleted('qa-engineer', taskId, {
         phase: 'qa',
         metadata: {
-          epicBranchesTested: epicBranches.length,
+          epicBranchesTested: branchesToTest.length,
           prsCreated: successfulPRs,
           mergeSuccess,
           conflictsCount: mergeConflicts.length,
@@ -369,7 +427,7 @@ Provide:
         success: true,
         data: {
           output: result.output,
-          epicBranchesTested: epicBranches.length,
+          epicBranchesTested: branchesToTest.length,
           prsCreated: successfulPRs,
           mergeSuccess,
           conflicts: mergeConflicts,
@@ -379,7 +437,7 @@ Provide:
           input_tokens: result.usage?.input_tokens || 0,
           output_tokens: result.usage?.output_tokens || 0,
           prs_created: successfulPRs,
-          branches_tested: epicBranches.length,
+          branches_tested: branchesToTest.length,
         },
         warnings: !mergeSuccess ? [`Merge conflicts detected: ${mergeConflicts.join(', ')}`] : undefined,
       };
