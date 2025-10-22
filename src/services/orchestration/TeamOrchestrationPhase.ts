@@ -116,22 +116,64 @@ export class TeamOrchestrationPhase extends BasePhase {
       }
 
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
-      console.log(`   Creating ${projectManagerEpics.length} parallel team(s) - 1 team per epic...\n`);
+
+      // 🔥 SEQUENTIAL EXECUTION BY EXECUTION ORDER
+      // Group epics by executionOrder
+      const epicsByOrder = new Map<number, any[]>();
+      for (const epic of projectManagerEpics) {
+        const order = epic.executionOrder || 1;
+        if (!epicsByOrder.has(order)) {
+          epicsByOrder.set(order, []);
+        }
+        epicsByOrder.get(order)!.push(epic);
+      }
+
+      // Sort execution groups by order
+      const orderedGroups = Array.from(epicsByOrder.entries()).sort((a, b) => a[0] - b[0]);
+
+      console.log(`📋 [TeamOrchestration] Execution plan:`);
+      for (const [order, epics] of orderedGroups) {
+        console.log(`   Order ${order}: ${epics.length} epic(s) - ${epics.map((e: any) => e.targetRepository || 'unknown').join(', ')}`);
+      }
+      console.log(`   Strategy: Sequential by order, parallel within same order\n`);
 
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `🎯 Creating ${projectManagerEpics.length} parallel teams (1 team per epic)`
+        `🎯 Sequential multi-repo execution: ${orderedGroups.length} phase(s)`
       );
 
-      // Create team execution promises (1 team per epic)
-      const teamPromises = projectManagerEpics.map((epic: any, index: number) =>
-        this.executeTeam(epic, index + 1, context)
-      );
+      let teamResults: PromiseSettledResult<any>[] = [];
+      let teamCounter = 0;
 
-      // Execute all teams in parallel
-      console.log(`\n🚀 [TeamOrchestration] Launching ${teamPromises.length} team(s) in parallel...\n`);
-      const teamResults = await Promise.allSettled(teamPromises);
+      // Execute groups sequentially
+      for (const [order, epics] of orderedGroups) {
+        console.log(`\n🔧 [Phase ${order}] Executing ${epics.length} epic(s) in parallel...\n`);
+        NotificationService.emitConsoleLog(taskId, 'info', `🔧 Phase ${order}: ${epics.map((e: any) => e.targetRepository).join(', ')}`);
+
+        const groupPromises = epics.map((epic: any) =>
+          this.executeTeam(epic, ++teamCounter, context)
+        );
+
+        const groupResults = await Promise.allSettled(groupPromises);
+        teamResults.push(...groupResults);
+
+        // Check if this phase failed
+        const groupFailed = groupResults.filter(r =>
+          r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)
+        ).length;
+
+        if (groupFailed > 0) {
+          console.log(`\n⚠️  [Phase ${order}] ${groupFailed}/${epics.length} epic(s) failed`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️  ${groupFailed} epic(s) failed in phase ${order} - continuing with next phase...`
+          );
+        } else {
+          console.log(`\n✅ [Phase ${order}] All ${epics.length} epic(s) completed successfully`);
+        }
+      }
 
       // Aggregate results
       const successfulTeams = teamResults.filter(r => r.status === 'fulfilled' && r.value.success);
