@@ -1,6 +1,10 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import {
+  analyzeRepositoryAffinity,
+  getRepositoryExecutionOrder,
+} from '../../utils/repositoryDetection';
 
 /**
  * Project Manager Phase
@@ -216,6 +220,14 @@ ${repoInfo}${workspaceInfo}
 
       console.log(`✅ [ProjectManager] Successfully parsed ${parsed.epics.length} epic(s) - will create ${parsed.epics.length} team(s)`);
 
+      // 🔥 VALIDATE AND SEPARATE EPICS BY REPOSITORY
+      const validatedEpics = this.validateAndSeparateEpics(parsed.epics, context);
+      console.log(`✅ [ProjectManager] After validation: ${validatedEpics.length} epic(s) (separated by repository)`);
+
+      // Update parsed epics with validated ones
+      parsed.epics = validatedEpics;
+      parsed.totalTeamsNeeded = validatedEpics.length;
+
       // Store results
       task.orchestration.projectManager.status = 'completed';
       task.orchestration.projectManager.completedAt = new Date();
@@ -336,5 +348,99 @@ ${repoInfo}${workspaceInfo}
         error: error.message,
       };
     }
+  }
+
+  /**
+   * Validates epics and separates them by repository if needed
+   *
+   * If an epic spans multiple repositories, splits it into separate epics (one per repository)
+   * Adds dependencies so backend epics execute before frontend epics
+   */
+  private validateAndSeparateEpics(epics: any[], context: OrchestrationContext): any[] {
+    const result: any[] = [];
+    const repositories = context.repositories;
+
+    if (repositories.length === 0) {
+      console.log('⚠️  [ProjectManager] No repositories configured - skipping multi-repo validation');
+      return epics;
+    }
+
+    // Get repository execution order
+    const executionOrder = getRepositoryExecutionOrder(repositories);
+    console.log(`📋 [ProjectManager] Repository execution order: ${executionOrder.join(' → ')}`);
+
+    for (const epic of epics) {
+      // Collect all files mentioned in the epic
+      const allFiles = [
+        ...(epic.filesToRead || []),
+        ...(epic.filesToModify || []),
+        ...(epic.filesToCreate || []),
+      ];
+
+      if (allFiles.length === 0) {
+        // No files specified - keep epic as-is
+        result.push(epic);
+        continue;
+      }
+
+      // Analyze repository affinity
+      const affinity = analyzeRepositoryAffinity(allFiles, repositories);
+
+      if (affinity.isMultiRepo) {
+        // Epic spans multiple repositories - split it
+        console.log(`⚠️  [ProjectManager] Epic "${epic.id}" spans multiple repos:`, affinity.affectedRepositories);
+
+        for (const [index, repoName] of affinity.affectedRepositories.entries()) {
+          const filesForRepo = affinity.filesByRepository.get(repoName) || [];
+          const repo = repositories.find(r => r.name === repoName);
+
+          if (!repo) continue;
+
+          // Calculate dependencies: if this is not the first repo in execution order, depend on previous repos
+          const repoDependencies: string[] = [];
+          const repoExecIndex = executionOrder.indexOf(repoName);
+
+          // Add previous repos in execution order as dependencies
+          if (repoExecIndex > 0) {
+            for (let i = 0; i < repoExecIndex; i++) {
+              const prevRepo = executionOrder[i];
+              // Only add if that repo is also affected by this epic
+              if (affinity.affectedRepositories.includes(prevRepo)) {
+                repoDependencies.push(`${epic.id}-${prevRepo}`);
+              }
+            }
+          }
+
+          // Also include epic's original dependencies
+          repoDependencies.push(...(epic.dependencies || []));
+
+          result.push({
+            ...epic,
+            id: `${epic.id}-${repoName}`,
+            title: `[${repoName.toUpperCase()}] ${epic.title}`,
+            targetRepository: repoName,
+            affectedRepositories: [repoName],
+            filesToRead: (epic.filesToRead || []).filter((f: string) => filesForRepo.includes(f)),
+            filesToModify: (epic.filesToModify || []).filter((f: string) => filesForRepo.includes(f)),
+            filesToCreate: (epic.filesToCreate || []).filter((f: string) => filesForRepo.includes(f)),
+            dependencies: repoDependencies.length > 0 ? repoDependencies : undefined,
+            executionOrder: repo.executionOrder || repoExecIndex + 1,
+          });
+        }
+      } else {
+        // Epic is single-repo - just add metadata
+        result.push({
+          ...epic,
+          targetRepository: affinity.primaryRepository,
+          affectedRepositories: affinity.affectedRepositories,
+          executionOrder: repositories.find(r => r.name === affinity.primaryRepository)?.executionOrder || 1,
+        });
+      }
+    }
+
+    // Sort epics by execution order
+    result.sort((a, b) => (a.executionOrder || 999) - (b.executionOrder || 999));
+
+    return result;
   }
 }
