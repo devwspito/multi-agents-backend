@@ -108,6 +108,9 @@ export class ApprovalPhase extends BasePhase {
     const phaseName = this.getPhaseName(previousPhase);
     const normalizedPhase = this.normalizePhase(previousPhase); // product-manager
 
+    // Debug logging to understand the mapping
+    console.log(`📋 [Approval] Phase mapping: "${previousPhase}" → "${normalizedPhase}" (human: ${phaseName})`);
+
     console.log(`⏸️  [Approval] Waiting for human approval of: ${phaseName}`);
     NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Waiting for human approval of: ${phaseName}`);
 
@@ -206,6 +209,7 @@ export class ApprovalPhase extends BasePhase {
       'Merge': 'merge-coordinator',
       'Judge': 'judge',
       'Developers': 'development',
+      'TeamOrchestration': 'team-orchestration', // Use its own phase name for approval
     };
 
     if (specialCases[phase]) {
@@ -228,6 +232,7 @@ export class ApprovalPhase extends BasePhase {
       'ProjectManager': 'Project Manager',
       'TechLead': 'Tech Lead',
       'Developers': 'Development Team',
+      'TeamOrchestration': 'Team Orchestration',
       'Judge': 'Judge Evaluation',
       'QA': 'QA Engineer',
       'Merge': 'Merge Coordinator',

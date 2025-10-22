@@ -258,4 +258,90 @@ router.post('/logout', (_req: Request, res: Response) => {
   });
 });
 
+/**
+ * GET /api/auth/me/api-key
+ * Get user's default Anthropic API key
+ */
+router.get('/me/api-key', async (req: any, res) => {
+  try {
+    const { authenticate } = await import('../middleware/auth');
+    await authenticate(req, res, async () => {
+      const user = await User.findById(req.user.id).select('+defaultApiKey');
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+        });
+      }
+
+      // Return masked API key for security (show only last 4 chars)
+      const apiKey = user.defaultApiKey;
+      const maskedKey = apiKey
+        ? `sk-ant-...${apiKey.slice(-4)}`
+        : null;
+
+      res.json({
+        success: true,
+        data: {
+          hasApiKey: !!apiKey,
+          maskedKey,
+        },
+      });
+    });
+  } catch (error: any) {
+    console.error('❌ Error getting user API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get API key',
+    });
+  }
+});
+
+/**
+ * PUT /api/auth/me/api-key
+ * Update user's default Anthropic API key
+ */
+router.put('/me/api-key', async (req: any, res) => {
+  try {
+    const { authenticate } = await import('../middleware/auth');
+    await authenticate(req, res, async () => {
+      const { apiKey } = req.body;
+
+      // Validate API key format
+      if (apiKey && !apiKey.startsWith('sk-ant-')) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid Anthropic API key format',
+        });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+        });
+      }
+
+      user.defaultApiKey = apiKey || undefined;
+      await user.save();
+
+      res.json({
+        success: true,
+        message: 'Default API key updated successfully',
+        data: {
+          hasApiKey: !!apiKey,
+        },
+      });
+    });
+  } catch (error: any) {
+    console.error('❌ Error updating user API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update API key',
+    });
+  }
+});
+
 export default router;

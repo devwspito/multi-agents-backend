@@ -169,8 +169,16 @@ export class DevelopersPhase extends BasePhase {
       let epics = state.epics;
       if (multiTeamMode && teamEpic) {
         // In multi-team mode, only work on the team's assigned epic
-        epics = state.epics.filter(e => e.id === teamEpic.id);
-        console.log(`🎯 [Developers] Multi-Team: Filtered to team epic ${teamEpic.id} (was ${state.epics.length} epics, now ${epics.length})`);
+        // 🔥 CRITICAL: Use teamEpic from context (has branchName) instead of EventStore epic
+        const eventStoreEpic = state.epics.find(e => e.id === teamEpic.id);
+        if (eventStoreEpic) {
+          // Merge EventStore epic with teamEpic to get both branchName and latest state
+          epics = [{ ...eventStoreEpic, branchName: teamEpic.branchName }];
+          console.log(`🎯 [Developers] Multi-Team: Using team epic ${teamEpic.id} with branch ${teamEpic.branchName}`);
+        } else {
+          epics = state.epics.filter(e => e.id === teamEpic.id);
+          console.log(`🎯 [Developers] Multi-Team: Filtered to team epic ${teamEpic.id} (was ${state.epics.length} epics, now ${epics.length})`);
+        }
       }
 
       if (epics.length === 0) {
@@ -566,6 +574,11 @@ export class DevelopersPhase extends BasePhase {
     try {
       // STEP 1: Developer implements story
       console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
+
+      // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
+      const epicBranchName = context.getData<string>('epicBranch');
+      console.log(`📂 [DevelopersPhase] Passing epic branch to developer: ${epicBranchName || 'not specified'}`);
+
       const developerResult = await this.executeDeveloperFn(
         task,
         developer,
@@ -574,7 +587,9 @@ export class DevelopersPhase extends BasePhase {
         workspaceStructure,
         attachments,
         state.stories,
-        state.epics
+        state.epics,
+        undefined, // judgeFeedback
+        epicBranchName // Epic branch name from TeamOrchestrationPhase
       );
 
       // Track developer cost and tokens

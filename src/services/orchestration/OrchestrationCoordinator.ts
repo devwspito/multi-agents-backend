@@ -299,7 +299,7 @@ export class OrchestrationCoordinator {
 
       // Get user's GitHub token for cloning
       const User = (await import('../../models/User')).User;
-      const user = await User.findById(task.userId).select('accessToken');
+      const user = await User.findById(task.userId).select('accessToken defaultApiKey');
       if (!user || !user.accessToken) {
         throw new Error(
           `User GitHub token not found. User must connect their GitHub account before starting orchestration.`
@@ -315,6 +315,42 @@ export class OrchestrationCoordinator {
 
       // Create orchestration context (shared state for all phases)
       const context = new OrchestrationContext(task, repositories, workspacePath);
+
+      // 🔑 Get project-specific API key with fallback chain:
+      // 1. Project API key (if set)
+      // 2. User's default API key (if set)
+      // 3. Environment variable (fallback)
+      let anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+      let apiKeySource = 'environment';
+
+      // Get project to check for project-specific API key
+      const ProjectModel = (await import('../../models/Project')).Project;
+      const project = userProjects.length > 0 ? await ProjectModel.findById(userProjects[0]._id).select('+apiKey') : null;
+
+      if (project?.apiKey) {
+        anthropicApiKey = project.apiKey;
+        apiKeySource = 'project';
+        console.log(`🔑 Using project-specific API key (project: ${project.name})`);
+      } else if (user.defaultApiKey) {
+        anthropicApiKey = user.defaultApiKey;
+        apiKeySource = 'user_default';
+        console.log(`🔑 Using user's default API key`);
+      } else {
+        console.log(`🔑 Using environment API key (no project or user default set)`);
+      }
+
+      if (!anthropicApiKey) {
+        throw new Error(
+          `No Anthropic API key configured. Please set:\n` +
+          `1. Project-specific API key (recommended for budget tracking), or\n` +
+          `2. User default API key (in user settings), or\n` +
+          `3. ANTHROPIC_API_KEY environment variable`
+        );
+      }
+
+      // Store API key in context for agent execution
+      context.setData('anthropicApiKey', anthropicApiKey);
+      context.setData('apiKeySource', apiKeySource);
       context.setData('workspaceStructure', workspaceStructure);
 
       // Mark task as in progress
@@ -501,16 +537,42 @@ export class OrchestrationCoordinator {
    * Following SDK pattern: each subagent has specific description and tool restrictions.
    */
   private createPhase(phaseName: string, context: OrchestrationContext): IPhase | null {
+    // Create a wrapper for executeAgent that includes context
+    const executeAgentWithContext = (
+      agentType: string,
+      prompt: string,
+      workspacePath: string,
+      taskId?: string,
+      agentName?: string,
+      sessionId?: string,
+      fork?: boolean,
+      attachments?: any[],
+      options?: { maxIterations?: number; timeout?: number }
+    ) => {
+      return this.executeAgent(
+        agentType,
+        prompt,
+        workspacePath,
+        taskId,
+        agentName,
+        sessionId,
+        fork,
+        attachments,
+        options,
+        context // Pass context for API key lookup
+      );
+    };
+
     switch (phaseName) {
       case 'ProductManager':
-        return new ProductManagerPhase(this.executeAgent.bind(this));
+        return new ProductManagerPhase(executeAgentWithContext);
 
       case 'ProjectManager':
-        return new ProjectManagerPhase(this.executeAgent.bind(this));
+        return new ProjectManagerPhase(executeAgentWithContext);
 
       case 'TeamOrchestration':
         return new TeamOrchestrationPhase(
-          this.executeAgent.bind(this),
+          executeAgentWithContext,
           this.executeDeveloper.bind(this),
           this.githubService,
           this.prManagementService,
@@ -518,27 +580,27 @@ export class OrchestrationCoordinator {
         );
 
       case 'TechLead':
-        return new TechLeadPhase(this.executeAgent.bind(this));
+        return new TechLeadPhase(executeAgentWithContext);
 
       case 'Developers':
         return new DevelopersPhase(
           this.executeDeveloper.bind(this),
-          this.executeAgent.bind(this) // For Judge execution
+          executeAgentWithContext // For Judge execution
         );
 
       case 'Judge':
-        return new JudgePhase(this.executeAgent.bind(this));
+        return new JudgePhase(executeAgentWithContext);
 
       case 'QA':
         return new QAPhase(
-          this.executeAgent.bind(this),
+          executeAgentWithContext,
           this.githubService,
           this.prManagementService,
           this.workspaceDir
         );
 
       case 'Fixer':
-        return new (require('./FixerPhase').FixerPhase)(this.executeAgent.bind(this));
+        return new (require('./FixerPhase').FixerPhase)(executeAgentWithContext);
 
       case 'Approval':
         return new ApprovalPhase();
@@ -686,7 +748,8 @@ export class OrchestrationCoordinator {
     options?: {
       maxIterations?: number;
       timeout?: number;
-    }
+    },
+    contextOverride?: OrchestrationContext
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     const { getAgentDefinition, getAgentModel, getFullModelId } = await import('./AgentDefinitions');
@@ -788,12 +851,35 @@ export class OrchestrationCoordinator {
 
       // Let SDK manage everything - tools, turns, iterations
       console.log(`🤖 [ExecuteAgent] Starting ${agentType} agent with SDK`);
-      console.log(`🔑 [ExecuteAgent] Environment check:`, {
-        hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
-        keyLength: process.env.ANTHROPIC_API_KEY?.length || 0,
+
+      // 🔑 Get API key from context (project-specific or user default)
+      let apiKey: string | undefined = process.env.ANTHROPIC_API_KEY;
+      let apiKeySource: string = 'environment';
+
+      if (taskId && contextOverride) {
+        const contextApiKey = contextOverride.getData('anthropicApiKey') as string | undefined;
+        const contextSource = contextOverride.getData('apiKeySource') as string | undefined;
+
+        if (contextApiKey) {
+          apiKey = contextApiKey;
+          apiKeySource = contextSource || 'context';
+        }
+      }
+
+      console.log(`🔑 [ExecuteAgent] API Key check:`, {
+        hasApiKey: !!apiKey,
+        keyLength: apiKey?.length || 0,
+        source: apiKeySource,
         nodeVersion: process.version,
         platform: process.platform,
       });
+
+      if (!apiKey) {
+        throw new Error(
+          `No Anthropic API key available for agent execution. ` +
+          `Please configure a project API key, user default API key, or ANTHROPIC_API_KEY environment variable.`
+        );
+      }
 
       // SDK query - minimal config, let SDK handle env inheritance
       console.log(`📡 [ExecuteAgent] Calling SDK query() with options:`, {
@@ -801,6 +887,7 @@ export class OrchestrationCoordinator {
         model: fullModelId,
         permissionMode: 'bypassPermissions',
         hasPrompt: !!promptContent,
+        apiKeySource,
       });
 
       const stream = query({
@@ -810,7 +897,10 @@ export class OrchestrationCoordinator {
           model: fullModelId,
           // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
           permissionMode: 'bypassPermissions',
-          // env is NOT set - SDK inherits from process automatically
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
+          },
         },
       });
 
@@ -1148,7 +1238,8 @@ export class OrchestrationCoordinator {
     attachments?: any[], // Receive attachments from context
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
-    judgeFeedback?: string // Judge feedback for retry attempts
+    judgeFeedback?: string, // Judge feedback for retry attempts
+    epicBranchName?: string // Epic branch name from TeamOrchestrationPhase
   ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
 
@@ -1190,13 +1281,21 @@ export class OrchestrationCoordinator {
       }
 
       // Get target repository from epic
-      const targetRepository = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+      // Priority: epic.targetRepository > first repo's githubRepoName > first repo's name
+      const targetRepository = epic.targetRepository || repositories[0]?.githubRepoName || repositories[0]?.name;
       if (!targetRepository) {
         console.error(`❌ [Developer ${member.instanceId}] No target repository defined for epic ${epic.id}`);
         throw new Error(`Epic ${epic.id} has no targetRepository - cannot execute developer`);
       }
 
+      // 🔥 CRITICAL FIX: Extract repo name from full path (e.g., "devwspito/v2_frontend" → "v2_frontend")
+      // Git clones repos with just the repo name, not the full owner/repo path
+      const repoName = targetRepository.includes('/')
+        ? targetRepository.split('/').pop()
+        : targetRepository;
+
       console.log(`📂 [Developer ${member.instanceId}] Target repository: ${targetRepository}`);
+      console.log(`📂 [Developer ${member.instanceId}] Repository directory: ${repoName}`);
       console.log(`📂 [Developer ${member.instanceId}] Workspace: ${workspacePath}`);
 
       // Build developer prompt - Rich context per SDK philosophy
@@ -1245,10 +1344,14 @@ ${judgeFeedback}
 
       try {
         const { execSync } = require('child_process');
-        const repoPath = `${workspacePath}/${targetRepository}`;
+        const repoPath = `${workspacePath}/${repoName}`;
 
         // First, ensure we're on the epic base branch WITH LATEST CHANGES
-        const epicBranch = `epic/${epic.id}`;
+        // 🔥 CRITICAL FIX: Use the actual epic branch name from TeamOrchestrationPhase
+        // Epic branch names are unique with timestamp (e.g., epic/358cdca9-epic-1-1761118801698-l5tvun)
+        const epicBranch = epicBranchName || epic.branchName || `epic/${epic.id}`;
+        console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
+
         try {
           execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
           console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
@@ -1355,7 +1458,7 @@ After writing code, you MUST:
 
         try {
           const { execSync } = require('child_process');
-          const repoPath = `${workspacePath}/${targetRepository}`;
+          const repoPath = `${workspacePath}/${repoName}`;
 
           // Check if branch exists on remote
           const remoteBranches = execSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, { encoding: 'utf8' });
@@ -1391,7 +1494,7 @@ After writing code, you MUST:
 
         try {
           const { execSync } = require('child_process');
-          const repoPath = `${workspacePath}/${targetRepository}`;
+          const repoPath = `${workspacePath}/${repoName}`;
 
           // 🔥 IMPORTANT: Developer already committed, so we need to see the LAST commit
           // git diff would be empty because changes are already committed

@@ -320,4 +320,114 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
   }
 });
 
+/**
+ * GET /api/projects/:id/api-key
+ * Get project's Anthropic API key (or user's default)
+ */
+router.get('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const project = await Project.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    }).select('+apiKey');
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    // If project has its own API key, return it (masked)
+    if (project.apiKey) {
+      return res.json({
+        success: true,
+        data: {
+          hasApiKey: true,
+          maskedKey: `sk-ant-...${project.apiKey.slice(-4)}`,
+          source: 'project',
+        },
+      });
+    }
+
+    // Otherwise, check if user has a default API key
+    const { User } = await import('../models/User');
+    const user = await User.findById(req.user!.id).select('+defaultApiKey');
+
+    if (user?.defaultApiKey) {
+      return res.json({
+        success: true,
+        data: {
+          hasApiKey: true,
+          maskedKey: `sk-ant-...${user.defaultApiKey.slice(-4)}`,
+          source: 'user_default',
+        },
+      });
+    }
+
+    // No API key configured
+    res.json({
+      success: true,
+      data: {
+        hasApiKey: false,
+        maskedKey: null,
+        source: 'environment',
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting project API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get API key',
+    });
+  }
+});
+
+/**
+ * PUT /api/projects/:id/api-key
+ * Update project's Anthropic API key
+ */
+router.put('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { apiKey } = req.body;
+
+    // Validate API key format if provided
+    if (apiKey && !apiKey.startsWith('sk-ant-')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Anthropic API key format',
+      });
+    }
+
+    const project = await Project.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    project.apiKey = apiKey || undefined;
+    await project.save();
+
+    res.json({
+      success: true,
+      message: 'Project API key updated successfully',
+      data: {
+        hasApiKey: !!apiKey,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error updating project API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update API key',
+    });
+  }
+});
+
 export default router;

@@ -452,6 +452,21 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamContext.setData('epicBranch', branchName);
       teamContext.setData('targetRepository', targetRepository); // 🔥 Pass repository name to team
 
+      // 🔥 CRITICAL: Update EventStore with the actual branch name
+      // This allows all downstream phases (Developers, Judge, QA) to access the correct branch
+      const { eventStore } = await import('../EventStore');
+      await eventStore.append({
+        taskId: parentContext.task._id as any,
+        eventType: 'EpicBranchCreated' as any,
+        agentName: 'team-orchestration',
+        payload: {
+          epicId: epic.id,
+          branchName: branchName,
+          targetRepository: targetRepository,
+        },
+      });
+      console.log(`📝 [Team ${teamNumber}] Stored epic branch in EventStore: ${branchName}`);
+
       // Execute team pipeline
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
       const developersPhase = new DevelopersPhase(

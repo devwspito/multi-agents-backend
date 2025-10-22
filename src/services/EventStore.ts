@@ -300,6 +300,15 @@ export class EventStore {
           }
           break;
 
+        case 'EpicBranchCreated':
+          // Update epic with the actual branch name created by TeamOrchestrationPhase
+          const epicWithBranch = state.epics.find((e: any) => e.id === payload.epicId);
+          if (epicWithBranch) {
+            epicWithBranch.branchName = payload.branchName;
+            console.log(`📝 [EventStore] Updated epic ${payload.epicId} with branch: ${payload.branchName}`);
+          }
+          break;
+
         case 'TeamCompositionDefined':
           state.teamComposition = payload;
           break;
