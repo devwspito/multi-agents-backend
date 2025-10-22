@@ -13,6 +13,12 @@ export interface IRepository extends Document {
   // Workspace
   workspaceId: string; // unique ID for this repository's workspace
 
+  // 🔥 Multi-Repo Orchestration Configuration
+  type: 'backend' | 'frontend' | 'mobile' | 'shared'; // Repository type for orchestration
+  pathPatterns: string[]; // Glob patterns to detect files belonging to this repo
+  executionOrder?: number; // Order of execution (1 = first, 2 = second, etc.)
+  dependencies?: string[]; // Names of repositories this depends on
+
   // Metadata
   isActive: boolean;
   lastSyncedAt?: Date;
@@ -66,6 +72,23 @@ const repositorySchema = new Schema<IRepository>(
       type: String,
       required: true,
       unique: true,
+    },
+    type: {
+      type: String,
+      enum: ['backend', 'frontend', 'mobile', 'shared'],
+      required: true,
+      default: 'backend',
+    },
+    pathPatterns: {
+      type: [String],
+      default: [],
+    },
+    executionOrder: {
+      type: Number,
+    },
+    dependencies: {
+      type: [String],
+      default: [],
     },
     isActive: {
       type: Boolean,
