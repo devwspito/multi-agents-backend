@@ -278,6 +278,15 @@ export interface ITask extends Document {
     timestamp: Date;
   }[];
 
+  // Webhook deduplication metadata
+  webhookMetadata?: {
+    errorHash?: string;
+    occurrenceCount?: number;
+    firstOccurrence?: Date;
+    lastOccurrence?: Date;
+    source?: string;
+  };
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -687,6 +696,17 @@ const taskSchema = new Schema<ITask>(
         default: Date.now,
       },
     }],
+    // Webhook deduplication metadata
+    webhookMetadata: {
+      errorHash: String, // SHA-256 hash of errorType + message
+      occurrenceCount: {
+        type: Number,
+        default: 1,
+      },
+      firstOccurrence: Date,
+      lastOccurrence: Date,
+      source: String, // 'webhook-errors', 'webhook-github', etc
+    },
   },
   {
     timestamps: true,
@@ -697,6 +717,7 @@ const taskSchema = new Schema<ITask>(
 taskSchema.index({ userId: 1, status: 1 });
 taskSchema.index({ projectId: 1, status: 1 });
 taskSchema.index({ repositoryIds: 1, status: 1 });
+taskSchema.index({ 'webhookMetadata.errorHash': 1, projectId: 1, status: 1 }); // For deduplication
 taskSchema.index({ 'orchestration.currentPhase': 1 });
 taskSchema.index({ createdAt: -1 });
 
