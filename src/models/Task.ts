@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer';
+export type AgentType = 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -187,8 +187,21 @@ export interface IOrchestration {
     };
   };
 
+  // Fase 7: Auto Merge (automático - merge PRs a main después de QA) - NEW
+  autoMerge?: IAgentStep & {
+    results?: {
+      success: boolean;
+      merged: boolean;
+      conflictsDetected: any[];
+      conflictsResolved: number;
+      needsHumanReview: boolean;
+      error?: string;
+      mergeCommitSha?: string;
+    }[];
+  };
+
   // Métricas globales
-  currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed';
+  currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'completed';
   totalCost: number;
   totalTokens: number;
 
@@ -229,6 +242,13 @@ export interface IOrchestration {
     approvedAt: Date;
     comments?: string;
     autoApproved?: boolean; // Indica si fue auto-aprobado
+  }[];
+
+  // Continuations (for /continue endpoint)
+  continuations?: {
+    timestamp: Date;
+    additionalRequirements: string;
+    previousStatus: string;
   }[];
 }
 
@@ -333,7 +353,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer'],
+      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge'],
       required: true,
     },
     status: {
@@ -548,9 +568,34 @@ const taskSchema = new Schema<ITask>(
           branch: String,
         },
       },
+      autoMerge: {
+        agent: { type: String, default: 'auto-merge' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        results: [{
+          success: Boolean,
+          merged: Boolean,
+          conflictsDetected: [Schema.Types.Mixed],
+          conflictsResolved: Number,
+          needsHumanReview: Boolean,
+          error: String,
+          mergeCommitSha: String,
+        }],
+      },
       currentPhase: {
         type: String,
-        enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'completed'],
+        enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'completed'],
         default: 'analysis',
       },
       totalCost: {
@@ -585,7 +630,7 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator'],
+        enum: ['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
@@ -604,6 +649,7 @@ const taskSchema = new Schema<ITask>(
           qaEngineer: String,
           fixer: String,
           mergeCoordinator: String,
+          autoMerge: String,
         },
       },
       approvalHistory: [{
@@ -617,6 +663,11 @@ const taskSchema = new Schema<ITask>(
         approvedAt: Date,
         comments: String,
         autoApproved: Boolean,
+      }],
+      continuations: [{
+        timestamp: Date,
+        additionalRequirements: String,
+        previousStatus: String,
       }],
     },
     attachments: [String],

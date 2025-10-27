@@ -3,6 +3,7 @@ import { NotificationService } from '../NotificationService';
 import { GitHubService } from '../GitHubService';
 import { PRManagementService } from '../github/PRManagementService';
 import { LogService } from '../logging/LogService';
+import { HookService } from '../HookService';
 import path from 'path';
 
 /**
@@ -78,6 +79,33 @@ export class QAPhase extends BasePhase {
       category: 'orchestration',
       phase: 'qa',
     });
+
+    // 🪝 HOOK: Execute auto-test before QA
+    if (HookService.hookExists('auto-test') && repositories.length > 0) {
+      console.log(`\n🪝 [QA] Running auto-test hook before QA validation...`);
+      const testResult = await HookService.executeAutoTest(
+        repositories[0].localPath,
+        taskId
+      );
+      if (!testResult.success) {
+        console.warn(`   ⚠️  Auto-test completed with failures`);
+        // Store test results for QA agent to review
+        context.setData('autoTestResult', testResult);
+      }
+    }
+
+    // 🪝 HOOK: Execute auto-build to verify compilation
+    if (HookService.hookExists('auto-build') && repositories.length > 0) {
+      console.log(`\n🪝 [QA] Running auto-build hook to verify compilation...`);
+      const buildResult = await HookService.executeAutoBuild(
+        repositories[0].localPath,
+        taskId
+      );
+      if (!buildResult.success) {
+        console.warn(`   ⚠️  Auto-build failed`);
+        context.setData('autoBuildResult', buildResult);
+      }
+    }
 
     // Track start time for duration calculation
     const startTime = new Date();

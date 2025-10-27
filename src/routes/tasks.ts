@@ -31,10 +31,14 @@ const approvePhaseSchema = z.object({
   comments: z.string().optional(),
 });
 
+const continueTaskSchema = z.object({
+  additionalRequirements: z.string().min(1, 'Additional requirements are required'),
+});
+
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator'])
+    z.enum(['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge'])
   ).optional(),
 });
 
@@ -334,6 +338,129 @@ router.post('/:id/start', authenticate, uploadSingleImage, async (req: AuthReque
 });
 
 /**
+ * POST /api/tasks/:id/continue
+ * Continue working on a completed task with additional requirements
+ * Preserves context: same repositories, branches, and previous work
+ */
+router.post('/:id/continue', authenticate, uploadSingleImage, async (req: AuthRequest, res) => {
+  try {
+    const validatedData = continueTaskSchema.parse(req.body);
+
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    // Validate task can be continued
+    // Only block if actively running - allow continuation from any other state
+    if (task.status === 'in_progress') {
+      res.status(400).json({
+        success: false,
+        message: 'Task is currently in progress. Wait for it to complete before continuing.',
+      });
+      return;
+    }
+
+    // Allow continuation from: completed, failed, cancelled, paused, interrupted, pending
+    console.log(`🔄 [Continue] Allowing continuation from status: ${task.status}`);
+
+    // Verify repositories are still configured
+    if (!task.repositoryIds || task.repositoryIds.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Cannot continue: No repositories configured for this task',
+      });
+      return;
+    }
+
+    // Append additional requirements to description
+    const previousDescription = task.description || '';
+    task.description = `${previousDescription}\n\n--- CONTINUATION ---\n${validatedData.additionalRequirements}`;
+
+    // Reset orchestration status to restart
+    task.status = 'in_progress';
+
+    // Keep orchestration history but mark as continuation
+    if (!task.orchestration.continuations) {
+      task.orchestration.continuations = [];
+    }
+    task.orchestration.continuations.push({
+      timestamp: new Date(),
+      additionalRequirements: validatedData.additionalRequirements,
+      previousStatus: task.status,
+    });
+
+    // Clear paused state if any (DO NOT touch currentPhase - OrchestrationCoordinator handles it)
+    task.orchestration.paused = false;
+    task.orchestration.cancelRequested = false;
+
+    // Process image if uploaded
+    if ((req as any).file) {
+      const uploadedFile = (req as any).file;
+      console.log(`📎 [CONTINUE] Image uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+
+      const imagePath = `/uploads/${uploadedFile.filename}`;
+      if (!task.attachments) {
+        task.attachments = [];
+      }
+      task.attachments.push(imagePath);
+      console.log(`📎 [CONTINUE] Image saved to attachments: ${imagePath}`);
+    }
+
+    await task.save();
+
+    console.log(`🔄 Continuing orchestration for task: ${task._id}`);
+    console.log(`📝 Additional requirements: ${validatedData.additionalRequirements}`);
+    console.log(`📦 Preserving ${task.repositoryIds.length} repositories`);
+    console.log(`🌿 Preserving existing epic branches`);
+
+    // Restart orchestration (will reuse existing branches and context)
+    orchestrationCoordinator
+      .orchestrateTask((task._id as any).toString())
+      .catch((error) => {
+        console.error('❌ Orchestration continuation error:', error);
+      });
+
+    res.json({
+      success: true,
+      message: 'Task continuation started - preserving repositories, branches, and previous work',
+      data: {
+        taskId: (task._id as any).toString(),
+        status: task.status,
+        additionalRequirements: validatedData.additionalRequirements,
+        preservedContext: {
+          repositories: task.repositoryIds.length,
+          previousWork: 'Epic branches and commits will be preserved',
+        },
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid continuation data',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    console.error('Error continuing task:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to continue task',
+    });
+  }
+});
+
+/**
  * GET /api/tasks/:id/status
  * Obtener el estado de la orquestación
  */
@@ -489,7 +616,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/approve/:phase
  * Aprobar o rechazar una fase de la orquestación
- * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator
+ * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge
  */
 router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -593,6 +720,10 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = task.orchestration.mergeCoordinator;
         phaseName = 'Merge Coordinator';
         break;
+      case 'auto-merge':
+        agentStep = (task.orchestration as any).autoMerge;
+        phaseName = 'Auto-Merge';
+        break;
       case 'team-orchestration':
         // Team orchestration phase - approval to START multi-team execution
         // This approval happens BEFORE teams are created, not after
@@ -639,7 +770,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator`,
+          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge`,
         });
         return;
     }

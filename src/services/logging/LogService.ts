@@ -16,8 +16,8 @@ export interface LogContext {
   taskId: string | mongoose.Types.ObjectId;
   level?: LogLevel;
   category?: LogCategory;
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed' | 'multi-team';
-  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'completed' | 'multi-team';
+  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge';
   agentInstanceId?: string;
   epicId?: string;
   epicName?: string;
@@ -26,6 +26,7 @@ export interface LogContext {
   metadata?: Record<string, any>;
   sessionId?: string;
   error?: Error | { message: string; stack?: string; code?: string };
+  validationError?: boolean;
 }
 
 /**
@@ -244,7 +245,7 @@ export class LogService {
    * Convenience: Log agent started
    */
   static async agentStarted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -260,7 +261,7 @@ export class LogService {
    * Convenience: Log agent completed
    */
   static async agentCompleted(
-    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration',
+    agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {

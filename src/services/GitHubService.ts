@@ -3,6 +3,8 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import { User } from '../models/User';
+import { EnvService } from './EnvService';
+import { IEnvVariable } from '../models/Repository';
 
 const execAsync = promisify(exec);
 
@@ -90,7 +92,8 @@ export class GitHubService {
     githubRepoName: string,
     branch: string,
     githubToken: string,
-    targetDir: string
+    targetDir: string,
+    envVariables?: IEnvVariable[] // Optional environment variables to inject
   ): Promise<string> {
     // Extract repo name from "user/repo" format
     const repoName = githubRepoName.split('/').pop() || githubRepoName;
@@ -100,6 +103,16 @@ export class GitHubService {
     try {
       await fs.access(repoPath);
       console.log(`📂 Repository already cloned: ${repoPath}`);
+
+      // If env variables provided and .env doesn't exist, create it
+      if (envVariables && envVariables.length > 0) {
+        const envExists = await EnvService.envFileExists(repoPath);
+        if (!envExists) {
+          console.log(`🔐 Injecting ${envVariables.length} environment variables...`);
+          await EnvService.writeEnvFile(repoPath, envVariables);
+        }
+      }
+
       return repoPath;
     } catch {
       // Doesn't exist, clone it
@@ -123,6 +136,13 @@ export class GitHubService {
         });
 
         console.log(`✅ Repository cloned successfully: ${repoName}`);
+
+        // 🔐 Inject environment variables if provided
+        if (envVariables && envVariables.length > 0) {
+          console.log(`🔐 Injecting ${envVariables.length} environment variables...`);
+          await EnvService.writeEnvFile(repoPath, envVariables);
+        }
+
         return repoPath;
       } catch (error: any) {
         lastError = error;
@@ -220,6 +240,49 @@ export class GitHubService {
       console.log(`✅ Pushed branch: ${branchName}`);
     } catch (error: any) {
       throw new Error(`Failed to push branch: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete a remote branch from GitHub
+   * Used for branch cleanup after epic/story merge
+   */
+  async deleteBranch(repositoryName: string, branchName: string): Promise<void> {
+    try {
+      // repositoryName format: "owner/repo"
+      const [owner, repo] = repositoryName.split('/');
+
+      if (!owner || !repo) {
+        throw new Error(`Invalid repository name format: ${repositoryName}. Expected "owner/repo"`);
+      }
+
+      // Get any user's access token (we just need valid credentials)
+      const user = await User.findOne({ accessToken: { $exists: true, $ne: null } });
+      if (!user || !user.accessToken) {
+        throw new Error('No user with GitHub access token found');
+      }
+
+      // Delete branch using GitHub API
+      // DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}
+      const response = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branchName}`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${user.accessToken}`,
+            Accept: 'application/vnd.github.v3+json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`GitHub API error (${response.status}): ${errorText}`);
+      }
+
+      console.log(`✅ Deleted branch: ${branchName} from ${repositoryName}`);
+    } catch (error: any) {
+      throw new Error(`Failed to delete branch ${branchName}: ${error.message}`);
     }
   }
 

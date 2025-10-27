@@ -33,8 +33,18 @@ export class TechLeadPhase extends BasePhase {
       context.task = freshTask;
     }
 
+    // 🔄 CONTINUATION: Never skip - always re-execute all phases with new context
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [TechLead] This is a CONTINUATION - will re-execute with additional requirements`);
+      return false; // DO NOT SKIP
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     if (context.task.orchestration.techLead?.status === 'completed') {
-      console.log(`[SKIP] Tech Lead already completed - skipping re-execution`);
+      console.log(`[SKIP] Tech Lead already completed - skipping re-execution (recovery mode)`);
 
       // Restore phase data from previous execution for next phases
       if (context.task.orchestration.techLead.output) {
@@ -96,11 +106,16 @@ export class TechLeadPhase extends BasePhase {
       // For now, extract epics from productManager output manually if needed
       const epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
 
-      // Build repositories information
+      // Build repositories information with TYPE for multi-repo orchestration
       const repoInfo = context.repositories.length > 0
-        ? `\n## Available Repositories:\n${context.repositories.map((repo, i) =>
-            `${i + 1}. ${repo.githubRepoName} (branch: ${repo.githubBranch}) ${i === 0 ? '(default)' : ''}`
-          ).join('\n')}\n`
+        ? `\n## Available Repositories:\n${context.repositories.map((repo, i) => {
+            const typeEmoji = repo.type === 'backend' ? '🔧' : repo.type === 'frontend' ? '🎨' : '📦';
+            const isDefault = i === 0 ? ' (default workspace)' : '';
+            return `${i + 1}. **${repo.name}** (${typeEmoji} ${repo.type.toUpperCase()})${isDefault}
+   - GitHub: ${repo.githubRepoName}
+   - Branch: ${repo.githubBranch}
+   - Execution Order: ${repo.executionOrder || 'not set'}`;
+          }).join('\n')}\n`
         : '';
 
       const workspaceInfo = workspaceStructure
@@ -126,7 +141,11 @@ ${previousOutput}
 
       // 🔥 MULTI-TEAM MODE: Different prompt for epic breakdown into stories
       const firstRepoName = context.repositories[0]?.full_name || context.repositories[0]?.githubRepoName || 'repository-name';
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, firstRepoName, epicBranch) : `Act as the tech-lead agent.
+
+      // 🔥 NEW: Get Master Epic context for contract awareness
+      const masterEpic = context.getData<any>('masterEpic');
+
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic) : `Act as the tech-lead agent.
 
 # Architecture Design & Team Building
 ${revisionSection}
@@ -138,6 +157,35 @@ ${task.description || 'See title for requirements'}
 
 ## Epics Identified by Product Manager:
 ${epicsIdentified.length > 0 ? epicsIdentified.map((e, i) => `${i + 1}. ${e}`).join('\n') : 'No epics identified - analyze task and create epics as needed'}
+
+## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+
+**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+
+**ABSOLUTE RULE**: ONLY explore files inside this workspace path. NEVER explore outside.
+
+The following repositories are cloned INSIDE your workspace:
+${context.repositories.map(repo =>
+  `- **${workspacePath}/${repo.name}** (${repo.type}) → ${repo.githubRepoName}`
+).join('\n')}
+
+**✅ CORRECT Commands (stay inside workspace)**:
+\`\`\`bash
+cd ${workspacePath}/${context.repositories[0]?.name || 'repo'} && find src -name "*.ts"
+Read("${context.repositories[0]?.name || 'repo'}/src/models/User.ts")
+\`\`\`
+
+**❌ INCORRECT Commands (FORBIDDEN)**:
+\`\`\`bash
+# ❌ NEVER explore outside workspace
+find ~ -name "*.ts"
+Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
+\`\`\`
+
+**📝 FILE PATHS IN STORIES**: Must be relative to repo root
+- ✅ CORRECT: "src/models/User.ts"
+- ❌ WRONG: "${context.repositories[0]?.name || 'repo'}/src/models/User.ts"
+
 ${repoInfo}${workspaceInfo}
 
 ## Your Mission:
@@ -755,10 +803,113 @@ const token = jwt.sign(
 
   /**
    * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
+   * 🔥 NEW: Includes Master Epic context for contract awareness
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, firstRepo?: string, branchName?: string): string {
-    const targetRepo = epic.affectedRepositories?.[0] || firstRepo || 'repository-name';
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, workspacePath: string, firstRepo?: string, branchName?: string, masterEpic?: any): string {
+    const targetRepo = epic.targetRepository || epic.affectedRepositories?.[0] || firstRepo || 'repository-name';
+    const repoType = epic.targetRepository ? (epic.targetRepository.includes('frontend') || epic.targetRepository.includes('ws-project') ? 'FRONTEND' : 'BACKEND') : 'UNKNOWN';
+
+    // 🔥 NEW: Build Master Epic context section
+    let masterEpicContext = '';
+    if (masterEpic && epic.masterEpicId === masterEpic.id) {
+      const namingConventions = epic.globalNamingConventions || masterEpic.globalNamingConventions || {};
+      const sharedContracts = epic.sharedContracts || masterEpic.sharedContracts || {};
+      const otherRepos = (masterEpic.affectedRepositories || []).filter((r: string) => r !== targetRepo);
+
+      masterEpicContext = `
+## 🎯 CRITICAL: Master Epic Context
+
+⚠️ **YOU ARE WORKING ON A SUB-EPIC THAT IS PART OF A LARGER MASTER EPIC**
+
+**Master Epic ID**: ${masterEpic.id}
+**Master Epic Title**: ${masterEpic.title}
+**Your Sub-Epic**: ${epic.id} (${repoType} repository)
+${otherRepos.length > 0 ? `**Other Teams Working On**: ${otherRepos.join(', ')} (parallel development)` : ''}
+
+---
+
+### 📋 MANDATORY Naming Conventions (ALL stories MUST follow these)
+
+${Object.entries(namingConventions).map(([key, value]) => `- **${key}**: ${value}`).join('\n')}
+
+**Why this matters**:
+- Backend team uses these EXACT field names in database models
+- Frontend team uses these EXACT field names in API calls
+- If you deviate, you create integration bugs (e.g., backend sends "userId", frontend expects "user_id" → 💥 FAILURE)
+
+**Examples**:
+${namingConventions.primaryIdField ? `- User ID field: \`${namingConventions.primaryIdField}\` (NOT "id", "user_id", "userID", etc.)` : ''}
+${namingConventions.timestampFormat ? `- Timestamps: ${namingConventions.timestampFormat} format` : ''}
+${namingConventions.errorCodePrefix ? `- Error codes: ${namingConventions.errorCodePrefix}ERROR_NAME` : ''}
+
+---
+
+### 🔗 Shared Contracts (APIs and Types)
+
+${sharedContracts.apiEndpoints && sharedContracts.apiEndpoints.length > 0 ? `
+**API Endpoints**:
+${sharedContracts.apiEndpoints.map((api: any, i: number) => `
+${i + 1}. **${api.method} ${api.path}**
+   - Description: ${api.description || 'Not provided'}
+   - Request: \`${JSON.stringify(api.request)}\`
+   - Response: \`${JSON.stringify(api.response)}\`
+   ${repoType === 'BACKEND' ? '   → YOU MUST IMPLEMENT this endpoint with this EXACT signature' : ''}
+   ${repoType === 'FRONTEND' ? '   → YOU MUST CONSUME this endpoint with this EXACT request format' : ''}
+`).join('\n')}
+` : ''}
+
+${sharedContracts.sharedTypes && sharedContracts.sharedTypes.length > 0 ? `
+**Shared Data Types**:
+${sharedContracts.sharedTypes.map((type: any, i: number) => `
+${i + 1}. **${type.name}**
+   - Description: ${type.description || 'Not provided'}
+   - Fields: \`${JSON.stringify(type.fields)}\`
+   ${repoType === 'BACKEND' ? '   → Database model MUST use these field names and types' : ''}
+   ${repoType === 'FRONTEND' ? '   → Components MUST use these field names when displaying data' : ''}
+`).join('\n')}
+` : ''}
+
+${sharedContracts.eventSchemas && sharedContracts.eventSchemas.length > 0 ? `
+**Event Schemas**:
+${sharedContracts.eventSchemas.map((event: any, i: number) => `
+${i + 1}. **${event.name}**
+   - Description: ${event.description || 'Not provided'}
+   - Payload: \`${JSON.stringify(event.payload)}\`
+`).join('\n')}
+` : ''}
+
+---
+
+### ⚠️ CRITICAL RULES FOR YOUR STORIES
+
+1. **Field Names**: Use EXACT field names from naming conventions
+   - ✅ CORRECT: \`userId: req.body.userId\`
+   - ❌ WRONG: \`userId: req.body.user_id\` (different from contract!)
+
+2. **API Implementation** (Backend):
+   - Implement endpoints with EXACT paths, methods, request/response formats
+   - Return responses matching contract EXACTLY (no extra/missing fields)
+
+3. **API Consumption** (Frontend):
+   - Call endpoints with EXACT request format from contract
+   - Expect responses matching contract EXACTLY
+
+4. **Type Alignment**:
+   - Backend models MUST match shared types
+   - Frontend interfaces MUST match shared types
+   - NO custom field names or structure changes
+
+5. **Cross-Repo Awareness**:
+${otherRepos.length > 0 ? `   - ${otherRepos.join(', ')} team(s) are working in parallel on their part
+   - They will use the SAME naming conventions and contracts
+   - Your work must integrate seamlessly with theirs` : '   - No other repositories involved in this epic'}
+
+---
+`;
+    }
+
     return `Act as the TECH LEAD in MULTI-TEAM MODE.
+${masterEpicContext}
 
 # Epic Architecture Design & Team Building
 
@@ -773,15 +924,61 @@ You are the TEAM LEAD for this epic. Your job is to:
 **Title**: ${epic.title}
 **Description**: ${epic.description}
 **Complexity**: ${epic.estimatedComplexity}
+**Target Repository**: ${targetRepo} (${repoType === 'BACKEND' ? '🔧 BACKEND' : repoType === 'FRONTEND' ? '🎨 FRONTEND' : '📦 GENERAL'})
 **Affected Repositories**: ${epic.affectedRepositories?.join(', ') || 'Not specified'}
 **Dependencies**: ${epic.dependencies?.length > 0 ? epic.dependencies.join(', ') : 'None'}
 **Branch**: ${branchName || `epic/${epic.id}`}
+**Execution Order**: ${epic.executionOrder || 'not set'}
+
+## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+
+**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+
+**ABSOLUTE RULE**: ONLY explore files inside **${workspacePath}/${targetRepo}**
+
+**✅ CORRECT Commands (stay inside workspace)**:
+\`\`\`bash
+cd ${workspacePath}/${targetRepo} && find src -name "*.ts" | head -20
+Read("${targetRepo}/src/models/User.ts")
+\`\`\`
+
+**❌ INCORRECT Commands (FORBIDDEN - exploring outside workspace)**:
+\`\`\`bash
+# ❌ NEVER explore system directories or other projects
+find ~ -name "*.ts"
+Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
+ls /Users/.../Desktop/mult-agent-software-project  # System directory!
+\`\`\`
+
+**📝 FILE PATHS IN STORIES**: Must be relative to repo root
+- ✅ CORRECT: "src/models/User.ts"
+- ❌ WRONG: "${targetRepo}/src/models/User.ts"
 
 ${repoInfo}${workspaceInfo}
 
+## Repository Type Guidance:
+
+${repoType === 'BACKEND' ? `
+### 🔧 BACKEND Repository - Focus On:
+- **API Endpoints**: REST routes, GraphQL resolvers, WebSocket handlers
+- **Data Models**: MongoDB/Mongoose schemas, database migrations
+- **Business Logic**: Services, controllers, middleware, utilities
+- **Authentication**: JWT, sessions, OAuth, password hashing
+- **Data Processing**: Agenda jobs, cron tasks, background workers
+- **File Paths Typically**: backend/src/models/, backend/src/routes/, backend/src/services/, src/middleware/
+` : repoType === 'FRONTEND' ? `
+### 🎨 FRONTEND Repository - Focus On:
+- **UI Components**: React/Vue components, forms, modals, layouts
+- **Views/Pages**: Route-level components, dashboard views
+- **State Management**: Hooks (useState, useEffect), context, stores
+- **API Integration**: Service calls, API clients, data fetching hooks
+- **Styling**: CSS, styled-components, Tailwind classes
+- **File Paths Typically**: src/components/, src/views/, src/hooks/, src/services/
+` : ''}
+
 ## Your Mission (as Team Lead):
 Break this EPIC into 2-5 implementable STORIES with:
-1. **Exact file paths** to read/modify/create
+1. **Exact file paths** to read/modify/create (matching repository type above)
 2. **Detailed acceptance criteria** (Given/When/Then)
 3. **Technical specifications** (functions, classes, APIs)
 4. **Implementation guidelines** (patterns, security, performance)
@@ -791,6 +988,7 @@ Break this EPIC into 2-5 implementable STORIES with:
 **CRITICAL RULES**:
 - 🚨 **EXPLORE CODEBASE FIRST** - Use tools to find actual file paths
 - ⚠️ **REAL PATHS ONLY** - No placeholder paths like "src/path/to/file.ts"
+- ⚠️ **REPOSITORY AWARENESS** - All file paths MUST match the target repository type (${repoType})
 - ⚠️ **2-5 STORIES RECOMMENDED** - Break epic into manageable stories
 - ⚠️ **GRANULAR** - Each story = 1-3 hours of work for 1 developer
 - ⚠️ **ASSIGN DEVS** - Decide team size (1-5 devs) and assign stories

@@ -210,6 +210,7 @@ export class ApprovalPhase extends BasePhase {
       'Judge': 'judge',
       'Developers': 'development',
       'TeamOrchestration': 'team-orchestration', // Use its own phase name for approval
+      'AutoMerge': 'auto-merge',
     };
 
     if (specialCases[phase]) {
@@ -236,6 +237,7 @@ export class ApprovalPhase extends BasePhase {
       'Judge': 'Judge Evaluation',
       'QA': 'QA Engineer',
       'Merge': 'Merge Coordinator',
+      'AutoMerge': 'Auto-Merge',
     };
 
     return phaseNames[phase] || phase;

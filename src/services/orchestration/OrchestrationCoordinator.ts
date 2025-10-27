@@ -13,6 +13,7 @@ import { JudgePhase } from './JudgePhase';
 import { QAPhase } from './QAPhase';
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
+import { AutoMergePhase } from './AutoMergePhase';
 import { AgentModelConfig } from '../../config/ModelConfigurations';
 
 // 🔥 NEW: Best practice services
@@ -95,6 +96,7 @@ export class OrchestrationCoordinator {
     'Approval',            // 2.5 Human approval gate
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
     'Approval',            // 3.5 Human approval gate (final approval - all teams done)
+    'AutoMerge',           // 4. Automatically merge PRs to main (NEW)
   ];
 
   constructor() {
@@ -478,10 +480,50 @@ export class OrchestrationCoordinator {
 
         // Check if phase failed
         if (!result.success) {
+          // 🚨 CRITICAL: Check if this is a validation error that blocks execution
+          const isValidationError = result.data?.validationError === true ||
+                                   result.data?.blocked === true ||
+                                   (result.error && (
+                                     result.error.includes('EPIC OVERLAP DETECTED') ||
+                                     result.error.includes('CIRCUIT BREAKER') ||
+                                     result.error.includes('CRITICAL VALIDATION FAILURE') ||
+                                     result.error.includes('max retries')
+                                   ));
+
+          if (isValidationError) {
+            console.error(`\n${'⛔'.repeat(60)}`);
+            console.error(`⛔ ORCHESTRATION BLOCKED - VALIDATION FAILURE`);
+            console.error(`⛔ Phase: ${phaseName}`);
+            console.error(`⛔ Reason: ${result.error}`);
+            console.error(`⛔ STATUS: Task execution STOPPED - will NOT proceed to next phase`);
+            console.error(`${'⛔'.repeat(60)}\n`);
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `⛔ ORCHESTRATION BLOCKED: ${phaseName} validation failed - execution stopped`
+            );
+          }
+
+          // 🔥 ADDITIONAL CHECK: If this is ProjectManager failure, ENSURE we don't continue
+          if (phaseName === 'ProjectManager') {
+            console.error(`\n${'🛑'.repeat(60)}`);
+            console.error(`🛑 CRITICAL: ProjectManager phase failed`);
+            console.error(`🛑 Cannot proceed to TechLead without valid epics`);
+            console.error(`🛑 Remaining phases (TechLead, Developers, QA) will NOT execute`);
+            console.error(`${'🛑'.repeat(60)}\n`);
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `🛑 CRITICAL: ProjectManager failed - cannot create epics. Orchestration stopped.`
+            );
+          }
+
           // Phase failed - mark task as failed
           NotificationService.emitConsoleLog(taskId, 'error', `❌ Phase ${phaseName} failed: ${result.error}`);
           await this.handlePhaseFailed(task, phaseName, result);
-          return;
+          return; // 🔥 EXPLICIT STOP: No further phases will execute
         }
 
         // Check if phase needs approval (paused, not failed)
@@ -605,6 +647,9 @@ export class OrchestrationCoordinator {
       case 'Approval':
         return new ApprovalPhase();
 
+      case 'AutoMerge':
+        return new AutoMergePhase(this.githubService, this.workspaceDir);
+
       default:
         return null;
     }
@@ -633,11 +678,22 @@ export class OrchestrationCoordinator {
     // Clone ONLY the selected repositories using user's GitHub token
     for (const repo of repositories) {
       console.log(`   🔄 Cloning: ${repo.githubRepoName} (branch: ${repo.githubBranch || 'main'})`);
+
+      // 🔐 Inject environment variables if configured
+      const envVariables = repo.envVariables && repo.envVariables.length > 0
+        ? repo.envVariables
+        : undefined;
+
+      if (envVariables) {
+        console.log(`   🔐 Repository has ${envVariables.length} environment variable(s) configured`);
+      }
+
       await this.githubService.cloneRepositoryForOrchestration(
         repo.githubRepoName,
         repo.githubBranch || 'main',
         githubToken,  // Use user's token for all repos
-        taskWorkspace
+        taskWorkspace,
+        envVariables  // Inject .env file during cloning
       );
     }
 
@@ -752,10 +808,32 @@ export class OrchestrationCoordinator {
     contextOverride?: OrchestrationContext
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { getAgentDefinition, getAgentModel, getFullModelId } = await import('./AgentDefinitions');
+    const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel, getFullModelId } = await import('./AgentDefinitions');
 
-    // Get agent configuration
-    const agentDef = getAgentDefinition(agentType);
+    // Get repository type from task or context for developer specialization
+    let repositoryType: 'frontend' | 'backend' | 'mobile' | 'fullstack' | 'library' | 'unknown' = 'unknown';
+    if (taskId && agentType === 'developer') {
+      try {
+        const task = await Task.findById(taskId).populate('project');
+        if (task?.project) {
+          const project = task.project as any;
+          // Get repository type from the first repository (if multi-repo)
+          if (project.repositories && project.repositories.length > 0) {
+            repositoryType = project.repositories[0].type || 'unknown';
+          } else if (project.repository) {
+            repositoryType = project.repository.type || 'unknown';
+          }
+        }
+      } catch (error: any) {
+        console.warn(`[OrchestrationCoordinator] Failed to get repository type for specialization: ${error.message}`);
+      }
+    }
+
+    // Get agent configuration with specialization for developers
+    const agentDef = agentType === 'developer'
+      ? getAgentDefinitionWithSpecialization(agentType, repositoryType)
+      : getAgentDefinition(agentType);
+
     if (!agentDef) {
       throw new Error(`Agent type "${agentType}" not found in agent definitions`);
     }

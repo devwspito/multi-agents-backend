@@ -3,6 +3,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { Repository } from '../models/Repository';
 import { Project } from '../models/Project';
 import { GitHubService } from '../services/GitHubService';
+import { EnvService } from '../services/EnvService';
 import { z } from 'zod';
 import crypto from 'crypto';
 import path from 'path';
@@ -413,6 +414,168 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to delete repository',
+    });
+  }
+});
+
+/**
+ * 🔐 ENVIRONMENT VARIABLES MANAGEMENT
+ */
+
+/**
+ * GET /api/repositories/:id/env
+ * Get environment variables for a repository
+ */
+router.get('/:id/env', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const repository = await Repository.findById(req.params.id).populate('projectId');
+    if (!repository) {
+      return res.status(404).json({
+        success: false,
+        message: 'Repository not found',
+      });
+    }
+
+    const project: any = repository.projectId;
+    if (project.userId.toString() !== req.user!.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied',
+      });
+    }
+
+    // Return env variables (secrets are decrypted on frontend request)
+    res.json({
+      success: true,
+      data: {
+        envVariables: repository.envVariables || [],
+        count: repository.envVariables?.length || 0,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting env variables:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to get environment variables',
+    });
+  }
+});
+
+/**
+ * PUT /api/repositories/:id/env
+ * Update environment variables for a repository
+ */
+const envVariableSchema = z.object({
+  envVariables: z.array(z.object({
+    key: z.string().min(1),
+    value: z.string(),
+    isSecret: z.boolean().optional().default(false),
+    description: z.string().optional(),
+  })),
+});
+
+router.put('/:id/env', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const repository = await Repository.findById(req.params.id).populate('projectId');
+    if (!repository) {
+      return res.status(404).json({
+        success: false,
+        message: 'Repository not found',
+      });
+    }
+
+    const project: any = repository.projectId;
+    if (project.userId.toString() !== req.user!.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied',
+      });
+    }
+
+    // Validate request body
+    const body = envVariableSchema.parse(req.body);
+
+    // Validate env variables format
+    const validation = EnvService.validateEnvVariables(body.envVariables);
+    if (!validation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid environment variables',
+        errors: validation.errors,
+      });
+    }
+
+    // Encrypt secret values before saving
+    const preparedEnvVars = EnvService.prepareForStorage(body.envVariables);
+
+    // Update repository
+    repository.envVariables = preparedEnvVars;
+    await repository.save();
+
+    console.log(`✅ Updated ${preparedEnvVars.length} environment variables for repository: ${repository.name}`);
+
+    res.json({
+      success: true,
+      message: 'Environment variables updated successfully',
+      data: {
+        count: preparedEnvVars.length,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error updating env variables:', error);
+
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request body',
+        errors: error.errors,
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update environment variables',
+    });
+  }
+});
+
+/**
+ * DELETE /api/repositories/:id/env
+ * Delete all environment variables for a repository
+ */
+router.delete('/:id/env', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const repository = await Repository.findById(req.params.id).populate('projectId');
+    if (!repository) {
+      return res.status(404).json({
+        success: false,
+        message: 'Repository not found',
+      });
+    }
+
+    const project: any = repository.projectId;
+    if (project.userId.toString() !== req.user!.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied',
+      });
+    }
+
+    // Clear env variables
+    repository.envVariables = [];
+    await repository.save();
+
+    console.log(`✅ Cleared environment variables for repository: ${repository.name}`);
+
+    res.json({
+      success: true,
+      message: 'Environment variables cleared successfully',
+    });
+  } catch (error: any) {
+    console.error('Error clearing env variables:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to clear environment variables',
     });
   }
 });

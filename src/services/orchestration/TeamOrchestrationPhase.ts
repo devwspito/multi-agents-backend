@@ -115,7 +115,44 @@ export class TeamOrchestrationPhase extends BasePhase {
         throw new Error('No epics found from Project Manager - cannot create teams. Database may be corrupted or Project Manager output was invalid.');
       }
 
+      // 🚨 CRITICAL VALIDATION: Check epic quality
+      // If Project Manager somehow passed invalid epics, BLOCK execution here
+      const invalidEpics = projectManagerEpics.filter(epic => {
+        const hasFiles = (epic.filesToModify && epic.filesToModify.length > 0) ||
+                        (epic.filesToCreate && epic.filesToCreate.length > 0);
+        return !hasFiles;
+      });
+
+      if (invalidEpics.length > 0) {
+        const invalidTitles = invalidEpics.map((e: any) => e.title || e.id).join(', ');
+        console.error(`\n${'🚨'.repeat(40)}`);
+        console.error(`🚨 CRITICAL: INVALID EPICS DETECTED`);
+        console.error(`🚨 ${invalidEpics.length} epic(s) have NO file paths`);
+        console.error(`🚨 Invalid epics: ${invalidTitles}`);
+        console.error(`🚨 This should have been caught by Project Manager validation`);
+        console.error(`🚨 BLOCKING EXECUTION - Cannot proceed without file paths`);
+        console.error(`${'🚨'.repeat(40)}\n`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `🚨 CRITICAL: Found ${invalidEpics.length} invalid epic(s) without file paths`
+        );
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `⛔ EXECUTION BLOCKED - Cannot proceed to Tech Lead without concrete file paths`
+        );
+
+        throw new Error(
+          `🚨 CRITICAL VALIDATION FAILURE: ${invalidEpics.length} epic(s) missing file paths: ${invalidTitles}. ` +
+          `Project Manager must specify filesToModify or filesToCreate for each epic. ` +
+          `This error indicates a validation bypass - execution blocked.`
+        );
+      }
+
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
+      console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths`);
 
       // 🔥 SEQUENTIAL EXECUTION BY EXECUTION ORDER
       // Group epics by executionOrder

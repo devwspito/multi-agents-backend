@@ -40,6 +40,7 @@ export interface AgentModelConfig {
   qaEngineer: ClaudeModel;
   fixer: ClaudeModel;
   mergeCoordinator: ClaudeModel;
+  autoMerge: ClaudeModel;
 }
 
 /**
@@ -63,6 +64,7 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
   qaEngineer: 'claude-3-5-sonnet-20241022',     // Testing
   fixer: 'claude-3-5-sonnet-20241022',          // Bug fixes
   mergeCoordinator: 'claude-3-5-sonnet-20241022', // PR coordination
+  autoMerge: 'claude-3-5-haiku-20241022',       // Automated merge (fast, simple)
 };
 
 /**
@@ -86,6 +88,7 @@ export const STANDARD_CONFIG: AgentModelConfig = {
   qaEngineer: 'claude-3-5-haiku-20241022',      // Testing
   fixer: 'claude-3-5-haiku-20241022',           // Bug fixes
   mergeCoordinator: 'claude-3-5-haiku-20241022', // Routine coordination
+  autoMerge: 'claude-3-5-haiku-20241022',       // Automated merge
 };
 
 /**
@@ -107,6 +110,7 @@ export const ECONOMY_CONFIG: AgentModelConfig = {
   qaEngineer: 'claude-3-5-haiku-20241022',
   fixer: 'claude-3-5-haiku-20241022',
   mergeCoordinator: 'claude-3-5-haiku-20241022',
+  autoMerge: 'claude-3-5-haiku-20241022',
 };
 
 /**
@@ -135,6 +139,8 @@ export function getAgentModel(
       return config.fixer;
     case 'merge-coordinator':
       return config.mergeCoordinator;
+    case 'auto-merge':
+      return config.autoMerge;
     default:
       // Default to Haiku for unknown agents
       return 'claude-3-5-haiku-20241022';

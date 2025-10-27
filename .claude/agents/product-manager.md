@@ -87,14 +87,55 @@ Integration Requirements: [External systems and dependencies]
 
 ## Output Format
 
-Structure all product analysis as:
+Structure all product analysis as a **Master Epic** with shared contracts:
 
-1. **Executive Summary** - Key findings and strategic recommendations
-2. **Business Objectives** - Specific goals and expected outcomes
-3. **User Requirements** - Detailed user needs and acceptance criteria
-4. **Technical Requirements** - High-level technical specifications
-5. **Success Metrics** - Measurable criteria for success
-6. **Implementation Priority** - Feature prioritization with rationale
-7. **Risk Assessment** - Identified risks and mitigation strategies
+```json
+{
+  "masterEpic": {
+    "id": "master-<feature>-<timestamp>",
+    "title": "Feature name",
+    "globalNamingConventions": {
+      "primaryIdField": "userId|orderId|productId",
+      "timestampFormat": "ISO8601|Unix|DateTime",
+      "errorCodePrefix": "AUTH_|USER_|API_",
+      "booleanFieldPrefix": "is|has|should",
+      "collectionNaming": "plural|singular"
+    },
+    "sharedContracts": {
+      "apiEndpoints": [
+        {
+          "method": "POST|GET|PUT|DELETE",
+          "path": "/api/resource/action",
+          "request": {"field": "type"},
+          "response": {"field": "type"},
+          "description": "What this endpoint does"
+        }
+      ],
+      "sharedTypes": [
+        {
+          "name": "TypeName",
+          "description": "What this represents",
+          "fields": {"fieldName": "type"}
+        }
+      ]
+    },
+    "affectedRepositories": ["backend", "frontend"],
+    "repositoryResponsibilities": {
+      "backend": "APIs, models, business logic",
+      "frontend": "UI, components, state"
+    }
+  },
+  "complexity": "simple|moderate|complex|epic",
+  "successCriteria": ["criterion 1", "criterion 2"],
+  "recommendations": "Technical approach",
+  "challenges": ["challenge 1", "challenge 2"]
+}
+```
 
-Remember: Your role is to ensure every technical decision serves clear business objectives and delivers genuine user value.
+**Critical Requirements**:
+1. **Naming Conventions MUST be specific**: Use exact field names (e.g., "userId", NOT "user ID field")
+2. **API Contracts MUST be complete**: Include ALL request/response fields with types
+3. **Shared Types MUST match database**: If backend stores "userId", contract must say "userId"
+4. **One Source of Truth**: Master Epic is the ONLY place where naming/contracts are defined
+
+Remember: Your role is to ensure every technical decision serves clear business objectives and delivers genuine user value. The Master Epic you create will prevent integration bugs by ensuring all teams use the same field names and API formats.

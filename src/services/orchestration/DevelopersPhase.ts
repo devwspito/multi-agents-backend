@@ -3,6 +3,7 @@ import { ITeamMember } from '../../models/Task';
 import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
+import { HookService } from '../HookService';
 
 /**
  * Developers Phase
@@ -103,6 +104,18 @@ export class DevelopersPhase extends BasePhase {
       category: 'orchestration',
       phase: 'development',
     });
+
+    // 🪝 HOOK: Execute security scan before development
+    if (HookService.hookExists('security-scan') && repositories.length > 0) {
+      console.log(`\n🪝 [Developers] Running security-scan hook before development...`);
+      const securityResult = await HookService.executeSecurityScan(
+        repositories[0].localPath,
+        taskId
+      );
+      if (!securityResult.success) {
+        console.warn(`   ⚠️  Security scan completed with warnings`);
+      }
+    }
 
     // 🔥 MULTI-TEAM MODE: Check if we're in team mode and use context data
     const teamEpic = context.getData<any>('teamEpic');
@@ -703,12 +716,19 @@ export class DevelopersPhase extends BasePhase {
         console.log(`💰 [Judge] Cost: $${judgeCost.toFixed(4)} (${judgeTokens.input + judgeTokens.output} tokens)`);
       }
 
+      // 🔥 DEBUG: Log judge result structure to identify merge blocking issue
+      console.log(`\n🔍 [DEBUG] Judge result structure:`);
+      console.log(`   judgeResult.success: ${judgeResult.success}`);
+      console.log(`   judgeResult.data: ${JSON.stringify(judgeResult.data)}`);
+      console.log(`   judgeResult.data?.status: ${judgeResult.data?.status}`);
+      console.log(`   Checking if: judgeResult.success (${judgeResult.success}) && judgeResult.data?.status ('${judgeResult.data?.status}') === 'approved'`);
+
       if (judgeResult.success && judgeResult.data?.status === 'approved') {
         console.log(`✅ [STEP 2/3] Judge APPROVED story: ${story.title}`);
 
         // STEP 3: Merge to epic branch
         console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
-        await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories);
+        await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories, taskId);
 
         // 🧹 CLEANUP: Delete story branch after successful merge
         // ✅ ONLY if Judge APPROVED - rejected stories keep their branches for investigation
@@ -868,7 +888,8 @@ export class DevelopersPhase extends BasePhase {
     story: any,
     epic: any,
     workspacePath: string | null,
-    repositories: any[]
+    repositories: any[],
+    taskId: string
   ): Promise<void> {
     console.log(`\n🔀 [Merge] Merging story branch → epic branch`);
     console.log(`   From: ${story.branchName}`);
@@ -917,7 +938,7 @@ export class DevelopersPhase extends BasePhase {
       console.log(`✅ [Merge] Pushed ${epicBranch} to remote`);
 
       NotificationService.emitConsoleLog(
-        'system', // No task ID in this context
+        taskId,
         'info',
         `🔀 Merged story ${story.title} → ${epicBranch}`
       );
