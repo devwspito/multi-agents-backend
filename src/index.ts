@@ -22,6 +22,7 @@ import codeRoutes from './routes/code';
 import analyticsRoutes from './routes/analytics';
 import cleanupRoutes from './routes/cleanup';
 import githubWebhookRoutes from './routes/webhooks/github';
+import errorWebhookRoutes from './routes/webhooks/errors';
 import commandRoutes from './routes/commands';
 
 /**
@@ -168,6 +169,7 @@ class AgentPlatformApp {
     this.app.use('/api/analytics', analyticsRoutes);
     this.app.use('/api/cleanup', cleanupRoutes);
     this.app.use('/api/webhooks/github', githubWebhookRoutes);
+    this.app.use('/api/webhooks/errors', errorWebhookRoutes);
     this.app.use('/api/commands', commandRoutes);
 
     // 404 handler
