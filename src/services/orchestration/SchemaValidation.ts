@@ -172,6 +172,61 @@ export const FixerOutputSchema = z.object({
 });
 
 // ============================================================================
+// Webhook Error Payload Schema
+// ============================================================================
+
+export const WebhookErrorPayloadSchema = z.object({
+  errorType: z.string().min(1, 'Error type is required'),
+  severity: z.enum(['critical', 'high', 'medium', 'low'], {
+    errorMap: () => ({ message: 'Severity must be one of: critical, high, medium, low' }),
+  }),
+  message: z.string().min(1, 'Error message is required'),
+  stackTrace: z.string().optional(),
+  metadata: z.object({
+    url: z.string().url().optional(),
+    userAgent: z.string().optional(),
+    userId: z.string().optional(),
+    environment: z.enum(['production', 'staging', 'development']).optional(),
+    timestamp: z.string().datetime().optional(),
+    additionalContext: z.any().optional(),
+  }).optional(),
+  repository: z.object({
+    name: z.string(),
+    branch: z.string(),
+    commit: z.string(),
+  }).optional(),
+}).strict();
+
+export type WebhookErrorPayload = z.infer<typeof WebhookErrorPayloadSchema>;
+
+/**
+ * Validate webhook error payload
+ */
+export function validateWebhookErrorPayload(data: unknown): WebhookErrorPayload {
+  return WebhookErrorPayloadSchema.parse(data);
+}
+
+/**
+ * Map error severity to task priority
+ */
+export function mapSeverityToPriority(
+  severity: 'critical' | 'high' | 'medium' | 'low'
+): 'critical' | 'high' | 'medium' | 'low' {
+  // Direct 1:1 mapping
+  return severity;
+}
+
+/**
+ * Get validation errors as structured objects
+ */
+export function getWebhookValidationErrors(error: z.ZodError): Array<{ field: string; message: string }> {
+  return error.errors.map(err => ({
+    field: err.path.join('.'),
+    message: err.message,
+  }));
+}
+
+// ============================================================================
 // Validation Service
 // ============================================================================
 
