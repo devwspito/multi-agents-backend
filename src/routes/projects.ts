@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { Project } from '../models/Project';
 import { Repository } from '../models/Repository';
+import { ApiKey } from '../models/ApiKey';
 import { GitHubService } from '../services/GitHubService';
 import { z } from 'zod';
 import path from 'path';
@@ -35,6 +36,38 @@ const updateProjectSchema = z.object({
   description: z.string().optional(),
   isActive: z.boolean().optional(),
 });
+
+// API Key validation schemas
+const createApiKeySchema = z.object({
+  name: z.string().min(1).max(100),
+  scopes: z.array(z.enum(['read', 'write', 'admin'])).optional().default(['read']),
+  rateLimit: z.object({
+    requestsPerHour: z.number().int().min(1).max(10000).default(1000),
+    requestsPerDay: z.number().int().min(1).max(100000).default(10000),
+  }).optional(),
+  expiresAt: z.string().datetime().optional().transform(s => s ? new Date(s) : undefined),
+});
+
+const updateApiKeySchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  scopes: z.array(z.enum(['read', 'write', 'admin'])).optional(),
+  rateLimit: z.object({
+    requestsPerHour: z.number().int().min(1).max(10000).optional(),
+    requestsPerDay: z.number().int().min(1).max(100000).optional(),
+  }).optional(),
+  isActive: z.boolean().optional(),
+});
+
+/**
+ * Mask an API key showing only prefix and last 4 characters
+ */
+function maskApiKey(fullKey: string): string {
+  // Show first 16 chars (prefix) + bullets + last 4 chars
+  if (fullKey.length < 20) {
+    return `${fullKey.substring(0, 8)}••••••••••••••••••${fullKey.slice(-4)}`;
+  }
+  return `${fullKey.substring(0, 16)}••••••••••••••••••${fullKey.slice(-4)}`;
+}
 
 /**
  * Generate default pathPatterns and executionOrder based on repository type
@@ -492,6 +525,349 @@ router.put('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to update API key',
+    });
+  }
+});
+
+// ===== API Key Management Routes =====
+
+/**
+ * POST /api/projects/:projectId/api-keys
+ * Generate and create a new API key for a project
+ */
+router.post('/:projectId/api-keys', authenticate, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const { projectId } = req.params;
+    const userId = req.user!.id;
+
+    // Validate project ownership
+    const project = await Project.findOne({ _id: projectId, userId });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    // Validate request body
+    const validated = createApiKeySchema.parse(req.body);
+
+    // Generate API key
+    const plainKey = await ApiKey.generateApiKey();
+    const keyHash = await ApiKey.hashApiKey(plainKey);
+    const keyPrefix = plainKey.substring(0, 16); // First 16 chars as prefix
+
+    // Create API key document
+    const apiKey = await ApiKey.create({
+      keyPrefix,
+      keyHash,
+      projectId,
+      userId,
+      name: validated.name,
+      scopes: validated.scopes,
+      rateLimit: {
+        requestsPerHour: validated.rateLimit?.requestsPerHour || 1000,
+        requestsPerDay: validated.rateLimit?.requestsPerDay || 10000,
+        currentHourRequests: 0,
+        currentDayRequests: 0,
+        hourResetAt: new Date(Date.now() + 60 * 60 * 1000),
+        dayResetAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+      expiresAt: validated.expiresAt,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        apiKey: plainKey, // ONLY TIME WE RETURN PLAIN KEY
+        message: 'Store this key securely. It won\'t be shown again.',
+        keyId: apiKey._id,
+        keyPrefix: apiKey.keyPrefix,
+        name: apiKey.name,
+        scopes: apiKey.scopes,
+        createdAt: apiKey.createdAt,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid request body',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    console.error('Error creating API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create API key',
+    });
+  }
+});
+
+/**
+ * GET /api/projects/:projectId/api-keys
+ * List all API keys for a project (masked, never showing full key)
+ */
+router.get('/:projectId/api-keys', authenticate, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const { projectId } = req.params;
+    const userId = req.user!.id;
+
+    // Validate project ownership
+    const project = await Project.findOne({ _id: projectId, userId });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    // Query all API keys for this project
+    const apiKeys = await ApiKey.find({ projectId, userId });
+
+    // Map results to mask keys (never include keyHash)
+    const maskedKeys = apiKeys.map(key => ({
+      id: key._id,
+      name: key.name,
+      keyPrefix: key.keyPrefix,
+      maskedKey: maskApiKey(key.keyPrefix),
+      scopes: key.scopes,
+      rateLimit: {
+        requestsPerHour: key.rateLimit.requestsPerHour,
+        requestsPerDay: key.rateLimit.requestsPerDay,
+      },
+      usage: {
+        totalRequests: key.totalRequests,
+        lastUsedAt: key.lastUsedAt,
+      },
+      expiresAt: key.expiresAt,
+      isActive: key.isActive,
+      createdAt: key.createdAt,
+    }));
+
+    res.json({
+      success: true,
+      data: maskedKeys,
+    });
+  } catch (error) {
+    console.error('Error listing API keys:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to list API keys',
+    });
+  }
+});
+
+/**
+ * GET /api/projects/:projectId/api-keys/:keyId
+ * Get details of a specific API key (masked)
+ */
+router.get('/:projectId/api-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const { projectId, keyId } = req.params;
+    const userId = req.user!.id;
+
+    // Validate project ownership
+    const project = await Project.findOne({ _id: projectId, userId });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    // Find the API key
+    const apiKey = await ApiKey.findOne({
+      _id: keyId,
+      projectId,
+      userId,
+    });
+
+    if (!apiKey) {
+      res.status(404).json({
+        success: false,
+        message: 'API key not found',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        id: apiKey._id,
+        name: apiKey.name,
+        keyPrefix: apiKey.keyPrefix,
+        maskedKey: maskApiKey(apiKey.keyPrefix),
+        scopes: apiKey.scopes,
+        rateLimit: {
+          requestsPerHour: apiKey.rateLimit.requestsPerHour,
+          requestsPerDay: apiKey.rateLimit.requestsPerDay,
+        },
+        usage: {
+          totalRequests: apiKey.totalRequests,
+          lastUsedAt: apiKey.lastUsedAt,
+        },
+        expiresAt: apiKey.expiresAt,
+        isActive: apiKey.isActive,
+        createdAt: apiKey.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch API key',
+    });
+  }
+});
+
+/**
+ * PATCH /api/projects/:projectId/api-keys/:keyId
+ * Update API key (name, scopes, rateLimit, isActive)
+ */
+router.patch('/:projectId/api-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const { projectId, keyId } = req.params;
+    const userId = req.user!.id;
+
+    // Validate project ownership
+    const project = await Project.findOne({ _id: projectId, userId });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    // Validate request body
+    const validated = updateApiKeySchema.parse(req.body);
+
+    // Find the API key
+    const apiKey = await ApiKey.findOne({
+      _id: keyId,
+      projectId,
+      userId,
+    });
+
+    if (!apiKey) {
+      res.status(404).json({
+        success: false,
+        message: 'API key not found',
+      });
+      return;
+    }
+
+    // Update allowed fields only
+    if (validated.name !== undefined) {
+      apiKey.name = validated.name;
+    }
+
+    if (validated.scopes !== undefined) {
+      apiKey.scopes = validated.scopes;
+    }
+
+    if (validated.rateLimit !== undefined) {
+      if (validated.rateLimit.requestsPerHour !== undefined) {
+        apiKey.rateLimit.requestsPerHour = validated.rateLimit.requestsPerHour;
+      }
+      if (validated.rateLimit.requestsPerDay !== undefined) {
+        apiKey.rateLimit.requestsPerDay = validated.rateLimit.requestsPerDay;
+      }
+    }
+
+    if (validated.isActive !== undefined) {
+      apiKey.isActive = validated.isActive;
+    }
+
+    await apiKey.save();
+
+    res.json({
+      success: true,
+      message: 'API key updated successfully',
+      data: {
+        id: apiKey._id,
+        name: apiKey.name,
+        keyPrefix: apiKey.keyPrefix,
+        maskedKey: maskApiKey(apiKey.keyPrefix),
+        scopes: apiKey.scopes,
+        rateLimit: {
+          requestsPerHour: apiKey.rateLimit.requestsPerHour,
+          requestsPerDay: apiKey.rateLimit.requestsPerDay,
+        },
+        isActive: apiKey.isActive,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid request body',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    console.error('Error updating API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update API key',
+    });
+  }
+});
+
+/**
+ * DELETE /api/projects/:projectId/api-keys/:keyId
+ * Revoke an API key (soft delete: set isActive = false)
+ */
+router.delete('/:projectId/api-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const { projectId, keyId } = req.params;
+    const userId = req.user!.id;
+
+    // Validate project ownership
+    const project = await Project.findOne({ _id: projectId, userId });
+    if (!project) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    // Find the API key
+    const apiKey = await ApiKey.findOne({
+      _id: keyId,
+      projectId,
+      userId,
+    });
+
+    if (!apiKey) {
+      res.status(404).json({
+        success: false,
+        message: 'API key not found',
+      });
+      return;
+    }
+
+    // Soft delete: set isActive = false (keep for audit trail)
+    apiKey.isActive = false;
+    await apiKey.save();
+
+    res.json({
+      success: true,
+      message: 'API key revoked successfully',
+    });
+  } catch (error) {
+    console.error('Error revoking API key:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to revoke API key',
     });
   }
 });
