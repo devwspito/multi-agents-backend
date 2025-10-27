@@ -22,6 +22,7 @@ export type LogCategory =
   | 'system'          // System-level events
   | 'auto_merge'      // Auto-merge operations
   | 'branch_cleanup'  // Branch cleanup after merge
+  | 'webhook'         // Webhook events
   | 'error';          // Errors and failures
 
 /**

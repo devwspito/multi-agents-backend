@@ -7,6 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 import { authenticateWebhook, WebhookAuthRequest } from '../../middleware/webhookAuth';
 import { Task } from '../../models/Task';
 import { Repository } from '../../models/Repository';
@@ -54,6 +55,35 @@ function getWebhookValidationErrors(error: z.ZodError) {
     field: err.path.join('.'),
     message: err.message,
   }));
+}
+
+/**
+ * Calculate error hash for deduplication
+ * Uses SHA-256 hash of errorType + message
+ */
+function calculateErrorHash(errorType: string, message: string): string {
+  const content = `${errorType}:${message}`;
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Find existing task with same error in time window
+ * Deduplication window: 1 hour
+ */
+async function findDuplicateTask(
+  projectId: string,
+  errorHash: string
+): Promise<any | null> {
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+  const existingTask = await Task.findOne({
+    projectId,
+    'webhookMetadata.errorHash': errorHash,
+    status: { $in: ['pending', 'in_progress'] },
+    createdAt: { $gte: oneHourAgo },
+  }).sort({ createdAt: -1 });
+
+  return existingTask;
 }
 
 /**
@@ -136,64 +166,132 @@ router.post(
         });
       }
 
-      // Create task
-      const task = await Task.create({
-        title: `[AUTO] ${errorType}: ${message.substring(0, 100)}`,
-        description,
-        priority,
-        projectId,
-        repositoryIds: repositories.map((r) => r._id),
-        status: 'pending',
-        tags: ['webhook', 'auto-generated', severity],
-        orchestration: {
-          productManager: { agent: 'product-manager', status: 'pending' },
-          projectManager: { agent: 'project-manager', status: 'pending' },
-          totalCost: 0,
-          totalTokens: 0,
-        },
-      });
+      // 🔄 DEDUPLICATION: Calculate error hash
+      const errorHash = calculateErrorHash(errorType, message);
 
-      const taskId = (task._id as any).toString();
+      // 🔍 Check for duplicate task in last hour
+      const existingTask = await findDuplicateTask(projectId, errorHash);
 
-      await LogService.info(`Webhook error notification received and task created`, {
-        taskId,
-        category: 'system',
-        metadata: {
+      let task: any;
+
+      if (existingTask) {
+        // ♻️ DUPLICATE FOUND: Update existing task
+        const occurrenceCount = (existingTask.webhookMetadata?.occurrenceCount || 1) + 1;
+
+        await Task.updateOne(
+          { _id: existingTask._id },
+          {
+            $set: {
+              'webhookMetadata.occurrenceCount': occurrenceCount,
+              'webhookMetadata.lastOccurrence': new Date(),
+            },
+          }
+        );
+
+        task = existingTask;
+        const taskId = (task._id as any).toString();
+
+        console.log(`♻️  Duplicate error detected - updating existing task ${taskId}`);
+        console.log(`   Occurrence count: ${occurrenceCount}`);
+
+        await LogService.info(`Duplicate error detected - count updated`, {
+          taskId,
+          category: 'system',
+          metadata: {
+            projectId,
+            errorType,
+            errorHash,
+            occurrenceCount,
+          },
+        });
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `♻️  Duplicate error detected (occurrence #${occurrenceCount})`
+        );
+
+        // Return 200 with existing task info
+        return res.status(200).json({
+          success: true,
+          taskId,
+          taskUrl: `/api/tasks/${taskId}`,
+          message: `Duplicate error detected. Existing task updated (occurrence #${occurrenceCount}).`,
+          deduplicated: true,
+          occurrenceCount,
+        });
+      } else {
+        // ✨ NEW ERROR: Create new task
+        task = await Task.create({
+          title: `[AUTO] ${errorType}: ${message.substring(0, 100)}`,
+          description,
+          priority,
           projectId,
-          errorType,
-          severity,
-          repositoryCount: repositories.length,
-        },
-      });
+          repositoryIds: repositories.map((r) => r._id),
+          status: 'pending',
+          tags: ['webhook', 'auto-generated', severity],
+          orchestration: {
+            productManager: { agent: 'product-manager', status: 'pending' },
+            projectManager: { agent: 'project-manager', status: 'pending' },
+            totalCost: 0,
+            totalTokens: 0,
+          },
+          webhookMetadata: {
+            errorHash,
+            occurrenceCount: 1,
+            firstOccurrence: new Date(),
+            lastOccurrence: new Date(),
+            source: 'webhook-errors',
+          },
+        });
 
-      // Trigger orchestration asynchronously
-      setImmediate(async () => {
-        try {
-          console.log(`🚀 Starting orchestration for webhook-generated task: ${taskId}`);
-          await orchestrationCoordinator.orchestrateTask(taskId);
+        const taskId = (task._id as any).toString();
 
-          NotificationService.emitConsoleLog(
-            taskId,
-            'info',
-            `✅ Orchestration started automatically from webhook error notification`
-          );
-        } catch (error: any) {
-          console.error(`❌ Failed to start orchestration for task ${taskId}:`, error);
-          await LogService.error(`Webhook orchestration failed`, {
-            taskId,
-            category: 'error',
-            error,
-          });
-        }
-      });
+        console.log(`✨ New error - created task ${taskId}`);
 
-      // Return 201 immediately with task info
-      return res.status(201).json({
-        success: true,
-        taskId,
-        taskUrl: `/api/tasks/${taskId}`,
-        message: 'Error notification received. Task created and orchestration started.',
-      });
+        await LogService.info(`Webhook error notification received and task created`, {
+          taskId,
+          category: 'system',
+          metadata: {
+            projectId,
+            errorType,
+            severity,
+            errorHash,
+            repositoryCount: repositories.length,
+          },
+        });
+
+        // Trigger orchestration asynchronously
+        setImmediate(async () => {
+          try {
+            console.log(`🚀 Starting orchestration for webhook-generated task: ${taskId}`);
+            await orchestrationCoordinator.orchestrateTask(taskId);
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ Orchestration started automatically from webhook error notification`
+            );
+          } catch (error: any) {
+            console.error(`❌ Failed to start orchestration for task ${taskId}:`, error);
+            await LogService.error(`Webhook orchestration failed`, {
+              taskId,
+              category: 'error',
+              error,
+            });
+          }
+        });
+
+        // Return 201 with new task info
+        return res.status(201).json({
+          success: true,
+          taskId,
+          taskUrl: `/api/tasks/${taskId}`,
+          message: 'Error notification received. Task created and orchestration started.',
+          deduplicated: false,
+          occurrenceCount: 1,
+        });
+      }
 
     } catch (error: any) {
       // Handle Zod validation errors
