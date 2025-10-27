@@ -22,7 +22,7 @@ async function viewTask(taskId) {
     const task = await Task.findById(taskId);
 
     if (!task) {
-      console.error(`❌ Task ${taskId} not found`);
+      console.error(`❌ Task ${taskId} not found.`);
       process.exit(1);
     }
 
