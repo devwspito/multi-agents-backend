@@ -90,9 +90,90 @@
       "Bash(echo \"ANTHROPIC_API_KEY length: $#ANTHROPIC_API_KEY\")",
       "Read(//private/var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/**)",
       "Bash(git revert:*)",
-      "Bash(cut:*)"
+      "Bash(cut:*)",
+      "Read(//var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68fa3dc82cba9b703eafb996/backend/src/routes/**)",
+      "Read(//var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68fa3dc82cba9b703eafb996/backend/src/services/**)",
+      "Read(//var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68fa3dc82cba9b703eafb996/backend/src/utils/webhooks/**)",
+      "Read(//var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68fa3dc82cba9b703eafb996/backend/src/utils/schedule/agenda/**)",
+      "Read(//var/folders/12/6j3zsv9n36755yzf0r8fcq140000gn/T/agent-workspace/task-68fa3dc82cba9b703eafb996/backend/src/models/**)",
+      "WebFetch(domain:www.aitmpl.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.aitmpl.com)",
+      "Bash(git clone:*)",
+      "Bash(npm run dev:*)",
+      "Bash(./.claude/hooks/security-scan.sh:*)",
+      "Bash(npm run cleanup-workspaces:*)"
     ],
     "deny": [],
     "ask": []
+  },
+  "enableAllProjectMcpServers": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/security-scan.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/file-protection.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/auto-backup.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/tool-activity-logger.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/git-auto-add.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/auto-format.sh",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/auto-test.sh",
+            "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/auto-build.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/load-task-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }

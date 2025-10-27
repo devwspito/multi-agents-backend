@@ -32,7 +32,7 @@ export class JudgePhase extends BasePhase {
   readonly name = 'Judge';
   readonly description = 'Evaluating developer code quality and requirements compliance';
 
-  private readonly MAX_RETRIES = 1; // Disabled auto-retry to prevent infinite loops
+  private readonly MAX_RETRIES = 3; // Developer gets 3 attempts to fix Judge feedback
 
   constructor(private executeAgentFn: Function) {
     super();
@@ -350,21 +350,27 @@ export class JudgePhase extends BasePhase {
         );
 
         if (attempt < this.MAX_RETRIES) {
-          // 🔥 DISABLED: Automatic retry causes infinite loops
-          // Developer is still working when Judge re-evaluates
-          // Instead: fail immediately and let user re-run task manually
-          console.log(`⚠️ [Judge] Story failed evaluation - retry disabled to prevent infinite loops`);
+          // 🔄 RETRY: Developer gets another attempt with Judge feedback
+          console.log(`🔄 [Judge] Story failed evaluation - Developer will retry (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
 
-          // Fall through to return failed status
-        }
+          // Execute developer retry with Judge feedback
+          await this.retryDeveloperWork(task, developer, story, context, evaluation.feedback);
 
-        if (true) { // Always fail on first rejection to avoid loops
+          // Continue to next iteration (Judge will re-evaluate)
+          continue;
+        } else {
           // MAX RETRIES REACHED
           story.status = 'failed';
           story.judgeStatus = 'changes_requested';
           if (!multiTeamMode) {
             await task.save();
           }
+
+          NotificationService.emitAgentMessage(
+            (task._id as any).toString(),
+            'Judge',
+            `❌ Story **"${story.title}"** FAILED after ${this.MAX_RETRIES} attempts. Last feedback:\n\n${evaluation.feedback}`
+          );
 
           return {
             status: 'failed',

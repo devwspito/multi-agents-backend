@@ -201,7 +201,7 @@ export class AnalyticsService {
    * Get metrics for all agent types
    */
   async getAllAgentMetrics(period: 'hour' | 'day' | 'week' | 'month' | 'all' = 'day'): Promise<IAgentMetrics[]> {
-    const agentTypes = ['product-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge'];
+    const agentTypes = ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'auto-merge'];
 
     const metricsPromises = agentTypes.map((agentType) => this.getAgentMetrics(agentType, period));
 

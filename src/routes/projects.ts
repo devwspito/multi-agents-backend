@@ -26,6 +26,7 @@ const createProjectSchema = z.object({
     language: z.string().optional(),
     html_url: z.string().optional(),
     owner: z.any().optional(),
+    type: z.enum(['backend', 'frontend']), // Repository type (required)
   })).optional(),
 });
 
@@ -34,6 +35,63 @@ const updateProjectSchema = z.object({
   description: z.string().optional(),
   isActive: z.boolean().optional(),
 });
+
+/**
+ * Generate default pathPatterns and executionOrder based on repository type
+ */
+function getRepositoryConfig(type: 'backend' | 'frontend' | 'mobile' | 'shared', repoName: string) {
+  const config = {
+    backend: {
+      pathPatterns: [
+        'backend/**/*',
+        'src/models/**/*',
+        'src/routes/**/*',
+        'src/services/**/*',
+        'src/middleware/**/*',
+        'src/utils/**/*',
+        'src/app.js',
+        'src/app.ts',
+        'server.js',
+        'server.ts',
+      ],
+      executionOrder: 1,
+    },
+    frontend: {
+      pathPatterns: [
+        `${repoName}/**/*`,
+        'src/components/**/*',
+        'src/views/**/*',
+        'src/pages/**/*',
+        'src/hooks/**/*',
+        'src/contexts/**/*',
+        'src/services/**/*',
+        'src/styles/**/*',
+        'public/**/*',
+      ],
+      executionOrder: 2,
+    },
+    mobile: {
+      pathPatterns: [
+        `${repoName}/**/*`,
+        'src/**/*',
+        'ios/**/*',
+        'android/**/*',
+      ],
+      executionOrder: 3,
+    },
+    shared: {
+      pathPatterns: [
+        'shared/**/*',
+        'lib/**/*',
+        'types/**/*',
+        'common/**/*',
+      ],
+      executionOrder: 0,
+    },
+  };
+
+  return config[type] || config.backend;
+}
 
 /**
  * GET /api/projects
@@ -146,6 +204,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       if (!userWithToken || !userWithToken.accessToken) {
         // Si no tiene token, crear repos con la info que viene
         for (const repo of repositories) {
+          const repoConfig = getRepositoryConfig(repo.type, repo.name);
           const repository = await Repository.create({
             name: repo.name,
             description: `Repository ${repo.name}`,
@@ -154,6 +213,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
             githubRepoName: repo.full_name,
             githubBranch: repo.default_branch || 'main',
             workspaceId: `ws-${Math.random().toString(36).substring(7)}`,
+            type: repo.type, // Save repository type (backend/frontend)
+            pathPatterns: repoConfig.pathPatterns, // Auto-generated patterns
+            executionOrder: repoConfig.executionOrder, // Auto-generated order
             isActive: true,
           });
           createdRepositories.push(repository);
@@ -182,6 +244,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
             }
           }
 
+          const repoConfig = getRepositoryConfig(repo.type, fullRepoData.name);
           const repository = await Repository.create({
             name: fullRepoData.name,
             description: fullRepoData.description || `Repository ${fullRepoData.name}`,
@@ -190,6 +253,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
             githubRepoName: fullRepoData.full_name || fullRepoData.name,
             githubBranch: fullRepoData.default_branch || 'main',
             workspaceId: `ws-${Math.random().toString(36).substring(7)}`,
+            type: repo.type, // Save repository type (backend/frontend)
+            pathPatterns: repoConfig.pathPatterns, // Auto-generated patterns
+            executionOrder: repoConfig.executionOrder, // Auto-generated order
             isActive: true,
           });
           createdRepositories.push(repository);

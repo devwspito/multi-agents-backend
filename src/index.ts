@@ -20,6 +20,9 @@ import repositoryRoutes from './routes/repositories';
 import conversationRoutes from './routes/conversations';
 import codeRoutes from './routes/code';
 import analyticsRoutes from './routes/analytics';
+import cleanupRoutes from './routes/cleanup';
+import githubWebhookRoutes from './routes/webhooks/github';
+import commandRoutes from './routes/commands';
 
 /**
  * Multi-Agent Software Development Platform
@@ -163,6 +166,9 @@ class AgentPlatformApp {
     this.app.use('/api/conversations', conversationRoutes);
     this.app.use('/api/code', codeRoutes);
     this.app.use('/api/analytics', analyticsRoutes);
+    this.app.use('/api/cleanup', cleanupRoutes);
+    this.app.use('/api/webhooks/github', githubWebhookRoutes);
+    this.app.use('/api/commands', commandRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
@@ -368,6 +374,11 @@ class AgentPlatformApp {
 
       // Iniciar schedulers
       this.cleanupScheduler.start();
+
+      // 🧹 Start scheduled branch cleanup (runs daily at 2 AM)
+      const { scheduledCleanup } = await import('./services/cleanup/ScheduledBranchCleanup');
+      scheduledCleanup.start();
+      console.log('🧹 Scheduled branch cleanup: Enabled (runs daily at 2:00 AM)');
 
       // Graceful shutdown
       process.on('SIGTERM', () => this.shutdown());

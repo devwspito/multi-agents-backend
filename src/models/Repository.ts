@@ -1,5 +1,12 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export interface IEnvVariable {
+  key: string;
+  value: string;
+  isSecret: boolean; // If true, value is encrypted in DB
+  description?: string; // Optional description for documentation
+}
+
 export interface IRepository extends Document {
   name: string;
   description?: string;
@@ -18,6 +25,9 @@ export interface IRepository extends Document {
   pathPatterns: string[]; // Glob patterns to detect files belonging to this repo
   executionOrder?: number; // Order of execution (1 = first, 2 = second, etc.)
   dependencies?: string[]; // Names of repositories this depends on
+
+  // 🔐 Environment Variables Management
+  envVariables: IEnvVariable[]; // Environment variables for this repository
 
   // Metadata
   isActive: boolean;
@@ -88,6 +98,15 @@ const repositorySchema = new Schema<IRepository>(
     },
     dependencies: {
       type: [String],
+      default: [],
+    },
+    envVariables: {
+      type: [{
+        key: { type: String, required: true },
+        value: { type: String, required: true },
+        isSecret: { type: Boolean, default: false },
+        description: { type: String },
+      }],
       default: [],
     },
     isActive: {

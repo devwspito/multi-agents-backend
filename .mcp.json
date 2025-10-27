@@ -1,14 +1,30 @@
 {
   "mcpServers": {
-    "github": {
+    "memory": {
+      "description": "Persistent memory and context management for Claude Code sessions. Store and recall information across conversations and projects.",
       "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-github"
-      ],
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "github": {
+      "description": "Direct GitHub API integration for repository management, issue tracking, pull requests, and collaborative development workflows.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
       }
+    },
+    "postgresql": {
+      "description": "Connect to PostgreSQL databases for advanced data operations, complex queries, and enterprise database management.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "${POSTGRES_CONNECTION_STRING}"
+      }
+    },
+    "context7": {
+      "description": "Context7 MCP pulls up-to-date, version-specific documentation and code examples straight from the source.",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
     }
   }
 }

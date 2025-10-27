@@ -6,6 +6,8 @@ import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
 // import { AutoHealingService, IHealingContext } from '../quality/AutoHealingService'; // DEPRECATED - Service removed
 import { NotificationService } from '../NotificationService';
+import { AutoMergeService, IMergeResult } from './AutoMergeService';
+import { BranchCleanupService } from '../cleanup/BranchCleanupService';
 
 const execAsync = promisify(exec);
 
@@ -18,6 +20,7 @@ export interface IPRCreationResult {
   prUrl?: string;
   error?: string;
   action?: 'created' | 'found_existing' | 'healed' | 'skipped';
+  mergeResult?: IMergeResult; // Auto-merge result if attempted
 }
 
 /**
@@ -27,13 +30,16 @@ export interface IPRCreationResult {
  * - Creates PRs after all developers complete
  * - Validates changes exist
  * - Searches for existing PRs
+ * - Auto-merges PRs to main after QA approval (NEW)
  * Note: Auto-healing feature temporarily disabled
  */
 export class PRManagementService {
   // private autoHealingService: AutoHealingService; // DEPRECATED
+  private autoMergeService: AutoMergeService;
 
   constructor(private githubService: GitHubService) {
     // this.autoHealingService = new AutoHealingService(githubService); // DEPRECATED
+    this.autoMergeService = new AutoMergeService(githubService);
   }
 
   /**
@@ -331,5 +337,182 @@ export class PRManagementService {
       console.error(`  ⚠️ Error searching for existing PR:`, error);
       return null;
     }
+  }
+
+  /**
+   * Attempt automatic merge for all open PRs to main
+   *
+   * This should be called AFTER all PRs are created and QA approves
+   * Will automatically merge PRs that:
+   * - Have no complex conflicts
+   * - Pass all tests
+   * - Are approved by QA
+   *
+   * @param task - Task with epics containing PR information
+   * @param repositories - Repository objects with owner/name
+   * @param workspacePath - Path to workspace with cloned repositories
+   * @param taskId - Task ID for logging
+   * @returns Array of merge results for each PR
+   */
+  async autoMergePRsToMain(
+    task: ITask,
+    repositories: any[],
+    workspacePath: string | null,
+    taskId: string
+  ): Promise<IMergeResult[]> {
+    console.log(`\n🚀 [Auto-Merge] Attempting automatic merge to main for all PRs...`);
+
+    if (repositories.length === 0 || !workspacePath) {
+      console.log(`  ⚠️ No repository or workspace available for auto-merge`);
+      return [];
+    }
+
+    // Rebuild epics from events (event sourcing)
+    const { eventStore } = await import('../EventStore');
+    const state = await eventStore.getCurrentState(task._id as any);
+    const epics = state.epics || [];
+
+    const results: IMergeResult[] = [];
+
+    for (const epic of epics) {
+      // Skip if no PR was created
+      if (!epic.pullRequestNumber || !epic.prCreated) {
+        console.log(`  ⏭️  Epic "${epic.name}" has no PR, skipping auto-merge`);
+        continue;
+      }
+
+      // Find target repository
+      const targetRepo = this.findTargetRepository(epic, repositories);
+      if (!targetRepo) {
+        console.log(`  ⚠️ Epic "${epic.name}" has invalid targetRepository, skipping`);
+        continue;
+      }
+
+      const targetRepoPath = `${workspacePath}/${targetRepo.name}`;
+
+      // Extract owner and repo name from repository
+      const [repoOwner, repoName] = this.getOwnerAndRepo(targetRepo);
+
+      console.log(`\n  🔀 [Auto-Merge] Epic: ${epic.name}`);
+      console.log(`     PR #${epic.pullRequestNumber}`);
+      console.log(`     Repository: ${repoOwner}/${repoName}`);
+
+      // Attempt auto-merge
+      const mergeResult = await this.autoMergeService.mergePRToMain(
+        epic.pullRequestNumber,
+        targetRepoPath,
+        repoOwner,
+        repoName,
+        taskId
+      );
+
+      results.push(mergeResult);
+
+      // Update epic with merge status
+      if (mergeResult.merged) {
+        epic.pullRequestState = 'merged';
+        epic.mergedAt = new Date();
+        epic.mergeCommitSha = mergeResult.mergeCommitSha;
+
+        // Clean up epic branch after successful merge
+        if (epic.branchName) {
+          await this.autoMergeService.deletePRBranch(
+            epic.branchName,
+            targetRepoPath,
+            taskId
+          );
+        }
+
+        // 🧹 CLEANUP: Delete all story branches that belong to this epic
+        await this.cleanupStoryBranchesForEpic(task, epic, taskId);
+
+        console.log(`     ✅ Successfully merged and cleaned up`);
+      } else if (mergeResult.needsHumanReview) {
+        console.log(`     ⚠️  Requires human review: ${mergeResult.error}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `⚠️  PR #${epic.pullRequestNumber} needs human review: ${mergeResult.error}`
+        );
+      } else {
+        console.log(`     ❌ Merge failed: ${mergeResult.error}`);
+      }
+    }
+
+    // Save epic updates
+    task.markModified('orchestration.techLead.epics');
+    await task.save();
+
+    const successfulMerges = results.filter((r) => r.merged).length;
+    const needsReview = results.filter((r) => r.needsHumanReview).length;
+
+    console.log(`\n✅ [Auto-Merge] Complete:`);
+    console.log(`   Merged: ${successfulMerges}/${epics.length}`);
+    console.log(`   Needs review: ${needsReview}`);
+
+    return results;
+  }
+
+  /**
+   * Clean up all story branches that belong to an epic after successful epic merge
+   *
+   * @param task - Task containing orchestration data
+   * @param epic - Epic that was merged
+   * @param taskId - Task ID for logging
+   */
+  private async cleanupStoryBranchesForEpic(
+    task: ITask,
+    epic: any,
+    taskId: string
+  ): Promise<void> {
+    try {
+      console.log(`\n🧹 [Cleanup] Cleaning story branches for epic: ${epic.branchName}`);
+
+      // Build branch mappings from task orchestration data
+      const mappings = BranchCleanupService.buildBranchMappingsFromTask(task);
+      const mapping = mappings.get(epic.id);
+
+      if (!mapping || mapping.storyBranches.length === 0) {
+        console.log(`   ⏭️  No story branches found for epic ${epic.id}`);
+        return;
+      }
+
+      console.log(`   Found ${mapping.storyBranches.length} story branch(es) to clean up`);
+
+      // Create cleanup service instance
+      const cleanupService = new BranchCleanupService(this.githubService);
+
+      // Clean up only story branches (epic branch already deleted by deletePRBranch above)
+      const result = await cleanupService.cleanupStoriesAfterEpicMerge(
+        taskId,
+        epic.id,
+        epic.branchName,
+        epic.targetRepository,
+        mapping
+      );
+
+      console.log(`   ✅ Cleanup complete: ${result.deleted.length} deleted, ${result.failed.length} failed`);
+    } catch (error: any) {
+      console.error(`   ⚠️  Story branch cleanup failed: ${error.message}`);
+      // Don't throw - cleanup failure shouldn't block the merge success
+    }
+  }
+
+  /**
+   * Extract owner and repo name from repository object
+   */
+  private getOwnerAndRepo(repo: any): [string, string] {
+    // Try to extract from full_name (e.g., "luiscorrea/backend")
+    if (repo.full_name && repo.full_name.includes('/')) {
+      const parts = repo.full_name.split('/');
+      return [parts[0], parts[1]];
+    }
+
+    // Fallback: use repo name and try to get owner from other fields
+    const repoName = repo.name || 'unknown';
+    const repoOwner = repo.owner || repo.user || 'unknown';
+
+    return [repoOwner, repoName];
   }
 }

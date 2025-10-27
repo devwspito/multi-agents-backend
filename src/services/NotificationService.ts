@@ -2,7 +2,7 @@ import { Server as SocketServer } from 'socket.io';
 
 export interface OrchestrationEvent {
   taskId: string;
-  agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'senior-developer' | 'junior-developer' | 'qa-engineer';
+  agentType: 'product-manager' | 'project-manager' | 'tech-lead' | 'senior-developer' | 'junior-developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'auto-merge';
   status: 'started' | 'in-progress' | 'completed' | 'failed';
   message: string;
   timestamp: Date;
@@ -204,6 +204,11 @@ export class NotificationService {
       agentName,
       error,
     });
+  }
+
+  static emitAgentError(taskId: string, agentName: string, error: string): void {
+    // Alias for emitAgentFailed
+    this.emitAgentFailed(taskId, agentName, error);
   }
 
   static emitOrchestrationStarted(taskId: string): void {

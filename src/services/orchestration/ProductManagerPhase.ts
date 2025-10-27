@@ -33,8 +33,18 @@ export class ProductManagerPhase extends BasePhase {
       context.task = freshTask;
     }
 
+    // 🔄 CONTINUATION: Never skip - always re-execute all phases with new context
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [ProductManager] This is a CONTINUATION - will re-execute with additional requirements`);
+      return false; // DO NOT SKIP
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     if (context.task.orchestration.productManager?.status === 'completed') {
-      console.log(`[SKIP] Product Manager already completed - skipping re-execution`);
+      console.log(`[SKIP] Product Manager already completed - skipping re-execution (recovery mode)`);
 
       // Restore phase data from previous execution for next phases
       if (context.task.orchestration.productManager.output) {
@@ -101,25 +111,132 @@ ${revisionSection}
 - **Title**: ${task.title}
 - **Description**: ${task.description}
 - **Priority**: ${task.priority}
+
+## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+
+**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+
+**ABSOLUTE RULE**: ONLY explore files inside this workspace path. NEVER explore outside.
+
+The following repositories are cloned INSIDE your workspace:
+${context.repositories.map(repo =>
+  `- **${workspacePath}/${repo.name}** (${repo.type}) → GitHub: ${repo.githubRepoName}`
+).join('\n')}
+
+**✅ CORRECT Commands (stay inside workspace)**:
+\`\`\`bash
+# Navigate inside workspace
+cd ${workspacePath}/${context.repositories[0]?.name || 'repo'} && ls -la
+
+# Find files inside workspace
+find ${workspacePath} -name "*.js" | head -20
+
+# Read files using relative paths from your current directory
+Read("${context.repositories[0]?.name || 'repo'}/src/App.jsx")
+
+# Grep inside specific repo
+Grep("pattern", "${context.repositories[0]?.name || 'repo'}/")
+\`\`\`
+
+**❌ INCORRECT Commands (exploring outside workspace - FORBIDDEN)**:
+\`\`\`bash
+# ❌ NEVER explore user's home directory
+ls ~/Desktop
+find ~ -name "*.js"
+
+# ❌ NEVER explore system repositories outside workspace
+ls /Users/luiscorrea/Desktop/mult-agent-software-project
+Read("/Users/.../multi-agents-backend/src/file.js")
+
+# ❌ NEVER use absolute paths outside workspace
+find /Users -name "package.json"
+\`\`\`
+
 ${repoInfo}${workspaceInfo}
 
-🔍 **CRITICAL**: You MUST explore the codebase FIRST before outputting JSON:
-1. Use Bash("ls -la") to see all repositories in workspace
-2. Use Bash("cd repo && find . -name '*.ts' -o -name '*.js' | head -30") to explore each repo
-3. Use Read("repo/package.json") to understand dependencies and scripts
-4. Use Grep("pattern") to find existing similar features
-5. ONLY THEN output the JSON
+🔍 **EXPLORATION CHECKLIST** - Do this BEFORE outputting JSON:
+${context.repositories.map((repo, idx) =>
+  `${idx + 1}. Bash("cd ${workspacePath}/${repo.name} && ls -la") - See ${repo.name} structure
+${idx + 1}.b Bash("cd ${workspacePath}/${repo.name} && find . -type f | head -30") - List files
+${idx + 1}.c Read("${repo.name}/package.json") - Understand ${repo.name} dependencies`
+).join('\n')}
 
-${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attachments.length} image(s) attached. Analyze them for visual requirements (UI mockups, diagrams, etc.).\n\n` : ''}**Output format** (match exactly - valid JSON only):
+${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attachments.length} image(s) attached. Analyze them for visual requirements (UI mockups, diagrams, etc.).\n\n` : ''}## 🎯 NEW REQUIREMENT: Master Epic with Shared Contracts
+
+You are creating a **MASTER EPIC** that will coordinate work across multiple repositories.
+
+Your output must include:
+1. **Global Naming Conventions** - Field names, formats, prefixes that ALL repos must follow
+2. **Shared Contracts** - API endpoints, data types, interfaces that define cross-repo communication
+3. **Repository Assignment** - Which repos are affected and what each will do
+
+**Why this matters**:
+- Without naming conventions: Backend uses "userId", Frontend uses "user_id" → 💥 CONFLICT
+- Without contracts: Backend returns {id, name}, Frontend expects {userId, fullName} → 💥 MISMATCH
+- With contracts: ALL teams use the same field names and API formats → ✅ CONSISTENCY
+
+**Output format** (match exactly - valid JSON only):
 \`\`\`json
 {
+  "masterEpic": {
+    "id": "master-${task.title.toLowerCase().replace(/\\s+/g, '-')}-${Date.now()}",
+    "title": "${task.title}",
+    "globalNamingConventions": {
+      "primaryIdField": "userId|productId|orderId (choose ONE convention for IDs)",
+      "timestampFormat": "ISO8601|Unix|DateTime (choose ONE)",
+      "errorCodePrefix": "AUTH_|USER_|API_ (choose ONE prefix)",
+      "booleanFieldPrefix": "is|has|should (choose ONE for booleans)",
+      "collectionNaming": "plural|singular (e.g., 'users' vs 'user')"
+    },
+    "sharedContracts": {
+      "apiEndpoints": [
+        {
+          "method": "POST|GET|PUT|DELETE",
+          "path": "/api/resource/action",
+          "request": { "field1": "type", "field2": "type" },
+          "response": { "field1": "type", "field2": "type" },
+          "description": "What this endpoint does"
+        }
+      ],
+      "sharedTypes": [
+        {
+          "name": "TypeName",
+          "description": "What this type represents",
+          "fields": {
+            "fieldName": "MongoDB.ObjectId|String|Number|Date|Boolean",
+            "anotherField": "type with description if needed"
+          }
+        }
+      ],
+      "eventSchemas": [
+        {
+          "name": "EventName",
+          "description": "When this event is emitted",
+          "payload": {
+            "field1": "type",
+            "field2": "type"
+          }
+        }
+      ]
+    },
+    "affectedRepositories": ["exact-repo-name-1", "exact-repo-name-2"],
+    "repositoryResponsibilities": {
+      "backend": "What backend will implement (APIs, models, business logic)",
+      "frontend": "What frontend will implement (UI, components, state management)"
+    }
+  },
   "complexity": "simple|moderate|complex|epic",
-  "affectedRepositories": ["exact-repo-name-1", "exact-repo-name-2"],
   "successCriteria": ["measurable criterion 1", "measurable criterion 2"],
   "recommendations": "Technical approach based on ACTUAL code exploration",
   "challenges": ["technical challenge 1", "technical challenge 2"]
 }
 \`\`\`
+
+**CRITICAL RULES**:
+1. **Naming Conventions MUST be specific**: NOT "use consistent naming" but "userId" (exact field name)
+2. **API Contracts MUST be complete**: Include ALL request/response fields with types
+3. **Shared Types MUST match database**: If backend stores "userId", contract must say "userId"
+4. **One Source of Truth**: Master Epic is the ONLY place where naming/contracts are defined
 
 **DO NOT** output anything else. **DO NOT** talk about what you would do. **ACT**: Use tools, explore code, output JSON.`;
 
@@ -289,9 +406,28 @@ ${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attach
         },
       });
 
+      // 🔥 NEW: Parse and store Master Epic from Product Manager output
+      let masterEpic = null;
+      try {
+        const jsonMatch = result.output.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[1]);
+          if (parsed.masterEpic) {
+            masterEpic = parsed.masterEpic;
+            console.log(`✅ [ProductManager] Extracted Master Epic: ${masterEpic.id}`);
+            console.log(`   Global Naming Conventions: ${Object.keys(masterEpic.globalNamingConventions || {}).length} conventions`);
+            console.log(`   Shared Contracts: ${(masterEpic.sharedContracts?.apiEndpoints || []).length} APIs, ${(masterEpic.sharedContracts?.sharedTypes || []).length} types`);
+            console.log(`   Affected Repositories: ${masterEpic.affectedRepositories?.join(', ')}`);
+          }
+        }
+      } catch (error: any) {
+        console.warn(`⚠️  [ProductManager] Failed to parse Master Epic: ${error.message}`);
+      }
+
       // Store phase data for next phases
       context.setData('productManagerOutput', result.output);
       context.setData('taskComplexity', complexityMatch?.[1]?.toLowerCase() || 'medium');
+      context.setData('masterEpic', masterEpic); // 🔥 NEW: Pass Master Epic to Project Manager
 
       // 🔥 CRITICAL: Store processed attachments in context for ALL subsequent agents
       // This ensures images/multimedia travel through ALL agents with complete context

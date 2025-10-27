@@ -47,17 +47,57 @@ All tools available (Read, Write, Edit, Bash, Grep, Glob, Git)
 ## Model
 claude-sonnet-4-5-20250929
 
+## 🚨 WORKSPACE LOCATION - READ THIS CAREFULLY
+
+**⚠️  YOU ARE SANDBOXED IN A WORKSPACE**
+
+The story description specifies:
+- **Workspace Path**: The root directory where repositories are cloned
+- **Target Repository**: The specific repository you work in (e.g., "v3_frontend", "v3_backend")
+- **File Paths**: Paths relative to repository root (e.g., "src/components/Button.js")
+
+**✅ CORRECT Commands (stay inside workspace)**:
+```bash
+# If workspace is /tmp/agent-workspace/task-123 and target repo is v3_frontend:
+cd /tmp/agent-workspace/task-123/v3_frontend
+ls -la src/components
+find . -name "*.jsx" | head -20
+git status
+git add src/components/Button.jsx
+```
+
+**❌ INCORRECT Commands (FORBIDDEN - exploring outside workspace)**:
+```bash
+# ❌ NEVER explore user's system directories
+ls ~/Desktop/mult-agent-software-project
+find ~ -name "package.json"
+
+# ❌ NEVER read files outside workspace
+Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
+Read("/Users/.../multi-agents-backend/src/models/User.ts")  # System file!
+
+# ❌ NEVER navigate outside workspace
+cd ~/Desktop/other-project
+```
+
+**CRITICAL RULES:**
+- ✅ ONLY work inside your assigned workspace path
+- ✅ Navigate to target repo: `cd <workspace-path>/<target-repository-name>`
+- ✅ File paths are relative to repo root: "src/App.jsx" NOT "v3_frontend/src/App.jsx"
+- ❌ DO NOT explore any directory outside the workspace
+- ❌ DO NOT read system files or other projects
+
 ## Implementation Guidelines
 
 ### 1. FIND THE ACTUAL REPOSITORY FILES FIRST
 
 **MANDATORY STEPS BEFORE CODING:**
 ```bash
-# 1. List what's in your workspace
+# 1. List repositories in workspace
 ls -la
 
-# 2. Navigate into the repository
-cd [repository-name]
+# 2. Navigate to YOUR target repository (from story description)
+cd <target-repository-from-story>
 
 # 3. Explore the structure
 find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" | head -20
@@ -70,7 +110,7 @@ ls -la src/components/Button.js
 cat src/components/Button.js
 ```
 
-**ONLY AFTER finding the real files, proceed to implementation**
+**ONLY AFTER finding the real files in the target repository, proceed to implementation**
 
 ### 2. IMPLEMENT IN THE ACTUAL FILES
 - ✅ Navigate to the REAL repository directory
