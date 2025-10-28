@@ -35,7 +35,7 @@ function verifyGitHubSignature(payload: string, signature: string, secret: strin
  * GitHub webhook endpoint for PR events
  * Automatically triggers cleanup when epic PR is merged
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response): Promise<any> => {
   try {
     // Verify webhook signature
     const signature = req.headers['x-hub-signature-256'] as string;
@@ -154,7 +154,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (team.techLead?.stories) {
       for (const story of team.techLead.stories) {
         if (story.branchName) {
-          mapping.storyBranches.push({
+          (mapping.storyBranches as any).push({
             storyId: story.id,
             branchName: story.branchName,
             pullRequestNumber: story.pullRequestNumber,
@@ -230,7 +230,7 @@ router.post('/', async (req: Request, res: Response) => {
  *
  * Test endpoint to verify webhook is reachable
  */
-router.get('/test', (req: Request, res: Response) => {
+router.get('/test', (_req: Request, res: Response) => {
   res.json({
     message: 'GitHub webhook endpoint is ready',
     timestamp: new Date().toISOString(),

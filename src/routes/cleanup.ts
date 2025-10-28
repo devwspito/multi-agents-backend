@@ -23,7 +23,7 @@ const router = Router();
  * Clean up all branches (epic + stories) for a completed task
  * User should call this AFTER merging all epic PRs
  */
-router.post('/task/:taskId', authenticate, async (req: Request, res: Response) => {
+router.post('/task/:taskId', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.params;
     const userId = (req as any).user.userId;
@@ -136,7 +136,7 @@ router.post('/task/:taskId', authenticate, async (req: Request, res: Response) =
  * Clean up branches for a specific epic only
  * Useful when you want to clean up one epic at a time
  */
-router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Response) => {
+router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId, epicId } = req.params;
     const userId = (req as any).user.userId;
@@ -174,7 +174,7 @@ router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Res
 
     const totalBranchesDeleted = mapping.storyBranches.length + 1; // +1 for epic branch
 
-    res.json({
+    return res.json({
       success: true,
       message: `Cleanup complete: ${totalBranchesDeleted} branches deleted`,
       epicId,
@@ -184,7 +184,7 @@ router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Res
     });
   } catch (error: any) {
     console.error('❌ Cleanup error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Failed to clean up epic branches',
       message: error.message,
     });
@@ -197,7 +197,7 @@ router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Res
  * Preview what branches would be deleted without actually deleting them
  * Useful to check before running cleanup
  */
-router.get('/preview/:taskId', authenticate, async (req: Request, res: Response) => {
+router.get('/preview/:taskId', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.params;
     const userId = (req as any).user.userId;
@@ -250,7 +250,7 @@ router.get('/preview/:taskId', authenticate, async (req: Request, res: Response)
       totalBranches += epicPreview.totalBranchCount;
     }
 
-    res.json({
+    return res.json({
       message: `Preview: ${totalBranches} branches would be deleted across ${mappings.size} epic(s)`,
       taskId,
       taskStatus: task.status,
@@ -264,7 +264,7 @@ router.get('/preview/:taskId', authenticate, async (req: Request, res: Response)
     });
   } catch (error: any) {
     console.error('❌ Preview error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Failed to preview cleanup',
       message: error.message,
     });
@@ -277,7 +277,7 @@ router.get('/preview/:taskId', authenticate, async (req: Request, res: Response)
  * Manually trigger scheduled cleanup (for testing or on-demand cleanup)
  * Admin only
  */
-router.post('/scheduled/run', authenticate, async (req: Request, res: Response) => {
+router.post('/scheduled/run', authenticate, async (_req: Request, res: Response): Promise<any> => {
   try {
     const { scheduledCleanup } = await import('../services/cleanup/ScheduledBranchCleanup');
 
@@ -311,7 +311,7 @@ router.post('/scheduled/run', authenticate, async (req: Request, res: Response) 
  *
  * Get status of scheduled cleanup
  */
-router.get('/scheduled/status', authenticate, async (req: Request, res: Response) => {
+router.get('/scheduled/status', authenticate, async (_req: Request, res: Response): Promise<any> => {
   try {
     const { scheduledCleanup } = await import('../services/cleanup/ScheduledBranchCleanup');
     const status = scheduledCleanup.getStatus();
@@ -338,7 +338,7 @@ router.get('/scheduled/status', authenticate, async (req: Request, res: Response
  * Scan for corrupted workspaces (tasks with system repositories assigned)
  * Returns list of corrupted tasks without making any changes
  */
-router.get('/workspaces/scan', authenticate, async (req: Request, res: Response) => {
+router.get('/workspaces/scan', authenticate, async (_req: Request, res: Response): Promise<any> => {
   try {
     const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     const cleanupService = new WorkspaceCleanupService(workspaceDir);
@@ -423,7 +423,7 @@ router.post('/workspaces/cleanup', authenticate, async (req: Request, res: Respo
  *
  * Body: { repositoryIds: string[] }
  */
-router.post('/workspaces/validate', authenticate, async (req: Request, res: Response) => {
+router.post('/workspaces/validate', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { repositoryIds } = req.body;
 
@@ -449,14 +449,14 @@ router.post('/workspaces/validate', authenticate, async (req: Request, res: Resp
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       valid: true,
       message: 'Repository IDs are valid',
     });
   } catch (error: any) {
     console.error('❌ Validation error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Failed to validate repository IDs',
       message: error.message,
     });

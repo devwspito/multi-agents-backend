@@ -5,7 +5,7 @@
  * Runs daily to keep GitHub repositories clean
  */
 
-import cron from 'node-cron';
+import * as cron from 'node-cron';
 import { Task } from '../../models/Task';
 import { GitHubService } from '../GitHubService';
 import { BranchCleanupService } from './BranchCleanupService';

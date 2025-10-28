@@ -238,7 +238,7 @@ export class PRManagementService {
     error: Error,
     epic: IEpic,
     branchName: string,
-    primaryRepo: any,
+    _primaryRepo: any,
     primaryRepoPath: string,
     task: ITask,
     taskId: string
@@ -410,9 +410,9 @@ export class PRManagementService {
 
       // Update epic with merge status
       if (mergeResult.merged) {
-        epic.pullRequestState = 'merged';
-        epic.mergedAt = new Date();
-        epic.mergeCommitSha = mergeResult.mergeCommitSha;
+        (epic as any).pullRequestState = 'merged';
+        (epic as any).mergedAt = new Date();
+        (epic as any).mergeCommitSha = mergeResult.mergeCommitSha;
 
         // Clean up epic branch after successful merge
         if (epic.branchName) {

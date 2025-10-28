@@ -15,6 +15,21 @@ export interface IProject extends Document {
     requiredReviews?: number;
     educationalContext?: string;
     complianceLevel?: string;
+    // Webhook error notifications
+    errorNotifications?: {
+      enabled?: boolean;
+      channels?: Array<{
+        type: 'email' | 'webhook' | 'slack';
+        enabled: boolean;
+        config: {
+          email?: string;
+          webhookUrl?: string;
+          webhookSecret?: string;
+          slackWebhookUrl?: string;
+          slackChannel?: string;
+        };
+      }>;
+    };
   };
 
   // Stats
@@ -80,6 +95,20 @@ const projectSchema = new Schema<IProject>(
       requiredReviews: { type: Number, default: 1 },
       educationalContext: { type: String, default: 'general' },
       complianceLevel: { type: String, default: 'basic' },
+      errorNotifications: {
+        enabled: { type: Boolean, default: true },
+        channels: [{
+          type: { type: String, enum: ['email', 'webhook', 'slack'], required: true },
+          enabled: { type: Boolean, default: true },
+          config: {
+            email: String,
+            webhookUrl: String,
+            webhookSecret: String,
+            slackWebhookUrl: String,
+            slackChannel: String,
+          },
+        }],
+      },
     },
     stats: {
       totalTasks: { type: Number, default: 0 },

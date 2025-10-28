@@ -6,7 +6,6 @@ export interface WebhookAuthRequest extends Request {
     apiKeyDoc: any;
     projectId: string;
   };
-  ip?: string;
 }
 
 /**

@@ -69,7 +69,7 @@ export class HookService {
     if (!fs.existsSync(hookPath)) {
       const error = `Hook not found: ${hookPath}`;
       await LogService.warn(error, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         metadata: { hookName, hookPath },
       });
@@ -116,7 +116,7 @@ export class HookService {
       }
 
       await LogService.info(`Hook executed: ${hookName}`, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         metadata: {
           hookName,
@@ -138,7 +138,7 @@ export class HookService {
       console.error(`   ❌ Hook failed: ${error.message}`);
 
       await LogService.error(`Hook failed: ${hookName}`, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         error,
         metadata: {

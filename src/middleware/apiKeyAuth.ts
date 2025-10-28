@@ -62,7 +62,7 @@ export async function apiKeyAuth(req: ApiKeyRequest, res: Response, next: NextFu
     const isValid = await ApiKey.verifyApiKey(apiKeyValue, apiKey.keyHash);
     if (!isValid) {
       Logger.debug('API key hash verification failed', {
-        apiKeyId: apiKey._id.toString(),
+        apiKeyId: (apiKey._id as any).toString(),
       });
       res.status(401).json({
         success: false,
@@ -74,7 +74,7 @@ export async function apiKeyAuth(req: ApiKeyRequest, res: Response, next: NextFu
     // Verificar si el API key ha expirado
     if (apiKey.isExpired()) {
       Logger.debug('API key expired', {
-        apiKeyId: apiKey._id.toString(),
+        apiKeyId: (apiKey._id as any).toString(),
         expiresAt: apiKey.expiresAt,
       });
       res.status(401).json({
@@ -88,7 +88,7 @@ export async function apiKeyAuth(req: ApiKeyRequest, res: Response, next: NextFu
     const rateLimitCheck = apiKey.checkRateLimit();
     if (!rateLimitCheck.allowed) {
       Logger.warn('API key rate limit exceeded', {
-        apiKeyId: apiKey._id.toString(),
+        apiKeyId: (apiKey._id as any).toString(),
         hourlyRequests: apiKey.rateLimit.currentHourRequests,
         dailyRequests: apiKey.rateLimit.currentDayRequests,
       });
@@ -106,7 +106,7 @@ export async function apiKeyAuth(req: ApiKeyRequest, res: Response, next: NextFu
 
     // Adjuntar información del API key al request
     req.apiKey = {
-      id: apiKey._id.toString(),
+      id: (apiKey._id as any).toString(),
       projectId: apiKey.projectId.toString(),
       userId: apiKey.userId.toString(),
       scopes: apiKey.scopes,
@@ -127,7 +127,7 @@ export async function apiKeyAuth(req: ApiKeyRequest, res: Response, next: NextFu
     });
 
     Logger.debug('API key authenticated successfully', {
-      apiKeyId: apiKey._id.toString(),
+      apiKeyId: (apiKey._id as any).toString(),
       projectId: apiKey.projectId.toString(),
     });
 

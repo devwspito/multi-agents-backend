@@ -11,14 +11,17 @@ import crypto from 'crypto';
 import { authenticateWebhook, WebhookAuthRequest } from '../../middleware/webhookAuth';
 import { Task } from '../../models/Task';
 import { Repository } from '../../models/Repository';
+// import { Project } from '../../models/Project';
 import { WebhookApiKey } from '../../models/WebhookApiKey';
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { LogService } from '../../services/logging/LogService';
 import { NotificationService } from '../../services/NotificationService';
+// import { WebhookNotificationService } from '../../services/webhooks/WebhookNotificationService'; // DISABLED - requires SMTP setup
 import { z } from 'zod';
 
 const router = Router();
 const orchestrationCoordinator = new OrchestrationCoordinator();
+// const notificationService = new WebhookNotificationService(); // DISABLED - requires SMTP setup
 
 /**
  * Zod validation schema for webhook error payload
@@ -211,6 +214,32 @@ router.post(
           `♻️  Duplicate error detected (occurrence #${occurrenceCount})`
         );
 
+        // Send notification to client (DISABLED - requires SMTP setup)
+        /*
+        try {
+          const project = await Project.findById(projectId);
+          if (project?.settings?.errorNotifications?.enabled) {
+            await notificationService.notifyClient(
+              project.settings.errorNotifications.channels || [],
+              {
+                taskId,
+                projectId,
+                errorType,
+                errorMessage: message,
+                severity,
+                occurrenceCount,
+                isDuplicate: true,
+                taskUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${taskId}`,
+                timestamp: new Date().toISOString(),
+              }
+            );
+          }
+        } catch (notifError: any) {
+          console.error(`Failed to send notification: ${notifError.message}`);
+          // Don't fail the webhook request if notification fails
+        }
+        */
+
         // Return 200 with existing task info
         return res.status(200).json({
           success: true,
@@ -260,6 +289,32 @@ router.post(
             repositoryCount: repositories.length,
           },
         });
+
+        // Send notification to client (DISABLED - requires SMTP setup)
+        /*
+        try {
+          const project = await Project.findById(projectId);
+          if (project?.settings?.errorNotifications?.enabled) {
+            await notificationService.notifyClient(
+              project.settings.errorNotifications.channels || [],
+              {
+                taskId,
+                projectId,
+                errorType,
+                errorMessage: message,
+                severity,
+                occurrenceCount: 1,
+                isDuplicate: false,
+                taskUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${taskId}`,
+                timestamp: new Date().toISOString(),
+              }
+            );
+          }
+        } catch (notifError: any) {
+          console.error(`Failed to send notification: ${notifError.message}`);
+          // Don't fail the webhook request if notification fails
+        }
+        */
 
         // Trigger orchestration asynchronously
         setImmediate(async () => {

@@ -262,10 +262,10 @@ router.post('/logout', (_req: Request, res: Response) => {
  * GET /api/auth/me/api-key
  * Get user's default Anthropic API key
  */
-router.get('/me/api-key', async (req: any, res) => {
+router.get('/me/api-key', async (req: any, res): Promise<any> => {
   try {
     const { authenticate } = await import('../middleware/auth');
-    await authenticate(req, res, async () => {
+    return await authenticate(req, res, async () => {
       const user = await User.findById(req.user.id).select('+defaultApiKey');
 
       if (!user) {
@@ -281,7 +281,7 @@ router.get('/me/api-key', async (req: any, res) => {
         ? `sk-ant-...${apiKey.slice(-4)}`
         : null;
 
-      res.json({
+      return res.json({
         success: true,
         data: {
           hasApiKey: !!apiKey,
@@ -291,7 +291,7 @@ router.get('/me/api-key', async (req: any, res) => {
     });
   } catch (error: any) {
     console.error('❌ Error getting user API key:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to get API key',
     });
@@ -302,10 +302,10 @@ router.get('/me/api-key', async (req: any, res) => {
  * PUT /api/auth/me/api-key
  * Update user's default Anthropic API key
  */
-router.put('/me/api-key', async (req: any, res) => {
+router.put('/me/api-key', async (req: any, res): Promise<any> => {
   try {
     const { authenticate } = await import('../middleware/auth');
-    await authenticate(req, res, async () => {
+    return await authenticate(req, res, async () => {
       const { apiKey } = req.body;
 
       // Validate API key format
@@ -327,7 +327,7 @@ router.put('/me/api-key', async (req: any, res) => {
       user.defaultApiKey = apiKey || undefined;
       await user.save();
 
-      res.json({
+      return res.json({
         success: true,
         message: 'Default API key updated successfully',
         data: {
@@ -337,7 +337,7 @@ router.put('/me/api-key', async (req: any, res) => {
     });
   } catch (error: any) {
     console.error('❌ Error updating user API key:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to update API key',
     });

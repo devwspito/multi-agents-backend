@@ -53,7 +53,10 @@ export interface IMergeResult {
  * - cli-tool/components/agents/git/git-flow-manager.md
  */
 export class AutoMergeService {
-  constructor(private githubService: GitHubService) {}
+  constructor(_githubService?: GitHubService) {
+    // GitHubService available for future use
+    void _githubService;
+  }
 
   /**
    * Merge a PR to main branch with automatic conflict resolution
@@ -237,7 +240,7 @@ export class AutoMergeService {
   /**
    * Fetch latest changes from remote
    */
-  private async fetchLatest(repoPath: string, taskId: string): Promise<void> {
+  private async fetchLatest(repoPath: string, _taskId: string): Promise<void> {
     console.log(`   🔄 Fetching latest from origin...`);
 
     try {
@@ -255,7 +258,7 @@ export class AutoMergeService {
   private async getPRBranch(
     prNumber: number,
     repoPath: string,
-    taskId: string
+    _taskId: string
   ): Promise<string | null> {
     try {
       // Get branch name from PR number using gh CLI
@@ -278,7 +281,7 @@ export class AutoMergeService {
   private async detectConflicts(
     repoPath: string,
     prBranch: string,
-    taskId: string
+    _taskId: string
   ): Promise<IMergeConflict[]> {
     try {
       // Checkout main and update
@@ -309,7 +312,7 @@ export class AutoMergeService {
         const conflicts: IMergeConflict[] = [];
 
         for (const file of conflictingFiles) {
-          const conflict = await this.analyzeConflict(repoPath, file, prBranch, taskId);
+          const conflict = await this.analyzeConflict(repoPath, file, prBranch, _taskId);
           conflicts.push(conflict);
         }
 
@@ -328,7 +331,7 @@ export class AutoMergeService {
     repoPath: string,
     file: string,
     prBranch: string,
-    taskId: string
+    _taskId: string
   ): Promise<IMergeConflict> {
     try {
       // Get diff for this file
@@ -372,7 +375,7 @@ export class AutoMergeService {
   private async resolveSimpleConflicts(
     repoPath: string,
     conflicts: IMergeConflict[],
-    taskId: string
+    _taskId: string
   ): Promise<number> {
     const simpleConflicts = conflicts.filter((c) => c.canAutoResolve);
 
@@ -407,7 +410,7 @@ export class AutoMergeService {
   /**
    * Run tests before merging (optional)
    */
-  private async runTests(repoPath: string, taskId: string): Promise<boolean> {
+  private async runTests(repoPath: string, _taskId: string): Promise<boolean> {
     console.log(`   🧪 Running tests...`);
 
     try {
@@ -444,7 +447,7 @@ export class AutoMergeService {
     repoPath: string,
     prBranch: string,
     prNumber: number,
-    taskId: string
+    _taskId: string
   ): Promise<string> {
     try {
       // Checkout main

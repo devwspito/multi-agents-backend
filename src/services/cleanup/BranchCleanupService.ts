@@ -35,12 +35,12 @@ export class BranchCleanupService {
    * Called by DevelopersPhase when creating story branches
    */
   static trackStoryBranch(
-    taskId: string,
-    epicId: string,
+    _taskId: string,
+    _epicId: string,
     epicBranch: string,
-    storyId: string,
+    _storyId: string,
     storyBranch: string,
-    targetRepository: string
+    _targetRepository: string
   ): void {
     // Store in Task model under (task.orchestration as any).branchMappings
     console.log(`📝 [BranchCleanup] Tracking: ${storyBranch} belongs to epic ${epicBranch}`);

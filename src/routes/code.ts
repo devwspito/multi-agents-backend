@@ -3,7 +3,7 @@
  * Endpoints para ver el código generado por los developers
  */
 
-import express from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 
@@ -13,7 +13,7 @@ const router = express.Router();
  * GET /api/code/:taskId
  * Obtiene todo el código generado para una tarea
  */
-router.get('/:taskId', async (req, res) => {
+router.get('/:taskId', async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.params;
 
@@ -59,7 +59,7 @@ router.get('/:taskId', async (req, res) => {
  * GET /api/code/:taskId/files
  * Lista todos los archivos creados/modificados
  */
-router.get('/:taskId/files', async (req, res) => {
+router.get('/:taskId/files', async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.params;
 
@@ -125,7 +125,7 @@ router.get('/:taskId/files', async (req, res) => {
  * Obtiene el contenido específico de un archivo
  * Query param: path=/path/to/file
  */
-router.get('/:taskId/file', async (req, res) => {
+router.get('/:taskId/file', async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.params;
     const { path: filePath } = req.query;
@@ -143,7 +143,7 @@ router.get('/:taskId/file', async (req, res) => {
     const logs = JSON.parse(fs.readFileSync(logsPath, 'utf-8'));
 
     // Buscar la última versión del archivo
-    let lastContent = null;
+    let lastContent: any = null;
     let history: any[] = [];
 
     logs.forEach((entry: any) => {
@@ -190,7 +190,7 @@ router.get('/:taskId/file', async (req, res) => {
  * Server-Sent Events para ver código en tiempo real
  */
 router.get('/:taskId/stream', (req, res) => {
-  const { taskId } = req.params;
+  const { taskId: _taskId } = req.params;
 
   // Configurar SSE
   res.writeHead(200, {
@@ -201,6 +201,9 @@ router.get('/:taskId/stream', (req, res) => {
   });
 
   // Listener para eventos de código
+  // Note: NotificationService doesn't have event emitter methods yet
+  // These handlers are defined but not subscribed for future implementation
+  /* Disabled - NotificationService doesn't have EventEmitter yet
   const codeWriteHandler = (data: any) => {
     if (data.taskId === taskId) {
       res.write(`event: code:write\n`);
@@ -215,9 +218,10 @@ router.get('/:taskId/stream', (req, res) => {
     }
   };
 
-  // Suscribir a eventos
+  // TODO: Implement event subscription when NotificationService has EventEmitter functionality
   NotificationService.on('agent:code:write', codeWriteHandler);
   NotificationService.on('agent:code:edit', codeEditHandler);
+  */
 
   // Keep-alive
   const keepAlive = setInterval(() => {
@@ -226,13 +230,16 @@ router.get('/:taskId/stream', (req, res) => {
 
   // Cleanup on disconnect
   req.on('close', () => {
+    // TODO: Implement event unsubscription when available
+    /* Disabled - NotificationService doesn't have EventEmitter yet
     NotificationService.off('agent:code:write', codeWriteHandler);
     NotificationService.off('agent:code:edit', codeEditHandler);
+    */
     clearInterval(keepAlive);
   });
 });
 
-// Import NotificationService type
-import { NotificationService } from '../services/NotificationService';
+// Import NotificationService type (disabled - not used yet)
+// import { NotificationService } from '../services/NotificationService';
 
 export default router;

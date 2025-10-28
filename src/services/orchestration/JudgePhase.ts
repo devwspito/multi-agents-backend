@@ -100,7 +100,7 @@ export class JudgePhase extends BasePhase {
       // Full batch review mode (called from orchestration)
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
-      stories = state.stories || [];
+      stories = (state.stories || []) as any;
       console.log(`📋 [Judge] Batch review mode: Retrieved ${stories.length} stories from EventStore`);
     }
 
@@ -123,8 +123,8 @@ export class JudgePhase extends BasePhase {
         } as any;
       }
 
-      task.orchestration.judge.status = 'in_progress';
-      task.orchestration.judge.startedAt = new Date();
+      task.orchestration.judge!.status = 'in_progress';
+      task.orchestration.judge!.startedAt = new Date();
       await task.save();
     }
 
@@ -168,8 +168,8 @@ export class JudgePhase extends BasePhase {
 
     // Save results (skip in multi-team mode to avoid conflicts)
     if (!multiTeamMode) {
-      task.orchestration.judge.status = allPassed ? 'completed' : 'failed';
-      task.orchestration.judge.completedAt = new Date();
+      task.orchestration.judge!.status = allPassed ? 'completed' : 'failed';
+      task.orchestration.judge!.completedAt = new Date();
       await task.save();
     }
 
@@ -422,12 +422,12 @@ export class JudgePhase extends BasePhase {
 
     // Get target repository from context or story's epic
     let targetRepository = context.getData<string>('targetRepository');
-    if (!targetRepository && story.epicId) {
+    if (!targetRepository && (story as any).epicId) {
       // Try to get from epic
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
-      const epic = state.epics?.find((e: any) => e.id === story.epicId);
-      targetRepository = epic?.targetRepository || epic?.affectedRepositories?.[0];
+      const epic = state.epics?.find((e: any) => e.id === (story as any).epicId);
+      targetRepository = epic?.targetRepository || (epic as any)?.affectedRepositories?.[0];
     }
     if (!targetRepository) {
       // Fallback to first repository

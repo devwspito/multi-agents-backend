@@ -102,7 +102,10 @@
       "Bash(git clone:*)",
       "Bash(npm run dev:*)",
       "Bash(./.claude/hooks/security-scan.sh:*)",
-      "Bash(npm run cleanup-workspaces:*)"
+      "Bash(npm run cleanup-workspaces:*)",
+      "Bash(timeout 10 npm run dev:*)",
+      "Bash(perl:*)",
+      "Bash(src/services/orchestration/OrchestrationCoordinator.ts)"
     ],
     "deny": [],
     "ask": []

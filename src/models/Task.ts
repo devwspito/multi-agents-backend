@@ -202,6 +202,7 @@ export interface IOrchestration {
 
   // Métricas globales
   currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'completed';
+  phases?: any[]; // Array of phase objects with name, status, startedAt, approval
   totalCost: number;
   totalTokens: number;
 
@@ -287,6 +288,7 @@ export interface ITask extends Document {
     source?: string;
   };
 
+  completedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
