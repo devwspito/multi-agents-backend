@@ -15,7 +15,8 @@ import path from 'path';
 const { combine, timestamp, printf, colorize, errors, json } = winston.format;
 
 // Formato personalizado para consola (desarrollo)
-const consoleFormat = printf(({ level, message, timestamp, ...metadata }) => {
+const consoleFormat = printf((info) => {
+  const { level, message, timestamp, ...metadata } = info as any;
   let msg = `${timestamp} [${level}] ${message}`;
 
   // Agregar metadata si existe

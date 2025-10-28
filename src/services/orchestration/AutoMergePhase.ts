@@ -29,8 +29,7 @@ export class AutoMergePhase extends BasePhase {
   readonly description = 'Automatically merging PRs to main';
 
   constructor(
-    private githubService: GitHubService,
-    private workspaceDir: string
+    private githubService: GitHubService
   ) {
     super();
   }

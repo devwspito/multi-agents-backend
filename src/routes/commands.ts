@@ -32,7 +32,7 @@ const executeCommandSchema = z.object({
  *   "taskId": "optional-task-id"
  * }
  */
-router.post('/execute', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/execute', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const body = executeCommandSchema.parse(req.body);
 
@@ -73,7 +73,7 @@ router.post('/execute', authenticate, async (req: Request, res: Response): Promi
  * GET /api/commands/available
  * Get list of available slash commands
  */
-router.get('/available', authenticate, async (_req: Request, res: Response): Promise<void> => {
+router.get('/available', authenticate, async (_req: Request, res: Response): Promise<any> => {
   try {
     const availableCommands = CommandService.getAvailableCommands();
 
@@ -101,7 +101,7 @@ router.get('/available', authenticate, async (_req: Request, res: Response): Pro
  * GET /api/commands/:commandName/help
  * Get help text for a specific command
  */
-router.get('/:commandName/help', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.get('/:commandName/help', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const commandName = req.params.commandName as SlashCommand;
 
@@ -132,7 +132,7 @@ router.get('/:commandName/help', authenticate, async (req: Request, res: Respons
  * POST /api/commands/check-quality
  * Shortcut for /check-quality command
  */
-router.post('/check-quality', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/check-quality', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.body;
 
@@ -164,7 +164,7 @@ router.post('/check-quality', authenticate, async (req: Request, res: Response):
  * POST /api/commands/analyze-security
  * Shortcut for /analyze-security command
  */
-router.post('/analyze-security', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/analyze-security', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.body;
 
@@ -196,7 +196,7 @@ router.post('/analyze-security', authenticate, async (req: Request, res: Respons
  * POST /api/commands/review-pr
  * Shortcut for /review-pr command
  */
-router.post('/review-pr', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/review-pr', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { prNumber, taskId } = req.body;
 
@@ -239,7 +239,7 @@ router.post('/review-pr', authenticate, async (req: Request, res: Response): Pro
  * POST /api/commands/run-tests
  * Shortcut for /run-tests command
  */
-router.post('/run-tests', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/run-tests', authenticate, async (req: Request, res: Response): Promise<any> => {
   try {
     const { taskId } = req.body;
 

@@ -851,7 +851,7 @@ The system will **REJECT** your epics if they overlap (modify the same files). T
         // Epic spans multiple repositories - split it
         console.log(`⚠️  [ProjectManager] Epic "${epic.id}" spans multiple repos:`, affinity.affectedRepositories);
 
-        for (const [index, repoName] of affinity.affectedRepositories.entries()) {
+        for (const [_index, repoName] of affinity.affectedRepositories.entries()) {
           const filesForRepo = affinity.filesByRepository.get(repoName) || [];
           const repo = repositories.find(r => r.name === repoName);
 
@@ -1107,7 +1107,7 @@ The system will **REJECT** your epics if they overlap (modify the same files). T
    * - 30-70% overlap → SEQUENCE (add dependencies)
    * - <30% overlap → SPLIT (refactor code)
    */
-  private buildOverlapFeedback(errorMessage: string, epics: any[]): string {
+  private buildOverlapFeedback(errorMessage: string, _epics: any[]): string {
     let feedback = `# 🚨 CRITICAL ERROR: EPIC OVERLAP DETECTED - MUST FIX IMMEDIATELY\n\n`;
     feedback += `⛔ YOUR PREVIOUS OUTPUT WAS REJECTED due to file conflicts.\n\n`;
 
@@ -1292,7 +1292,7 @@ The system will **REJECT** your epics if they overlap (modify the same files). T
    * Returns the conflicting epic if overlap detected, null otherwise
    */
   private detectEpicOverlap(
-    newEpic: any,
+    _newEpic: any,
     existingEpics: any[],
     newEpicFiles: string[]
   ): { title: string; epicId: string; overlappingFiles: string[] } | null {

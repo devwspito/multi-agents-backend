@@ -798,8 +798,10 @@ export class DevelopersPhase extends BasePhase {
   /**
    * Review a story branch with Judge
    * Returns true if approved, false if changes requested
+   * @deprecated - Not currently used, retained for future functionality
    */
-  private async reviewStoryBranch(
+  // @ts-ignore - Unused method retained for future functionality
+  private async _reviewStoryBranch(
     story: any,
     task: any,
     workspacePath: string | null,

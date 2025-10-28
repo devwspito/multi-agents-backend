@@ -23,6 +23,7 @@ export type LogCategory =
   | 'auto_merge'      // Auto-merge operations
   | 'branch_cleanup'  // Branch cleanup after merge
   | 'webhook'         // Webhook events
+  | 'scheduled_cleanup' // Scheduled cleanup operations
   | 'error';          // Errors and failures
 
 /**

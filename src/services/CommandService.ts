@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { LogService } from './logging/LogService';
 import { OrchestrationCoordinator } from './orchestration/OrchestrationCoordinator';
 import { Task } from '../models/Task';
@@ -62,7 +63,7 @@ export class CommandService {
     if (!fs.existsSync(commandPath)) {
       const error = `Command not found: ${commandPath}`;
       await LogService.warn(error, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         metadata: { commandName, commandPath },
       });
@@ -137,7 +138,7 @@ export class CommandService {
       console.log(`   ✅ Command completed in ${executionTime}ms`);
 
       await LogService.info(`Command executed: /${commandName}`, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         metadata: {
           commandName,
@@ -158,7 +159,7 @@ export class CommandService {
       console.error(`   ❌ Command failed: ${error.message}`);
 
       await LogService.error(`Command failed: /${commandName}`, {
-        taskId,
+        taskId: taskId as any,
         category: 'orchestration',
         error,
         metadata: {
@@ -187,16 +188,23 @@ export class CommandService {
   ): Promise<any> {
     // Use general-purpose agent or create a specialized quality-check agent
     const coordinator = new OrchestrationCoordinator();
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
     // For now, use QA engineer agent for quality checks
-    return await coordinator.executeAgent('qa-engineer', {
+    return await coordinator.executeAgent(
+      'qa-engineer',
       prompt,
+      workspaceDir,
       taskId,
-      options: {
+      'qa-engineer',
+      undefined,
+      false,
+      [],
+      {
         maxIterations: 10,
         timeout: 300000, // 5 minutes
-      },
-    });
+      }
+    );
   }
 
   /**
@@ -208,16 +216,23 @@ export class CommandService {
     taskId?: string
   ): Promise<any> {
     const coordinator = new OrchestrationCoordinator();
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
     // Use QA engineer with security-focused prompt
-    return await coordinator.executeAgent('qa-engineer', {
-      prompt: `${prompt}\n\nFocus on OWASP API Security Top 10 vulnerabilities and dependency security.`,
+    return await coordinator.executeAgent(
+      'qa-engineer',
+      `${prompt}\n\nFocus on OWASP API Security Top 10 vulnerabilities and dependency security.`,
+      workspaceDir,
       taskId,
-      options: {
+      'qa-engineer',
+      undefined,
+      false,
+      [],
+      {
         maxIterations: 15,
         timeout: 600000, // 10 minutes
-      },
-    });
+      }
+    );
   }
 
   /**
@@ -236,16 +251,23 @@ export class CommandService {
     }
 
     const coordinator = new OrchestrationCoordinator();
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
     // Use judge agent for PR review
-    return await coordinator.executeAgent('judge', {
-      prompt: `${prompt}\n\nReview Pull Request #${prNumber}`,
+    return await coordinator.executeAgent(
+      'judge',
+      `${prompt}\n\nReview Pull Request #${prNumber}`,
+      workspaceDir,
       taskId,
-      options: {
+      'judge',
+      undefined,
+      false,
+      [],
+      {
         maxIterations: 20,
         timeout: 600000, // 10 minutes
-      },
-    });
+      }
+    );
   }
 
   /**
@@ -257,16 +279,23 @@ export class CommandService {
     taskId?: string
   ): Promise<any> {
     const coordinator = new OrchestrationCoordinator();
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
     // Use QA engineer to run tests
-    return await coordinator.executeAgent('qa-engineer', {
-      prompt: `${prompt}\n\nRun the complete test suite and report results.`,
+    return await coordinator.executeAgent(
+      'qa-engineer',
+      `${prompt}\n\nRun the complete test suite and report results.`,
+      workspaceDir,
       taskId,
-      options: {
+      'qa-engineer',
+      undefined,
+      false,
+      [],
+      {
         maxIterations: 10,
         timeout: 600000, // 10 minutes
-      },
-    });
+      }
+    );
   }
 
   /**
@@ -285,16 +314,23 @@ export class CommandService {
     }
 
     const coordinator = new OrchestrationCoordinator();
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
     // Use tech-lead for complexity estimation
-    return await coordinator.executeAgent('tech-lead', {
-      prompt: `${prompt}\n\nTask: ${taskDescription}`,
+    return await coordinator.executeAgent(
+      'tech-lead',
+      `${prompt}\n\nTask: ${taskDescription}`,
+      workspaceDir,
       taskId,
-      options: {
+      'tech-lead',
+      undefined,
+      false,
+      [],
+      {
         maxIterations: 10,
         timeout: 300000, // 5 minutes
-      },
-    });
+      }
+    );
   }
 
   /**

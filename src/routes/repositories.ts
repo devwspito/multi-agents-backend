@@ -17,7 +17,7 @@ const githubService = new GitHubService(workspaceDir);
  * GET /api/repositories/github
  * Obtener repositorios de GitHub del usuario autenticado
  */
-router.get('/github', authenticate, async (req: AuthRequest, res) => {
+router.get('/github', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { User } = await import('../models/User');
     const user = await User.findById(req.user!.id).select('accessToken');
@@ -111,7 +111,7 @@ const updateRepositorySchema = z.object({
  * GET /api/repositories
  * Obtener todos los repositorios del usuario (opcionalmente filtrados por proyecto)
  */
-router.get('/', authenticate, async (req: AuthRequest, res) => {
+router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { projectId, isActive } = req.query;
 
@@ -170,7 +170,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
  * GET /api/repositories/:id
  * Obtener un repositorio específico
  */
-router.get('/:id', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id)
       .populate('projectId', 'name description userId')
@@ -211,7 +211,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
  * POST /api/repositories
  * Crear un nuevo repositorio (agregar repo a un proyecto)
  */
-router.post('/', authenticate, async (req: AuthRequest, res) => {
+router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const validatedData = createRepositorySchema.parse(req.body);
 
@@ -278,7 +278,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
  * PUT /api/repositories/:id
  * Actualizar un repositorio
  */
-router.put('/:id', authenticate, async (req: AuthRequest, res) => {
+router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const validatedData = updateRepositorySchema.parse(req.body);
 
@@ -332,7 +332,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res) => {
  * POST /api/repositories/:id/sync
  * Sincronizar workspace con el repo remoto
  */
-router.post('/:id/sync', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/sync', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id).populate('projectId');
     if (!repository) {
@@ -379,7 +379,7 @@ router.post('/:id/sync', authenticate, async (req: AuthRequest, res) => {
  * DELETE /api/repositories/:id
  * Eliminar un repositorio y limpiar su workspace
  */
-router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
+router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id).populate('projectId');
     if (!repository) {
@@ -426,7 +426,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
  * GET /api/repositories/:id/env
  * Get environment variables for a repository
  */
-router.get('/:id/env', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id).populate('projectId');
     if (!repository) {
@@ -474,7 +474,7 @@ const envVariableSchema = z.object({
   })),
 });
 
-router.put('/:id/env', authenticate, async (req: AuthRequest, res) => {
+router.put('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id).populate('projectId');
     if (!repository) {
@@ -543,7 +543,7 @@ router.put('/:id/env', authenticate, async (req: AuthRequest, res) => {
  * DELETE /api/repositories/:id/env
  * Delete all environment variables for a repository
  */
-router.delete('/:id/env', authenticate, async (req: AuthRequest, res) => {
+router.delete('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const repository = await Repository.findById(req.params.id).populate('projectId');
     if (!repository) {

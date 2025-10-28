@@ -18,7 +18,7 @@ import { AgentModelConfig } from '../../config/ModelConfigurations';
 
 // 🔥 NEW: Best practice services
 import { RetryService } from './RetryService';
-import { SchemaValidationService } from './SchemaValidation';
+// import { SchemaValidationService } from './SchemaValidation'; // Unused - available for future use
 import { CostBudgetService } from './CostBudgetService';
 import { SecretsDetectionService } from './SecretsDetectionService';
 
@@ -77,7 +77,7 @@ export class OrchestrationCoordinator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
   private readonly prManagementService: PRManagementService;
-  private readonly compactionService: ContextCompactionService;
+  private readonly _compactionService: ContextCompactionService;
 
   /**
    * Ordered phases - executes sequentially with approval gates
@@ -103,7 +103,8 @@ export class OrchestrationCoordinator {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
     this.prManagementService = new PRManagementService(this.githubService);
-    this.compactionService = new ContextCompactionService();
+    this._compactionService = new ContextCompactionService();
+    void this._compactionService; // Available for future use
   }
 
   /**
@@ -114,8 +115,11 @@ export class OrchestrationCoordinator {
    * - Idle time (many turns without Edit/Write)
    * - No file changes in git
    * - Execution timeout
+   *
+   * @deprecated - Not currently used, retained for future functionality
    */
-  private async checkDeveloperProgress(
+  // @ts-ignore - Unused method retained for future functionality
+  private async _checkDeveloperProgress(
     progress: DeveloperProgress,
     workspacePath: string,
     story: any,
@@ -648,7 +652,7 @@ export class OrchestrationCoordinator {
         return new ApprovalPhase();
 
       case 'AutoMerge':
-        return new AutoMergePhase(this.githubService, this.workspaceDir);
+        return new AutoMergePhase(this.githubService);
 
       default:
         return null;
@@ -721,7 +725,7 @@ export class OrchestrationCoordinator {
   /**
    * Get workspace structure for agent context
    */
-  private async getWorkspaceStructure(workspacePath: string): Promise<string> {
+  private async getWorkspaceStructure(_workspacePath: string): Promise<string> {
     // TODO: Implement tree command or fs-based directory listing
     return 'Workspace structure loading...';
   }
@@ -792,16 +796,16 @@ export class OrchestrationCoordinator {
    *
    * Using single-mode (non-streaming) for reliability and simplicity.
    */
-  private async executeAgent(
+  public async executeAgent(
     agentType: string,
     prompt: string,
     workspacePath: string,
     taskId?: string,
-    agentName?: string,
+    _agentName?: string,
     sessionId?: string,
-    fork?: boolean,
+    _fork?: boolean,
     attachments?: any[],
-    options?: {
+    _options?: {
       maxIterations?: number;
       timeout?: number;
     },
@@ -814,9 +818,9 @@ export class OrchestrationCoordinator {
     let repositoryType: 'frontend' | 'backend' | 'mobile' | 'fullstack' | 'library' | 'unknown' = 'unknown';
     if (taskId && agentType === 'developer') {
       try {
-        const task = await Task.findById(taskId).populate('project');
-        if (task?.project) {
-          const project = task.project as any;
+        const task = await Task.findById(taskId).populate('projectId');
+        if (task?.projectId) {
+          const project = task.projectId as any;
           // Get repository type from the first repository (if multi-repo)
           if (project.repositories && project.repositories.length > 0) {
             repositoryType = project.repositories[0].type || 'unknown';
@@ -1006,7 +1010,7 @@ export class OrchestrationCoordinator {
         }
 
         // Log every message type for debugging
-        if (message.type !== 'tool_use' && message.type !== 'tool_result' && message.type !== 'text') {
+        if ((message as any).type !== 'tool_use' && (message as any).type !== 'tool_result' && (message as any).type !== 'text') {
           console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
             hasSubtype: !!(message as any).subtype,
             isError: !!(message as any).is_error,
@@ -1014,7 +1018,7 @@ export class OrchestrationCoordinator {
         }
 
         // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
-        if (message.type === 'turn_start') {
+        if ((message as any).type === 'turn_start') {
           turnCount++;
           console.log(`\n🔄 [${agentType}] Turn ${turnCount} started`);
           if (taskId) {
@@ -1022,7 +1026,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'tool_use') {
+        if ((message as any).type === 'tool_use') {
           const tool = (message as any).name || 'unknown';
           const input = (message as any).input || {};
           console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
@@ -1062,7 +1066,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'tool_result') {
+        if ((message as any).type === 'tool_result') {
           const status = (message as any).is_error ? '❌' : '✅';
           const result = (message as any).content || (message as any).result || '';
 
@@ -1076,7 +1080,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        if (message.type === 'text') {
+        if ((message as any).type === 'text') {
           const text = (message as any).text || '';
           if (text.length > 0) {
             const preview = text.substring(0, 100);
@@ -1312,7 +1316,7 @@ export class OrchestrationCoordinator {
     member: any,
     repositories: any[],
     workspacePath: string,
-    workspaceStructure: string,
+    _workspaceStructure: string,
     attachments?: any[], // Receive attachments from context
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
@@ -1675,7 +1679,7 @@ After writing code, you MUST:
   /**
    * Handle orchestration completion
    */
-  private async handleOrchestrationComplete(task: ITask, context: OrchestrationContext): Promise<void> {
+  private async handleOrchestrationComplete(task: ITask, _context: OrchestrationContext): Promise<void> {
     task.status = 'completed';
     task.orchestration.currentPhase = 'completed';
     await task.save();
@@ -1693,13 +1697,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'Product Manager',
         cost: pm.cost_usd || 0,
-        inputTokens: pm.usage.input_tokens || 0,
-        outputTokens: pm.usage.output_tokens || 0,
+        inputTokens: pm.usage?.input_tokens || 0,
+        outputTokens: pm.usage?.output_tokens || 0,
       });
-      totalInputTokens += pm.usage.input_tokens || 0;
-      totalOutputTokens += pm.usage.output_tokens || 0;
-      cacheCreationTokens += pm.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += pm.usage.cache_read_input_tokens || 0;
+      totalInputTokens += pm.usage?.input_tokens || 0;
+      totalOutputTokens += pm.usage?.output_tokens || 0;
+      cacheCreationTokens += pm.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += pm.usage?.cache_read_input_tokens || 0;
     }
 
     // Project Manager
@@ -1708,13 +1712,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'Project Manager',
         cost: pjm.cost_usd || 0,
-        inputTokens: pjm.usage.input_tokens || 0,
-        outputTokens: pjm.usage.output_tokens || 0,
+        inputTokens: pjm.usage?.input_tokens || 0,
+        outputTokens: pjm.usage?.output_tokens || 0,
       });
-      totalInputTokens += pjm.usage.input_tokens || 0;
-      totalOutputTokens += pjm.usage.output_tokens || 0;
-      cacheCreationTokens += pjm.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += pjm.usage.cache_read_input_tokens || 0;
+      totalInputTokens += pjm.usage?.input_tokens || 0;
+      totalOutputTokens += pjm.usage?.output_tokens || 0;
+      cacheCreationTokens += pjm.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += pjm.usage?.cache_read_input_tokens || 0;
     }
 
     // Tech Lead
@@ -1723,13 +1727,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'Tech Lead',
         cost: tl.cost_usd || 0,
-        inputTokens: tl.usage.input_tokens || 0,
-        outputTokens: tl.usage.output_tokens || 0,
+        inputTokens: tl.usage?.input_tokens || 0,
+        outputTokens: tl.usage?.output_tokens || 0,
       });
-      totalInputTokens += tl.usage.input_tokens || 0;
-      totalOutputTokens += tl.usage.output_tokens || 0;
-      cacheCreationTokens += tl.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += tl.usage.cache_read_input_tokens || 0;
+      totalInputTokens += tl.usage?.input_tokens || 0;
+      totalOutputTokens += tl.usage?.output_tokens || 0;
+      cacheCreationTokens += tl.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += tl.usage?.cache_read_input_tokens || 0;
     }
 
     // Developers (team)
@@ -1756,13 +1760,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'Judge',
         cost: judge.cost_usd || 0,
-        inputTokens: judge.usage.input_tokens || 0,
-        outputTokens: judge.usage.output_tokens || 0,
+        inputTokens: judge.usage?.input_tokens || 0,
+        outputTokens: judge.usage?.output_tokens || 0,
       });
-      totalInputTokens += judge.usage.input_tokens || 0;
-      totalOutputTokens += judge.usage.output_tokens || 0;
-      cacheCreationTokens += judge.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += judge.usage.cache_read_input_tokens || 0;
+      totalInputTokens += judge.usage?.input_tokens || 0;
+      totalOutputTokens += judge.usage?.output_tokens || 0;
+      cacheCreationTokens += judge.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += judge.usage?.cache_read_input_tokens || 0;
     }
 
     // Fixer
@@ -1771,13 +1775,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'Fixer',
         cost: fixer.cost_usd || 0,
-        inputTokens: fixer.usage.input_tokens || 0,
-        outputTokens: fixer.usage.output_tokens || 0,
+        inputTokens: fixer.usage?.input_tokens || 0,
+        outputTokens: fixer.usage?.output_tokens || 0,
       });
-      totalInputTokens += fixer.usage.input_tokens || 0;
-      totalOutputTokens += fixer.usage.output_tokens || 0;
-      cacheCreationTokens += fixer.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += fixer.usage.cache_read_input_tokens || 0;
+      totalInputTokens += fixer.usage?.input_tokens || 0;
+      totalOutputTokens += fixer.usage?.output_tokens || 0;
+      cacheCreationTokens += fixer.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += fixer.usage?.cache_read_input_tokens || 0;
     }
 
     // QA Engineer
@@ -1786,13 +1790,13 @@ After writing code, you MUST:
       breakdown.push({
         phase: 'QA Engineer',
         cost: qa.cost_usd || 0,
-        inputTokens: qa.usage.input_tokens || 0,
-        outputTokens: qa.usage.output_tokens || 0,
+        inputTokens: qa.usage?.input_tokens || 0,
+        outputTokens: qa.usage?.output_tokens || 0,
       });
-      totalInputTokens += qa.usage.input_tokens || 0;
-      totalOutputTokens += qa.usage.output_tokens || 0;
-      cacheCreationTokens += qa.usage.cache_creation_input_tokens || 0;
-      cacheReadTokens += qa.usage.cache_read_input_tokens || 0;
+      totalInputTokens += qa.usage?.input_tokens || 0;
+      totalOutputTokens += qa.usage?.output_tokens || 0;
+      cacheCreationTokens += qa.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += qa.usage?.cache_read_input_tokens || 0;
     }
 
     // Calculate REAL total cost by summing all agent costs

@@ -98,7 +98,7 @@ function getRepositoryConfig(type: 'backend' | 'frontend' | 'mobile' | 'shared',
  * GET /api/projects
  * Obtener todos los proyectos del usuario con sus repositorios
  */
-router.get('/', authenticate, async (req: AuthRequest, res) => {
+router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { isActive } = req.query;
 
@@ -143,7 +143,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
  * GET /api/projects/:id
  * Obtener un proyecto específico con sus repositorios
  */
-router.get('/:id', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const project = await Project.findOne({
       _id: req.params.id,
@@ -183,7 +183,7 @@ router.get('/:id', authenticate, async (req: AuthRequest, res) => {
  * POST /api/projects
  * Crear un nuevo proyecto con sus repositorios
  */
-router.post('/', authenticate, async (req: AuthRequest, res) => {
+router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const validatedData = createProjectSchema.parse(req.body);
     const { repositories, ...projectData } = validatedData;
@@ -296,7 +296,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
  * PUT /api/projects/:id
  * Actualizar un proyecto
  */
-router.put('/:id', authenticate, async (req: AuthRequest, res) => {
+router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const validatedData = updateProjectSchema.parse(req.body);
 
@@ -344,7 +344,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res) => {
  * DELETE /api/projects/:id
  * Eliminar un proyecto y todos sus repositorios
  */
-router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
+router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const project = await Project.findOne({
       _id: req.params.id,
@@ -391,7 +391,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
  * GET /api/projects/:id/api-key
  * Get project's Anthropic API key (or user's default)
  */
-router.get('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const project = await Project.findOne({
       _id: req.params.id,
@@ -454,7 +454,7 @@ router.get('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
  * PUT /api/projects/:id/api-key
  * Update project's Anthropic API key
  */
-router.put('/:id/api-key', authenticate, async (req: AuthRequest, res) => {
+router.put('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { apiKey } = req.body;
 
@@ -519,7 +519,7 @@ const updateWebhookKeySchema = z.object({
  * POST /api/projects/:id/webhook-keys
  * Create a new webhook API key for external integrations
  */
-router.post('/:id/webhook-keys', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/webhook-keys', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const projectId = req.params.id;
     const userId = req.user!.id;
@@ -589,7 +589,7 @@ router.post('/:id/webhook-keys', authenticate, async (req: AuthRequest, res) => 
  * GET /api/projects/:id/webhook-keys
  * List all webhook API keys for a project
  */
-router.get('/:id/webhook-keys', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/webhook-keys', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const projectId = req.params.id;
     const userId = req.user!.id;
@@ -645,7 +645,7 @@ router.get('/:id/webhook-keys', authenticate, async (req: AuthRequest, res) => {
  * GET /api/projects/:id/webhook-keys/:keyId
  * Get details of a specific webhook API key
  */
-router.get('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res) => {
+router.get('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { id: projectId, keyId } = req.params;
     const userId = req.user!.id;
@@ -706,7 +706,7 @@ router.get('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, re
  * PATCH /api/projects/:id/webhook-keys/:keyId
  * Update webhook API key (name, rate limit, active status)
  */
-router.patch('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res) => {
+router.patch('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { id: projectId, keyId } = req.params;
     const userId = req.user!.id;
@@ -775,7 +775,7 @@ router.patch('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, 
  * DELETE /api/projects/:id/webhook-keys/:keyId
  * Deactivate a webhook API key (soft delete)
  */
-router.delete('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res) => {
+router.delete('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { id: projectId, keyId } = req.params;
     const userId = req.user!.id;
@@ -830,7 +830,7 @@ router.delete('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest,
  * POST /api/projects/:id/webhook-keys/:keyId/regenerate
  * Regenerate a webhook API key (creates new key, invalidates old one)
  */
-router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { id: projectId, keyId } = req.params;
     const userId = req.user!.id;
