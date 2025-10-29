@@ -114,6 +114,28 @@ export const ECONOMY_CONFIG: AgentModelConfig = {
 };
 
 /**
+ * Max Configuration (All Opus)
+ *
+ * - Maximum performance and capabilities
+ * - Best for mission-critical projects
+ * - Estimated cost: $30-40 per session
+ *
+ * Note: Highest quality but also highest cost
+ */
+export const MAX_CONFIG: AgentModelConfig = {
+  productManager: 'claude-3-opus-20240229',
+  projectManager: 'claude-3-opus-20240229',
+  techLead: 'claude-3-opus-20240229',
+  seniorDeveloper: 'claude-3-opus-20240229',
+  juniorDeveloper: 'claude-3-opus-20240229',
+  judge: 'claude-3-opus-20240229',
+  qaEngineer: 'claude-3-opus-20240229',
+  fixer: 'claude-3-opus-20240229',
+  mergeCoordinator: 'claude-3-opus-20240229',
+  autoMerge: 'claude-3-opus-20240229',
+};
+
+/**
  * Get model for a specific agent type
  */
 export function getAgentModel(

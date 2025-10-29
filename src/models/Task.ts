@@ -220,7 +220,7 @@ export interface IOrchestration {
 
   // Model configuration
   modelConfig?: {
-    preset?: 'premium' | 'standard' | 'economy' | 'custom';
+    preset?: 'max' | 'premium' | 'standard' | 'economy' | 'custom';
     customConfig?: {
       productManager?: string;
       projectManager?: string;
