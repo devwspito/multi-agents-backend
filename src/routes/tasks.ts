@@ -43,7 +43,7 @@ const autoApprovalConfigSchema = z.object({
 });
 
 const modelConfigSchema = z.object({
-  preset: z.enum(['premium', 'standard', 'economy', 'custom']).optional(),
+  preset: z.enum(['max', 'premium', 'standard', 'economy', 'custom']).optional(),
   customConfig: z.object({
     productManager: z.string().optional(),
     projectManager: z.string().optional(),
@@ -1448,7 +1448,7 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Import model configurations
-    const { PREMIUM_CONFIG, STANDARD_CONFIG, ECONOMY_CONFIG } = await import('../config/ModelConfigurations');
+    const { MAX_CONFIG, PREMIUM_CONFIG, STANDARD_CONFIG, ECONOMY_CONFIG } = await import('../config/ModelConfigurations');
 
     // Get current configuration
     const modelConfig = task.orchestration.modelConfig || {
@@ -1458,6 +1458,7 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
 
     // Get preset configurations for reference
     const presets = {
+      max: MAX_CONFIG,
       premium: PREMIUM_CONFIG,
       standard: STANDARD_CONFIG,
       economy: ECONOMY_CONFIG,

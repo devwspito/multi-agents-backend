@@ -858,6 +858,10 @@ export class OrchestrationCoordinator {
           console.log(`🎯 [ExecuteAgent] Using custom model configuration`);
         } else if (preset) {
           switch (preset) {
+            case 'max':
+              modelConfig = configs.MAX_CONFIG;
+              console.log(`🚀 [ExecuteAgent] Using MAX_CONFIG (All Opus - Maximum Performance)`);
+              break;
             case 'premium':
               modelConfig = configs.PREMIUM_CONFIG;
               console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
