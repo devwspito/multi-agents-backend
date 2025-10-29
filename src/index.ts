@@ -141,6 +141,15 @@ class AgentPlatformApp {
 
     // GitHub OAuth URL endpoint (compatibilidad con frontend)
     this.app.get('/api/github-auth/url', (req: Request, res: Response) => {
+      // Check if GitHub OAuth is configured
+      if (env.GITHUB_CLIENT_ID === 'not-configured' || env.GITHUB_CLIENT_SECRET === 'not-configured') {
+        res.status(501).json({
+          success: false,
+          message: 'GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables.',
+        });
+        return;
+      }
+
       const crypto = require('crypto');
       const state = crypto.randomBytes(16).toString('hex');
 

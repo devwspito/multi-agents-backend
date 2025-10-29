@@ -10,9 +10,9 @@ const envSchema = z.object({
   // Claude API
   ANTHROPIC_API_KEY: z.string().min(1),
 
-  // GitHub OAuth
-  GITHUB_CLIENT_ID: z.string().min(1),
-  GITHUB_CLIENT_SECRET: z.string().min(1),
+  // GitHub OAuth (OPTIONAL - only needed for GitHub login)
+  GITHUB_CLIENT_ID: z.string().min(1).default('not-configured'),
+  GITHUB_CLIENT_SECRET: z.string().min(1).default('not-configured'),
 
   // Security
   JWT_SECRET: z.string().min(32),
@@ -24,6 +24,12 @@ const envSchema = z.object({
   // Server
   PORT: z.string().default('3001').transform(Number),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+
+  // Redis (OPTIONAL - falls back to in-memory if not provided)
+  REDIS_URL: z.string().url().optional(),
+
+  // GitHub Token (OPTIONAL - for private repos)
+  GITHUB_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
