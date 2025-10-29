@@ -843,28 +843,38 @@ export class OrchestrationCoordinator {
     }
 
     // Get model configuration from task if available
-    let modelConfig: AgentModelConfig | undefined;
+    // Always default to STANDARD_CONFIG if not specified
+    const configs = await import('../../config/ModelConfigurations');
+    let modelConfig: AgentModelConfig = configs.STANDARD_CONFIG; // Default to standard
+
     if (taskId) {
       const task = await Task.findById(taskId);
       if (task?.orchestration?.modelConfig) {
         const { preset, customConfig } = task.orchestration.modelConfig;
+        console.log(`🎯 [ExecuteAgent] Task ${taskId} has modelConfig: preset=${preset}, hasCustomConfig=${!!customConfig}`);
+
         if (preset === 'custom' && customConfig) {
           modelConfig = customConfig as AgentModelConfig;
+          console.log(`🎯 [ExecuteAgent] Using custom model configuration`);
         } else if (preset) {
-          const configs = await import('../../config/ModelConfigurations');
           switch (preset) {
             case 'premium':
               modelConfig = configs.PREMIUM_CONFIG;
+              console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
               break;
             case 'economy':
               modelConfig = configs.ECONOMY_CONFIG;
+              console.log(`💰 [ExecuteAgent] Using ECONOMY_CONFIG (All Haiku)`);
               break;
             case 'standard':
             default:
               modelConfig = configs.STANDARD_CONFIG;
+              console.log(`⚙️ [ExecuteAgent] Using STANDARD_CONFIG (Sonnet + Haiku)`);
               break;
           }
         }
+      } else {
+        console.log(`⚠️ [ExecuteAgent] Task ${taskId} has no modelConfig, using STANDARD_CONFIG as default`);
       }
     }
 
@@ -874,6 +884,11 @@ export class OrchestrationCoordinator {
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
     console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);
     console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
+    console.log(`🔧 [ExecuteAgent] Model configuration:`, {
+      preset: taskId ? 'From task' : 'Default STANDARD_CONFIG',
+      modelUsed: sdkModel,
+      fullModelId,
+    });
     console.log(`🔧 [ExecuteAgent] Agent config:`, {
       agentType,
       model: sdkModel,
