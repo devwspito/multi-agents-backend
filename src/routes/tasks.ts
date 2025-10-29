@@ -180,6 +180,9 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         pipeline: [],
         totalCost: 0,
         totalTokens: 0,
+        modelConfig: {
+          preset: 'standard', // Default to standard configuration
+        },
       },
     });
 
@@ -1506,9 +1509,14 @@ router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
 
     if (validatedData.preset) {
       task.orchestration.modelConfig.preset = validatedData.preset;
+
+      // Clear custom config if not using custom preset
+      if (validatedData.preset !== 'custom') {
+        task.orchestration.modelConfig.customConfig = undefined;
+      }
     }
 
-    if (validatedData.customConfig) {
+    if (validatedData.preset === 'custom' && validatedData.customConfig) {
       task.orchestration.modelConfig.customConfig = validatedData.customConfig;
     }
 
