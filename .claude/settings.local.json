@@ -7,7 +7,12 @@
       "Bash(git commit:*)",
       "Read(//Users/luiscorrea/Desktop/mult-agent-software-project/**)",
       "Bash(npm install:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(npm ls:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(npm run dev:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

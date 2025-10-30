@@ -18,6 +18,7 @@ const createTaskSchema = z.object({
   projectId: z.string().optional(),
   repositoryIds: z.array(z.string()).optional(), // Array de repository IDs
   tags: z.array(z.string()).optional(),
+  modelConfig: z.enum(['standard', 'premium', 'economy', 'max']).optional(), // Model preset configuration
 });
 
 const startTaskSchema = z.object({
@@ -181,7 +182,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
         totalCost: 0,
         totalTokens: 0,
         modelConfig: {
-          preset: 'standard', // Default to standard configuration
+          preset: validatedData.modelConfig || 'standard', // Use provided config or default to standard
         },
       },
     });

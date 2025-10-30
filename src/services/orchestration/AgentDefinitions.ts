@@ -1684,9 +1684,10 @@ export function getAgentModel(agentType: string, modelConfig?: AgentModelConfig)
   if (modelConfig) {
     const configuredModel = getConfiguredModel(agentType, modelConfig);
     // Map full model names to SDK model names
-    if (configuredModel.includes('haiku')) return 'haiku';
-    if (configuredModel.includes('sonnet')) return 'sonnet';
-    if (configuredModel.includes('opus')) return 'opus';
+    // Support both old incorrect IDs and any future variations
+    if (configuredModel.includes('haiku') || configuredModel.includes('claude-haiku')) return 'haiku';
+    if (configuredModel.includes('sonnet') || configuredModel.includes('claude-sonnet')) return 'sonnet';
+    if (configuredModel.includes('opus') || configuredModel.includes('claude-opus')) return 'opus';
   }
 
   // Fall back to definition default
@@ -1702,7 +1703,7 @@ export function getFullModelId(sdkModel: string): string {
   const modelMap: Record<string, string> = {
     'haiku': 'claude-haiku-4-5-20251001',
     'sonnet': 'claude-sonnet-4-5-20250929',
-    'opus': 'claude-opus-4-20250514',
+    'opus': 'claude-opus-4-1-20250805',
   };
   return modelMap[sdkModel] || 'claude-haiku-4-5-20251001';
 }
