@@ -5,7 +5,9 @@
       "Bash(git add:*)",
       "Bash(git reset:*)",
       "Bash(git commit:*)",
-      "Read(//Users/luiscorrea/Desktop/mult-agent-software-project/**)"
+      "Read(//Users/luiscorrea/Desktop/mult-agent-software-project/**)",
+      "Bash(npm install:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
