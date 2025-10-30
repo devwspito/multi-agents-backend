@@ -991,21 +991,32 @@ export class OrchestrationCoordinator {
         apiKeySource,
       });
 
-      const stream = query({
-        prompt: promptContent as any,
-        options: {
-          cwd: workspacePath,
-          model: fullModelId,
-          // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
-          permissionMode: 'bypassPermissions',
-          env: {
-            ...process.env,
-            ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
+      let stream;
+      try {
+        stream = query({
+          prompt: promptContent as any,
+          options: {
+            cwd: workspacePath,
+            model: fullModelId,
+            // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
+            permissionMode: 'bypassPermissions',
+            env: {
+              ...process.env,
+              ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
+            },
           },
-        },
-      });
+        });
 
-      console.log(`✅ [ExecuteAgent] SDK query() call successful, stream created`);
+        console.log(`✅ [ExecuteAgent] SDK query() call successful, stream created`);
+      } catch (queryError: any) {
+        console.error(`❌ [ExecuteAgent] Failed to create SDK stream:`, {
+          message: queryError.message,
+          stack: queryError.stack,
+          code: queryError.code,
+          fullError: queryError
+        });
+        throw new Error(`SDK query failed: ${queryError.message}`);
+      }
 
       // Simply collect the result - SDK handles everything
       let finalResult: any = null;
@@ -1014,8 +1025,9 @@ export class OrchestrationCoordinator {
 
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
 
-      for await (const message of stream) {
-        allMessages.push(message);
+      try {
+        for await (const message of stream) {
+          allMessages.push(message);
 
         // 🔥 CRITICAL: Log FULL message if it has an error flag
         if ((message as any).is_error === true) {
@@ -1124,6 +1136,15 @@ export class OrchestrationCoordinator {
 
           console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
         }
+      } catch (streamError: any) {
+        console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
+          message: streamError.message,
+          stack: streamError.stack,
+          code: streamError.code,
+          turnCount,
+          lastMessages: allMessages.slice(-3)
+        });
+        throw streamError;
       }
 
       console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
