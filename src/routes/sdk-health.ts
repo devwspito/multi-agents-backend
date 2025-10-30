@@ -15,7 +15,7 @@ const router = Router();
  * GET /api/sdk-health
  * Deep diagnostic check for SDK issues
  */
-router.get('/', async (req, res) => {
+router.get('/', async (_req, res) => {
   const diagnostics: any = {
     timestamp: new Date().toISOString(),
     environment: {
