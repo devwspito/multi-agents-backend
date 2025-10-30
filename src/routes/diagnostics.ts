@@ -16,7 +16,7 @@ const router = Router();
  * GET /api/diagnostics/sdk
  * Test Claude SDK functionality
  */
-router.get('/sdk', authenticate, async (req: AuthRequest, res) => {
+router.get('/sdk', authenticate, async (_req: AuthRequest, res) => {
   const diagnostics: any = {
     timestamp: new Date().toISOString(),
     environment: {
@@ -140,7 +140,7 @@ router.get('/sdk', authenticate, async (req: AuthRequest, res) => {
  * GET /api/diagnostics/models
  * Test all model configurations
  */
-router.get('/models', authenticate, async (req: AuthRequest, res) => {
+router.get('/models', authenticate, async (_req: AuthRequest, res) => {
   const models = [
     { alias: 'haiku', id: 'claude-haiku-4-5-20251001' },
     { alias: 'sonnet', id: 'claude-sonnet-4-5-20250929' },

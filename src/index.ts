@@ -47,7 +47,7 @@ class AgentPlatformApp {
     // Initialize Socket.IO with CORS
     this.io = new SocketServer(this.httpServer, {
       cors: {
-        origin: (origin, callback) => {
+        origin: (_origin, callback) => {
           // Allow all origins temporarily for debugging
           callback(null, true);
         },
@@ -101,14 +101,14 @@ class AgentPlatformApp {
 
     this.app.use(
       cors({
-        origin: (origin, callback) => {
+        origin: (_origin, callback) => {
           // Allow requests with no origin (like mobile apps or curl)
-          if (!origin) return callback(null, true);
+          if (!_origin) return callback(null, true);
 
-          if (allowedOrigins.includes(origin)) {
+          if (allowedOrigins.includes(_origin)) {
             callback(null, true);
           } else {
-            console.warn(`⚠️ CORS: Blocked origin ${origin}`);
+            console.warn(`⚠️ CORS: Blocked origin ${_origin}`);
             callback(null, true); // Temporarily allow all origins to debug
           }
         },
