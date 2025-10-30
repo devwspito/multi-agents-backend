@@ -24,6 +24,8 @@ import cleanupRoutes from './routes/cleanup';
 import githubWebhookRoutes from './routes/webhooks/github';
 import errorWebhookRoutes from './routes/webhooks/errors';
 import commandRoutes from './routes/commands';
+import diagnosticsRoutes from './routes/diagnostics';
+import sdkHealthRoutes from './routes/sdk-health';
 
 /**
  * Multi-Agent Software Development Platform
@@ -45,11 +47,17 @@ class AgentPlatformApp {
     // Initialize Socket.IO with CORS
     this.io = new SocketServer(this.httpServer, {
       cors: {
-        origin: [env.FRONTEND_URL, 'http://localhost:3000', 'http://localhost:5177'],
+        origin: (origin, callback) => {
+          // Allow all origins temporarily for debugging
+          callback(null, true);
+        },
         credentials: true,
         methods: ['GET', 'POST'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
       },
       path: '/ws/notifications',
+      transports: ['websocket', 'polling'], // Allow both transports
+      allowEIO3: true, // Allow different Socket.IO versions
     });
 
     this.cleanupScheduler = new WorkspaceCleanupScheduler();
@@ -81,13 +89,36 @@ class AgentPlatformApp {
       })
     );
 
-    // CORS
+    // CORS - More permissive for production issues
+    const allowedOrigins = [
+      env.FRONTEND_URL,
+      'http://localhost:3000',
+      'http://localhost:5177',
+      'http://localhost:5173',
+      'https://multi-agents-d6279.web.app',
+      'https://multi-agents-d6279.firebaseapp.com' // Add Firebase alternate domain
+    ];
+
     this.app.use(
       cors({
-        origin: [env.FRONTEND_URL, 'http://localhost:3000', "http://localhost:5177", "http://localhost:5173", "https://multi-agents-d6279.web.app"],
+        origin: (origin, callback) => {
+          // Allow requests with no origin (like mobile apps or curl)
+          if (!origin) return callback(null, true);
+
+          if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+          } else {
+            console.warn(`⚠️ CORS: Blocked origin ${origin}`);
+            callback(null, true); // Temporarily allow all origins to debug
+          }
+        },
         credentials: true,
-        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+        exposedHeaders: ['X-Total-Count'],
+        maxAge: 86400, // 24 hours
+        preflightContinue: false,
+        optionsSuccessStatus: 204
       })
     );
 
@@ -180,6 +211,8 @@ class AgentPlatformApp {
     this.app.use('/api/webhooks/github', githubWebhookRoutes);
     this.app.use('/api/webhooks/errors', errorWebhookRoutes);
     this.app.use('/api/commands', commandRoutes);
+    this.app.use('/api/diagnostics', diagnosticsRoutes);
+    this.app.use('/api/sdk-health', sdkHealthRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
