@@ -1029,112 +1029,113 @@ export class OrchestrationCoordinator {
         for await (const message of stream) {
           allMessages.push(message);
 
-        // 🔥 CRITICAL: Log FULL message if it has an error flag
-        if ((message as any).is_error === true) {
-          console.error(`\n${'='.repeat(80)}`);
-          console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
-          console.error(`${'='.repeat(80)}`);
-          console.error(`Message type: ${message.type}`);
-          console.error(`Full message object:`);
-          console.error(JSON.stringify(message, null, 2));
-          console.error(`${'='.repeat(80)}\n`);
-        }
-
-        // Log every message type for debugging
-        if ((message as any).type !== 'tool_use' && (message as any).type !== 'tool_result' && (message as any).type !== 'text') {
-          console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
-            hasSubtype: !!(message as any).subtype,
-            isError: !!(message as any).is_error,
-          });
-        }
-
-        // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
-        if ((message as any).type === 'turn_start') {
-          turnCount++;
-          console.log(`\n🔄 [${agentType}] Turn ${turnCount} started`);
-          if (taskId) {
-            NotificationService.emitConsoleLog(taskId, 'info', `🔄 Turn ${turnCount} - Agent working...`);
+          // 🔥 CRITICAL: Log FULL message if it has an error flag
+          if ((message as any).is_error === true) {
+            console.error(`\n${'='.repeat(80)}`);
+            console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
+            console.error(`${'='.repeat(80)}`);
+            console.error(`Message type: ${message.type}`);
+            console.error(`Full message object:`);
+            console.error(JSON.stringify(message, null, 2));
+            console.error(`${'='.repeat(80)}\n`);
           }
-        }
 
-        if ((message as any).type === 'tool_use') {
-          const tool = (message as any).name || 'unknown';
-          const input = (message as any).input || {};
-          console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
-
-          // Log file operations for visibility
-          if (tool === 'Read' && input.file_path) {
-            console.log(`   📖 Reading: ${input.file_path}`);
-            if (taskId) {
-              NotificationService.emitConsoleLog(taskId, 'info', `📖 Reading ${input.file_path}`);
-            }
-          } else if (tool === 'Edit' && input.file_path) {
-            console.log(`   ✏️  Editing: ${input.file_path}`);
-            if (taskId) {
-              NotificationService.emitConsoleLog(taskId, 'info', `✏️ Editing ${input.file_path}`);
-            }
-          } else if (tool === 'Write' && input.file_path) {
-            console.log(`   📝 Writing: ${input.file_path}`);
-            if (taskId) {
-              NotificationService.emitConsoleLog(taskId, 'info', `📝 Writing ${input.file_path}`);
-            }
-          } else if (tool === 'Bash' && input.command) {
-            const cmd = input.command;
-
-            // 🔥 DETAILED GIT LOGGING - Show full command for git operations
-            if (cmd.includes('git')) {
-              console.log(`   🌿 GIT COMMAND: ${cmd}`);
-              if (taskId) {
-                NotificationService.emitConsoleLog(taskId, 'info', `🌿 GIT: ${cmd}`);
-              }
-            } else {
-              const cmdPreview = cmd.substring(0, 80);
-              console.log(`   💻 Running: ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
-              if (taskId) {
-                NotificationService.emitConsoleLog(taskId, 'info', `💻 ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
-              }
-            }
-          }
-        }
-
-        if ((message as any).type === 'tool_result') {
-          const status = (message as any).is_error ? '❌' : '✅';
-          const result = (message as any).content || (message as any).result || '';
-
-          // 🔥 LOG TOOL RESULT - especially for git commands
-          console.log(`${status} [${agentType}] Tool completed`);
-
-          if (result && typeof result === 'string' && result.length > 0) {
-            // Show result preview
-            const resultPreview = result.substring(0, 200).replace(/\n/g, ' ');
-            console.log(`   📤 Result: ${resultPreview}${result.length > 200 ? '...' : ''}`);
-          }
-        }
-
-        if ((message as any).type === 'text') {
-          const text = (message as any).text || '';
-          if (text.length > 0) {
-            const preview = text.substring(0, 100);
-            console.log(`💬 [${agentType}] Agent says: ${preview}...`);
-          }
-        }
-
-        if (message.type === 'result') {
-          finalResult = message;
-
-          // 🔥 CHECK FOR ERROR RESULT
-          if ((message as any).is_error || (message as any).subtype === 'error') {
-            console.error(`❌ [ExecuteAgent] SDK returned error result:`, {
-              subtype: (message as any).subtype,
-              is_error: (message as any).is_error,
-              result: (message as any).result,
-              error: (message as any).error,
-              error_message: (message as any).error_message,
-              fullMessage: JSON.stringify(message, null, 2),
+          // Log every message type for debugging
+          if ((message as any).type !== 'tool_use' && (message as any).type !== 'tool_result' && (message as any).type !== 'text') {
+            console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
+              hasSubtype: !!(message as any).subtype,
+              isError: !!(message as any).is_error,
             });
           }
 
-          console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
+          // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
+          if ((message as any).type === 'turn_start') {
+            turnCount++;
+            console.log(`\n🔄 [${agentType}] Turn ${turnCount} started`);
+            if (taskId) {
+              NotificationService.emitConsoleLog(taskId, 'info', `🔄 Turn ${turnCount} - Agent working...`);
+            }
+          }
+  
+          if ((message as any).type === 'tool_use') {
+            const tool = (message as any).name || 'unknown';
+            const input = (message as any).input || {};
+            console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
+  
+            // Log file operations for visibility
+            if (tool === 'Read' && input.file_path) {
+              console.log(`   📖 Reading: ${input.file_path}`);
+              if (taskId) {
+                NotificationService.emitConsoleLog(taskId, 'info', `📖 Reading ${input.file_path}`);
+              }
+            } else if (tool === 'Edit' && input.file_path) {
+              console.log(`   ✏️  Editing: ${input.file_path}`);
+              if (taskId) {
+                NotificationService.emitConsoleLog(taskId, 'info', `✏️ Editing ${input.file_path}`);
+              }
+            } else if (tool === 'Write' && input.file_path) {
+              console.log(`   📝 Writing: ${input.file_path}`);
+              if (taskId) {
+                NotificationService.emitConsoleLog(taskId, 'info', `📝 Writing ${input.file_path}`);
+              }
+            } else if (tool === 'Bash' && input.command) {
+              const cmd = input.command;
+  
+              // 🔥 DETAILED GIT LOGGING - Show full command for git operations
+              if (cmd.includes('git')) {
+                console.log(`   🌿 GIT COMMAND: ${cmd}`);
+                if (taskId) {
+                  NotificationService.emitConsoleLog(taskId, 'info', `🌿 GIT: ${cmd}`);
+                }
+              } else {
+                const cmdPreview = cmd.substring(0, 80);
+                console.log(`   💻 Running: ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
+                if (taskId) {
+                  NotificationService.emitConsoleLog(taskId, 'info', `💻 ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
+                }
+              }
+            }
+          }
+  
+            if ((message as any).type === 'tool_result') {
+            const status = (message as any).is_error ? '❌' : '✅';
+            const result = (message as any).content || (message as any).result || '';
+  
+            // 🔥 LOG TOOL RESULT - especially for git commands
+            console.log(`${status} [${agentType}] Tool completed`);
+  
+            if (result && typeof result === 'string' && result.length > 0) {
+              // Show result preview
+              const resultPreview = result.substring(0, 200).replace(/\n/g, ' ');
+              console.log(`   📤 Result: ${resultPreview}${result.length > 200 ? '...' : ''}`);
+            }
+            }
+  
+            if ((message as any).type === 'text') {
+            const text = (message as any).text || '';
+            if (text.length > 0) {
+              const preview = text.substring(0, 100);
+              console.log(`💬 [${agentType}] Agent says: ${preview}...`);
+            }
+            }
+  
+            if (message.type === 'result') {
+            finalResult = message;
+  
+            // 🔥 CHECK FOR ERROR RESULT
+            if ((message as any).is_error || (message as any).subtype === 'error') {
+              console.error(`❌ [ExecuteAgent] SDK returned error result:`, {
+                subtype: (message as any).subtype,
+                is_error: (message as any).is_error,
+                result: (message as any).result,
+                error: (message as any).error,
+                error_message: (message as any).error_message,
+                fullMessage: JSON.stringify(message, null, 2),
+              });
+            }
+  
+            console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
+            }
         }
       } catch (streamError: any) {
         console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
