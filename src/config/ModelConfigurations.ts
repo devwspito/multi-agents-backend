@@ -31,6 +31,7 @@ export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
 };
 
 export interface AgentModelConfig {
+  problemAnalyst: ClaudeModel;
   productManager: ClaudeModel;
   projectManager: ClaudeModel;
   techLead: ClaudeModel;
@@ -41,6 +42,8 @@ export interface AgentModelConfig {
   fixer: ClaudeModel;
   mergeCoordinator: ClaudeModel;
   autoMerge: ClaudeModel;
+  e2eTester: ClaudeModel;
+  e2eFixer: ClaudeModel;
 }
 
 /**
@@ -50,21 +53,24 @@ export interface AgentModelConfig {
  * - Best for complex, critical projects
  * - Estimated cost: $15-20 per session
  *
- * Strategy:
- * - Opus for critical thinking phases (PM, Tech Lead, Judge)
- * - Sonnet for implementation phases
+ * AUTO-OPTIMIZED Strategy:
+ * - Opus → Critical thinking (Problem Analyst, PM, PjM, TL, Judge, QA, Fixers)
+ * - Sonnet → Execution (Developers, Merge, E2E Testing)
  */
 export const PREMIUM_CONFIG: AgentModelConfig = {
-  productManager: 'claude-3-opus-20240229',      // Critical: Requirements analysis
-  projectManager: 'claude-3-5-sonnet-20241022',  // Task breakdown
-  techLead: 'claude-3-opus-20240229',           // Critical: Architecture design
-  seniorDeveloper: 'claude-3-5-sonnet-20241022', // Complex implementation
-  juniorDeveloper: 'claude-3-5-sonnet-20241022', // Simple implementation
-  judge: 'claude-3-opus-20240229',              // Critical: Code review
-  qaEngineer: 'claude-3-5-sonnet-20241022',     // Testing
-  fixer: 'claude-3-5-sonnet-20241022',          // Bug fixes
-  mergeCoordinator: 'claude-3-5-sonnet-20241022', // PR coordination
-  autoMerge: 'claude-3-5-haiku-20241022',       // Automated merge (fast, simple)
+  problemAnalyst: 'claude-3-opus-20240229',     // 🧠 Critical: Deep problem analysis
+  productManager: 'claude-3-opus-20240229',      // 🧠 Critical: Requirements analysis
+  projectManager: 'claude-3-opus-20240229',      // 🧠 Critical: Task breakdown & planning
+  techLead: 'claude-3-opus-20240229',           // 🧠 Critical: Architecture design
+  judge: 'claude-3-opus-20240229',              // 🧠 Critical: Code review
+  qaEngineer: 'claude-3-opus-20240229',         // 🧠 Critical: Error detection
+  fixer: 'claude-3-opus-20240229',              // 🧠 Critical: Bug fixes
+  e2eFixer: 'claude-3-opus-20240229',           // 🧠 Critical: Integration fixes
+  seniorDeveloper: 'claude-3-5-sonnet-20241022', // 💨 Execution: Implements architecture
+  juniorDeveloper: 'claude-3-5-sonnet-20241022', // 💨 Execution: Simple tasks
+  mergeCoordinator: 'claude-3-5-sonnet-20241022', // 💨 Execution: Git operations
+  autoMerge: 'claude-3-5-sonnet-20241022',       // 💨 Execution: Automated merge
+  e2eTester: 'claude-3-5-sonnet-20241022',      // 💨 Execution: Script execution
 };
 
 /**
@@ -74,21 +80,51 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
  * - Suitable for most projects
  * - Estimated cost: $5-7 per session
  *
- * Strategy:
- * - Sonnet for critical thinking phases
- * - Haiku for implementation and routine tasks
+ * AUTO-OPTIMIZED Strategy:
+ * - Sonnet → Critical thinking (Problem Analyst, PM, PjM, TL, Judge, QA, Fixers)
+ * - Haiku → Execution (Developers, Merge, E2E Testing)
  */
 export const STANDARD_CONFIG: AgentModelConfig = {
+  problemAnalyst: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Deep problem analysis
+  productManager: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Requirements
+  projectManager: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Planning
+  techLead: 'claude-3-5-sonnet-20241022',       // 🧠 Critical: Architecture
+  judge: 'claude-3-5-sonnet-20241022',          // 🧠 Critical: Code review
+  qaEngineer: 'claude-3-5-sonnet-20241022',     // 🧠 Critical: Error detection
+  fixer: 'claude-3-5-sonnet-20241022',          // 🧠 Critical: Bug fixes
+  e2eFixer: 'claude-3-5-sonnet-20241022',       // 🧠 Critical: Integration fixes
+  seniorDeveloper: 'claude-3-5-haiku-20241022',  // 💨 Execution: Implementation
+  juniorDeveloper: 'claude-3-5-haiku-20241022',  // 💨 Execution: Simple tasks
+  mergeCoordinator: 'claude-3-5-haiku-20241022', // 💨 Execution: Git coordination
+  autoMerge: 'claude-3-5-haiku-20241022',       // 💨 Execution: Automated merge
+  e2eTester: 'claude-3-5-haiku-20241022',       // 💨 Execution: Script execution
+};
+
+/**
+ * Balanced Configuration (Strategic Sonnet + Haiku)
+ *
+ * - Best cost-performance ratio
+ * - Sonnet for critical thinking, Haiku for execution
+ * - Estimated cost: $4-6 per session (40% less than STANDARD)
+ *
+ * Strategy:
+ * - Sonnet: Orchestration (PM, PjM, TL, ProblemAnalyst), Quality (Judge, QA, Fixers)
+ * - Haiku: Execution (Developers), Simple tasks (Merge)
+ */
+export const BALANCED_CONFIG: AgentModelConfig = {
+  problemAnalyst: 'claude-3-5-sonnet-20241022',  // Critical: Deep analysis
   productManager: 'claude-3-5-sonnet-20241022',  // Critical: Requirements
-  projectManager: 'claude-3-5-sonnet-20241022',  // Planning
+  projectManager: 'claude-3-5-sonnet-20241022',  // Critical: Planning
   techLead: 'claude-3-5-sonnet-20241022',       // Critical: Architecture
-  seniorDeveloper: 'claude-3-5-haiku-20241022',  // Implementation
-  juniorDeveloper: 'claude-3-5-haiku-20241022',  // Simple tasks
-  judge: 'claude-3-5-sonnet-20241022',          // Important: Code review
-  qaEngineer: 'claude-3-5-haiku-20241022',      // Testing
-  fixer: 'claude-3-5-haiku-20241022',           // Bug fixes
-  mergeCoordinator: 'claude-3-5-haiku-20241022', // Routine coordination
-  autoMerge: 'claude-3-5-haiku-20241022',       // Automated merge
+  seniorDeveloper: 'claude-3-5-haiku-20241022',  // Execution - Haiku is capable
+  juniorDeveloper: 'claude-3-5-haiku-20241022',  // Execution - Haiku is capable
+  judge: 'claude-3-5-sonnet-20241022',          // Critical: Code review
+  qaEngineer: 'claude-3-5-sonnet-20241022',     // Critical: Error detection
+  fixer: 'claude-3-5-sonnet-20241022',          // Critical: Accurate fixes
+  mergeCoordinator: 'claude-3-5-haiku-20241022', // Simple coordination
+  autoMerge: 'claude-3-5-haiku-20241022',       // Simple automated task
+  e2eTester: 'claude-3-5-haiku-20241022',       // Script execution - Haiku sufficient
+  e2eFixer: 'claude-3-5-sonnet-20241022',       // Critical: Integration fixes
 };
 
 /**
@@ -101,6 +137,7 @@ export const STANDARD_CONFIG: AgentModelConfig = {
  * Note: May struggle with complex requirements
  */
 export const ECONOMY_CONFIG: AgentModelConfig = {
+  problemAnalyst: 'claude-3-5-haiku-20241022',
   productManager: 'claude-3-5-haiku-20241022',
   projectManager: 'claude-3-5-haiku-20241022',
   techLead: 'claude-3-5-haiku-20241022',
@@ -111,6 +148,8 @@ export const ECONOMY_CONFIG: AgentModelConfig = {
   fixer: 'claude-3-5-haiku-20241022',
   mergeCoordinator: 'claude-3-5-haiku-20241022',
   autoMerge: 'claude-3-5-haiku-20241022',
+  e2eTester: 'claude-3-5-haiku-20241022',
+  e2eFixer: 'claude-3-5-haiku-20241022',
 };
 
 /**
@@ -123,6 +162,7 @@ export const ECONOMY_CONFIG: AgentModelConfig = {
  * Note: Highest quality but also highest cost
  */
 export const MAX_CONFIG: AgentModelConfig = {
+  problemAnalyst: 'claude-3-opus-20240229',
   productManager: 'claude-3-opus-20240229',
   projectManager: 'claude-3-opus-20240229',
   techLead: 'claude-3-opus-20240229',
@@ -133,7 +173,61 @@ export const MAX_CONFIG: AgentModelConfig = {
   fixer: 'claude-3-opus-20240229',
   mergeCoordinator: 'claude-3-opus-20240229',
   autoMerge: 'claude-3-opus-20240229',
+  e2eTester: 'claude-3-opus-20240229',
+  e2eFixer: 'claude-3-opus-20240229',
 };
+
+/**
+ * Optimize a configuration for best cost-performance ratio
+ *
+ * Takes any user-selected config and intelligently assigns:
+ * - Most capable model (top tier) → Critical thinking agents
+ * - Most economical model (bottom tier) → Execution agents
+ *
+ * Example:
+ * - PREMIUM (Opus + Sonnet) → Critics get Opus, Executors get Sonnet
+ * - STANDARD (Sonnet + Haiku) → Critics get Sonnet, Executors get Haiku
+ * - MAX (All Opus) → No optimization needed, all stay Opus
+ */
+export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentModelConfig {
+  // Extract unique models from config
+  const models = Array.from(new Set(Object.values(userConfig))) as ClaudeModel[];
+
+  // Sort by price (most expensive first)
+  const sortedModels = models.sort((a, b) => {
+    const priceA = MODEL_PRICING[a].inputPerMillion + MODEL_PRICING[a].outputPerMillion;
+    const priceB = MODEL_PRICING[b].inputPerMillion + MODEL_PRICING[b].outputPerMillion;
+    return priceB - priceA; // Descending
+  });
+
+  const topModel = sortedModels[0]; // Most capable
+  const bottomModel = sortedModels[sortedModels.length - 1]; // Most economical
+
+  console.log(`🎯 [ConfigOptimization] Optimizing user config:`, {
+    topModel,
+    bottomModel,
+    savingsEstimate: models.length > 1 ? 'Optimized for cost' : 'Single model config'
+  });
+
+  return {
+    // 🧠 CRITICAL THINKING - Use TOP MODEL (most capable)
+    problemAnalyst: topModel,     // Deep problem analysis
+    productManager: topModel,     // Requirements decisions
+    projectManager: topModel,     // Planning & breakdown
+    techLead: topModel,          // Architecture design
+    judge: topModel,             // Code quality evaluation
+    qaEngineer: topModel,        // Error detection
+    fixer: topModel,             // Precise bug fixes
+    e2eFixer: topModel,          // Complex integration fixes
+
+    // 💨 EXECUTION - Use BOTTOM MODEL (economical)
+    seniorDeveloper: bottomModel, // Executes defined architecture
+    juniorDeveloper: bottomModel, // Executes simple tasks
+    mergeCoordinator: bottomModel, // Mechanical git operations
+    autoMerge: bottomModel,       // Simple automation
+    e2eTester: bottomModel,       // Script execution (curl, npm)
+  };
+}
 
 /**
  * Get model for a specific agent type
@@ -143,6 +237,8 @@ export function getAgentModel(
   config: AgentModelConfig = STANDARD_CONFIG
 ): ClaudeModel {
   switch (agentType) {
+    case 'problem-analyst':
+      return config.problemAnalyst;
     case 'product-manager':
       return config.productManager;
     case 'project-manager':
@@ -163,6 +259,10 @@ export function getAgentModel(
       return config.mergeCoordinator;
     case 'auto-merge':
       return config.autoMerge;
+    case 'e2e-tester':
+      return config.e2eTester;
+    case 'e2e-fixer':
+      return config.e2eFixer;
     default:
       // Default to Haiku for unknown agents
       return 'claude-3-5-haiku-20241022';

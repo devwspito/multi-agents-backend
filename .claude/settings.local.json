@@ -12,7 +12,10 @@
       "Bash(npx:*)",
       "Bash(node:*)",
       "Bash(npm run dev:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

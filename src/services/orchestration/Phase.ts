@@ -141,7 +141,30 @@ export abstract class BasePhase implements IPhase {
     console.log(`\n🚀 [${this.name}] Starting phase...`);
     console.log(`   ${this.description}`);
 
+    // Special logging for Fixer phase
+    if (this.name === 'Fixer') {
+      console.log(`🔧 [BasePhase] Fixer execute() called - checking context:`, {
+        qaErrors: context.getData('qaErrors') ? 'present' : 'missing',
+        qaErrorType: context.getData('qaErrorType'),
+        qaAttempt: context.getData('qaAttempt')
+      });
+    }
+
     try {
+      // 🛑 CHECK FOR CANCELLATION BEFORE EXECUTING PHASE
+      const { Task } = await import('../../models/Task');
+      const task = await Task.findById(context.task._id);
+      if (task?.orchestration.cancelRequested) {
+        const duration = Date.now() - startTime;
+        console.log(`🛑 [${this.name}] Task cancelled - aborting phase execution`);
+        return {
+          success: false,
+          phaseName: this.name,
+          duration,
+          error: 'Task cancelled by user',
+        };
+      }
+
       // Check if phase should be skipped
       if (this.shouldSkip && (await this.shouldSkip(context))) {
         const duration = Date.now() - startTime;
@@ -154,8 +177,8 @@ export abstract class BasePhase implements IPhase {
         };
       }
 
-      // Execute the phase
-      const result = await this.executePhase(context);
+      // Execute the phase with cancellation polling
+      const result = await this.executePhaseWithCancellationCheck(context, startTime);
 
       const duration = Date.now() - startTime;
       const finalResult: PhaseResult = {
@@ -192,6 +215,63 @@ export abstract class BasePhase implements IPhase {
 
       context.setPhaseResult(this.name, errorResult);
       return errorResult;
+    }
+  }
+
+  /**
+   * Execute phase with periodic cancellation checks
+   *
+   * This wraps executePhase() and polls the database every 5 seconds
+   * to check if the user has requested cancellation.
+   */
+  private async executePhaseWithCancellationCheck(
+    context: OrchestrationContext,
+    _startTime: number
+  ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
+    const { Task } = await import('../../models/Task');
+
+    // Create a cancellation checker that polls every 5 seconds
+    let cancelled = false;
+    const cancellationChecker = setInterval(async () => {
+      try {
+        const task = await Task.findById(context.task._id);
+        if (task?.orchestration.cancelRequested) {
+          cancelled = true;
+          console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
+          clearInterval(cancellationChecker);
+        }
+      } catch (err) {
+        console.error(`[${this.name}] Error checking cancellation:`, err);
+      }
+    }, 5000); // Check every 5 seconds
+
+    try {
+      // Execute the phase
+      const resultPromise = this.executePhase(context);
+
+      // Race between phase completion and cancellation detection
+      while (true) {
+        if (cancelled) {
+          clearInterval(cancellationChecker);
+          throw new Error('Task cancelled by user during phase execution');
+        }
+
+        // Check if phase is done
+        const raceResult = await Promise.race([
+          resultPromise,
+          new Promise(resolve => setTimeout(() => resolve('__polling__'), 1000))
+        ]);
+
+        if (raceResult !== '__polling__') {
+          clearInterval(cancellationChecker);
+          return raceResult as Omit<PhaseResult, 'phaseName' | 'duration'>;
+        }
+
+        // Continue polling
+      }
+    } catch (error) {
+      clearInterval(cancellationChecker);
+      throw error;
     }
   }
 

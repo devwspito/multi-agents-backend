@@ -42,7 +42,7 @@ export class TeamOrchestrationPhase extends BasePhase {
   }
 
   /**
-   * Skip if all teams already completed
+   * Skip if all teams already completed (ONLY for recovery, NOT for continuations)
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -54,10 +54,19 @@ export class TeamOrchestrationPhase extends BasePhase {
       context.task = freshTask;
     }
 
-    // Check if TeamOrchestration step exists and is completed
+    // 🔄 CONTINUATION: Never skip - always re-execute to create new teams for new epics
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [TeamOrchestration] This is a CONTINUATION - will re-execute to create new teams`);
+      return false; // DO NOT SKIP
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     const teamOrchestration = (context.task.orchestration as any).teamOrchestration;
     if (teamOrchestration?.status === 'completed') {
-      console.log(`[SKIP] TeamOrchestration already completed`);
+      console.log(`[SKIP] TeamOrchestration already completed - skipping re-execution (recovery mode)`);
       return true;
     }
 
@@ -396,8 +405,19 @@ export class TeamOrchestrationPhase extends BasePhase {
         },
       });
 
+      // Collect error messages from failed teams
+      const failedTeamErrors: string[] = [];
+      for (const teamResult of failedTeams) {
+        if (teamResult.status === 'rejected') {
+          failedTeamErrors.push(`Team rejected: ${teamResult.reason?.message || teamResult.reason}`);
+        } else if (teamResult.status === 'fulfilled' && !teamResult.value.success) {
+          failedTeamErrors.push(`Team failed: ${teamResult.value.error || 'Unknown error'}`);
+        }
+      }
+
       return {
         success: failedTeams.length === 0,
+        error: failedTeams.length > 0 ? failedTeamErrors.join('; ') : undefined,
         data: {
           totalTeams: teamResults.length,
           successfulTeams: successfulTeams.length,
@@ -635,8 +655,48 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`💰 [Team ${teamNumber}] QA cost: $${qaCost.toFixed(4)} (${qaUsage.input + qaUsage.output} tokens)`);
       }
 
+      // 🔧 Fixer: Fix QA errors if detected
+      const hasQAErrors = teamContext.getData<boolean>('qaErrors');
+      if (hasQAErrors) {
+        console.log(`\n[Team ${teamNumber}] Phase 5: Fixer (Error Resolution)`);
+        const { FixerPhase } = await import('./FixerPhase');
+        const fixerPhase = new FixerPhase(this.executeAgentFn);
+
+        const fixerResult = await fixerPhase.execute(teamContext);
+        if (!fixerResult.success) {
+          console.warn(`⚠️ [Team ${teamNumber}] Fixer could not resolve all errors: ${fixerResult.error}`);
+        }
+
+        // Track Fixer cost and tokens if available
+        const fixerCost = Number(fixerResult.metadata?.cost || fixerResult.metrics?.cost_usd || 0);
+        if (fixerCost > 0) {
+          (teamCosts as any).fixer = fixerCost;
+          (teamCosts as any).fixerUsage = {
+            input: Number(fixerResult.metadata?.input_tokens || 0),
+            output: Number(fixerResult.metadata?.output_tokens || 0),
+          };
+          console.log(`💰 [Team ${teamNumber}] Fixer cost: $${fixerCost.toFixed(4)}`);
+        }
+
+        // 🔄 Re-run QA after Fixer
+        console.log(`\n[Team ${teamNumber}] Phase 6: QA (Re-test after Fixer)`);
+        teamContext.setData('qaAttempt', 2); // Mark as second attempt
+
+        const qaRetryResult = await qaPhase.execute(teamContext);
+        if (!qaRetryResult.success) {
+          throw new Error(`QA failed after Fixer: ${qaRetryResult.error}`);
+        }
+
+        // Track QA retry cost
+        const qaRetryCost = Number(qaRetryResult.metadata?.cost || qaRetryResult.metrics?.cost_usd || 0);
+        if (qaRetryCost > 0) {
+          (teamCosts as any).qa += qaRetryCost; // Add to existing QA cost
+          console.log(`💰 [Team ${teamNumber}] QA retry cost: $${qaRetryCost.toFixed(4)}`);
+        }
+      }
+
       // Calculate total team cost
-      teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge + teamCosts.qa;
+      teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge + teamCosts.qa + ((teamCosts as any).fixer || 0);
       console.log(`💰 [Team ${teamNumber}] Total team cost: $${teamCosts.total.toFixed(4)}`);
 
       console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);

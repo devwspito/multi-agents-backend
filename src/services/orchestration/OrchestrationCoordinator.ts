@@ -90,13 +90,16 @@ export class OrchestrationCoordinator {
    * - Human approval gates (must wait for approval before next phase)
    */
   private readonly PHASE_ORDER = [
+    'ProblemAnalyst',      // 0. Deep problem analysis and architecture
     'ProductManager',      // 1. Analyze requirements (Sonnet 4.5 orchestrator)
     'Approval',            // 1.5 Human approval gate
     'ProjectManager',      // 2. Break into epics (Sonnet 4.5 orchestrator)
     'Approval',            // 2.5 Human approval gate
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
-    'Approval',            // 3.5 Human approval gate (final approval - all teams done)
-    'AutoMerge',           // 4. Automatically merge PRs to main (NEW)
+    'E2ETesting',          // 4. End-to-end integration testing (frontend-backend)
+    'E2EFixer',            // 4.5 Fix integration issues if E2E detected errors
+    'Approval',            // 5. Human approval gate (final approval - all teams done + E2E passed)
+    'AutoMerge',           // 6. Automatically merge PRs to main
   ];
 
   constructor() {
@@ -447,12 +450,24 @@ export class OrchestrationCoordinator {
         // 🔥 SPECIAL HANDLING: QA → Fixer → QA retry loop
         if (phaseName === 'QA' && result.success && result.data?.hasErrors) {
           console.log(`🔧 [QA] QA detected errors - executing Fixer phase`);
+          console.log(`   Error type: ${result.data?.errorType}`);
+          console.log(`   QA Attempt: ${result.data?.qaAttempt}`);
           NotificationService.emitConsoleLog(taskId, 'info', `🔧 QA detected errors - executing Fixer to resolve`);
 
           // Execute Fixer
           const fixerPhase = this.createPhase('Fixer', context);
+          console.log(`   Fixer phase created: ${fixerPhase ? 'YES' : 'NO'}`);
+
           if (fixerPhase) {
+            console.log(`🔧 [Fixer] Starting Fixer execution...`);
+            NotificationService.emitConsoleLog(taskId, 'info', `🔧 Starting Fixer agent to fix ${result.data?.errorType || 'detected'} errors...`);
+
             const fixerResult = await fixerPhase.execute(context);
+            console.log(`🔧 [Fixer] Execution completed:`, {
+              success: fixerResult.success,
+              fixed: fixerResult.data?.fixed,
+              filesModified: fixerResult.data?.filesModified
+            });
 
             if (fixerResult.success && fixerResult.data?.fixed) {
               // Fixer succeeded - re-execute QA (attempt 2)
@@ -479,6 +494,94 @@ export class OrchestrationCoordinator {
               console.log(`⚠️  [Fixer] Could not fix errors - PRs created with error documentation`);
               NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Fixer could not resolve all errors - PRs created with error documentation`);
             }
+          }
+        }
+
+        // 🔥 SPECIAL HANDLING: E2ETesting → E2EFixer → E2ETesting smart retry loop
+        if (phaseName === 'E2ETesting' && result.success && result.data?.hasErrors) {
+          console.log(`🔧 [E2ETesting] E2E detected integration errors - executing E2E Fixer phase`);
+          console.log(`   Error type: ${result.data?.errorType}`);
+          NotificationService.emitConsoleLog(taskId, 'info', `🔧 E2E Testing detected integration errors - executing E2E Fixer to resolve`);
+
+          // Mark that E2E Fixer should run
+          context.setData('shouldRunE2EFixer', true);
+
+          // Loop: Execute Fixer → Test → Fixer... until fixed or max retries
+          let retryCount = 0;
+          const maxRetries = 3;
+          let fixed = false;
+
+          while (retryCount < maxRetries && !fixed) {
+            console.log(`\n🔄 [E2E Loop] Iteration ${retryCount + 1}/${maxRetries}`);
+
+            // Execute E2E Fixer
+            const e2eFixerPhase = this.createPhase('E2EFixer', context);
+            if (!e2eFixerPhase) {
+              console.log(`❌ [E2E Loop] Could not create E2E Fixer phase - breaking loop`);
+              break;
+            }
+
+            const e2eFixerResult = await e2eFixerPhase.execute(context);
+            console.log(`🔧 [E2EFixer] Execution completed:`, {
+              success: e2eFixerResult.success,
+              fixed: e2eFixerResult.data?.fixed,
+              maxRetriesReached: e2eFixerResult.data?.maxRetriesReached,
+            });
+
+            // Check if max retries reached for same error
+            if (e2eFixerResult.data?.maxRetriesReached) {
+              console.log(`⚠️  [E2E Loop] Max retries reached for same error - allowing continuation with documented errors`);
+              NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ E2E Fixer tried ${maxRetries} times but couldn't fix the same error - allowing continuation`);
+              break;
+            }
+
+            // Check if fixer succeeded
+            if (e2eFixerResult.success && e2eFixerResult.data?.fixed) {
+              console.log(`✅ [E2EFixer] Fixed integration errors - re-running E2E Testing`);
+              NotificationService.emitConsoleLog(taskId, 'info', `✅ E2E Fixer completed - re-running integration tests`);
+
+              // Re-run E2E Testing
+              const e2eTestingPhaseRetry = this.createPhase('E2ETesting', context);
+              if (e2eTestingPhaseRetry) {
+                const e2eTestingResultRetry = await e2eTestingPhaseRetry.execute(context);
+
+                if (e2eTestingResultRetry.success) {
+                  if (e2eTestingResultRetry.data?.hasErrors) {
+                    // Still has errors - check if error changed
+                    console.log(`⚠️  [E2E Loop] E2E Testing still reports errors - may be different error, continuing loop`);
+                    context.setData('shouldRunE2EFixer', true);
+                    retryCount++;
+                  } else {
+                    // No errors - success!
+                    console.log(`✅ [E2E Loop] E2E Testing passed - integration verified`);
+                    NotificationService.emitConsoleLog(taskId, 'info', `✅ E2E Testing passed - frontend-backend integration verified`);
+                    fixed = true;
+                    break;
+                  }
+                } else {
+                  console.log(`❌ [E2E Loop] E2E Testing failed critically: ${e2eTestingResultRetry.error}`);
+                  break;
+                }
+              }
+            } else {
+              // Fixer failed this iteration
+              console.log(`⚠️  [E2EFixer] Could not fix on this attempt (${retryCount + 1}/${maxRetries})`);
+
+              if (e2eFixerResult.data?.shouldRetryE2E) {
+                // Can retry E2E Testing to see if error changed
+                console.log(`🔄 [E2E Loop] Will retry E2E Testing to detect if error changed`);
+                retryCount++;
+              } else {
+                // Don't retry
+                console.log(`⏹️  [E2E Loop] Stopping retry loop`);
+                break;
+              }
+            }
+          }
+
+          if (!fixed && retryCount >= maxRetries) {
+            console.log(`⚠️  [E2E Loop] Completed ${maxRetries} iterations without full fix - allowing continuation with documented errors`);
+            NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ E2E testing completed with remaining integration issues - documented for review`);
           }
         }
 
@@ -610,6 +713,8 @@ export class OrchestrationCoordinator {
     };
 
     switch (phaseName) {
+      case 'ProblemAnalyst':
+        return new (require('./ProblemAnalystPhase').ProblemAnalystPhase)(executeAgentWithContext);
       case 'ProductManager':
         return new ProductManagerPhase(executeAgentWithContext);
 
@@ -647,6 +752,12 @@ export class OrchestrationCoordinator {
 
       case 'Fixer':
         return new (require('./FixerPhase').FixerPhase)(executeAgentWithContext);
+
+      case 'E2ETesting':
+        return new (require('./E2ETestingPhase').E2ETestingPhase)(executeAgentWithContext);
+
+      case 'E2EFixer':
+        return new (require('./E2EFixerPhase').E2EFixerPhase)(executeAgentWithContext);
 
       case 'Approval':
         return new ApprovalPhase();
@@ -735,6 +846,7 @@ export class OrchestrationCoordinator {
    */
   private mapPhaseToEnum(phaseName: string): 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed' {
     const phaseMap: Record<string, 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed'> = {
+      'ProblemAnalyst': 'analysis',
       'ProductManager': 'analysis',
       'Approval': 'analysis', // Approval after analysis
       'ProjectManager': 'planning',
@@ -866,6 +978,10 @@ export class OrchestrationCoordinator {
               modelConfig = configs.PREMIUM_CONFIG;
               console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
               break;
+            case 'balanced':
+              modelConfig = configs.BALANCED_CONFIG;
+              console.log(`⚖️  [ExecuteAgent] Using BALANCED_CONFIG (Strategic Sonnet + Haiku - Best Value)`);
+              break;
             case 'economy':
               modelConfig = configs.ECONOMY_CONFIG;
               console.log(`💰 [ExecuteAgent] Using ECONOMY_CONFIG (All Haiku)`);
@@ -881,6 +997,12 @@ export class OrchestrationCoordinator {
         console.log(`⚠️ [ExecuteAgent] Task ${taskId} has no modelConfig, using STANDARD_CONFIG as default`);
       }
     }
+
+    // 🎯 AUTOMATIC OPTIMIZATION: Apply cost-performance optimization
+    // This ensures critical agents get top model, executors get bottom model
+    // Works with ANY config the user selected (MAX, PREMIUM, STANDARD, BALANCED, ECONOMY, CUSTOM)
+    modelConfig = configs.optimizeConfigForBudget(modelConfig);
+    console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
 
     const sdkModel = getAgentModel(agentType, modelConfig); // 'haiku', 'sonnet', 'opus' - with model config support
     const fullModelId = getFullModelId(sdkModel); // 'claude-haiku-4-5-20251001'
@@ -1056,12 +1178,12 @@ export class OrchestrationCoordinator {
               NotificationService.emitConsoleLog(taskId, 'info', `🔄 Turn ${turnCount} - Agent working...`);
             }
           }
-  
+
           if ((message as any).type === 'tool_use') {
             const tool = (message as any).name || 'unknown';
             const input = (message as any).input || {};
             console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
-  
+
             // Log file operations for visibility
             if (tool === 'Read' && input.file_path) {
               console.log(`   📖 Reading: ${input.file_path}`);
@@ -1080,7 +1202,7 @@ export class OrchestrationCoordinator {
               }
             } else if (tool === 'Bash' && input.command) {
               const cmd = input.command;
-  
+
               // 🔥 DETAILED GIT LOGGING - Show full command for git operations
               if (cmd.includes('git')) {
                 console.log(`   🌿 GIT COMMAND: ${cmd}`);
@@ -1096,32 +1218,32 @@ export class OrchestrationCoordinator {
               }
             }
           }
-  
-            if ((message as any).type === 'tool_result') {
+
+          if ((message as any).type === 'tool_result') {
             const status = (message as any).is_error ? '❌' : '✅';
             const result = (message as any).content || (message as any).result || '';
-  
+
             // 🔥 LOG TOOL RESULT - especially for git commands
             console.log(`${status} [${agentType}] Tool completed`);
-  
+
             if (result && typeof result === 'string' && result.length > 0) {
               // Show result preview
               const resultPreview = result.substring(0, 200).replace(/\n/g, ' ');
               console.log(`   📤 Result: ${resultPreview}${result.length > 200 ? '...' : ''}`);
             }
-            }
-  
-            if ((message as any).type === 'text') {
+          }
+
+          if ((message as any).type === 'text') {
             const text = (message as any).text || '';
             if (text.length > 0) {
               const preview = text.substring(0, 100);
               console.log(`💬 [${agentType}] Agent says: ${preview}...`);
             }
-            }
-  
-            if (message.type === 'result') {
+          }
+
+          if (message.type === 'result') {
             finalResult = message;
-  
+
             // 🔥 CHECK FOR ERROR RESULT
             if ((message as any).is_error || (message as any).subtype === 'error') {
               console.error(`❌ [ExecuteAgent] SDK returned error result:`, {
@@ -1133,9 +1255,9 @@ export class OrchestrationCoordinator {
                 fullMessage: JSON.stringify(message, null, 2),
               });
             }
-  
+
             console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
-            }
+          }
         }
       } catch (streamError: any) {
         console.error(`❌ [ExecuteAgent] Error consuming stream:`, {

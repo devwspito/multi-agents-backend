@@ -29,8 +29,8 @@ export interface ICodeSnapshot extends Document {
   timestamp: Date;
 
   // Context
-  phase: 'development' | 'qa' | 'merge' | 'auto-merge';
-  agentType: 'developer' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge';
+  phase: 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e';
+  agentType: 'developer' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'fixer' | 'e2e-fixer';
   agentInstanceId: string; // "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -99,12 +99,12 @@ const codeSnapshotSchema = new Schema<ICodeSnapshot>(
     },
     phase: {
       type: String,
-      enum: ['development', 'qa', 'merge', 'auto-merge'],
+      enum: ['development', 'qa', 'merge', 'auto-merge', 'e2e'],
       required: true,
     },
     agentType: {
       type: String,
-      enum: ['developer', 'qa-engineer', 'merge-coordinator', 'auto-merge'],
+      enum: ['developer', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'fixer', 'e2e-fixer'],
       required: true,
     },
     agentInstanceId: {

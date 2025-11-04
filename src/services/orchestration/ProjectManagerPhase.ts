@@ -146,7 +146,8 @@ ${latestFeedback}
       const previousOutput = task.orchestration.projectManager.output;
 
       let revisionSection = '';
-      if (previousOutput && task.orchestration.projectManager.status === 'in_progress' && !validationFeedbackSection) {
+      // ALWAYS include previous context if exists (for continuations), unless we have validation feedback (takes priority)
+      if (previousOutput && !validationFeedbackSection) {
         revisionSection = `
 
 # Previous Project Plan Available

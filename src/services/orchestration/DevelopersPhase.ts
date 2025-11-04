@@ -36,7 +36,7 @@ export class DevelopersPhase extends BasePhase {
   }
 
   /**
-   * Skip if developers already completed all stories
+   * Skip if developers already completed all stories (ONLY for recovery, NOT for continuations)
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -48,6 +48,16 @@ export class DevelopersPhase extends BasePhase {
       context.task = freshTask;
     }
 
+    // 🔄 CONTINUATION: Never skip - always re-execute to implement new stories
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [Developers] This is a CONTINUATION - will re-execute to implement new stories`);
+      return false; // DO NOT SKIP
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     const team = context.task.orchestration.team || [];
     // Get stories from Project Manager (not epics from Tech Lead)
     const stories = context.task.orchestration.projectManager?.stories || [];
@@ -58,7 +68,7 @@ export class DevelopersPhase extends BasePhase {
       const allEpicsCompleted = epics.every((epic: any) => epic.status === 'completed');
 
       if (allEpicsCompleted) {
-        console.log(`[SKIP] Developers already completed - all ${epics.length} stories done`);
+        console.log(`[SKIP] Developers already completed - all ${epics.length} stories done (recovery mode)`);
 
         // Restore phase data
         context.setData('developmentTeam', team);
@@ -736,7 +746,9 @@ export class DevelopersPhase extends BasePhase {
         if (workspacePath && repositories.length > 0) {
           try {
             const { execSync } = require('child_process');
-            const targetRepo = repositories[0];
+            // 🔥 FIX: Get correct repository based on epic.targetRepository
+            const targetRepoName = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+            const targetRepo = repositories.find(r => r.name === targetRepoName || r.full_name === targetRepoName) || repositories[0];
             const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
             const storyBranch = updatedStory.branchName;
 

@@ -90,11 +90,11 @@ export class ProductManagerPhase extends BasePhase {
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nAnalyze all repositories to understand the full system.`
         : '';
 
-      // Previous output for revision (if any)
+      // Previous output for revision (if any) - ALWAYS include if exists (for continuations)
       const previousOutput = task.orchestration.productManager.output;
 
       let revisionSection = '';
-      if (previousOutput && task.orchestration.productManager.status === 'in_progress') {
+      if (previousOutput) {
         revisionSection = `
 
 # Previous Analysis Available
@@ -105,8 +105,39 @@ ${previousOutput}
 `;
       }
 
+      // Get problem analysis from context if available
+      const problemAnalysis = context.getData<any>('problemAnalysis');
+
+      let problemAnalysisSection = '';
+      if (problemAnalysis) {
+        problemAnalysisSection = `
+## 🧠 Problem Analysis (from Problem Analyst)
+
+### Problem Statement:
+${problemAnalysis.problemStatement || 'Not available'}
+
+### Solution Architecture:
+${problemAnalysis.solutionApproach || 'Not available'}
+
+### Technical Analysis:
+${problemAnalysis.technicalAnalysis || 'Not available'}
+
+### Success Criteria:
+${problemAnalysis.successCriteria?.map((c: string) => `- ${c}`).join('\n') || 'Not available'}
+
+### Identified Risks:
+${problemAnalysis.risks?.map((r: string) => `- ⚠️ ${r}`).join('\n') || 'None identified'}
+
+### Implementation Strategy:
+${problemAnalysis.implementationStrategy || 'Not available'}
+
+**USE THIS ANALYSIS** to create better, more informed epics and stories that address the real problem and follow the recommended architecture.
+`;
+      }
+
       const prompt = `# Task to Analyze
 ${revisionSection}
+${problemAnalysisSection}
 ## Task Details:
 - **Title**: ${task.title}
 - **Description**: ${task.description}
@@ -163,7 +194,13 @@ ${idx + 1}.c Read("${repo.name}/package.json") - Understand ${repo.name} depende
 
 ${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attachments.length} image(s) attached. Analyze them for visual requirements (UI mockups, diagrams, etc.).\n\n` : ''}## 🎯 NEW REQUIREMENT: Master Epic with Shared Contracts
 
-You are creating a **MASTER EPIC** that will coordinate work across multiple repositories.
+${problemAnalysis ? `⚠️ **IMPORTANT**: Use the Problem Analysis above to inform your epic creation. The Problem Analyst has already:
+- Identified the real problem to solve
+- Suggested the architecture approach
+- Defined success criteria
+- Identified risks to mitigate
+
+Your epics should align with and implement this analysis.\n\n` : ''}You are creating a **MASTER EPIC** that will coordinate work across multiple repositories.
 
 Your output must include:
 1. **Global Naming Conventions** - Field names, formats, prefixes that ALL repos must follow

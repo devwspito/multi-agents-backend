@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge';
+export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'e2e-fixer';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -111,6 +111,11 @@ export interface IPRConflict {
  * Orchestration - Nueva estructura con team dinámico
  */
 export interface IOrchestration {
+  // Fase 0: Problem Analyst (único) - Deep problem analysis
+  problemAnalyst?: IAgentStep & {
+    analysis?: any; // Structured analysis data
+  };
+
   // Fase 1: Product Manager (único)
   productManager: IAgentStep & {
     taskComplexity?: 'small' | 'medium' | 'large' | 'epic';
@@ -174,6 +179,11 @@ export interface IOrchestration {
     integrationBranch?: string; // Rama temporal con todos los PRs mergeados
     integrationTestResults?: any;
     totalPRsTested?: number;
+    previousAttempt?: {
+      output?: string;
+      error?: string;
+      completedAt?: Date;
+    };
   };
 
   // Fase 6: Merge Coordinator (único pero observa múltiples PRs)
@@ -200,8 +210,31 @@ export interface IOrchestration {
     }[];
   };
 
+  // Fase 8: E2E Testing (tests real frontend-backend integration)
+  e2eTesting?: IAgentStep & {
+    integrationPass?: boolean;
+    backendStarted?: boolean;
+    frontendStarted?: boolean;
+  };
+
+  // Fase 8.5: E2E Fixer (fixes integration issues detected by E2E Testing)
+  e2eFixer?: IAgentStep & {
+    errorType?: string; // endpoint-not-found, cors, payload-mismatch, etc.
+    filesModified?: string[];
+    changes?: string[];
+    fixed?: boolean;
+    attempts?: number; // Number of fix attempts
+    lastErrorHash?: string; // Hash of last error to detect if error changed
+    errorHistory?: Array<{
+      errorHash: string;
+      errorType: string;
+      attempt: number;
+      timestamp: Date;
+    }>;
+  };
+
   // Métricas globales
-  currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'completed';
+  currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed';
   phases?: any[]; // Array of phase objects with name, status, startedAt, approval
   totalCost: number;
   totalTokens: number;
@@ -216,11 +249,11 @@ export interface IOrchestration {
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'e2e-testing' | 'e2e-fixer')[]; // Fases que se auto-aprueban
 
   // Model configuration
   modelConfig?: {
-    preset?: 'max' | 'premium' | 'standard' | 'economy' | 'custom';
+    preset?: 'max' | 'premium' | 'standard' | 'balanced' | 'economy' | 'custom';
     customConfig?: {
       productManager?: string;
       projectManager?: string;
@@ -364,7 +397,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge'],
       required: true,
     },
     status: {
@@ -441,6 +474,23 @@ const taskSchema = new Schema<ITask>(
       default: 'medium',
     },
     orchestration: {
+      problemAnalyst: {
+        agent: { type: String, default: 'problem-analyst' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        analysis: Schema.Types.Mixed, // Structured analysis data
+      },
       productManager: {
         type: agentStepSchema,
         default: () => ({ agent: 'product-manager', status: 'pending' }),
@@ -641,13 +691,13 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge'],
+        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'e2e-testing', 'e2e-fixer'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
         preset: {
           type: String,
-          enum: ['premium', 'standard', 'economy', 'custom'],
+          enum: ['max', 'premium', 'standard', 'balanced', 'economy', 'custom'],
           default: 'standard',
         },
         customConfig: {
