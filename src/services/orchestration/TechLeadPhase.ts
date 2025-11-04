@@ -122,10 +122,9 @@ export class TechLeadPhase extends BasePhase {
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nDesign architecture considering all repositories.`
         : '';
 
-      // TODO: Add feedbackHistory to IAgentStep if revision support is needed
-      // For now, check if there's previous output for revision detection
+      // Previous output for revision (if any) - ALWAYS include if exists (for continuations)
       const previousOutput = task.orchestration.techLead.output;
-      const hasRevision = previousOutput && task.orchestration.techLead.status === 'in_progress';
+      const hasRevision = !!previousOutput;
 
       let revisionSection = '';
       if (hasRevision) {

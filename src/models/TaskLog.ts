@@ -24,6 +24,7 @@ export type LogCategory =
   | 'branch_cleanup'  // Branch cleanup after merge
   | 'webhook'         // Webhook events
   | 'scheduled_cleanup' // Scheduled cleanup operations
+  | 'integration'     // E2E integration testing
   | 'error';          // Errors and failures
 
 /**
@@ -43,8 +44,8 @@ export interface ITaskLog extends Document {
   message: string;
 
   // Context (optional but recommended)
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'completed' | 'multi-team';
-  agentType?: 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed' | 'multi-team';
+  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'e2e-fixer';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -126,7 +127,7 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     agentType: {
       type: String,
-      enum: ['product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge'],
     },
     agentInstanceId: String,
     epicId: String,

@@ -31,7 +31,7 @@ export class QAPhase extends BasePhase {
   }
 
   /**
-   * Skip if QA Engineer already completed
+   * Skip if QA Engineer already completed (ONLY for recovery, NOT for continuations or retry after Fixer)
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -43,8 +43,27 @@ export class QAPhase extends BasePhase {
       context.task = freshTask;
     }
 
+    const qaAttempt = context.getData<number>('qaAttempt') || 1;
+    const isRetryAfterFixer = qaAttempt === 2;
+
+    // 🔄 CONTINUATION: Never skip - always re-execute to test new code
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [QA] This is a CONTINUATION - will re-execute to test new code`);
+      return false; // DO NOT SKIP
+    }
+
+    // Don't skip if we're in retry mode after Fixer (attempt 2)
+    if (isRetryAfterFixer) {
+      console.log(`[QA] Retry mode after Fixer - will re-execute QA (attempt ${qaAttempt})`);
+      return false;
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     if (context.task.orchestration.qaEngineer?.status === 'completed') {
-      console.log(`[SKIP] QA Engineer already completed - skipping re-execution`);
+      console.log(`[SKIP] QA Engineer already completed - skipping re-execution (recovery mode)`);
 
       // Restore phase data from previous execution
       if (context.task.orchestration.qaEngineer.output) {
@@ -110,6 +129,10 @@ export class QAPhase extends BasePhase {
     // Track start time for duration calculation
     const startTime = new Date();
 
+    // Check if this is a retry after Fixer
+    const qaAttempt = context.getData<number>('qaAttempt') || 1;
+    const isRetryAfterFixer = qaAttempt === 2;
+
     // Initialize QA Engineer state if not exists (skip in multi-team mode)
     if (!multiTeamMode) {
       if (!task.orchestration.qaEngineer) {
@@ -119,8 +142,22 @@ export class QAPhase extends BasePhase {
         } as any;
       }
 
-      task.orchestration.qaEngineer!.status = 'in_progress';
-      task.orchestration.qaEngineer!.startedAt = startTime;
+      // If retry after Fixer, reset status to allow re-execution
+      if (isRetryAfterFixer) {
+        console.log(`🔄 [QA] Retry after Fixer - resetting QA state for re-execution`);
+        task.orchestration.qaEngineer!.status = 'in_progress';
+        task.orchestration.qaEngineer!.startedAt = startTime;
+        // Keep previous output/error for history
+        task.orchestration.qaEngineer!.previousAttempt = {
+          output: task.orchestration.qaEngineer!.output,
+          error: task.orchestration.qaEngineer!.error,
+          completedAt: task.orchestration.qaEngineer!.completedAt
+        };
+      } else {
+        task.orchestration.qaEngineer!.status = 'in_progress';
+        task.orchestration.qaEngineer!.startedAt = startTime;
+      }
+
       await task.save();
     }
 
@@ -363,9 +400,22 @@ Provide:
 
         const errorDetails = this.extractErrorDetails(result.output);
 
+        console.log(`🔧 [QA] Setting context data for Fixer:`, {
+          qaErrorsLength: errorDetails.errorOutput.length,
+          qaErrorType: errorDetails.errorType,
+          qaAttempt: 1
+        });
+
         context.setData('qaErrors', errorDetails.errorOutput);
         context.setData('qaErrorType', errorDetails.errorType);
         context.setData('qaAttempt', 1);
+
+        // Verify data was set
+        console.log(`🔧 [QA] Context data verification:`, {
+          qaErrorsSet: !!context.getData('qaErrors'),
+          qaErrorTypeSet: context.getData('qaErrorType'),
+          qaAttemptSet: context.getData('qaAttempt')
+        });
 
         NotificationService.emitAgentMessage(
           taskId,
@@ -509,23 +559,40 @@ Provide:
   }
 
   /**
-   * Detect if QA found errors (lint/build/test failures)
+   * Detect if QA found errors (lint/build/test/startup failures)
    */
   private detectQAErrors(qaOutput: string): boolean {
     const errorIndicators = [
+      // Lint errors
       'eslint',
       'lint error',
+      // Build errors
       'build failed',
       'compilation error',
+      // Test errors
       'test failed',
       'tests failed',
+      // Syntax/Type errors
       'error ts',
       'typeerror',
       'syntaxerror',
       'npm err!',
+      // JSON output indicators
       'testsPass": false',
       'buildSuccess": false',
       'lintSuccess": false',
+      'serverStartSuccess": false',
+      // Startup/Runtime errors (CRITICAL)
+      'server failed to start',
+      'application failed to start',
+      'cannot find module',
+      'module not found',
+      'importerror',
+      'modulenotfounderror',
+      'failed to load',
+      'error: cannot find',
+      'uncaught exception',
+      'unhandled rejection',
     ];
 
     const lowerOutput = qaOutput.toLowerCase();
@@ -541,8 +608,17 @@ Provide:
   } {
     const lowerOutput = qaOutput.toLowerCase();
 
+    // Determine error type (priority order: startup > lint > build > test)
     let errorType = 'unknown';
-    if (lowerOutput.includes('lint')) {
+    if (lowerOutput.includes('server failed to start') ||
+        lowerOutput.includes('application failed to start') ||
+        lowerOutput.includes('cannot find module') ||
+        lowerOutput.includes('module not found') ||
+        lowerOutput.includes('importerror') ||
+        lowerOutput.includes('modulenotfounderror') ||
+        lowerOutput.includes('serverstartsuccess": false')) {
+      errorType = 'startup';
+    } else if (lowerOutput.includes('lint')) {
       errorType = 'lint';
     } else if (lowerOutput.includes('build') || lowerOutput.includes('compilation')) {
       errorType = 'build';

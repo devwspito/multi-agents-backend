@@ -31,13 +31,29 @@ export class FixerPhase extends BasePhase {
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const qaErrors = context.getData<string>('qaErrors');
     const qaAttempt = context.getData<number>('qaAttempt') || 1;
+    const qaErrorType = context.getData<string>('qaErrorType');
+
+    console.log(`🔧 [Fixer] shouldSkip() called - Checking context data:`, {
+      hasQaErrors: !!qaErrors,
+      qaErrorsLength: qaErrors?.length || 0,
+      qaErrorType: qaErrorType,
+      qaAttempt: qaAttempt,
+      qaErrorsPreview: qaErrors ? qaErrors.substring(0, 100) + '...' : 'null'
+    });
 
     // Only run if QA failed on attempt 1
     if (!qaErrors || qaAttempt !== 1) {
-      console.log(`[SKIP] Fixer not needed (QA passed or already on attempt 2)`);
+      console.log(`❌ [SKIP] Fixer will be skipped:`, {
+        reason: !qaErrors ? 'No QA errors found in context' : `Already on attempt ${qaAttempt}`,
+        qaErrors: qaErrors ? 'present' : 'missing',
+        qaAttempt: qaAttempt
+      });
       return true;
     }
 
+    console.log(`✅ [Fixer] Will execute - QA errors found on attempt 1`);
+    console.log(`   Error type: ${qaErrorType}`);
+    console.log(`   Errors length: ${qaErrors.length} chars`);
     return false;
   }
 
@@ -52,7 +68,13 @@ export class FixerPhase extends BasePhase {
     const qaErrors = context.getData<string>('qaErrors') || '';
     const qaErrorType = context.getData<string>('qaErrorType') || 'unknown';
 
-    console.log(`🔧 [Fixer] Starting to fix ${qaErrorType} errors`);
+    console.log(`🔧 [Fixer] executePhase called - Starting to fix ${qaErrorType} errors`);
+    console.log(`🔧 [Fixer] Context data:`, {
+      hasQaErrors: !!qaErrors,
+      qaErrorsPreview: qaErrors.substring(0, 200) + '...',
+      qaErrorType: qaErrorType,
+      taskId: taskId
+    });
 
     // Initialize fixer step in task
     if (!task.orchestration.fixer) {
@@ -138,7 +160,7 @@ Output your result as JSON with format specified in your instructions.`;
 
       if (parsed.fixed) {
         console.log(`✅ [Fixer] Successfully fixed errors`);
-        console.log(`   Files modified: ${parsed.filesModified?.join(', ') || 'unknown'}`);
+        console.log(`   Files modified: ${parsed.filesModified.length > 0 ? parsed.filesModified.join(', ') : 'unknown'}`);
 
         // Update task with success
         task.orchestration.fixer!.status = 'completed';
@@ -161,7 +183,7 @@ Output your result as JSON with format specified in your instructions.`;
         NotificationService.emitAgentCompleted(
           taskId,
           'Fixer',
-          `Fixed ${qaErrorType} errors: ${parsed.changes?.join(', ') || 'See logs'}`
+          `Fixed ${qaErrorType} errors: ${parsed.changes.length > 0 ? parsed.changes.join(', ') : 'See logs'}`
         );
 
         await LogService.agentCompleted('fixer', taskId, {
@@ -247,17 +269,24 @@ Output your result as JSON with format specified in your instructions.`;
    */
   private parseFixerOutput(output: string): {
     fixed: boolean;
-    changes?: string[];
-    filesModified?: string[];
+    changes: string[];
+    filesModified: string[];
   } {
     try {
       const jsonMatch = output.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
+
+        // Ensure changes and filesModified are always arrays
+        const changes = Array.isArray(parsed.changes) ? parsed.changes :
+                       (parsed.changes ? [parsed.changes] : []);
+        const filesModified = Array.isArray(parsed.filesModified) ? parsed.filesModified :
+                             (parsed.filesModified ? [parsed.filesModified] : []);
+
         return {
           fixed: parsed.fixed === true,
-          changes: parsed.changes || [],
-          filesModified: parsed.filesModified || [],
+          changes,
+          filesModified,
         };
       }
     } catch (error) {
@@ -267,6 +296,10 @@ Output your result as JSON with format specified in your instructions.`;
     // Fallback: check if output says "fixed"
     const fixed = output.toLowerCase().includes('fixed') && !output.toLowerCase().includes('could not fix');
 
-    return { fixed };
+    return {
+      fixed,
+      changes: [],
+      filesModified: []
+    };
   }
 }

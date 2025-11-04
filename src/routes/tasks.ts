@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { uploadSingleImage } from '../middleware/upload';
+import { uploadMultipleImages } from '../middleware/upload';
 import { Task } from '../models/Task';
 import { Repository } from '../models/Repository';
 import { OrchestrationCoordinator } from '../services/orchestration/OrchestrationCoordinator';
@@ -18,7 +18,7 @@ const createTaskSchema = z.object({
   projectId: z.string().optional(),
   repositoryIds: z.array(z.string()).optional(), // Array de repository IDs
   tags: z.array(z.string()).optional(),
-  modelConfig: z.enum(['standard', 'premium', 'economy', 'max']).optional(), // Model preset configuration
+  modelConfig: z.enum(['standard', 'premium', 'balanced', 'economy', 'max']).optional(), // Model preset configuration
 });
 
 const startTaskSchema = z.object({
@@ -39,13 +39,14 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge'])
+    z.enum(['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'e2e-testing', 'e2e-fixer'])
   ).optional(),
 });
 
 const modelConfigSchema = z.object({
-  preset: z.enum(['max', 'premium', 'standard', 'economy', 'custom']).optional(),
+  preset: z.enum(['max', 'premium', 'standard', 'balanced', 'economy', 'custom']).optional(),
   customConfig: z.object({
+    problemAnalyst: z.string().optional(),
     productManager: z.string().optional(),
     projectManager: z.string().optional(),
     techLead: z.string().optional(),
@@ -55,6 +56,9 @@ const modelConfigSchema = z.object({
     qaEngineer: z.string().optional(),
     fixer: z.string().optional(),
     mergeCoordinator: z.string().optional(),
+    autoMerge: z.string().optional(),
+    e2eTester: z.string().optional(),
+    e2eFixer: z.string().optional(),
   }).optional(),
 });
 
@@ -218,7 +222,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
  * Recibe la descripción desde el primer mensaje del chat + opcional imagen
  * Soporta tanto JSON como multipart/form-data (con imagen)
  */
-router.post('/:id/start', authenticate, uploadSingleImage, async (req: AuthRequest, res) => {
+router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRequest, res) => {
   try {
     console.log('🔍 [START] Received body:', JSON.stringify(req.body, null, 2));
     console.log('🔍 [START] Task ID:', req.params.id);
@@ -282,21 +286,27 @@ router.post('/:id/start', authenticate, uploadSingleImage, async (req: AuthReque
     task.description = validatedData.description || validatedData.content || '';
     task.status = 'in_progress';
 
-    // 🔥 PROCESS IMAGE if uploaded via multipart/form-data
-    // req.file is populated by multer middleware
-    if ((req as any).file) {
-      const uploadedFile = (req as any).file;
-      console.log(`📎 [START] Image uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
-
-      // Store relative path in task.attachments (ProductManager will read from filesystem)
-      const imagePath = `/uploads/${uploadedFile.filename}`;
+    // 🔥 PROCESS IMAGES if uploaded via multipart/form-data
+    // req.files is populated by multer middleware (array of files)
+    if ((req as any).files && (req as any).files.length > 0) {
+      const uploadedFiles = (req as any).files;
+      console.log(`📎 [START] ${uploadedFiles.length} image(s) uploaded`);
 
       if (!task.attachments) {
         task.attachments = [];
       }
-      task.attachments.push(imagePath);
 
-      console.log(`📎 [START] Image saved to attachments: ${imagePath}`);
+      // Process each uploaded file
+      for (const uploadedFile of uploadedFiles) {
+        console.log(`📎 [START] Processing image: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+
+        // Store relative path in task.attachments (ProductManager will read from filesystem)
+        const imagePath = `/uploads/${uploadedFile.filename}`;
+        task.attachments.push(imagePath);
+        console.log(`📎 [START] Image saved to attachments: ${imagePath}`);
+      }
+
+      console.log(`📎 [START] Total ${task.attachments.length} attachments for this task`);
     }
 
     await task.save();
@@ -346,7 +356,7 @@ router.post('/:id/start', authenticate, uploadSingleImage, async (req: AuthReque
  * Continue working on a completed task with additional requirements
  * Preserves context: same repositories, branches, and previous work
  */
-router.post('/:id/continue', authenticate, uploadSingleImage, async (req: AuthRequest, res) => {
+router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: AuthRequest, res) => {
   try {
     const validatedData = continueTaskSchema.parse(req.body);
 
@@ -406,17 +416,25 @@ router.post('/:id/continue', authenticate, uploadSingleImage, async (req: AuthRe
     task.orchestration.paused = false;
     task.orchestration.cancelRequested = false;
 
-    // Process image if uploaded
-    if ((req as any).file) {
-      const uploadedFile = (req as any).file;
-      console.log(`📎 [CONTINUE] Image uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+    // Process images if uploaded
+    if ((req as any).files && (req as any).files.length > 0) {
+      const uploadedFiles = (req as any).files;
+      console.log(`📎 [CONTINUE] ${uploadedFiles.length} image(s) uploaded`);
 
-      const imagePath = `/uploads/${uploadedFile.filename}`;
       if (!task.attachments) {
         task.attachments = [];
       }
-      task.attachments.push(imagePath);
-      console.log(`📎 [CONTINUE] Image saved to attachments: ${imagePath}`);
+
+      // Process each uploaded file
+      for (const uploadedFile of uploadedFiles) {
+        console.log(`📎 [CONTINUE] Processing image: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+
+        const imagePath = `/uploads/${uploadedFile.filename}`;
+        task.attachments.push(imagePath);
+        console.log(`📎 [CONTINUE] Image saved to attachments: ${imagePath}`);
+      }
+
+      console.log(`📎 [CONTINUE] Total ${task.attachments.length} attachments for this task`);
     }
 
     await task.save();

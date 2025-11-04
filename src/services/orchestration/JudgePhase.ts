@@ -39,7 +39,7 @@ export class JudgePhase extends BasePhase {
   }
 
   /**
-   * Skip if Judge already evaluated all stories
+   * Skip if Judge already evaluated all stories (ONLY for recovery, NOT for continuations)
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -51,6 +51,16 @@ export class JudgePhase extends BasePhase {
       context.task = freshTask;
     }
 
+    // 🔄 CONTINUATION: Never skip - always re-execute to evaluate new code
+    const isContinuation = context.task.orchestration.continuations &&
+                          context.task.orchestration.continuations.length > 0;
+
+    if (isContinuation) {
+      console.log(`🔄 [Judge] This is a CONTINUATION - will re-execute to evaluate new code`);
+      return false; // DO NOT SKIP
+    }
+
+    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
     const judgeEvaluations = context.task.orchestration.judge?.evaluations || [];
 
     // 🔥 EVENT SOURCING: Get stories from EventStore
@@ -69,7 +79,7 @@ export class JudgePhase extends BasePhase {
     });
 
     if (allStoriesApproved) {
-      console.log(`[SKIP] Judge already approved all stories`);
+      console.log(`[SKIP] Judge already approved all stories (recovery mode)`);
       context.setData('judgeComplete', true);
       return true;
     }
