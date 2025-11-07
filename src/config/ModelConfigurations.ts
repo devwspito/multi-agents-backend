@@ -6,9 +6,9 @@
  */
 
 export type ClaudeModel =
-  | 'claude-3-5-sonnet-20241022'  // Best balance of performance and cost
-  | 'claude-3-5-haiku-20241022'   // Fast and economical
-  | 'claude-3-opus-20240229';      // Most capable, highest cost
+  | 'claude-sonnet-4-5-20250929'  // Best balance of performance and cost
+  | 'claude-haiku-4-5-20251001'   // Fast and economical
+  | 'claude-opus-4-1-20250805';   // Most capable, highest cost
 
 export interface ModelPricing {
   inputPerMillion: number;
@@ -16,34 +16,33 @@ export interface ModelPricing {
 }
 
 export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
-  'claude-3-5-sonnet-20241022': {
+  'claude-sonnet-4-5-20250929': {
     inputPerMillion: 3,    // $3 per million tokens
     outputPerMillion: 15,   // $15 per million tokens
   },
-  'claude-3-5-haiku-20241022': {
+  'claude-haiku-4-5-20251001': {
     inputPerMillion: 1,     // $1 per million tokens
     outputPerMillion: 5,    // $5 per million tokens
   },
-  'claude-3-opus-20240229': {
+  'claude-opus-4-1-20250805': {
     inputPerMillion: 15,    // $15 per million tokens
     outputPerMillion: 75,   // $75 per million tokens
   },
 };
 
 export interface AgentModelConfig {
-  problemAnalyst: ClaudeModel;
-  productManager: ClaudeModel;
-  projectManager: ClaudeModel;
-  techLead: ClaudeModel;
-  seniorDeveloper: ClaudeModel;
-  juniorDeveloper: ClaudeModel;
-  judge: ClaudeModel;
-  qaEngineer: ClaudeModel;
-  fixer: ClaudeModel;
-  mergeCoordinator: ClaudeModel;
-  autoMerge: ClaudeModel;
-  e2eTester: ClaudeModel;
-  e2eFixer: ClaudeModel;
+  'problem-analyst': ClaudeModel;
+  'product-manager': ClaudeModel;
+  'project-manager': ClaudeModel;
+  'tech-lead': ClaudeModel;
+  'developer': ClaudeModel;
+  'judge': ClaudeModel;
+  'qa-engineer': ClaudeModel;
+  'fixer': ClaudeModel;
+  'merge-coordinator': ClaudeModel;
+  'auto-merge': ClaudeModel;
+  'e2e-tester': ClaudeModel;
+  'e2e-fixer': ClaudeModel;
 }
 
 /**
@@ -58,19 +57,18 @@ export interface AgentModelConfig {
  * - Sonnet → Execution (Developers, Merge, E2E Testing)
  */
 export const PREMIUM_CONFIG: AgentModelConfig = {
-  problemAnalyst: 'claude-3-opus-20240229',     // 🧠 Critical: Deep problem analysis
-  productManager: 'claude-3-opus-20240229',      // 🧠 Critical: Requirements analysis
-  projectManager: 'claude-3-opus-20240229',      // 🧠 Critical: Task breakdown & planning
-  techLead: 'claude-3-opus-20240229',           // 🧠 Critical: Architecture design
-  judge: 'claude-3-opus-20240229',              // 🧠 Critical: Code review
-  qaEngineer: 'claude-3-opus-20240229',         // 🧠 Critical: Error detection
-  fixer: 'claude-3-opus-20240229',              // 🧠 Critical: Bug fixes
-  e2eFixer: 'claude-3-opus-20240229',           // 🧠 Critical: Integration fixes
-  seniorDeveloper: 'claude-3-5-sonnet-20241022', // 💨 Execution: Implements architecture
-  juniorDeveloper: 'claude-3-5-sonnet-20241022', // 💨 Execution: Simple tasks
-  mergeCoordinator: 'claude-3-5-sonnet-20241022', // 💨 Execution: Git operations
-  autoMerge: 'claude-3-5-sonnet-20241022',       // 💨 Execution: Automated merge
-  e2eTester: 'claude-3-5-sonnet-20241022',      // 💨 Execution: Script execution
+  'problem-analyst': 'claude-opus-4-1-20250805',     // 🧠 Critical: Deep problem analysis
+  'product-manager': 'claude-opus-4-1-20250805',      // 🧠 Critical: Requirements analysis
+  'project-manager': 'claude-opus-4-1-20250805',      // 🧠 Critical: Task breakdown & planning
+  'tech-lead': 'claude-opus-4-1-20250805',           // 🧠 Critical: Architecture design
+  'judge': 'claude-opus-4-1-20250805',              // 🧠 Critical: Code review
+  'qa-engineer': 'claude-opus-4-1-20250805',         // 🧠 Critical: Error detection
+  'fixer': 'claude-opus-4-1-20250805',              // 🧠 Critical: Bug fixes
+  'e2e-fixer': 'claude-opus-4-1-20250805',           // 🧠 Critical: Integration fixes
+  'developer': 'claude-sonnet-4-5-20250929', // 💨 Execution: Implements architecture
+  'merge-coordinator': 'claude-sonnet-4-5-20250929', // 💨 Execution: Git operations
+  'auto-merge': 'claude-sonnet-4-5-20250929',       // 💨 Execution: Automated merge
+  'e2e-tester': 'claude-sonnet-4-5-20250929',      // 💨 Execution: Script execution
 };
 
 /**
@@ -85,71 +83,18 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
  * - Haiku → Execution (Developers, Merge, E2E Testing)
  */
 export const STANDARD_CONFIG: AgentModelConfig = {
-  problemAnalyst: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Deep problem analysis
-  productManager: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Requirements
-  projectManager: 'claude-3-5-sonnet-20241022',  // 🧠 Critical: Planning
-  techLead: 'claude-3-5-sonnet-20241022',       // 🧠 Critical: Architecture
-  judge: 'claude-3-5-sonnet-20241022',          // 🧠 Critical: Code review
-  qaEngineer: 'claude-3-5-sonnet-20241022',     // 🧠 Critical: Error detection
-  fixer: 'claude-3-5-sonnet-20241022',          // 🧠 Critical: Bug fixes
-  e2eFixer: 'claude-3-5-sonnet-20241022',       // 🧠 Critical: Integration fixes
-  seniorDeveloper: 'claude-3-5-haiku-20241022',  // 💨 Execution: Implementation
-  juniorDeveloper: 'claude-3-5-haiku-20241022',  // 💨 Execution: Simple tasks
-  mergeCoordinator: 'claude-3-5-haiku-20241022', // 💨 Execution: Git coordination
-  autoMerge: 'claude-3-5-haiku-20241022',       // 💨 Execution: Automated merge
-  e2eTester: 'claude-3-5-haiku-20241022',       // 💨 Execution: Script execution
-};
-
-/**
- * Balanced Configuration (Strategic Sonnet + Haiku)
- *
- * - Best cost-performance ratio
- * - Sonnet for critical thinking, Haiku for execution
- * - Estimated cost: $4-6 per session (40% less than STANDARD)
- *
- * Strategy:
- * - Sonnet: Orchestration (PM, PjM, TL, ProblemAnalyst), Quality (Judge, QA, Fixers)
- * - Haiku: Execution (Developers), Simple tasks (Merge)
- */
-export const BALANCED_CONFIG: AgentModelConfig = {
-  problemAnalyst: 'claude-3-5-sonnet-20241022',  // Critical: Deep analysis
-  productManager: 'claude-3-5-sonnet-20241022',  // Critical: Requirements
-  projectManager: 'claude-3-5-sonnet-20241022',  // Critical: Planning
-  techLead: 'claude-3-5-sonnet-20241022',       // Critical: Architecture
-  seniorDeveloper: 'claude-3-5-haiku-20241022',  // Execution - Haiku is capable
-  juniorDeveloper: 'claude-3-5-haiku-20241022',  // Execution - Haiku is capable
-  judge: 'claude-3-5-sonnet-20241022',          // Critical: Code review
-  qaEngineer: 'claude-3-5-sonnet-20241022',     // Critical: Error detection
-  fixer: 'claude-3-5-sonnet-20241022',          // Critical: Accurate fixes
-  mergeCoordinator: 'claude-3-5-haiku-20241022', // Simple coordination
-  autoMerge: 'claude-3-5-haiku-20241022',       // Simple automated task
-  e2eTester: 'claude-3-5-haiku-20241022',       // Script execution - Haiku sufficient
-  e2eFixer: 'claude-3-5-sonnet-20241022',       // Critical: Integration fixes
-};
-
-/**
- * Economy Configuration (All Haiku)
- *
- * - Lowest cost option
- * - For simple tasks and prototypes
- * - Estimated cost: $2-3 per session
- *
- * Note: May struggle with complex requirements
- */
-export const ECONOMY_CONFIG: AgentModelConfig = {
-  problemAnalyst: 'claude-3-5-haiku-20241022',
-  productManager: 'claude-3-5-haiku-20241022',
-  projectManager: 'claude-3-5-haiku-20241022',
-  techLead: 'claude-3-5-haiku-20241022',
-  seniorDeveloper: 'claude-3-5-haiku-20241022',
-  juniorDeveloper: 'claude-3-5-haiku-20241022',
-  judge: 'claude-3-5-haiku-20241022',
-  qaEngineer: 'claude-3-5-haiku-20241022',
-  fixer: 'claude-3-5-haiku-20241022',
-  mergeCoordinator: 'claude-3-5-haiku-20241022',
-  autoMerge: 'claude-3-5-haiku-20241022',
-  e2eTester: 'claude-3-5-haiku-20241022',
-  e2eFixer: 'claude-3-5-haiku-20241022',
+  'problem-analyst': 'claude-sonnet-4-5-20250929',  // 🧠 Critical: Deep problem analysis
+  'product-manager': 'claude-sonnet-4-5-20250929',  // 🧠 Critical: Requirements
+  'project-manager': 'claude-sonnet-4-5-20250929',  // 🧠 Critical: Planning
+  'tech-lead': 'claude-sonnet-4-5-20250929',       // 🧠 Critical: Architecture
+  'judge': 'claude-sonnet-4-5-20250929',          // 🧠 Critical: Code review
+  'qa-engineer': 'claude-sonnet-4-5-20250929',     // 🧠 Critical: Error detection
+  'fixer': 'claude-sonnet-4-5-20250929',          // 🧠 Critical: Bug fixes
+  'e2e-fixer': 'claude-sonnet-4-5-20250929',       // 🧠 Critical: Integration fixes
+  'developer': 'claude-haiku-4-5-20251001',  // 💨 Execution: Implementation
+  'merge-coordinator': 'claude-haiku-4-5-20251001', // 💨 Execution: Git coordination
+  'auto-merge': 'claude-haiku-4-5-20251001',       // 💨 Execution: Automated merge
+  'e2e-tester': 'claude-haiku-4-5-20251001',       // 💨 Execution: Script execution
 };
 
 /**
@@ -162,19 +107,18 @@ export const ECONOMY_CONFIG: AgentModelConfig = {
  * Note: Highest quality but also highest cost
  */
 export const MAX_CONFIG: AgentModelConfig = {
-  problemAnalyst: 'claude-3-opus-20240229',
-  productManager: 'claude-3-opus-20240229',
-  projectManager: 'claude-3-opus-20240229',
-  techLead: 'claude-3-opus-20240229',
-  seniorDeveloper: 'claude-3-opus-20240229',
-  juniorDeveloper: 'claude-3-opus-20240229',
-  judge: 'claude-3-opus-20240229',
-  qaEngineer: 'claude-3-opus-20240229',
-  fixer: 'claude-3-opus-20240229',
-  mergeCoordinator: 'claude-3-opus-20240229',
-  autoMerge: 'claude-3-opus-20240229',
-  e2eTester: 'claude-3-opus-20240229',
-  e2eFixer: 'claude-3-opus-20240229',
+  'problem-analyst': 'claude-opus-4-1-20250805',
+  'product-manager': 'claude-opus-4-1-20250805',
+  'project-manager': 'claude-opus-4-1-20250805',
+  'tech-lead': 'claude-opus-4-1-20250805',
+  'developer': 'claude-opus-4-1-20250805',
+  'judge': 'claude-opus-4-1-20250805',
+  'qa-engineer': 'claude-opus-4-1-20250805',
+  'fixer': 'claude-opus-4-1-20250805',
+  'merge-coordinator': 'claude-opus-4-1-20250805',
+  'auto-merge': 'claude-opus-4-1-20250805',
+  'e2e-tester': 'claude-opus-4-1-20250805',
+  'e2e-fixer': 'claude-opus-4-1-20250805',
 };
 
 /**
@@ -204,28 +148,29 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
   const bottomModel = sortedModels[sortedModels.length - 1]; // Most economical
 
   console.log(`🎯 [ConfigOptimization] Optimizing user config:`, {
-    topModel,
-    bottomModel,
+    uniqueModels: models,
+    sortedByPrice: sortedModels,
+    topModel,          // Will be used for critical agents (PM, TL, Judge, etc.)
+    bottomModel,       // Will be used for execution agents (Developers, Merge, etc.)
     savingsEstimate: models.length > 1 ? 'Optimized for cost' : 'Single model config'
   });
 
   return {
     // 🧠 CRITICAL THINKING - Use TOP MODEL (most capable)
-    problemAnalyst: topModel,     // Deep problem analysis
-    productManager: topModel,     // Requirements decisions
-    projectManager: topModel,     // Planning & breakdown
-    techLead: topModel,          // Architecture design
-    judge: topModel,             // Code quality evaluation
-    qaEngineer: topModel,        // Error detection
-    fixer: topModel,             // Precise bug fixes
-    e2eFixer: topModel,          // Complex integration fixes
+    'problem-analyst': topModel,     // Deep problem analysis
+    'product-manager': topModel,     // Requirements decisions
+    'project-manager': topModel,     // Planning & breakdown
+    'tech-lead': topModel,          // Architecture design
+    'judge': topModel,             // Code quality evaluation
+    'qa-engineer': topModel,        // Error detection
+    'fixer': topModel,             // Precise bug fixes
+    'e2e-fixer': topModel,          // Complex integration fixes
 
     // 💨 EXECUTION - Use BOTTOM MODEL (economical)
-    seniorDeveloper: bottomModel, // Executes defined architecture
-    juniorDeveloper: bottomModel, // Executes simple tasks
-    mergeCoordinator: bottomModel, // Mechanical git operations
-    autoMerge: bottomModel,       // Simple automation
-    e2eTester: bottomModel,       // Script execution (curl, npm)
+    'developer': bottomModel,      // Code implementation
+    'merge-coordinator': bottomModel, // Mechanical git operations
+    'auto-merge': bottomModel,       // Simple automation
+    'e2e-tester': bottomModel,       // Script execution (curl, npm)
   };
 }
 
@@ -236,37 +181,33 @@ export function getAgentModel(
   agentType: string,
   config: AgentModelConfig = STANDARD_CONFIG
 ): ClaudeModel {
-  switch (agentType) {
-    case 'problem-analyst':
-      return config.problemAnalyst;
-    case 'product-manager':
-      return config.productManager;
-    case 'project-manager':
-      return config.projectManager;
-    case 'tech-lead':
-      return config.techLead;
-    case 'senior-developer':
-      return config.seniorDeveloper;
-    case 'junior-developer':
-      return config.juniorDeveloper;
-    case 'judge':
-      return config.judge;
-    case 'qa-engineer':
-      return config.qaEngineer;
-    case 'fixer':
-      return config.fixer;
-    case 'merge-coordinator':
-      return config.mergeCoordinator;
-    case 'auto-merge':
-      return config.autoMerge;
-    case 'e2e-tester':
-      return config.e2eTester;
-    case 'e2e-fixer':
-      return config.e2eFixer;
-    default:
-      // Default to Haiku for unknown agents
-      return 'claude-3-5-haiku-20241022';
+  const selectedModel = config[agentType as keyof AgentModelConfig];
+
+  if (!selectedModel) {
+    console.warn(`⚠️ [getAgentModel] Unknown agent type: ${agentType}, defaulting to SONNET (best model)`);
+    return 'claude-sonnet-4-5-20250929'; // Default to best general-purpose model
   }
+
+  console.log(`🎯 [getAgentModel] ${agentType} → ${selectedModel}`);
+  return selectedModel;
+}
+
+/**
+ * Convert full model ID to SDK alias
+ * Maps actual Anthropic model IDs to SDK model names
+ */
+export function getModelAlias(fullModelId: string): string {
+  const aliasMap: Record<string, string> = {
+    'claude-sonnet-4-5-20250929': 'sonnet',
+    'claude-haiku-4-5-20251001': 'haiku',
+    'claude-opus-4-1-20250805': 'opus',
+  };
+  const alias = aliasMap[fullModelId];
+  if (!alias) {
+    console.warn(`⚠️ [getModelAlias] Unknown model ID: ${fullModelId}, defaulting to SONNET`);
+    return 'sonnet'; // Default to best model if unknown
+  }
+  return alias;
 }
 
 /**
@@ -300,4 +241,39 @@ export function validateBudget(
 ): boolean {
   const estimatedCost = estimateConfigCost(config);
   return estimatedCost <= maxBudgetUSD;
+}
+
+/**
+ * Get the most powerful (expensive) model from a configuration
+ * Used for timeout retries - escalate to the best model available in user's config
+ */
+export function getTopModelFromConfig(config: AgentModelConfig): ClaudeModel {
+  // Get all unique models used in the config
+  const modelsUsed = new Set(Object.values(config));
+
+  // Priority order: Opus > Sonnet > Haiku
+  if (modelsUsed.has('claude-opus-4-1-20250805')) {
+    return 'claude-opus-4-1-20250805';
+  }
+  if (modelsUsed.has('claude-sonnet-4-5-20250929')) {
+    return 'claude-sonnet-4-5-20250929';
+  }
+  return 'claude-haiku-4-5-20251001'; // Fallback
+}
+
+/**
+ * Escalate a configuration to use the top model for all agents
+ * Used for timeout retries - temporarily boost all agents to best available model
+ */
+export function escalateConfigToTopModel(config: AgentModelConfig): AgentModelConfig {
+  const topModel = getTopModelFromConfig(config);
+
+  // Create new config with all agents using the top model
+  const escalatedConfig: AgentModelConfig = {} as AgentModelConfig;
+
+  for (const agent in config) {
+    escalatedConfig[agent as keyof AgentModelConfig] = topModel;
+  }
+
+  return escalatedConfig;
 }

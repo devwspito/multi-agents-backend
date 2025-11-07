@@ -452,40 +452,66 @@ export class OrchestrationCoordinator {
         } catch (error: any) {
           // Check if this is a timeout error
           if (error.isTimeout || error.message?.includes('timeout')) {
-            console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying with Opus (most powerful model)`);
-            NotificationService.emitConsoleLog(
-              taskId,
-              'warn',
-              `⏰ ${phaseName} timed out after 30 minutes - retrying with Opus (most powerful model)`
-            );
+            console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying with top model from user's config`);
 
-            // Switch to MAX_CONFIG (all Opus) for this retry
+            // Get current model config to find the top model
             const task = await Task.findById(taskId);
             if (task) {
+              const configs = await import('../../config/ModelConfigurations');
+
+              // Get current model config
+              let currentModelConfig: AgentModelConfig = configs.STANDARD_CONFIG;
+              if (task.orchestration?.modelConfig) {
+                const { preset, customConfig } = task.orchestration.modelConfig;
+                if (preset === 'custom' && customConfig) {
+                  currentModelConfig = customConfig as AgentModelConfig;
+                } else if (preset === 'max') {
+                  currentModelConfig = configs.MAX_CONFIG;
+                } else if (preset === 'premium') {
+                  currentModelConfig = configs.PREMIUM_CONFIG;
+                } else {
+                  currentModelConfig = configs.STANDARD_CONFIG;
+                }
+              }
+
+              // Find the most powerful model in the user's current config
+              const topModel = configs.getTopModelFromConfig(currentModelConfig);
+              const topModelName = topModel.includes('opus') ? 'Opus' :
+                                  topModel.includes('sonnet') ? 'Sonnet' : 'Haiku';
+
+              console.log(`🚀 [${phaseName}] Top model in user's config: ${topModelName}`);
+              NotificationService.emitConsoleLog(
+                taskId,
+                'warn',
+                `⏰ ${phaseName} timed out after 30 minutes - retrying with ${topModelName} (best model in your config)`
+              );
+
               // Save current model config
               const previousModelConfig = task.orchestration.modelConfig;
 
-              // Temporarily switch to MAX_CONFIG
+              // Escalate to top model for all agents
+              const escalatedConfig = configs.escalateConfigToTopModel(currentModelConfig);
+
               task.orchestration.modelConfig = {
-                preset: 'max',
-                customConfig: null,
+                preset: 'custom',
+                customConfig: escalatedConfig,
               };
               await task.save();
 
-              console.log(`🚀 [${phaseName}] Switched to MAX_CONFIG (Opus) for timeout retry`);
+              console.log(`🚀 [${phaseName}] Escalated all agents to ${topModelName} for timeout retry`);
 
               try {
-                // Retry with Opus
+                // Retry with escalated config
                 result = await phase.execute(context);
 
-                console.log(`✅ [${phaseName}] Timeout retry with Opus succeeded!`);
+                console.log(`✅ [${phaseName}] Timeout retry with ${topModelName} succeeded!`);
                 NotificationService.emitConsoleLog(
                   taskId,
                   'info',
-                  `✅ ${phaseName} succeeded with Opus after timeout`
+                  `✅ ${phaseName} succeeded with ${topModelName} after timeout`
                 );
               } catch (retryError: any) {
-                console.error(`❌ [${phaseName}] Timeout retry with Opus also failed:`, retryError.message);
+                console.error(`❌ [${phaseName}] Timeout retry with ${topModelName} also failed:`, retryError.message);
 
                 // Restore previous model config
                 task.orchestration.modelConfig = previousModelConfig;
