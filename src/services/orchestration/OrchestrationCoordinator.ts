@@ -483,7 +483,7 @@ export class OrchestrationCoordinator {
               NotificationService.emitConsoleLog(
                 taskId,
                 'warn',
-                `⏰ ${phaseName} timed out after 30 minutes - retrying with ${topModelName} (best model in your config)`
+                `⏰ ${phaseName} timed out after 10 minutes - retrying with ${topModelName} (best model in your config)`
               );
 
               // Save current model config
@@ -1218,8 +1218,8 @@ export class OrchestrationCoordinator {
       }
 
       // 🔥 TIMEOUT PROTECTION: Prevent agents from hanging indefinitely
-      // Max execution time: 30 minutes per agent
-      const AGENT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+      // Max execution time: 10 minutes per agent
+      const AGENT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
       // Simply collect the result - SDK handles everything
       let finalResult: any = null;
