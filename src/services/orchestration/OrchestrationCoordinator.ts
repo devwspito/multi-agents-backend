@@ -14,7 +14,7 @@ import { QAPhase } from './QAPhase';
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
-import { AgentModelConfig } from '../../config/ModelConfigurations';
+import { AgentModelConfig, getModelAlias } from '../../config/ModelConfigurations';
 
 // 🔥 NEW: Best practice services
 import { RetryService } from './RetryService';
@@ -96,8 +96,8 @@ export class OrchestrationCoordinator {
     'ProjectManager',      // 2. Break into epics (Sonnet 4.5 orchestrator)
     'Approval',            // 2.5 Human approval gate
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
-    'E2ETesting',          // 4. End-to-end integration testing (frontend-backend)
-    'E2EFixer',            // 4.5 Fix integration issues if E2E detected errors
+    'e2e-testing',          // 4. End-to-end integration testing (frontend-backend)
+    'e2e-fixer',            // 4.5 Fix integration issues if E2E detected errors
     'Approval',            // 5. Human approval gate (final approval - all teams done + E2E passed)
     'AutoMerge',           // 6. Automatically merge PRs to main
   ];
@@ -432,20 +432,78 @@ export class OrchestrationCoordinator {
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
         // Execute phase with retry logic for transient failures
-        const result = await RetryService.executeWithRetry(
-          () => phase.execute(context),
-          {
-            maxRetries: 3,
-            onRetry: (attempt, error, delayMs) => {
-              console.warn(`⚠️ [${phaseName}] Retry attempt ${attempt} after ${delayMs}ms. Error: ${error.message}`);
-              NotificationService.emitConsoleLog(
-                taskId,
-                'warn',
-                `⚠️ Retrying ${phaseName} (attempt ${attempt}) after transient error: ${error.message}`
-              );
+        // 🔥 TIMEOUT RETRY STRATEGY: If agent times out, retry once with Opus (most powerful model)
+        let result;
+        try {
+          result = await RetryService.executeWithRetry(
+            () => phase.execute(context),
+            {
+              maxRetries: 3,
+              onRetry: (attempt, error, delayMs) => {
+                console.warn(`⚠️ [${phaseName}] Retry attempt ${attempt} after ${delayMs}ms. Error: ${error.message}`);
+                NotificationService.emitConsoleLog(
+                  taskId,
+                  'warn',
+                  `⚠️ Retrying ${phaseName} (attempt ${attempt}) after transient error: ${error.message}`
+                );
+              }
             }
+          );
+        } catch (error: any) {
+          // Check if this is a timeout error
+          if (error.isTimeout || error.message?.includes('timeout')) {
+            console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying with Opus (most powerful model)`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⏰ ${phaseName} timed out after 30 minutes - retrying with Opus (most powerful model)`
+            );
+
+            // Switch to MAX_CONFIG (all Opus) for this retry
+            const task = await Task.findById(taskId);
+            if (task) {
+              // Save current model config
+              const previousModelConfig = task.orchestration.modelConfig;
+
+              // Temporarily switch to MAX_CONFIG
+              task.orchestration.modelConfig = {
+                preset: 'max',
+                customConfig: null,
+              };
+              await task.save();
+
+              console.log(`🚀 [${phaseName}] Switched to MAX_CONFIG (Opus) for timeout retry`);
+
+              try {
+                // Retry with Opus
+                result = await phase.execute(context);
+
+                console.log(`✅ [${phaseName}] Timeout retry with Opus succeeded!`);
+                NotificationService.emitConsoleLog(
+                  taskId,
+                  'info',
+                  `✅ ${phaseName} succeeded with Opus after timeout`
+                );
+              } catch (retryError: any) {
+                console.error(`❌ [${phaseName}] Timeout retry with Opus also failed:`, retryError.message);
+
+                // Restore previous model config
+                task.orchestration.modelConfig = previousModelConfig;
+                await task.save();
+
+                throw retryError; // Re-throw to fail the phase
+              }
+
+              // Restore previous model config for next phases
+              task.orchestration.modelConfig = previousModelConfig;
+              await task.save();
+            } else {
+              throw error; // Can't retry without task
+            }
+          } else {
+            throw error; // Non-timeout error, re-throw
           }
-        );
+        }
 
         // 🔥 SPECIAL HANDLING: QA → Fixer → QA retry loop
         if (phaseName === 'QA' && result.success && result.data?.hasErrors) {
@@ -497,8 +555,8 @@ export class OrchestrationCoordinator {
           }
         }
 
-        // 🔥 SPECIAL HANDLING: E2ETesting → E2EFixer → E2ETesting smart retry loop
-        if (phaseName === 'E2ETesting' && result.success && result.data?.hasErrors) {
+        // 🔥 SPECIAL HANDLING: e2e-testing → e2e-fixer → e2e-testing smart retry loop
+        if (phaseName === 'e2e-testing' && result.success && result.data?.hasErrors) {
           console.log(`🔧 [E2ETesting] E2E detected integration errors - executing E2E Fixer phase`);
           console.log(`   Error type: ${result.data?.errorType}`);
           NotificationService.emitConsoleLog(taskId, 'info', `🔧 E2E Testing detected integration errors - executing E2E Fixer to resolve`);
@@ -515,7 +573,7 @@ export class OrchestrationCoordinator {
             console.log(`\n🔄 [E2E Loop] Iteration ${retryCount + 1}/${maxRetries}`);
 
             // Execute E2E Fixer
-            const e2eFixerPhase = this.createPhase('E2EFixer', context);
+            const e2eFixerPhase = this.createPhase('e2e-fixer', context);
             if (!e2eFixerPhase) {
               console.log(`❌ [E2E Loop] Could not create E2E Fixer phase - breaking loop`);
               break;
@@ -541,7 +599,7 @@ export class OrchestrationCoordinator {
               NotificationService.emitConsoleLog(taskId, 'info', `✅ E2E Fixer completed - re-running integration tests`);
 
               // Re-run E2E Testing
-              const e2eTestingPhaseRetry = this.createPhase('E2ETesting', context);
+              const e2eTestingPhaseRetry = this.createPhase('e2e-testing', context);
               if (e2eTestingPhaseRetry) {
                 const e2eTestingResultRetry = await e2eTestingPhaseRetry.execute(context);
 
@@ -753,10 +811,10 @@ export class OrchestrationCoordinator {
       case 'Fixer':
         return new (require('./FixerPhase').FixerPhase)(executeAgentWithContext);
 
-      case 'E2ETesting':
+      case 'e2e-testing':
         return new (require('./E2ETestingPhase').E2ETestingPhase)(executeAgentWithContext);
 
-      case 'E2EFixer':
+      case 'e2e-fixer':
         return new (require('./E2EFixerPhase').E2EFixerPhase)(executeAgentWithContext);
 
       case 'Approval':
@@ -924,7 +982,7 @@ export class OrchestrationCoordinator {
     contextOverride?: OrchestrationContext
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel, getFullModelId } = await import('./AgentDefinitions');
+    const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
 
     // Get repository type from task or context for developer specialization
     let repositoryType: 'frontend' | 'backend' | 'mobile' | 'fullstack' | 'library' | 'unknown' = 'unknown';
@@ -978,14 +1036,6 @@ export class OrchestrationCoordinator {
               modelConfig = configs.PREMIUM_CONFIG;
               console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
               break;
-            case 'balanced':
-              modelConfig = configs.BALANCED_CONFIG;
-              console.log(`⚖️  [ExecuteAgent] Using BALANCED_CONFIG (Strategic Sonnet + Haiku - Best Value)`);
-              break;
-            case 'economy':
-              modelConfig = configs.ECONOMY_CONFIG;
-              console.log(`💰 [ExecuteAgent] Using ECONOMY_CONFIG (All Haiku)`);
-              break;
             case 'standard':
             default:
               modelConfig = configs.STANDARD_CONFIG;
@@ -1004,20 +1054,20 @@ export class OrchestrationCoordinator {
     modelConfig = configs.optimizeConfigForBudget(modelConfig);
     console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
 
-    const sdkModel = getAgentModel(agentType, modelConfig); // 'haiku', 'sonnet', 'opus' - with model config support
-    const fullModelId = getFullModelId(sdkModel); // 'claude-haiku-4-5-20251001'
+    const fullModelId = getAgentModel(agentType, modelConfig); // e.g., 'claude-sonnet-4-5-20250929'
+    const sdkModel = getModelAlias(fullModelId); // e.g., 'sonnet'
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
     console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);
     console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
-    console.log(`🔧 [ExecuteAgent] Model configuration:`, {
+    console.log(`🔧 [ExecuteAgent] Model selection for ${agentType}:`, {
       preset: taskId ? 'From task' : 'Default STANDARD_CONFIG',
-      modelUsed: sdkModel,
-      fullModelId,
+      fullModelId: fullModelId,           // e.g., 'claude-sonnet-4-5-20250929'
+      sdkAlias: sdkModel,                 // e.g., 'sonnet' (what gets sent to SDK)
+      fromConfig: modelConfig[agentType as keyof AgentModelConfig]  // Show what config says
     });
     console.log(`🔧 [ExecuteAgent] Agent config:`, {
       agentType,
-      model: sdkModel,
       fullModelId,
       hasAgentDef: !!agentDef,
       promptLength: prompt.length,
@@ -1107,7 +1157,8 @@ export class OrchestrationCoordinator {
       // SDK query - minimal config, let SDK handle env inheritance
       console.log(`📡 [ExecuteAgent] Calling SDK query() with options:`, {
         cwd: workspacePath,
-        model: fullModelId,
+        model: sdkModel,
+        fullModelId: fullModelId,
         permissionMode: 'bypassPermissions',
         hasPrompt: !!promptContent,
         apiKeySource,
@@ -1119,7 +1170,7 @@ export class OrchestrationCoordinator {
           prompt: promptContent as any,
           options: {
             cwd: workspacePath,
-            model: fullModelId,
+            model: sdkModel, // Use SDK alias ('sonnet', 'haiku', 'opus'), NOT full ID
             // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
             permissionMode: 'bypassPermissions',
             env: {
@@ -1140,19 +1191,27 @@ export class OrchestrationCoordinator {
         throw new Error(`SDK query failed: ${queryError.message}`);
       }
 
+      // 🔥 TIMEOUT PROTECTION: Prevent agents from hanging indefinitely
+      // Max execution time: 30 minutes per agent
+      const AGENT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
       // Simply collect the result - SDK handles everything
       let finalResult: any = null;
       const allMessages: any[] = [];
       let turnCount = 0;
 
-      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
+      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages (timeout: ${AGENT_TIMEOUT_MS / 1000}s)...`);
 
       try {
-        for await (const message of stream) {
-          allMessages.push(message);
+        // Wrap stream consumption with timeout using Promise.race
+        await Promise.race([
+          // Main stream processing
+          (async () => {
+            for await (const message of stream) {
+              allMessages.push(message);
 
-          // 🔥 CRITICAL: Log FULL message if it has an error flag
-          if ((message as any).is_error === true) {
+              // 🔥 CRITICAL: Log FULL message if it has an error flag
+              if ((message as any).is_error === true) {
             console.error(`\n${'='.repeat(80)}`);
             console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
             console.error(`${'='.repeat(80)}`);
@@ -1258,16 +1317,35 @@ export class OrchestrationCoordinator {
 
             console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
           }
-        }
+            }
+          })(), // End of main stream processing
+          // Timeout promise
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`Agent execution timeout after ${AGENT_TIMEOUT_MS / 1000}s`)),
+              AGENT_TIMEOUT_MS
+            )
+          ),
+        ]);
       } catch (streamError: any) {
-        console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
+        // Check if this is a timeout error
+        const isTimeout = streamError.message?.includes('timeout');
+
+        console.error(`❌ [ExecuteAgent] Error consuming stream${isTimeout ? ' (TIMEOUT)' : ''}:`, {
           message: streamError.message,
           stack: streamError.stack,
           code: streamError.code,
           turnCount,
-          lastMessages: allMessages.slice(-3)
+          lastMessages: allMessages.slice(-3),
+          isTimeout,
         });
-        throw streamError;
+
+        // Re-throw with timeout flag for retry logic
+        const error: any = new Error(streamError.message);
+        error.isTimeout = isTimeout;
+        error.turnCount = turnCount;
+        error.agentType = agentType;
+        throw error;
       }
 
       console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
