@@ -399,6 +399,13 @@ export class OrchestrationCoordinator {
 
           NotificationService.emitConsoleLog(taskId, 'error', `🛑 Task cancelled by user`);
           NotificationService.emitTaskFailed(taskId, { error: 'Task cancelled by user' });
+
+          // 🔥 IMPORTANT: Clean up resources on cancellation
+          CostBudgetService.cleanupTaskConfig(taskId);
+          const { approvalEvents } = await import('../ApprovalEvents');
+          approvalEvents.cleanupTask(taskId);
+          console.log(`🧹 Cleaned up resources for cancelled task ${taskId}`);
+
           return; // Exit immediately
         }
 
@@ -2096,10 +2103,17 @@ After writing code, you MUST:
     });
     console.log(`${'='.repeat(80)}\n`);
 
-    // 🔥 IMPORTANT: Clean up task-specific config from CostBudgetService
+    // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks
     const taskId = (task._id as any).toString();
+
+    // Clean up cost budget config
     CostBudgetService.cleanupTaskConfig(taskId);
     console.log(`🧹 Cleaned up task-specific cost budget config for task ${taskId}`);
+
+    // Clean up approval event listeners
+    const { approvalEvents } = await import('../ApprovalEvents');
+    approvalEvents.cleanupTask(taskId);
+    console.log(`🧹 Cleaned up approval event listeners for task ${taskId}`);
   }
 
   /**
@@ -2116,8 +2130,14 @@ After writing code, you MUST:
       error: error.message,
     });
 
-    // 🔥 IMPORTANT: Clean up task-specific config from CostBudgetService even on failure
+    // 🔥 IMPORTANT: Clean up task-specific resources even on failure
     CostBudgetService.cleanupTaskConfig(taskId);
     console.log(`🧹 Cleaned up task-specific cost budget config for failed task ${taskId}`);
+
+    // Clean up approval event listeners
+    import('../ApprovalEvents').then(({ approvalEvents }) => {
+      approvalEvents.cleanupTask(taskId);
+      console.log(`🧹 Cleaned up approval event listeners for failed task ${taskId}`);
+    });
   }
 }
