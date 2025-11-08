@@ -286,40 +286,45 @@ export class QAPhase extends BasePhase {
       }));
 
       // Execute QA agent
-      const prompt = `Act as the qa-engineer agent.
+      const prompt = `# QA Engineer - Final Validation
 
-# Integration Testing
+## Task: ${task.title}
 
-## CRITICAL CONTEXT - Selected Repositories
-**You are working ONLY on these ${repositories.length} repository(ies):**
-${repoContext.map(r => `- ${r.name} (${r.fullName}): Located at ${r.path}`).join('\n')}
+## Repos to Test (${repositories.length}):
+${repoContext.map(r => `- ${r.name} at ${r.path}`).join('\n')}
 
-**IMPORTANT INSTRUCTIONS:**
-1. ONLY validate code in the repositories listed above
-2. Do NOT look for components outside these repositories
-3. If you see references to other repositories (e.g., ConsoleViewer in frontend when testing backend), that's EXPECTED
-4. Focus on testing functionality within the selected repositories only
+## Epic Branches Merged:
+${branchesToTest.map(b => `- ${b}`).join('\n')}
 
-## Task:
-${task.title}
+## 🎯 INSTRUCTIONS (Be thorough but efficient):
 
-## Epic Branches to Test:
-${branchesToTest.map((branch) => `- Branch: ${branch}`).join('\n')}
+1. **RUN TESTS** (2 min max):
+   - npm test or yarn test
+   - Check build: npm run build
+   - Verify lint: npm run lint
 
-## Your Mission:
-Test the integrated solution with all epic branches merged together.
-Test ONLY within the ${repositories.length} selected repository(ies).
+2. **TEST FUNCTIONALITY**:
+   - Verify main features work
+   - Check happy path first
+   - Test error handling
 
-Provide:
-1. Integration test results FOR THE SELECTED REPOSITORIES
-2. Any bugs or issues found IN THE SELECTED REPOSITORIES
-3. **GO/NO-GO decision** based on the selected repositories only
+3. **REPORT RESULTS**:
+   - List what passed ✅
+   - List any failures ❌
+   - GO/NO-GO decision
 
-**Testing Guidelines**:
-- Focus on the most critical paths first (happy path, then error cases)
-- If tests are taking too long (>2 minutes), report progress and continue with remaining checks
-- Prioritize functional correctness over exhaustive edge case testing
-- Document what you tested and what remains untested if time is limited`;
+## SUCCESS CRITERIA:
+- Build compiles without errors
+- Tests pass (or no tests exist)
+- No critical runtime errors
+- Main functionality works
+
+## OUTPUT FORMAT:
+1. Test Results: PASS/FAIL with details
+2. Issues Found: List any bugs
+3. Decision: GO (ready for PR) or NO-GO (needs fixes)
+
+Be concise but thorough. Focus on functionality over perfection.`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context

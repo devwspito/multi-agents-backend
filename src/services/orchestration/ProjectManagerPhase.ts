@@ -158,203 +158,66 @@ ${previousOutput}
 `;
       }
 
-      const prompt = `Act as the project-manager agent.
-
-# Project Clarification Task
+      const prompt = `# Project Manager - Scope & Dependencies
 ${validationFeedbackSection}${revisionSection}
-## Original Task Request:
-**Title**: ${task.title}
-**Description**: ${task.description}
+## Task: ${task.title}
+${task.description ? `Description: ${task.description}` : ''}
 
-## Product Manager Analysis:
+## Product Analysis:
 ${productManagerAnalysis}
+
+## Workspace: ${workspacePath}
 ${repoInfo}
 
-## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+## 🎯 INSTRUCTIONS (Be efficient):
 
-**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+1. **EXPLORE** (max 2 min): Find real files in repos
+2. **DEFINE EPICS**: Break into 3-5 major features with file paths
+3. **AVOID OVERLAPS**: Each epic must touch different files
+4. **OUTPUT JSON**: Epic plan with dependencies
 
-**ABSOLUTE RULE**: ONLY explore files inside this workspace path. NEVER explore outside.
+## CRITICAL RULES:
+- EVERY epic MUST have real file paths (no placeholders)
+- NO two epics can modify the same files
+- Backend repos: APIs, models, logic
+- Frontend repos: UI, components, views
 
-The following repositories are cloned INSIDE your workspace:
-${context.repositories.map(repo =>
-  `- **${workspacePath}/${repo.name}** (${repo.type}) → ${repo.githubRepoName}`
-).join('\n')}
+## Overlap Prevention:
+If epics need same files, either:
+1. MERGE them into one epic
+2. SEQUENCE with dependencies
+3. SPLIT into different files
 
-**✅ CORRECT Commands (stay inside workspace)**:
-\`\`\`bash
-# Navigate to a repo in workspace
-cd ${workspacePath}/${context.repositories[0]?.name || 'repo'}
-ls -la
-
-# Find files in workspace
-find ${workspacePath}/${context.repositories[0]?.name || 'repo'} -name "*.js" | head -20
-
-# Read files with relative paths
-Read("${context.repositories[0]?.name || 'repo'}/src/App.jsx")
-\`\`\`
-
-**❌ INCORRECT Commands (FORBIDDEN - exploring outside workspace)**:
-\`\`\`bash
-# ❌ NEVER explore system directories
-ls ~/Desktop/mult-agent-software-project
-find ~ -name "package.json"
-
-# ❌ NEVER use paths to files outside workspace
-Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
-Read("/Users/.../multi-agents-backend/src/models/User.ts")  # System file!
-
-# ❌ Files you find MUST be in: ${workspacePath}/<repo-name>/...
-\`\`\`
-
-**📝 FILE PATHS IN YOUR JSON OUTPUT**:
-- Your JSON must use paths relative to repository root
-- ✅ CORRECT: "src/components/Button.jsx"
-- ❌ WRONG: "${context.repositories[0]?.name || 'repo'}/src/components/Button.jsx"
-
-${workspaceInfo}
-
-## 🚨 MANDATORY REQUIREMENT: File Paths for ALL Epics
-
-**EVERY epic MUST include concrete file paths.** Without them:
-- ❌ System CANNOT detect overlapping work
-- ❌ Multiple devs WILL modify same files → merge conflicts
-- ❌ Epic assignment to repository WILL FAIL
-- ❌ Your response will be REJECTED
-
-**Before outputting JSON**:
-1. ✅ Use Bash to \`cd <repository-name>\` and explore with \`ls\`, \`find\`, \`cat\`
-2. ✅ Identify REAL files that exist in the cloned repositories
-3. ✅ Add file paths to EVERY epic (paths relative to repository root)
-
-**Example** (if exploring a backend repository):
-\`\`\`bash
-cd ${context.repositories.find(r => r.type === 'backend')?.name || 'backend-repo'}
-find . -name "*.js" | head -20
-\`\`\`
-
-Then in your JSON, reference files WITHOUT the repository name prefix:
+## JSON OUTPUT ONLY:
 \`\`\`json
 {
   "epics": [
     {
       "id": "epic-1",
-      "title": "Webhook Event Coverage",
-      "affectedRepositories": ["${context.repositories.find(r => r.type === 'backend')?.name || 'backend-repo'}"],
-      "filesToModify": ["src/routes/integrations.js"],
-      "filesToCreate": ["src/services/WebhookEventService.js"],
-      "filesToRead": ["src/models/Session.js"]
+      "title": "Feature name",
+      "description": "What it does",
+      "affectedRepositories": ["repo-name"],
+      "filesToModify": ["src/real/file.js"],
+      "filesToCreate": ["src/new/file.js"],
+      "filesToRead": ["src/existing/file.js"],
+      "estimatedComplexity": "simple|moderate|complex",
+      "dependencies": [],
+      "executionOrder": 1
     }
-  ]
+  ],
+  "totalTeamsNeeded": 2,
+  "dependencies": {
+    "cross_repo": ["backend API must exist before frontend"],
+    "external": ["needs database schema"],
+    "sequential": ["epic-2 depends on epic-1"]
+  },
+  "risks": ["risk 1", "risk 2"],
+  "outOfScope": ["excluded feature 1"],
+  "assumptions": ["assumption 1"]
 }
 \`\`\`
 
-❌ **NEVER** create epics without file paths
-❌ **NEVER** use placeholder paths like "src/path/to/file.js"
-❌ **NEVER** reference files from outside the cloned repositories
-
-## Your Responsibilities:
-
-1. **Clarify the Task**: Break down ambiguous requirements into clear, actionable objectives
-2. **Define Scope**: What is IN SCOPE and OUT OF SCOPE. Identify MVP vs nice-to-have
-3. **Dependency Analysis**: Identify cross-repo dependencies, circular dependencies, prerequisites
-4. **Risk Assessment**: Technical risks, integration risks, timeline risks with mitigation strategies
-5. **Implementation Sequencing**: Define phases with clear handoffs (Phase 1 → Phase 2 → Phase 3)
-6. **Multi-Repo Strategy**: Based on repository TYPES above, determine implementation order
-
-## CRITICAL: Multi-Repo Epic Creation
-
-When creating epics that span multiple repositories, you MUST:
-
-1. **Specify Affected Repositories by Type**:
-   - Look at the "Available Repositories" section above
-   - Each repository has a TYPE (BACKEND 🔧 or FRONTEND 🎨)
-   - In your epic's "affectedRepositories" field, list the repository NAMES (not types)
-
-2. **List Concrete File Paths**:
-   - For BACKEND repositories: Specify backend files (e.g., "backend/src/models/User.js", "src/routes/api.js")
-   - For FRONTEND repositories: Specify frontend files (e.g., "src/components/Dashboard.jsx", "src/hooks/useAuth.js")
-   - Include files in "filesToModify", "filesToCreate", or "filesToRead"
-
-3. **Example Epic Structure**:
-   \`\`\`json
-   {
-     "id": "epic-1",
-     "title": "User Authentication System",
-     "affectedRepositories": ["backend", "ws-project-frontend"],
-     "filesToModify": [
-       "backend/src/models/User.js",           // Backend file
-       "backend/src/routes/auth.js",           // Backend file
-       "src/components/LoginForm.jsx",         // Frontend file
-       "src/views/LoginPage.jsx"               // Frontend file
-     ]
-   }
-   \`\`\`
-
-4. **Repository Separation Logic**:
-   - The system will AUTOMATICALLY separate your epic by repository based on file paths
-   - Epic with backend + frontend files → becomes 2 separate epics (one per repo)
-   - Backend epics execute FIRST (executionOrder: 1), then Frontend (executionOrder: 2)
-
-5. **What Happens If You Don't Specify Files**:
-   - ⚠️ WARNING: If you list multiple repositories in "affectedRepositories" but NO file paths, the system CANNOT separate the epic
-   - This will cause ALL work to be assigned to ONE repository (likely the first one)
-   - ALWAYS include file paths when multiple repositories are involved
-
-## Critical for Multi-Repo:
-- If frontend and backend depend on each other, identify HOW to break the circular dependency
-- Specify which repository starts first and what it delivers to unblock the other
-- Define shared contracts/interfaces that both can work against
-- ALWAYS include concrete file paths for each repository mentioned in affectedRepositories
-
-## 🚨 CRITICAL: Epic Overlap Prevention
-
-The system will **REJECT** your epics if they overlap (modify the same files). To prevent this:
-
-### Overlap Resolution Strategies:
-
-1. **MERGE Features**: If two features naturally touch the same files, combine them into ONE epic
-   - Example: "User Auth" + "User Profile" both touch User.js → merge into "User Management System"
-
-2. **SPLIT Files**: Refactor so each epic has clear boundaries
-   - Example: Move auth logic to AuthService.js, profile logic to ProfileService.js
-
-3. **SEQUENCE Work**: Make epics depend on each other
-   - Example: Epic 2 modifies User.js AFTER Epic 1 finishes → add \`"dependencies": ["epic-1"]\`
-
-4. **ADJUST Scope**: Remove overlapping functionality from one epic
-   - Example: Epic 1 handles User.js completely, Epic 2 only adds UserSettings.js
-
-### How to Avoid Overlaps:
-
-✅ **DO**: Create epics with clear, non-overlapping file boundaries
-\`\`\`json
-{
-  "epics": [
-    {"id": "epic-1", "filesToModify": ["backend/src/models/User.js"]},
-    {"id": "epic-2", "filesToModify": ["backend/src/models/Product.js"]}
-  ]
-}
-\`\`\`
-
-❌ **DON'T**: Create multiple epics that touch the same files
-\`\`\`json
-{
-  "epics": [
-    {"id": "epic-1", "filesToModify": ["backend/src/routes/integrations.js"]},
-    {"id": "epic-2", "filesToModify": ["backend/src/routes/integrations.js"]}
-  ]
-}
-\`\`\`
-
-**Analysis Guidelines**:
-- Focus on understanding dependencies between the epics created by Product Manager
-- If the Master Epic is complex (>5 epics), prioritize analyzing the most critical dependencies first
-- You don't need perfect clarity on every detail - make reasonable assumptions and document them
-- Aim for practical, implementable breakdown over theoretical perfection
-**If you get an overlap error**: The system detected conflicting epics. Review the error message and apply one of the 4 strategies above.
-
-**Output a detailed project plan following the format in your agent instructions.**`;
+Explore first, then output JSON.`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context without re-processing

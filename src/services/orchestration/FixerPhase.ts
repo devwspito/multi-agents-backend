@@ -110,35 +110,44 @@ export class FixerPhase extends BasePhase {
     const repoPath = `${primaryRepo.name}`;
 
     // Build prompt with QA errors
-    const prompt = `# QA Detected Errors
+    const prompt = `# Fixer - Error Resolution
 
 ## Error Type: ${qaErrorType}
 
-## Error Output from QA:
+## Errors Found:
 \`\`\`
 ${qaErrors}
 \`\`\`
 
-## Your Task:
-Fix ONLY the errors shown above. Read the files mentioned, fix the issues, commit your changes.
+## 🎯 INSTRUCTIONS (Be efficient):
 
-## Repository:
-Working directory: ${workspacePath}
-Target repository: ${repoPath}/
+1. **FIX ERRORS** (priority order):
+   - Syntax/compilation errors first
+   - Import/module errors
+   - Type errors
+   - Test failures
 
-**CRITICAL**: After fixing, you MUST commit:
-1. cd ${repoPath}
-2. git add .
-3. git commit -m "Fix ${qaErrorType} errors"
-4. git push
+2. **COMMIT CHANGES**:
+   \`\`\`bash
+   cd ${repoPath}
+   git add .
+   git commit -m "Fix ${qaErrorType} errors"
+   \`\`\`
 
-Output your result as JSON with format specified in your instructions.
+## SUCCESS CRITERIA:
+- All errors resolved
+- Code compiles
+- Tests pass (if applicable)
+- Changes committed
 
-**Fixing Guidelines**:
-- Address the most critical errors first (compilation errors, syntax errors, missing imports)
-- If there are many errors (>5), fix them in logical groups and commit incrementally
-- Focus on making the code work - optimization can come later
-- If an error is unclear, make a reasonable fix based on the context and patterns in the codebase`;
+## OUTPUT (JSON only):
+{
+  "fixed": true|false,
+  "filesModified": ["file1.js", "file2.ts"],
+  "changes": ["Fixed import", "Added missing type"]
+}
+
+Fix errors quickly. Focus on functionality over perfection.`;
 
     try {
       const result = await this.executeAgentFn(

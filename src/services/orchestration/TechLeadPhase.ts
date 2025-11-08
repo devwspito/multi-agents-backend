@@ -146,229 +146,71 @@ ${previousOutput}
 
       const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic) : `Act as the tech-lead agent.
 
-# Architecture Design & Team Building
+# Architecture & Planning
 ${revisionSection}
-## Task:
-${task.title}
+## Task: ${task.title}
+${task.description ? `Description: ${task.description}` : ''}
 
-## Description:
-${task.description || 'See title for requirements'}
+## Workspace: ${workspacePath}
+${repoInfo}
 
-## Epics Identified by Product Manager:
-${epicsIdentified.length > 0 ? epicsIdentified.map((e, i) => `${i + 1}. ${e}`).join('\n') : 'No epics identified - analyze task and create epics as needed'}
+## 🎯 INSTRUCTIONS (Be concise and efficient):
 
-## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+1. **EXPLORE** (max 3 minutes): Scan codebase structure to find real file paths
+2. **CREATE 2-4 EPICS**: Major feature groups
+3. **CREATE 3-5 STORIES PER EPIC**: Each 1-3 hours of work
 
-**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+## STORY FORMAT (include all):
+- **Acceptance Criteria**: Given/When/Then format
+- **Files**: Exact paths to read/modify/create
+- **Technical Details**: Functions, APIs, types to implement
+- **Testing**: What tests to write
+- **Done Criteria**: Checklist for completion
 
-**ABSOLUTE RULE**: ONLY explore files inside this workspace path. NEVER explore outside.
-
-The following repositories are cloned INSIDE your workspace:
-${context.repositories.map(repo =>
-  `- **${workspacePath}/${repo.name}** (${repo.type}) → ${repo.githubRepoName}`
-).join('\n')}
-
-**✅ CORRECT Commands (stay inside workspace)**:
-\`\`\`bash
-cd ${workspacePath}/${context.repositories[0]?.name || 'repo'} && find src -name "*.ts"
-Read("${context.repositories[0]?.name || 'repo'}/src/models/User.ts")
-\`\`\`
-
-**❌ INCORRECT Commands (FORBIDDEN)**:
-\`\`\`bash
-# ❌ NEVER explore outside workspace
-find ~ -name "*.ts"
-Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
-\`\`\`
-
-**📝 FILE PATHS IN STORIES**: Must be relative to repo root
-- ✅ CORRECT: "src/models/User.ts"
-- ❌ WRONG: "${context.repositories[0]?.name || 'repo'}/src/models/User.ts"
-
-${repoInfo}${workspaceInfo}
-
-## Your Mission:
-Create a comprehensive technical plan with:
-1. **Epics & Stories Breakdown** - Implementable, testable units of work
-2. **Technical Architecture** - Complete design with patterns and best practices
-3. **Repository Assignment** - Clear repository mapping for each epic
-4. **Team Composition** - Right team size with balanced workload
-5. **Story Assignments** - Smart distribution based on complexity
-
----
-
-## ⚠️ CRITICAL: Story Description Requirements
-
-Each story description MUST include ALL of the following sections:
-
-### 1. ACCEPTANCE CRITERIA (Given/When/Then format)
-Provide clear, testable acceptance criteria:
-- **Given**: Initial state/preconditions
-- **When**: Action or trigger
-- **Then**: Expected outcome
-
-Example:
-\`\`\`
-**Acceptance Criteria:**
-- Given a user is on the login page
-- When they enter valid credentials and click "Login"
-- Then they should be redirected to the dashboard
-- And their session should be persisted
-\`\`\`
-
-### 2. TECHNICAL SPECIFICATIONS
-Be extremely specific about implementation:
-
-**Files to Create/Modify:**
-- Exact file paths to create or modify
-- Example: \`src/components/LoginForm.tsx\` (create)
-- Example: \`src/services/AuthService.ts\` (modify - add login method)
-
-**Functions/Classes/Components:**
-- Specific names and signatures
-- Example: \`async function login(email: string, password: string): Promise<User>\`
-- Example: \`class AuthService { async authenticate(credentials): Promise<Token> }\`
-
-**Data Structures:**
-- Interfaces, types, or schemas
-- Example:
-\`\`\`typescript
-interface LoginCredentials {
-  email: string;
-  password: string;
-}
-\`\`\`
-
-**API/Endpoints (if applicable):**
-- HTTP methods, routes, request/response formats
-- Example: \`POST /api/auth/login\`
-- Request: \`{ email, password }\`
-- Response: \`{ token, user }\`
-
-### 3. IMPLEMENTATION GUIDELINES
-Provide clear direction:
-
-**Design Patterns to Follow:**
-- Which patterns to use (e.g., Service pattern, Repository pattern, Factory pattern)
-- Example: "Use Repository pattern for data access"
-
-**Security Considerations:**
-- Authentication/authorization requirements
-- Input validation rules
-- Data sanitization needs
-- Example: "Hash passwords with bcrypt (10 rounds), validate email format, sanitize all user inputs"
-
-**Performance Considerations:**
-- Caching strategies
-- Database query optimization
-- Async/await patterns
-- Example: "Use Redis cache for session storage, debounce search by 300ms"
-
-**Error Handling:**
-- Specific errors to handle
-- Error messages to return
-- Example: "Handle InvalidCredentials (401), UserNotFound (404), ServerError (500)"
-
-### 4. TESTING REQUIREMENTS
-Define what tests are needed:
-- Unit tests for each function
-- Integration tests for workflows
-- Test cases to cover
-- Example: "Test successful login, invalid credentials, missing fields, SQL injection attempts"
-
-### 5. DEFINITION OF DONE
-Clear completion criteria:
-- [ ] All acceptance criteria met
-- [ ] All functions implemented and typed
-- [ ] Unit tests written and passing
-- [ ] Integration tests passing
-- [ ] Code linted (no ESLint errors)
-- [ ] TypeScript compilation successful
-- [ ] Security considerations addressed
-- [ ] Performance requirements met
-
-### 6. CODE EXAMPLES (when helpful)
-Provide code snippets for complex logic:
-\`\`\`typescript
-// Example: JWT token generation
-const token = jwt.sign(
-  { userId: user.id, email: user.email },
-  process.env.JWT_SECRET,
-  { expiresIn: '7d' }
-);
-\`\`\`
-
----
-
-**RESPOND ONLY WITH VALID JSON** in this exact format:
+## JSON OUTPUT ONLY:
 \`\`\`json
 {
   "epics": [
     {
       "id": "epic-1",
       "name": "Epic Name",
-      "description": "Epic description",
+      "description": "Brief description",
       "branchName": "epic/epic-name",
-      "targetRepository": "${context.repositories[0]?.full_name || context.repositories[0]?.name || 'repository-name'}",
+      "targetRepository": "${context.repositories[0]?.name || 'repository'}",
       "stories": [
         {
           "id": "story-1",
           "title": "Story title",
-          "description": "COMPLETE story description following ALL sections above (Acceptance Criteria, Technical Specifications, Implementation Guidelines, Testing Requirements, Definition of Done, Code Examples if needed)",
+          "description": "Complete description with: Acceptance Criteria (Given/When/Then), Files to modify, Functions/APIs to implement, Tests to write, Done criteria",
           "epicId": "epic-1",
           "priority": 1,
           "estimatedComplexity": "simple|moderate|complex",
           "dependencies": [],
           "status": "pending",
-          "filesToRead": ["src/path/to/file1.ts"],
-          "filesToModify": ["src/path/to/file2.ts", "src/path/to/file3.ts"],
-          "filesToCreate": ["src/path/to/newfile.ts"]
+          "filesToRead": ["real/path/file.ts"],
+          "filesToModify": ["real/path/file2.ts"],
+          "filesToCreate": ["real/path/new.ts"]
         }
       ],
       "status": "pending"
     }
   ],
-  "architectureDesign": "Comprehensive technical architecture including: system design, data flow, component interactions, database schema, API contracts, security measures, performance optimizations, error handling strategy, testing approach",
+  "architectureDesign": "Technical architecture: system design, data flow, APIs, security, error handling",
   "teamComposition": {
     "developers": 2,
-    "reasoning": "Why this team size based on story complexity and interdependencies"
+    "reasoning": "Team size reasoning"
   },
   "storyAssignments": [
-    {
-      "storyId": "story-1",
-      "assignedTo": "dev-1"
-    }
+    {"storyId": "story-1", "assignedTo": "dev-1"}
   ]
 }
 \`\`\`
 
-**Critical Rules**:
-- 🚨 **YOU MUST EXPLORE THE CODEBASE FIRST** - Before outputting JSON:
-  1. Use \`ls -la\` to list all repositories
-  2. Use \`cd repo-name && find . -name "*.ts" -o -name "*.js" | head -20\` to see file structure
-  3. Use Read tool to examine key files (package.json, main entry points, existing models)
-  4. Identify EXACTLY which files exist and need modification
-  5. ONLY THEN output the JSON with real file paths
-- ⚠️ **filesToRead, filesToModify, filesToCreate MUST contain REAL paths** - Use paths from your exploration (e.g., "src/services/AuthService.ts")
-- ⚠️ **STORY DESCRIPTIONS MUST BE DETAILED**: Include ALL 6 sections above (Acceptance Criteria, Technical Specs, Guidelines, Testing, Definition of Done, Examples)
-- ⚠️ **BE SPECIFIC**: No vague descriptions like "Implement feature X". Instead: "Create LoginForm.tsx component with email/password fields, validate inputs, call AuthService.login(), handle errors, redirect on success"
-- ⚠️ **EACH STORY MUST BE SELF-CONTAINED**: Developer should know exactly what files to create/modify, what functions to write, what tests to add
-- Each epic MUST specify targetRepository (the repository where changes will be made)
-- Use exact repository names from the "Available Repositories" list above
-- If targetRepository is not specified, the first repository will be used as default
-- Use instanceIds like "dev-1", "dev-2", "dev-3", etc.
-- Assign stories based on complexity and developer availability
-- Balance workload across developers
-- Each story must have a unique ID and belong to an epic
-- Stories should be implementable in 1-3 hours max
-- Break complex features into multiple stories if needed
-
-**Architecture Guidelines**:
-- Explore the codebase to understand existing patterns and architecture
-- Focus on the most relevant files for each story (don't read everything)
-- If exploration is extensive (>4 minutes), prioritize based on what you've learned and create stories
-- Make reasonable assumptions about file structure based on patterns you observe
-- It's better to have implementable stories with clear guidance than perfect stories with every detail`;
+**RULES**:
+- EXPLORE FIRST: Use ls, find, Read to get real file paths
+- USE REAL PATHS: No placeholders
+- COMPLETE STORIES: Each must include acceptance criteria, files, technical specs, tests
+- ASSIGN ALL STORIES: Each to a dev-1, dev-2, etc.`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context without re-processing
@@ -815,7 +657,7 @@ const token = jwt.sign(
     const targetRepo = epic.targetRepository || epic.affectedRepositories?.[0] || firstRepo || 'repository-name';
     const repoType = epic.targetRepository ? (epic.targetRepository.includes('frontend') || epic.targetRepository.includes('ws-project') ? 'FRONTEND' : 'BACKEND') : 'UNKNOWN';
 
-    // 🔥 NEW: Build Master Epic context section
+    // Master Epic context if available
     let masterEpicContext = '';
     if (masterEpic && epic.masterEpicId === masterEpic.id) {
       const namingConventions = epic.globalNamingConventions || masterEpic.globalNamingConventions || {};
@@ -823,250 +665,74 @@ const token = jwt.sign(
       const otherRepos = (masterEpic.affectedRepositories || []).filter((r: string) => r !== targetRepo);
 
       masterEpicContext = `
-## 🎯 CRITICAL: Master Epic Context
+## Master Epic Context
+**Master Epic**: ${masterEpic.title} (${masterEpic.id})
+**Your Sub-Epic**: ${epic.id} (${repoType})
+${otherRepos.length > 0 ? `**Other Teams**: ${otherRepos.join(', ')}` : ''}
 
-⚠️ **YOU ARE WORKING ON A SUB-EPIC THAT IS PART OF A LARGER MASTER EPIC**
+### Naming Conventions (MANDATORY)
+${Object.entries(namingConventions).map(([key, value]) => `- ${key}: ${value}`).join('\n')}
 
-**Master Epic ID**: ${masterEpic.id}
-**Master Epic Title**: ${masterEpic.title}
-**Your Sub-Epic**: ${epic.id} (${repoType} repository)
-${otherRepos.length > 0 ? `**Other Teams Working On**: ${otherRepos.join(', ')} (parallel development)` : ''}
+### Shared Contracts
+${sharedContracts.apiEndpoints?.length > 0 ? `APIs: ${sharedContracts.apiEndpoints.map((api: any) => `${api.method} ${api.path}`).join(', ')}` : ''}
+${sharedContracts.sharedTypes?.length > 0 ? `Types: ${sharedContracts.sharedTypes.map((t: any) => t.name).join(', ')}` : ''}
 
----
-
-### 📋 MANDATORY Naming Conventions (ALL stories MUST follow these)
-
-${Object.entries(namingConventions).map(([key, value]) => `- **${key}**: ${value}`).join('\n')}
-
-**Why this matters**:
-- Backend team uses these EXACT field names in database models
-- Frontend team uses these EXACT field names in API calls
-- If you deviate, you create integration bugs (e.g., backend sends "userId", frontend expects "user_id" → 💥 FAILURE)
-
-**Examples**:
-${namingConventions.primaryIdField ? `- User ID field: \`${namingConventions.primaryIdField}\` (NOT "id", "user_id", "userID", etc.)` : ''}
-${namingConventions.timestampFormat ? `- Timestamps: ${namingConventions.timestampFormat} format` : ''}
-${namingConventions.errorCodePrefix ? `- Error codes: ${namingConventions.errorCodePrefix}ERROR_NAME` : ''}
-
----
-
-### 🔗 Shared Contracts (APIs and Types)
-
-${sharedContracts.apiEndpoints && sharedContracts.apiEndpoints.length > 0 ? `
-**API Endpoints**:
-${sharedContracts.apiEndpoints.map((api: any, i: number) => `
-${i + 1}. **${api.method} ${api.path}**
-   - Description: ${api.description || 'Not provided'}
-   - Request: \`${JSON.stringify(api.request)}\`
-   - Response: \`${JSON.stringify(api.response)}\`
-   ${repoType === 'BACKEND' ? '   → YOU MUST IMPLEMENT this endpoint with this EXACT signature' : ''}
-   ${repoType === 'FRONTEND' ? '   → YOU MUST CONSUME this endpoint with this EXACT request format' : ''}
-`).join('\n')}
-` : ''}
-
-${sharedContracts.sharedTypes && sharedContracts.sharedTypes.length > 0 ? `
-**Shared Data Types**:
-${sharedContracts.sharedTypes.map((type: any, i: number) => `
-${i + 1}. **${type.name}**
-   - Description: ${type.description || 'Not provided'}
-   - Fields: \`${JSON.stringify(type.fields)}\`
-   ${repoType === 'BACKEND' ? '   → Database model MUST use these field names and types' : ''}
-   ${repoType === 'FRONTEND' ? '   → Components MUST use these field names when displaying data' : ''}
-`).join('\n')}
-` : ''}
-
-${sharedContracts.eventSchemas && sharedContracts.eventSchemas.length > 0 ? `
-**Event Schemas**:
-${sharedContracts.eventSchemas.map((event: any, i: number) => `
-${i + 1}. **${event.name}**
-   - Description: ${event.description || 'Not provided'}
-   - Payload: \`${JSON.stringify(event.payload)}\`
-`).join('\n')}
-` : ''}
-
----
-
-### ⚠️ CRITICAL RULES FOR YOUR STORIES
-
-1. **Field Names**: Use EXACT field names from naming conventions
-   - ✅ CORRECT: \`userId: req.body.userId\`
-   - ❌ WRONG: \`userId: req.body.user_id\` (different from contract!)
-
-2. **API Implementation** (Backend):
-   - Implement endpoints with EXACT paths, methods, request/response formats
-   - Return responses matching contract EXACTLY (no extra/missing fields)
-
-3. **API Consumption** (Frontend):
-   - Call endpoints with EXACT request format from contract
-   - Expect responses matching contract EXACTLY
-
-4. **Type Alignment**:
-   - Backend models MUST match shared types
-   - Frontend interfaces MUST match shared types
-   - NO custom field names or structure changes
-
-5. **Cross-Repo Awareness**:
-${otherRepos.length > 0 ? `   - ${otherRepos.join(', ')} team(s) are working in parallel on their part
-   - They will use the SAME naming conventions and contracts
-   - Your work must integrate seamlessly with theirs` : '   - No other repositories involved in this epic'}
-
----
+**CRITICAL**: Use exact field names and API signatures from contracts above.
 `;
     }
 
-    return `Act as the TECH LEAD in MULTI-TEAM MODE.
+    return `TECH LEAD - MULTI-TEAM MODE
 ${masterEpicContext}
 
-# Epic Architecture Design & Team Building
-
-You are the TEAM LEAD for this epic. Your job is to:
-1. **Break this epic into 2-5 implementable stories**
-2. **Decide how many developers you need** (1-5 devs recommended)
-3. **Assign each story to a specific developer**
-4. **Provide detailed technical specifications** for each story
-
-## Epic Assignment:
-**ID**: ${epic.id}
-**Title**: ${epic.title}
-**Description**: ${epic.description}
+## Epic: ${epic.id} - ${epic.title}
 **Complexity**: ${epic.estimatedComplexity}
-**Target Repository**: ${targetRepo} (${repoType === 'BACKEND' ? '🔧 BACKEND' : repoType === 'FRONTEND' ? '🎨 FRONTEND' : '📦 GENERAL'})
-**Affected Repositories**: ${epic.affectedRepositories?.join(', ') || 'Not specified'}
-**Dependencies**: ${epic.dependencies?.length > 0 ? epic.dependencies.join(', ') : 'None'}
+**Target**: ${targetRepo} (${repoType})
 **Branch**: ${branchName || `epic/${epic.id}`}
-**Execution Order**: ${epic.executionOrder || 'not set'}
 
-## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+## Workspace: ${workspacePath}/${targetRepo}
+${repoInfo}
 
-**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+## INSTRUCTIONS:
+1. EXPLORE codebase (max 2 min): cd ${workspacePath}/${targetRepo} && find src
+2. BREAK INTO 2-5 STORIES (each 1-3 hours work)
+3. ASSIGN DEVELOPERS (1 dev per story)
 
-**ABSOLUTE RULE**: ONLY explore files inside **${workspacePath}/${targetRepo}**
-
-**✅ CORRECT Commands (stay inside workspace)**:
-\`\`\`bash
-cd ${workspacePath}/${targetRepo} && find src -name "*.ts" | head -20
-Read("${targetRepo}/src/models/User.ts")
-\`\`\`
-
-**❌ INCORRECT Commands (FORBIDDEN - exploring outside workspace)**:
-\`\`\`bash
-# ❌ NEVER explore system directories or other projects
-find ~ -name "*.ts"
-Read("mult-agents-frontend/src/components/Modal.jsx")  # NOT in your workspace!
-ls /Users/.../Desktop/mult-agent-software-project  # System directory!
-\`\`\`
-
-**📝 FILE PATHS IN STORIES**: Must be relative to repo root
-- ✅ CORRECT: "src/models/User.ts"
-- ❌ WRONG: "${targetRepo}/src/models/User.ts"
-
-${repoInfo}${workspaceInfo}
-
-## Repository Type Guidance:
-
-${repoType === 'BACKEND' ? `
-### 🔧 BACKEND Repository - Focus On:
-- **API Endpoints**: REST routes, GraphQL resolvers, WebSocket handlers
-- **Data Models**: MongoDB/Mongoose schemas, database migrations
-- **Business Logic**: Services, controllers, middleware, utilities
-- **Authentication**: JWT, sessions, OAuth, password hashing
-- **Data Processing**: Agenda jobs, cron tasks, background workers
-- **File Paths Typically**: backend/src/models/, backend/src/routes/, backend/src/services/, src/middleware/
-` : repoType === 'FRONTEND' ? `
-### 🎨 FRONTEND Repository - Focus On:
-- **UI Components**: React/Vue components, forms, modals, layouts
-- **Views/Pages**: Route-level components, dashboard views
-- **State Management**: Hooks (useState, useEffect), context, stores
-- **API Integration**: Service calls, API clients, data fetching hooks
-- **Styling**: CSS, styled-components, Tailwind classes
-- **File Paths Typically**: src/components/, src/views/, src/hooks/, src/services/
-` : ''}
-
-## Your Mission (as Team Lead):
-Break this EPIC into 2-5 implementable STORIES with:
-1. **Exact file paths** to read/modify/create (matching repository type above)
-2. **Detailed acceptance criteria** (Given/When/Then)
-3. **Technical specifications** (functions, classes, APIs)
-4. **Implementation guidelines** (patterns, security, performance)
-5. **Testing requirements**
-6. **Definition of done**
-
-**CRITICAL RULES**:
-- 🚨 **EXPLORE CODEBASE FIRST** - Use tools to find actual file paths
-- ⚠️ **REAL PATHS ONLY** - No placeholder paths like "src/path/to/file.ts"
-- ⚠️ **REPOSITORY AWARENESS** - All file paths MUST match the target repository type (${repoType})
-- ⚠️ **2-5 STORIES RECOMMENDED** - Break epic into manageable stories
-- ⚠️ **GRANULAR** - Each story = 1-3 hours of work for 1 developer
-- ⚠️ **ASSIGN DEVS** - Decide team size (1-5 devs) and assign stories
-- ⚠️ **1 DEV = 1 STORY** - Each developer gets exactly one story to work on
-
-**RESPOND ONLY WITH VALID JSON** in this exact format:
+## JSON OUTPUT ONLY:
 \`\`\`json
 {
-  "epics": [
-    {
-      "id": "${epic.id}",
-      "name": "${epic.title}",
-      "description": "Architecture for ${epic.title}",
-      "branchName": "${branchName || `epic/${epic.id}`}",
-      "targetRepository": "${targetRepo}",
-      "stories": [
-        {
-          "id": "${epic.id}-story-1",
-          "title": "Story title (e.g., 'Create AuthService with JWT login')",
-          "description": "COMPLETE description with ALL sections: Acceptance Criteria (Given/When/Then), Technical Specifications (files, functions, types, APIs), Implementation Guidelines (patterns, security, performance), Testing Requirements, Definition of Done, Code Examples",
-          "epicId": "${epic.id}",
-          "priority": 1,
-          "estimatedComplexity": "simple|moderate|complex",
-          "dependencies": [],
-          "status": "pending",
-          "filesToRead": ["real/path/file1.ts"],
-          "filesToModify": ["real/path/file2.ts"],
-          "filesToCreate": ["real/path/newfile.ts"]
-        },
-        {
-          "id": "${epic.id}-story-2",
-          "title": "Another story (e.g., 'Add JWT middleware to routes')",
-          "description": "COMPLETE description with ALL sections...",
-          "epicId": "${epic.id}",
-          "priority": 2,
-          "estimatedComplexity": "simple|moderate|complex",
-          "dependencies": ["${epic.id}-story-1"],
-          "status": "pending",
-          "filesToRead": ["real/path/file3.ts"],
-          "filesToModify": ["real/path/file4.ts"],
-          "filesToCreate": []
-        }
-      ],
-      "status": "pending"
-    }
-  ],
-  "architectureDesign": "Technical architecture for ${epic.title} including: system design, data flow, component interactions, API contracts, security, performance, error handling",
-  "teamComposition": {
-    "developers": 2,
-    "reasoning": "2 developers needed - story-1 and story-2 can run in parallel after dependencies resolved"
-  },
+  "epics": [{
+    "id": "${epic.id}",
+    "name": "${epic.title}",
+    "description": "Architecture",
+    "branchName": "${branchName || `epic/${epic.id}`}",
+    "targetRepository": "${targetRepo}",
+    "stories": [
+      {
+        "id": "${epic.id}-story-1",
+        "title": "Story title",
+        "description": "Complete with: Acceptance Criteria, Files, Functions/APIs, Tests, Done criteria",
+        "epicId": "${epic.id}",
+        "priority": 1,
+        "estimatedComplexity": "simple|moderate|complex",
+        "dependencies": [],
+        "status": "pending",
+        "filesToRead": ["real/path.ts"],
+        "filesToModify": ["real/path2.ts"],
+        "filesToCreate": ["real/new.ts"]
+      }
+    ],
+    "status": "pending"
+  }],
+  "architectureDesign": "Technical design",
+  "teamComposition": {"developers": 2, "reasoning": "Why"},
   "storyAssignments": [
-    {
-      "storyId": "${epic.id}-story-1",
-      "assignedTo": "dev-1"
-    },
-    {
-      "storyId": "${epic.id}-story-2",
-      "assignedTo": "dev-2"
-    }
+    {"storyId": "${epic.id}-story-1", "assignedTo": "dev-1"}
   ]
 }
 \`\`\`
 
-🎯 **TEAM SIZE DECISION**:
-- ${epic.estimatedComplexity === 'simple' ? '1-2 developers' : ''}
-- ${epic.estimatedComplexity === 'moderate' ? '2-3 developers' : ''}
-- ${epic.estimatedComplexity === 'complex' ? '3-4 developers' : ''}
-- ${epic.estimatedComplexity === 'epic' ? '4-5 developers' : ''}
+Team size: ${epic.estimatedComplexity === 'simple' ? '1-2' : epic.estimatedComplexity === 'moderate' ? '2-3' : epic.estimatedComplexity === 'complex' ? '3-4' : '4-5'} developers
 
-Each developer = 1 story. If epic has 3 stories, assign 3 developers.
-
-**Start by exploring the codebase, then output the JSON.**`;
+Explore first, then output JSON.`;
   }
 }
