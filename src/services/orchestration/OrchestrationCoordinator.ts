@@ -404,7 +404,9 @@ export class OrchestrationCoordinator {
           CostBudgetService.cleanupTaskConfig(taskId);
           const { approvalEvents } = await import('../ApprovalEvents');
           approvalEvents.cleanupTask(taskId);
-          console.log(`🧹 Cleaned up resources for cancelled task ${taskId}`);
+          const { gitLock } = await import('./GitOperationLock');
+          gitLock.releaseAllTaskLocks(taskId);
+          console.log(`🧹 Cleaned up all resources for cancelled task ${taskId}`);
 
           return; // Exit immediately
         }
@@ -1702,7 +1704,12 @@ ${judgeFeedback}
         const { execSync } = require('child_process');
         const repoPath = `${workspacePath}/${repoName}`;
 
-        // First, ensure we're on the epic base branch WITH LATEST CHANGES
+        // 🔒 CRITICAL: Acquire lock for git operations to prevent conflicts
+        const { gitLock } = await import('./GitOperationLock');
+        await gitLock.acquireLock(taskId, repoPath, `Creating story branch for ${story.id}`);
+
+        try {
+          // First, ensure we're on the epic base branch WITH LATEST CHANGES
         // 🔥 CRITICAL FIX: Use the actual epic branch name from TeamOrchestrationPhase
         // Epic branch names are unique with timestamp (e.g., epic/358cdca9-epic-1-1761118801698-l5tvun)
         const epicBranch = epicBranchName || epic.branchName || `epic/${epic.id}`;
@@ -1745,6 +1752,10 @@ ${judgeFeedback}
           'info',
           `🌿 Developer ${member.instanceId}: Working on branch ${branchName}`
         );
+        } finally {
+          // 🔓 Always release lock, even if operation fails
+          gitLock.releaseLock(taskId, repoPath);
+        }
       } catch (gitError: any) {
         console.error(`❌ [Developer ${member.instanceId}] Failed to create branch: ${gitError.message}`);
         throw new Error(`Git branch creation failed: ${gitError.message}`);
@@ -2114,6 +2125,11 @@ After writing code, you MUST:
     const { approvalEvents } = await import('../ApprovalEvents');
     approvalEvents.cleanupTask(taskId);
     console.log(`🧹 Cleaned up approval event listeners for task ${taskId}`);
+
+    // Clean up git operation locks
+    const { gitLock } = await import('./GitOperationLock');
+    gitLock.releaseAllTaskLocks(taskId);
+    console.log(`🧹 Released all git locks for task ${taskId}`);
   }
 
   /**
@@ -2138,6 +2154,12 @@ After writing code, you MUST:
     import('../ApprovalEvents').then(({ approvalEvents }) => {
       approvalEvents.cleanupTask(taskId);
       console.log(`🧹 Cleaned up approval event listeners for failed task ${taskId}`);
+    });
+
+    // Clean up git operation locks
+    import('./GitOperationLock').then(({ gitLock }) => {
+      gitLock.releaseAllTaskLocks(taskId);
+      console.log(`🧹 Released all git locks for failed task ${taskId}`);
     });
   }
 }
