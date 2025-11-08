@@ -555,54 +555,37 @@ export class JudgePhase extends BasePhase {
    */
   private buildJudgePrompt(
     task: any,
-    story: any, // Using 'any' because EventStore stories have more fields than IStory model
+    story: any,
     developer: any,
     workspacePath: string | null,
     commitSHA?: string,
     targetRepository?: string
   ): string {
-    const techLeadInstructions = task.orchestration.techLead?.output || '';
+    return `# Judge - Code Review
 
-    return `You are a Judge evaluating developer code for correctness and quality.
+## Story: ${story.title}
+Developer: ${developer.instanceId}
+${targetRepository ? `Repository: ${targetRepository}` : ''}
+${commitSHA ? `Commit: ${commitSHA}` : ''}
 
-## Story to Evaluate:
-**Title**: ${story.title}
-**Description**: ${story.description}
-**Developer**: ${developer.instanceId}
-**Branch**: ${story.branchName || 'unknown'}
-${commitSHA ? `**Commit SHA**: ${commitSHA} (EXACT commit you must review)` : ''}
-${targetRepository ? `
-## 🎯 TARGET REPOSITORY: ${targetRepository}
-**CRITICAL**: Review code ONLY in the "${targetRepository}" directory.
-- All file paths should start with: ${targetRepository}/
-- Navigate to repository: cd ${workspacePath}/${targetRepository}
-- DO NOT review files in other repositories` : ''}
+Files to check:
+- Modify: ${story.filesToModify?.join(', ') || 'none'}
+- Create: ${story.filesToCreate?.join(', ') || 'none'}
 
-## Tech Lead Instructions:
-${techLeadInstructions}
+## 🎯 EVALUATION (All must pass):
+1. ✅ CODE EXISTS - Not just docs/comments
+2. ✅ COMPLETE - No TODOs/stubs
+3. ✅ REQUIREMENTS MET - Story fully implemented
+4. ✅ PATTERNS - Follows codebase conventions
+5. ✅ QUALITY - No obvious bugs, has error handling
 
-## Developer Assignment:
-- Developer: ${developer.instanceId}
-- Files to modify: ${story.filesToModify?.join(', ') || 'Not specified'}
-- Files to read: ${story.filesToRead?.join(', ') || 'Not specified'}
-- Files to create: ${story.filesToCreate?.join(', ') || 'None'}
+## INSTRUCTIONS (Be efficient):
+1. Read the modified/created files
+2. Check for TODOs/placeholders
+3. Verify requirements met
+4. Evaluate code quality
 
-## Your Task:
-Evaluate if the developer's implementation meets ALL 5 criteria:
-
-1. ✅ **CODE EXISTS** - Actual code was written (not just documentation)
-2. ✅ **CODE IS COMPLETE** - No stubs, TODOs, or placeholder functions
-3. ✅ **REQUIREMENTS MET** - All story requirements implemented
-4. ✅ **FOLLOWS PATTERNS** - Uses existing codebase patterns and conventions
-5. ✅ **QUALITY STANDARDS** - No obvious bugs, proper error handling, tests if needed
-
-## Instructions:
-1. Use Read() to read the files that were supposed to be modified
-2. Use Grep() to search for TODO, STUB, PLACEHOLDER markers
-3. Verify the code implements the story requirements
-4. Check code quality and patterns
-
-## Output Format (JSON):
+## OUTPUT (JSON only):
 {
   "status": "approved" | "changes_requested",
   "feedback": "Detailed feedback explaining what passed/failed and specific improvements needed",

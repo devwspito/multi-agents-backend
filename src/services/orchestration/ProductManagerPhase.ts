@@ -135,153 +135,74 @@ ${problemAnalysis.implementationStrategy || 'Not available'}
 `;
       }
 
-      const prompt = `# Task to Analyze
-${revisionSection}
-${problemAnalysisSection}
-## Task Details:
-- **Title**: ${task.title}
-- **Description**: ${task.description}
-- **Priority**: ${task.priority}
+      const prompt = `# Product Manager - Requirements Analysis
+${revisionSection}${problemAnalysisSection}
+## Task: ${task.title}
+${task.description ? `Description: ${task.description}` : ''}
+Priority: ${task.priority}
 
-## 🚨 CRITICAL: WORKSPACE LOCATION - READ THIS CAREFULLY
+## Workspace: ${workspacePath}
+Repositories:
+${context.repositories.map(r => `- ${r.name}/ (${r.type})`).join('\n')}
 
-**⚠️  YOU ARE SANDBOXED IN THIS WORKSPACE: ${workspacePath}**
+## 🎯 INSTRUCTIONS (Be efficient):
 
-**ABSOLUTE RULE**: ONLY explore files inside this workspace path. NEVER explore outside.
+1. **EXPLORE** (max 2 min): Check repos, understand structure
+2. **ANALYZE**: Define naming conventions & contracts for cross-repo consistency
+3. **OUTPUT JSON**: Master epic with shared specifications
 
-The following repositories are cloned INSIDE your workspace:
-${context.repositories.map(repo =>
-  `- **${workspacePath}/${repo.name}** (${repo.type}) → GitHub: ${repo.githubRepoName}`
-).join('\n')}
+${task.attachments?.length > 0 ? `📎 ${task.attachments.length} image(s) attached - analyze for requirements\n` : ''}
+${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creation\n` : ''}
 
-**✅ CORRECT Commands (stay inside workspace)**:
-\`\`\`bash
-# Navigate inside workspace
-cd ${workspacePath}/${context.repositories[0]?.name || 'repo'} && ls -la
-
-# Find files inside workspace
-find ${workspacePath} -name "*.js" | head -20
-
-# Read files using relative paths from your current directory
-Read("${context.repositories[0]?.name || 'repo'}/src/App.jsx")
-
-# Grep inside specific repo
-Grep("pattern", "${context.repositories[0]?.name || 'repo'}/")
-\`\`\`
-
-**❌ INCORRECT Commands (exploring outside workspace - FORBIDDEN)**:
-\`\`\`bash
-# ❌ NEVER explore user's home directory
-ls ~/Desktop
-find ~ -name "*.js"
-
-# ❌ NEVER explore system repositories outside workspace
-ls /Users/luiscorrea/Desktop/mult-agent-software-project
-Read("/Users/.../multi-agents-backend/src/file.js")
-
-# ❌ NEVER use absolute paths outside workspace
-find /Users -name "package.json"
-\`\`\`
-
-${repoInfo}${workspaceInfo}
-
-🔍 **EXPLORATION CHECKLIST** - Do this BEFORE outputting JSON:
-${context.repositories.map((repo, idx) =>
-  `${idx + 1}. Bash("cd ${workspacePath}/${repo.name} && ls -la") - See ${repo.name} structure
-${idx + 1}.b Bash("cd ${workspacePath}/${repo.name} && find . -type f | head -30") - List files
-${idx + 1}.c Read("${repo.name}/package.json") - Understand ${repo.name} dependencies`
-).join('\n')}
-
-${task.attachments && task.attachments.length > 0 ? `📎 You have ${task.attachments.length} image(s) attached. Analyze them for visual requirements (UI mockups, diagrams, etc.).\n\n` : ''}## 🎯 NEW REQUIREMENT: Master Epic with Shared Contracts
-
-${problemAnalysis ? `⚠️ **IMPORTANT**: Use the Problem Analysis above to inform your epic creation. The Problem Analyst has already:
-- Identified the real problem to solve
-- Suggested the architecture approach
-- Defined success criteria
-- Identified risks to mitigate
-
-Your epics should align with and implement this analysis.\n\n` : ''}You are creating a **MASTER EPIC** that will coordinate work across multiple repositories.
-
-Your output must include:
-1. **Global Naming Conventions** - Field names, formats, prefixes that ALL repos must follow
-2. **Shared Contracts** - API endpoints, data types, interfaces that define cross-repo communication
-3. **Repository Assignment** - Which repos are affected and what each will do
-
-**Why this matters**:
-- Without naming conventions: Backend uses "userId", Frontend uses "user_id" → 💥 CONFLICT
-- Without contracts: Backend returns {id, name}, Frontend expects {userId, fullName} → 💥 MISMATCH
-- With contracts: ALL teams use the same field names and API formats → ✅ CONSISTENCY
-
-**Output format** (match exactly - valid JSON only):
+## JSON OUTPUT ONLY:
 \`\`\`json
 {
   "masterEpic": {
-    "id": "master-${task.title.toLowerCase().replace(/\\s+/g, '-')}-${Date.now()}",
+    "id": "master-${task.title.toLowerCase().replace(/\\s+/g, '-')}",
     "title": "${task.title}",
     "globalNamingConventions": {
-      "primaryIdField": "userId|productId|orderId (choose ONE convention for IDs)",
-      "timestampFormat": "ISO8601|Unix|DateTime (choose ONE)",
-      "errorCodePrefix": "AUTH_|USER_|API_ (choose ONE prefix)",
-      "booleanFieldPrefix": "is|has|should (choose ONE for booleans)",
-      "collectionNaming": "plural|singular (e.g., 'users' vs 'user')"
+      "primaryIdField": "userId|id|_id (choose one)",
+      "timestampFormat": "ISO8601|Unix (choose one)",
+      "errorCodePrefix": "ERR_|ERROR_ (choose one)",
+      "booleanFieldPrefix": "is|has (choose one)",
+      "collectionNaming": "plural|singular"
     },
     "sharedContracts": {
       "apiEndpoints": [
         {
-          "method": "POST|GET|PUT|DELETE",
-          "path": "/api/resource/action",
-          "request": { "field1": "type", "field2": "type" },
-          "response": { "field1": "type", "field2": "type" },
-          "description": "What this endpoint does"
+          "method": "GET|POST|PUT|DELETE",
+          "path": "/api/path",
+          "request": {"field": "type"},
+          "response": {"field": "type"},
+          "description": "Purpose"
         }
       ],
       "sharedTypes": [
         {
           "name": "TypeName",
-          "description": "What this type represents",
-          "fields": {
-            "fieldName": "MongoDB.ObjectId|String|Number|Date|Boolean",
-            "anotherField": "type with description if needed"
-          }
-        }
-      ],
-      "eventSchemas": [
-        {
-          "name": "EventName",
-          "description": "When this event is emitted",
-          "payload": {
-            "field1": "type",
-            "field2": "type"
-          }
+          "description": "Purpose",
+          "fields": {"field": "String|Number|Boolean|Date|ObjectId"}
         }
       ]
     },
-    "affectedRepositories": ["exact-repo-name-1", "exact-repo-name-2"],
+    "affectedRepositories": ["repo1", "repo2"],
     "repositoryResponsibilities": {
-      "backend": "What backend will implement (APIs, models, business logic)",
-      "frontend": "What frontend will implement (UI, components, state management)"
+      "backend": "APIs, models, logic",
+      "frontend": "UI, state, components"
     }
   },
   "complexity": "simple|moderate|complex|epic",
-  "successCriteria": ["measurable criterion 1", "measurable criterion 2"],
-  "recommendations": "Technical approach based on ACTUAL code exploration",
-  "challenges": ["technical challenge 1", "technical challenge 2"]
+  "successCriteria": ["criterion 1", "criterion 2"],
+  "recommendations": "Technical approach",
+  "challenges": ["challenge 1", "challenge 2"]
 }
 \`\`\`
 
-**CRITICAL RULES**:
-1. **Naming Conventions MUST be specific**: NOT "use consistent naming" but "userId" (exact field name)
-2. **API Contracts MUST be complete**: Include ALL request/response fields with types
-3. **Shared Types MUST match database**: If backend stores "userId", contract must say "userId"
-4. **One Source of Truth**: Master Epic is the ONLY place where naming/contracts are defined
-
-**DO NOT** output anything else. **DO NOT** talk about what you would do. **ACT**: Use tools, explore code, output JSON.
-
-**Exploration Guidelines**:
-- Focus on understanding the most critical parts of the codebase first (models, main APIs, core services)
-- If exploration is taking too long (>3 minutes), prioritize based on what you've learned and proceed with epic creation
-- You don't need to read every file - understand the patterns and apply them
-- Document assumptions if you couldn't explore everything`;
+**RULES**:
+- Explore FIRST: Use ls, find, Read to understand codebase
+- Be SPECIFIC: "userId" not "consistent naming"
+- Complete contracts: All fields with types
+- Act quickly: Max 3 min exploration`;
 
       // 🔥 IMAGES: Convert task attachments to SDK format
       const attachments: any[] = [];
