@@ -85,9 +85,14 @@ export class ScheduledBranchCleanupService {
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+      // 🔥 CRITICAL: Only clean up truly completed tasks, not in-progress ones
       const tasks = await Task.find({
         status: 'completed',
         completedAt: { $gte: thirtyDaysAgo },
+        // Ensure orchestration is also marked complete
+        'orchestration.currentPhase': 'completed',
+        // Ensure task was not cancelled
+        'orchestration.cancelRequested': { $ne: true },
         // Optional: Add flag to track if cleanup was done
         // 'orchestration.branchesCleanedUp': { $ne: true }
       }).limit(100); // Process max 100 tasks per run
@@ -111,6 +116,14 @@ export class ScheduledBranchCleanupService {
         const taskId = (task._id as any).toString();
 
         try {
+          // 🔥 DOUBLE-CHECK: Verify task is really completed before cleanup
+          const currentTask = await Task.findById(taskId);
+          if (!currentTask || currentTask.status !== 'completed' ||
+              currentTask.orchestration.currentPhase !== 'completed') {
+            console.log(`⚠️  Skipping task ${taskId} - not fully completed`);
+            continue;
+          }
+
           console.log(`\n🧹 Processing task: ${taskId}`);
           console.log(`   Title: ${task.title}`);
           console.log(`   Completed: ${task.completedAt?.toISOString()}`);
