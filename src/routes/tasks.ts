@@ -8,7 +8,8 @@ import { z } from 'zod';
 import mongoose from 'mongoose';
 
 const router = Router();
-const orchestrationCoordinator = new OrchestrationCoordinator();
+// 🔥 IMPORTANT: No longer using a shared instance for parallel task safety
+// const orchestrationCoordinator = new OrchestrationCoordinator();
 
 // Validación schemas con Zod
 const createTaskSchema = z.object({
@@ -44,14 +45,13 @@ const autoApprovalConfigSchema = z.object({
 });
 
 const modelConfigSchema = z.object({
-  preset: z.enum(['max', 'premium', 'standard', 'balanced', 'economy', 'custom']).optional(),
+  preset: z.enum(['max', 'premium', 'standard', 'custom']).optional(),
   customConfig: z.object({
     problemAnalyst: z.string().optional(),
     productManager: z.string().optional(),
     projectManager: z.string().optional(),
     techLead: z.string().optional(),
-    seniorDeveloper: z.string().optional(),
-    juniorDeveloper: z.string().optional(),
+    developer: z.string().optional(),
     judge: z.string().optional(),
     qaEngineer: z.string().optional(),
     fixer: z.string().optional(),
@@ -315,8 +315,11 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     console.log(`📝 Task description: ${task.description}`);
     console.log(`📎 Task attachments: ${task.attachments?.length || 0}`);
 
+    // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
+    const taskOrchestrator = new OrchestrationCoordinator();
+
     // Iniciar orquestación con nuevo OrchestrationCoordinator (phase-based, SDK compliant)
-    orchestrationCoordinator
+    taskOrchestrator
       .orchestrateTask((task._id as any).toString())
       .catch((error) => {
         console.error('❌ Orchestration error:', error);
@@ -444,8 +447,11 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
     console.log(`📦 Preserving ${task.repositoryIds.length} repositories`);
     console.log(`🌿 Preserving existing epic branches`);
 
+    // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
+    const taskOrchestrator = new OrchestrationCoordinator();
+
     // Restart orchestration (will reuse existing branches and context)
-    orchestrationCoordinator
+    taskOrchestrator
       .orchestrateTask((task._id as any).toString())
       .catch((error) => {
         console.error('❌ Orchestration continuation error:', error);
@@ -638,7 +644,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/approve/:phase
  * Aprobar o rechazar una fase de la orquestación
- * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge
+ * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge, e2e-testing, e2e-fixer
  */
 router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -746,6 +752,14 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = (task.orchestration as any).autoMerge;
         phaseName = 'Auto-Merge';
         break;
+      case 'e2e-testing':
+        agentStep = (task.orchestration as any).e2eTester;
+        phaseName = 'E2E Testing';
+        break;
+      case 'e2e-fixer':
+        agentStep = (task.orchestration as any).e2eFixer;
+        phaseName = 'E2E Fixer';
+        break;
       case 'team-orchestration':
         // Team orchestration phase - approval to START multi-team execution
         // This approval happens BEFORE teams are created, not after
@@ -792,7 +806,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge`,
+          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge, e2e-testing, e2e-fixer`,
         });
         return;
     }
@@ -1467,7 +1481,7 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Import model configurations
-    const { MAX_CONFIG, PREMIUM_CONFIG, STANDARD_CONFIG, ECONOMY_CONFIG } = await import('../config/ModelConfigurations');
+    const { MAX_CONFIG, PREMIUM_CONFIG, STANDARD_CONFIG } = await import('../config/ModelConfigurations');
 
     // Get current configuration
     const modelConfig = task.orchestration.modelConfig || {
@@ -1480,7 +1494,6 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
       max: MAX_CONFIG,
       premium: PREMIUM_CONFIG,
       standard: STANDARD_CONFIG,
-      economy: ECONOMY_CONFIG,
     };
 
     res.json({

@@ -22,7 +22,7 @@ import crypto from 'crypto';
  * - Allows continuation if unable to fix after max retries
  */
 export class E2EFixerPhase extends BasePhase {
-  readonly name = 'E2EFixer';
+  readonly name = 'e2e-fixer';
   readonly description = 'Fixing frontend-backend integration issues';
   private readonly MAX_RETRIES = 3;
 
@@ -313,7 +313,13 @@ If you cannot fix the issue:
 }
 \`\`\`
 
-Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and push. Don't just describe what to do - DO IT.`;
+Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and push. Don't just describe what to do - DO IT.
+
+**E2E Fixing Guidelines**:
+- Prioritize fixing integration issues that block the entire flow (API contracts, shared types, communication)
+- If there are multiple integration points failing, fix them in order of criticality
+- Focus on making services communicate correctly - detailed error handling can come later
+- Test your fixes incrementally if possible (fix one integration point, verify, move to next)`;
 
       // Execute E2E Fixer
       const result = await this.executeAgentFn(

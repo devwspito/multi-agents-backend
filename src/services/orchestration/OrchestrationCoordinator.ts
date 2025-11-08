@@ -2095,6 +2095,11 @@ After writing code, you MUST:
       console.log(`   - ${item.phase}: $${item.cost.toFixed(4)}`);
     });
     console.log(`${'='.repeat(80)}\n`);
+
+    // 🔥 IMPORTANT: Clean up task-specific config from CostBudgetService
+    const taskId = (task._id as any).toString();
+    CostBudgetService.cleanupTaskConfig(taskId);
+    console.log(`🧹 Cleaned up task-specific cost budget config for task ${taskId}`);
   }
 
   /**
@@ -2110,5 +2115,9 @@ After writing code, you MUST:
     NotificationService.emitTaskFailed(taskId, {
       error: error.message,
     });
+
+    // 🔥 IMPORTANT: Clean up task-specific config from CostBudgetService even on failure
+    CostBudgetService.cleanupTaskConfig(taskId);
+    console.log(`🧹 Cleaned up task-specific cost budget config for failed task ${taskId}`);
   }
 }

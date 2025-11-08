@@ -615,7 +615,13 @@ Evaluate if the developer's implementation meets ALL 5 criteria:
   }
 }
 
-**CRITICAL**: If ANY criterion fails, status MUST be "changes_requested" with specific feedback.`;
+**CRITICAL**: If ANY criterion fails, status MUST be "changes_requested" with specific feedback.
+
+**Review Guidelines**:
+- Focus on the files that were supposed to be modified according to the story
+- Verify the most critical aspects first: code exists, requirements met, no obvious bugs
+- If the changeset is large (>10 files), prioritize reviewing the core changes
+- You don't need to verify every edge case - focus on main functionality and obvious issues`;
   }
 
   /**
