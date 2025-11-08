@@ -1087,7 +1087,21 @@ export class OrchestrationCoordinator {
     modelConfig = configs.optimizeConfigForBudget(modelConfig);
     console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
 
-    const fullModelId = getAgentModel(agentType, modelConfig); // e.g., 'claude-sonnet-4-5-20250929'
+    // 🔥 CRITICAL: Model optimization strategy without sacrificing quality
+    let fullModelId: string;
+
+    // Force certain agents to use better models for reliability
+    const criticalAgents = ['qa-engineer', 'judge', 'fixer', 'e2e-fixer'];
+    const shouldUpgrade = criticalAgents.includes(agentType);
+
+    if (shouldUpgrade) {
+      const topModel = configs.getTopModelFromConfig(modelConfig);
+      fullModelId = topModel;
+      console.log(`🚀 [ExecuteAgent] UPGRADING ${agentType} to top model for reliability: ${topModel}`);
+    } else {
+      fullModelId = getAgentModel(agentType, modelConfig);
+    }
+
     const sdkModel = getModelAlias(fullModelId); // e.g., 'sonnet'
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
@@ -1232,8 +1246,45 @@ export class OrchestrationCoordinator {
       let finalResult: any = null;
       const allMessages: any[] = [];
       let turnCount = 0;
+      let lastMessageTime = Date.now();
+      const MESSAGE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes without messages = stuck
 
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages (timeout: ${AGENT_TIMEOUT_MS / 1000}s)...`);
+
+      // 🔥 CRITICAL: Monitor for stuck streams
+      let warningIssued = false;
+      const messageMonitor = setInterval(() => {
+        const timeSinceLastMessage = Date.now() - lastMessageTime;
+
+        // Issue warning at 2 minutes
+        if (!warningIssued && timeSinceLastMessage > 2 * 60 * 1000) {
+          console.warn(`⚠️  [ExecuteAgent] Stream slow - no messages for 2 minutes`);
+          console.warn(`   Agent: ${agentType}`);
+          console.warn(`   Turn count: ${turnCount}`);
+          console.warn(`   Messages received: ${allMessages.length}`);
+          NotificationService.emitConsoleLog(
+            taskId || 'unknown',
+            'warn',
+            `⚠️ ${agentType} appears slow - checking for issues...`
+          );
+          warningIssued = true;
+        }
+
+        // Force recovery at 3 minutes
+        if (timeSinceLastMessage > MESSAGE_TIMEOUT_MS) {
+          console.error(`💀 [ExecuteAgent] Stream appears stuck - no messages for ${MESSAGE_TIMEOUT_MS / 1000}s`);
+          console.error(`   Agent: ${agentType}`);
+          console.error(`   Last activity: ${new Date(lastMessageTime).toISOString()}`);
+          console.error(`   Turn count: ${turnCount}`);
+
+          clearInterval(messageMonitor);
+
+          // Throw error to trigger retry with top model
+          const error = new Error(`Agent ${agentType} stream stuck - no messages for ${MESSAGE_TIMEOUT_MS / 1000}s`);
+          (error as any).isTimeout = true;
+          throw error;
+        }
+      }, 30000); // Check every 30 seconds
 
       try {
         // Wrap stream consumption with timeout using Promise.race
@@ -1241,6 +1292,7 @@ export class OrchestrationCoordinator {
           // Main stream processing
           (async () => {
             for await (const message of stream) {
+              lastMessageTime = Date.now(); // Update last message time
               allMessages.push(message);
 
               // 🔥 CRITICAL: Log FULL message if it has an error flag
@@ -1360,9 +1412,15 @@ export class OrchestrationCoordinator {
             )
           ),
         ]);
+
+        // Clean up monitor on success
+        clearInterval(messageMonitor);
       } catch (streamError: any) {
-        // Check if this is a timeout error
-        const isTimeout = streamError.message?.includes('timeout');
+        // Clean up monitor on error
+        clearInterval(messageMonitor);
+
+        // Check if this is a timeout error or stuck stream
+        const isTimeout = streamError.message?.includes('timeout') || streamError.message?.includes('stuck');
 
         console.error(`❌ [ExecuteAgent] Error consuming stream${isTimeout ? ' (TIMEOUT)' : ''}:`, {
           message: streamError.message,
