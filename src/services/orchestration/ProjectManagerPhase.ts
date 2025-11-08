@@ -347,6 +347,11 @@ The system will **REJECT** your epics if they overlap (modify the same files). T
 }
 \`\`\`
 
+**Analysis Guidelines**:
+- Focus on understanding dependencies between the epics created by Product Manager
+- If the Master Epic is complex (>5 epics), prioritize analyzing the most critical dependencies first
+- You don't need perfect clarity on every detail - make reasonable assumptions and document them
+- Aim for practical, implementable breakdown over theoretical perfection
 **If you get an overlap error**: The system detected conflicting epics. Review the error message and apply one of the 4 strategies above.
 
 **Output a detailed project plan following the format in your agent instructions.**`;

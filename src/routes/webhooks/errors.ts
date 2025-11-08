@@ -20,7 +20,8 @@ import { NotificationService } from '../../services/NotificationService';
 import { z } from 'zod';
 
 const router = Router();
-const orchestrationCoordinator = new OrchestrationCoordinator();
+// 🔥 IMPORTANT: No longer using a shared instance for parallel task safety
+// const orchestrationCoordinator = new OrchestrationCoordinator();
 // const notificationService = new WebhookNotificationService(); // DISABLED - requires SMTP setup
 
 /**
@@ -320,7 +321,9 @@ router.post(
         setImmediate(async () => {
           try {
             console.log(`🚀 Starting orchestration for webhook-generated task: ${taskId}`);
-            await orchestrationCoordinator.orchestrateTask(taskId);
+            // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
+            const taskOrchestrator = new OrchestrationCoordinator();
+            await taskOrchestrator.orchestrateTask(taskId);
 
             NotificationService.emitConsoleLog(
               taskId,

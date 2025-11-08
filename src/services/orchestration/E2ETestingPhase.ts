@@ -18,7 +18,7 @@ import { LogService } from '../logging/LogService';
  * 7. Retry after fix
  */
 export class E2ETestingPhase extends BasePhase {
-  readonly name = 'E2ETesting';
+  readonly name = 'e2e-testing';
   readonly description = 'Testing real frontend-backend integration';
 
   constructor(private executeAgentFn: Function) {
@@ -265,7 +265,14 @@ curl http://localhost:8000/api/endpoint -v
 - ✅ No CORS errors
 - ✅ Authentication works (if applicable)
 
-Remember: You are testing REAL integration. Start the servers, make the calls, verify the responses. Don't just read code - execute and test.`;
+Remember: You are testing REAL integration. Start the servers, make the calls, verify the responses. Don't just read code - execute and test.
+
+**E2E Testing Guidelines**:
+- Test the most critical integration flows first (main user journeys, critical APIs)
+- If setup/installation is taking too long (>3 minutes), document the delay and continue with available tests
+- Focus on end-to-end functionality - detailed unit testing is not your responsibility
+- If you find blocking issues, you can stop early and report NO-GO
+- Document what you tested and what you couldn't test due to time/environment constraints`;
 
       // Execute E2E tester
       const result = await this.executeAgentFn(

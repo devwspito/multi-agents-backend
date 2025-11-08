@@ -275,7 +275,13 @@ Your output must include:
 3. **Shared Types MUST match database**: If backend stores "userId", contract must say "userId"
 4. **One Source of Truth**: Master Epic is the ONLY place where naming/contracts are defined
 
-**DO NOT** output anything else. **DO NOT** talk about what you would do. **ACT**: Use tools, explore code, output JSON.`;
+**DO NOT** output anything else. **DO NOT** talk about what you would do. **ACT**: Use tools, explore code, output JSON.
+
+**Exploration Guidelines**:
+- Focus on understanding the most critical parts of the codebase first (models, main APIs, core services)
+- If exploration is taking too long (>3 minutes), prioritize based on what you've learned and proceed with epic creation
+- You don't need to read every file - understand the patterns and apply them
+- Document assumptions if you couldn't explore everything`;
 
       // 🔥 IMAGES: Convert task attachments to SDK format
       const attachments: any[] = [];

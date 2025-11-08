@@ -17,12 +17,39 @@ export interface CostBudgetConfig {
 }
 
 export class CostBudgetService {
-  private static config: CostBudgetConfig = {
+  // 🔥 IMPORTANT: Per-task configuration to support parallel task execution
+  // Each task can have different budget limits without interference
+  private static taskConfigs: Map<string, CostBudgetConfig> = new Map();
+
+  // Default configuration for tasks without specific config
+  private static defaultConfig: CostBudgetConfig = {
     maxTaskCostUSD: parseFloat(process.env.MAX_TASK_COST_USD || '1000.0'), // Increased from $10 to $1000
     maxPhaseCostUSD: parseFloat(process.env.MAX_PHASE_COST_USD || '200.0'), // Increased from $2 to $200
     warningThreshold: parseFloat(process.env.COST_WARNING_THRESHOLD || '0.8'),
     enableHardStop: process.env.ENABLE_COST_HARD_STOP === 'true',
   };
+
+  /**
+   * Get configuration for a specific task
+   */
+  private static getConfigForTask(taskId: string): CostBudgetConfig {
+    return this.taskConfigs.get(taskId) || this.defaultConfig;
+  }
+
+  /**
+   * Set custom configuration for a specific task
+   */
+  static setTaskConfig(taskId: string, config: Partial<CostBudgetConfig>): void {
+    const currentConfig = this.getConfigForTask(taskId);
+    this.taskConfigs.set(taskId, { ...currentConfig, ...config });
+  }
+
+  /**
+   * Clean up configuration when task is completed
+   */
+  static cleanupTaskConfig(taskId: string): void {
+    this.taskConfigs.delete(taskId);
+  }
 
   /**
    * Check if task is within budget before executing a phase
@@ -33,11 +60,12 @@ export class CostBudgetService {
     estimatedPhaseCost?: number
   ): Promise<{ allowed: boolean; reason?: string; warning?: string }> {
     const taskId = (task._id as any).toString();
+    const config = this.getConfigForTask(taskId);
     const currentCost = task.orchestration.totalCost || 0;
 
     // Check if task has already exceeded budget
-    if (currentCost >= this.config.maxTaskCostUSD) {
-      const message = `Task budget exceeded: $${currentCost.toFixed(2)} >= $${this.config.maxTaskCostUSD.toFixed(2)}`;
+    if (currentCost >= config.maxTaskCostUSD) {
+      const message = `Task budget exceeded: $${currentCost.toFixed(2)} >= $${config.maxTaskCostUSD.toFixed(2)}`;
 
       await LogService.error(message, {
         taskId,
@@ -45,11 +73,11 @@ export class CostBudgetService {
         phase: phaseName as any,
         metadata: {
           currentCost,
-          maxCost: this.config.maxTaskCostUSD,
+          maxCost: config.maxTaskCostUSD,
         },
       });
 
-      if (this.config.enableHardStop) {
+      if (config.enableHardStop) {
         return { allowed: false, reason: message };
       } else {
         return { allowed: true, warning: message };
@@ -60,10 +88,10 @@ export class CostBudgetService {
     if (estimatedPhaseCost) {
       const projectedCost = currentCost + estimatedPhaseCost;
 
-      if (projectedCost > this.config.maxTaskCostUSD) {
-        const message = `Phase would exceed budget: $${projectedCost.toFixed(2)} > $${this.config.maxTaskCostUSD.toFixed(2)}`;
+      if (projectedCost > config.maxTaskCostUSD) {
+        const message = `Phase would exceed budget: $${projectedCost.toFixed(2)} > $${config.maxTaskCostUSD.toFixed(2)}`;
 
-        if (this.config.enableHardStop) {
+        if (config.enableHardStop) {
           return { allowed: false, reason: message };
         } else {
           return { allowed: true, warning: message };
@@ -72,10 +100,10 @@ export class CostBudgetService {
     }
 
     // Check warning threshold
-    const usagePercentage = currentCost / this.config.maxTaskCostUSD;
+    const usagePercentage = currentCost / config.maxTaskCostUSD;
 
-    if (usagePercentage >= this.config.warningThreshold) {
-      const warning = `Cost warning: ${(usagePercentage * 100).toFixed(1)}% of budget used ($${currentCost.toFixed(2)}/$${this.config.maxTaskCostUSD.toFixed(2)})`;
+    if (usagePercentage >= config.warningThreshold) {
+      const warning = `Cost warning: ${(usagePercentage * 100).toFixed(1)}% of budget used ($${currentCost.toFixed(2)}/$${config.maxTaskCostUSD.toFixed(2)})`;
 
       NotificationService.emitConsoleLog(
         taskId,
@@ -89,7 +117,7 @@ export class CostBudgetService {
         phase: phaseName as any,
         metadata: {
           currentCost,
-          maxCost: this.config.maxTaskCostUSD,
+          maxCost: config.maxTaskCostUSD,
           usagePercentage,
         },
       });
@@ -103,10 +131,11 @@ export class CostBudgetService {
   /**
    * Check if individual phase cost is within limits
    */
-  static checkPhaseCost(phaseCost: number, phaseName: string): boolean {
-    if (phaseCost > this.config.maxPhaseCostUSD) {
+  static checkPhaseCost(phaseCost: number, phaseName: string, taskId: string): boolean {
+    const config = this.getConfigForTask(taskId);
+    if (phaseCost > config.maxPhaseCostUSD) {
       console.warn(
-        `⚠️ Phase ${phaseName} exceeded individual limit: $${phaseCost.toFixed(2)} > $${this.config.maxPhaseCostUSD.toFixed(2)}`
+        `⚠️ Phase ${phaseName} exceeded individual limit: $${phaseCost.toFixed(2)} > $${config.maxPhaseCostUSD.toFixed(2)}`
       );
       return false;
     }
@@ -136,8 +165,10 @@ export class CostBudgetService {
    * Calculate remaining budget
    */
   static getRemainingBudget(task: ITask): number {
+    const taskId = (task._id as any).toString();
+    const config = this.getConfigForTask(taskId);
     const currentCost = task.orchestration.totalCost || 0;
-    return Math.max(0, this.config.maxTaskCostUSD - currentCost);
+    return Math.max(0, config.maxTaskCostUSD - currentCost);
   }
 
   /**
@@ -150,8 +181,10 @@ export class CostBudgetService {
     status: 'healthy' | 'warning' | 'critical' | 'exceeded';
     remainingUSD: number;
   } {
+    const taskId = (task._id as any).toString();
+    const config = this.getConfigForTask(taskId);
     const used = task.orchestration.totalCost || 0;
-    const limit = this.config.maxTaskCostUSD;
+    const limit = config.maxTaskCostUSD;
     const percentage = (used / limit) * 100;
 
     let status: 'healthy' | 'warning' | 'critical' | 'exceeded';
@@ -160,7 +193,7 @@ export class CostBudgetService {
       status = 'exceeded';
     } else if (percentage >= 90) {
       status = 'critical';
-    } else if (percentage >= this.config.warningThreshold * 100) {
+    } else if (percentage >= config.warningThreshold * 100) {
       status = 'warning';
     } else {
       status = 'healthy';
@@ -176,18 +209,18 @@ export class CostBudgetService {
   }
 
   /**
-   * Update configuration (for testing or runtime adjustment)
+   * Update configuration for ALL tasks (updates the default)
    */
-  static updateConfig(updates: Partial<CostBudgetConfig>): void {
-    this.config = { ...this.config, ...updates };
-    console.log('💰 Cost budget configuration updated:', this.config);
+  static updateDefaultConfig(updates: Partial<CostBudgetConfig>): void {
+    this.defaultConfig = { ...this.defaultConfig, ...updates };
+    console.log('💰 Default cost budget configuration updated:', this.defaultConfig);
   }
 
   /**
-   * Get current configuration
+   * Get default configuration
    */
-  static getConfig(): CostBudgetConfig {
-    return { ...this.config };
+  static getDefaultConfig(): CostBudgetConfig {
+    return { ...this.defaultConfig };
   }
 
   /**

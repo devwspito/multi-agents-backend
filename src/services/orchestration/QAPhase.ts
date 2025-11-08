@@ -313,7 +313,13 @@ Test ONLY within the ${repositories.length} selected repository(ies).
 Provide:
 1. Integration test results FOR THE SELECTED REPOSITORIES
 2. Any bugs or issues found IN THE SELECTED REPOSITORIES
-3. **GO/NO-GO decision** based on the selected repositories only`;
+3. **GO/NO-GO decision** based on the selected repositories only
+
+**Testing Guidelines**:
+- Focus on the most critical paths first (happy path, then error cases)
+- If tests are taking too long (>2 minutes), report progress and continue with remaining checks
+- Prioritize functional correctness over exhaustive edge case testing
+- Document what you tested and what remains untested if time is limited`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context

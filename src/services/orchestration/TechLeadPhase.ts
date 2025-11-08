@@ -361,7 +361,14 @@ const token = jwt.sign(
 - Balance workload across developers
 - Each story must have a unique ID and belong to an epic
 - Stories should be implementable in 1-3 hours max
-- Break complex features into multiple stories if needed`;
+- Break complex features into multiple stories if needed
+
+**Architecture Guidelines**:
+- Explore the codebase to understand existing patterns and architecture
+- Focus on the most relevant files for each story (don't read everything)
+- If exploration is extensive (>4 minutes), prioritize based on what you've learned and create stories
+- Make reasonable assumptions about file structure based on patterns you observe
+- It's better to have implementable stories with clear guidance than perfect stories with every detail`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context without re-processing

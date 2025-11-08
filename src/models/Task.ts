@@ -253,17 +253,20 @@ export interface IOrchestration {
 
   // Model configuration
   modelConfig?: {
-    preset?: 'max' | 'premium' | 'standard' | 'balanced' | 'economy' | 'custom';
+    preset?: 'max' | 'premium' | 'standard' | 'custom';
     customConfig?: {
+      problemAnalyst?: string;
       productManager?: string;
       projectManager?: string;
       techLead?: string;
-      seniorDeveloper?: string;
-      juniorDeveloper?: string;
+      developer?: string;
       judge?: string;
       qaEngineer?: string;
       fixer?: string;
       mergeCoordinator?: string;
+      autoMerge?: string;
+      e2eTester?: string;
+      e2eFixer?: string;
     };
   };
 
@@ -697,20 +700,22 @@ const taskSchema = new Schema<ITask>(
       modelConfig: {
         preset: {
           type: String,
-          enum: ['max', 'premium', 'standard', 'balanced', 'economy', 'custom'],
+          enum: ['max', 'premium', 'standard', 'custom'],
           default: 'standard',
         },
         customConfig: {
           productManager: String,
+          problemAnalyst: String,
           projectManager: String,
           techLead: String,
-          seniorDeveloper: String,
-          juniorDeveloper: String,
+          developer: String,
           judge: String,
           qaEngineer: String,
           fixer: String,
           mergeCoordinator: String,
           autoMerge: String,
+          e2eTester: String,
+          e2eFixer: String,
         },
       },
       approvalHistory: [{

@@ -132,7 +132,13 @@ Target repository: ${repoPath}/
 3. git commit -m "Fix ${qaErrorType} errors"
 4. git push
 
-Output your result as JSON with format specified in your instructions.`;
+Output your result as JSON with format specified in your instructions.
+
+**Fixing Guidelines**:
+- Address the most critical errors first (compilation errors, syntax errors, missing imports)
+- If there are many errors (>5), fix them in logical groups and commit incrementally
+- Focus on making the code work - optimization can come later
+- If an error is unclear, make a reasonable fix based on the context and patterns in the codebase`;
 
     try {
       const result = await this.executeAgentFn(
