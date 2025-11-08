@@ -61,16 +61,35 @@ class ApprovalEventEmitter extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.removeListener(eventName, handler);
+        // 🔥 IMPORTANT: Clean up to prevent memory leak
+        this.removeAllListeners(eventName);
         reject(new Error(`Approval timeout after ${timeoutMs}ms`));
       }, timeoutMs);
 
       const handler = (data: { approved: boolean; timestamp: Date }) => {
         clearTimeout(timeout);
+        // 🔥 IMPORTANT: Clean up to prevent memory leak
+        this.removeAllListeners(eventName);
         resolve(data.approved);
       };
 
       this.once(eventName, handler);
     });
+  }
+
+  /**
+   * Clean up all listeners for a specific task
+   * Should be called when a task completes or is cancelled
+   */
+  cleanupTask(taskId: string): void {
+    // Remove all listeners for this task
+    const eventNames = this.eventNames();
+    for (const eventName of eventNames) {
+      if (typeof eventName === 'string' && eventName.startsWith(`approval:${taskId}:`)) {
+        this.removeAllListeners(eventName);
+        console.log(`🧹 Cleaned up approval listeners for: ${eventName}`);
+      }
+    }
   }
 }
 
