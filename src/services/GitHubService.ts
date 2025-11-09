@@ -226,16 +226,27 @@ export class GitHubService {
       const user = await User.findById(userId);
       if (!user) throw new Error('User not found');
 
-      // Push usando el token del usuario
-      await execAsync(`git push -u origin ${branchName}`, {
-        cwd: workspacePath,
-        env: {
-          ...process.env,
-          GIT_ASKPASS: 'echo',
-          GIT_USERNAME: user.username,
-          GIT_PASSWORD: user.accessToken,
-        },
-      });
+      // Push usando el token del usuario WITH TIMEOUT
+      // 🔥 CRITICAL: Add timeout to prevent hanging
+      const { exec } = require('child_process');
+      const { promisify } = require('util');
+      const execWithTimeout = promisify(exec);
+
+      await Promise.race([
+        execWithTimeout(`timeout 30 git push -u origin ${branchName} 2>&1`, {
+          cwd: workspacePath,
+          env: {
+            ...process.env,
+            GIT_ASKPASS: 'echo',
+            GIT_USERNAME: user.username,
+            GIT_PASSWORD: user.accessToken,
+          },
+          timeout: 30000 // 30 seconds max
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Git push timed out after 30 seconds')), 30000)
+        )
+      ]);
 
       console.log(`✅ Pushed branch: ${branchName}`);
     } catch (error: any) {

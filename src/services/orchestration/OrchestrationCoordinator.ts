@@ -1885,15 +1885,35 @@ After writing code, you MUST:
           const { execSync } = require('child_process');
           const repoPath = `${workspacePath}/${repoName}`;
 
-          // Check if branch exists on remote
-          const remoteBranches = execSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, { encoding: 'utf8' });
+          // 🔥 CRITICAL: Add timeout to prevent hanging on git ls-remote
+          // This command can hang waiting for credentials or network issues
+          const GIT_TIMEOUT_MS = 10000; // 10 seconds max for git operations
+
+          // Check if branch exists on remote WITH TIMEOUT
+          const remoteBranches = execSync(
+            `cd "${repoPath}" && timeout 10 git ls-remote --heads origin ${branchName} 2>/dev/null || echo ""`,
+            {
+              encoding: 'utf8',
+              timeout: GIT_TIMEOUT_MS
+            }
+          );
 
           if (remoteBranches.includes(branchName)) {
             console.log(`✅ [Developer ${member.instanceId}] Branch ${branchName} found on remote`);
 
-            // Check if there are commits
-            const commitCount = execSync(`cd "${repoPath}" && git rev-list --count ${branchName}`, { encoding: 'utf8' }).trim();
-            console.log(`✅ [Developer ${member.instanceId}] Branch has ${commitCount} commit(s)`);
+            // Check if there are commits (also with timeout)
+            try {
+              const commitCount = execSync(
+                `cd "${repoPath}" && timeout 5 git rev-list --count ${branchName} 2>/dev/null || echo "0"`,
+                {
+                  encoding: 'utf8',
+                  timeout: 5000
+                }
+              ).trim();
+              console.log(`✅ [Developer ${member.instanceId}] Branch has ${commitCount} commit(s)`);
+            } catch (e) {
+              console.log(`⚠️  [Developer ${member.instanceId}] Could not count commits (timeout or error)`);
+            }
 
             NotificationService.emitConsoleLog(
               taskId,
@@ -1901,15 +1921,17 @@ After writing code, you MUST:
               `✅ Developer ${member.instanceId}: Code pushed successfully to ${branchName}`
             );
           } else {
-            console.warn(`⚠️  [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote - developer may have skipped git push`);
+            console.warn(`⚠️  [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote - developer may have skipped git push or verification timed out`);
             NotificationService.emitConsoleLog(
               taskId,
               'warn',
-              `⚠️  Developer ${member.instanceId}: Branch ${branchName} not pushed to remote`
+              `⚠️  Developer ${member.instanceId}: Branch ${branchName} not pushed to remote (or verification timed out)`
             );
           }
         } catch (verifyError: any) {
-          console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify git push: ${verifyError.message}`);
+          // If timeout or other error, log but don't fail
+          console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify git push (timeout after 10s or error): ${verifyError.message}`);
+          console.warn(`⚠️  [Developer ${member.instanceId}] Continuing anyway - push verification is non-critical`);
         }
 
         // 🔥 CRITICAL DEBUG: Show EXACTLY what code Developer wrote
