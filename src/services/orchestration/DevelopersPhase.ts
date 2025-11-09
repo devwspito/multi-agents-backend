@@ -947,9 +947,21 @@ export class DevelopersPhase extends BasePhase {
       console.log(`✅ [Merge] Merged ${story.branchName} → ${epicBranch}`);
       console.log(`   Output: ${mergeOutput.substring(0, 200)}...`);
 
-      // 4. Push epic branch
-      execSync(`cd "${repoPath}" && git push origin ${epicBranch}`, { encoding: 'utf8' });
-      console.log(`✅ [Merge] Pushed ${epicBranch} to remote`);
+      // 4. Push epic branch WITH TIMEOUT
+      // 🔥 CRITICAL: Add timeout to prevent hanging
+      try {
+        execSync(
+          `cd "${repoPath}" && timeout 30 git push origin ${epicBranch} 2>&1 || echo "PUSH_FAILED"`,
+          {
+            encoding: 'utf8',
+            timeout: 30000 // 30 seconds max
+          }
+        );
+        console.log(`✅ [Merge] Pushed ${epicBranch} to remote`);
+      } catch (pushError: any) {
+        console.error(`❌ [Merge] Failed to push ${epicBranch} (timeout after 30s or error): ${pushError.message}`);
+        console.warn(`⚠️  [Merge] Continuing without push - manual push may be needed`);
+      }
 
       NotificationService.emitConsoleLog(
         taskId,

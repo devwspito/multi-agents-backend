@@ -779,12 +779,19 @@ export class TeamOrchestrationPhase extends BasePhase {
         return;
       }
 
-      // Push epic branch to remote
+      // Push epic branch to remote WITH TIMEOUT
       try {
-        execSync(`cd "${repoPath}" && git push -u origin ${epicBranch}`, { encoding: 'utf8' });
+        // 🔥 CRITICAL: Add timeout to prevent hanging on git push
+        execSync(
+          `cd "${repoPath}" && timeout 30 git push -u origin ${epicBranch} 2>&1`,
+          {
+            encoding: 'utf8',
+            timeout: 30000 // 30 seconds max
+          }
+        );
         console.log(`✅ [PR] Pushed ${epicBranch} to remote`);
       } catch (pushError: any) {
-        console.error(`❌ [PR] Failed to push branch: ${pushError.message}`);
+        console.error(`❌ [PR] Failed to push branch (timeout after 30s or error): ${pushError.message}`);
         NotificationService.emitConsoleLog(
           taskId,
           'warn',
