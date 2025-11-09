@@ -4,6 +4,7 @@ import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
+import { safeGitExecSync } from '../../utils/safeGitExecution';
 
 /**
  * Developers Phase
@@ -677,7 +678,7 @@ export class DevelopersPhase extends BasePhase {
 
         const repoPath = `${workspacePath}/${targetRepo.name}`;
         try {
-          commitSHA = execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
+          commitSHA = safeGitExecSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
           console.log(`📍 [PIPELINE] Fallback commit SHA from git: ${commitSHA}`);
         } catch (error: any) {
           console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
@@ -752,7 +753,7 @@ export class DevelopersPhase extends BasePhase {
             const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
             const storyBranch = updatedStory.branchName;
 
-            execSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
+            safeGitExecSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
             console.log(`🧹 Cleaned up story branch: ${storyBranch} (already merged to epic)`);
           } catch (cleanupError: any) {
             // Non-critical error - branch might not exist or already deleted
@@ -833,7 +834,7 @@ export class DevelopersPhase extends BasePhase {
           console.log(`🔀 [Judge] Checking out branch ${story.branchName} in ${repoPath}`);
 
           try {
-            execSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+            safeGitExecSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
             console.log(`✅ [Judge] Successfully checked out ${story.branchName}`);
           } catch (error: any) {
             console.error(`❌ [Judge] Failed to checkout ${story.branchName}: ${error.message}`);
@@ -928,19 +929,22 @@ export class DevelopersPhase extends BasePhase {
       console.log(`📂 [Merge] Path: ${repoPath}`);
 
       // 1. Checkout epic branch
-      execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+      safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
       console.log(`✅ [Merge] Checked out ${epicBranch}`);
 
       // 2. Pull latest changes from epic branch
       try {
-        execSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, { encoding: 'utf8' });
+        safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+          encoding: 'utf8',
+          timeout: 30000, // 30 seconds for pull
+        });
         console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
       } catch (pullError) {
         console.warn(`⚠️  [Merge] Pull failed (branch might not exist on remote yet)`);
       }
 
-      // 3. Merge story branch
-      const mergeOutput = execSync(
+      // 3. Merge story branch with timeout protection
+      const mergeOutput = safeGitExecSync(
         `cd "${repoPath}" && git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`,
         { encoding: 'utf8' }
       );
@@ -993,7 +997,7 @@ export class DevelopersPhase extends BasePhase {
           const { execSync } = require('child_process');
           const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
           const repoPath = `${workspacePath}/${targetRepo}`;
-          execSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
+          safeGitExecSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
           console.log(`✅ [Merge] Aborted conflicted merge`);
         } catch (abortError) {
           console.error(`⚠️  Could not abort merge: ${abortError}`);
