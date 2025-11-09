@@ -5,6 +5,7 @@ import fs from 'fs/promises';
 import { User } from '../models/User';
 import { EnvService } from './EnvService';
 import { IEnvVariable } from '../models/Repository';
+import { safeGitExec, safePushBranch, safeFetch, safePull, safeVerifyRemoteBranch } from '../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
 
@@ -61,13 +62,15 @@ export class GitHubService {
       // Clonar usando el token del usuario
       const repoUrlWithToken = this.getAuthenticatedRepoUrl(project.githubRepoUrl, user.accessToken);
 
-      await execAsync(`git clone ${repoUrlWithToken} ${workspacePath}`, {
+      // Use safe git operations with timeout
+      await safeGitExec(`git clone ${repoUrlWithToken} ${workspacePath}`, {
         cwd: parentDir,
+        timeout: 60000, // 60 seconds for clone
       });
 
       // Checkout al branch correcto
       if (project.githubBranch !== 'main' && project.githubBranch !== 'master') {
-        await execAsync(`git checkout ${project.githubBranch}`, {
+        await safeGitExec(`git checkout ${project.githubBranch}`, {
           cwd: workspacePath,
         });
       }
@@ -130,9 +133,10 @@ export class GitHubService {
         const githubRepoUrl = `https://github.com/${githubRepoName}`;
         const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
 
-        // Clone repository
-        await execAsync(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
+        // Clone repository with timeout protection
+        await safeGitExec(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
           cwd: targetDir,
+          timeout: 60000, // 60 seconds for clone
         });
 
         console.log(`✅ Repository cloned successfully: ${repoName}`);
@@ -174,12 +178,12 @@ export class GitHubService {
    */
   async createBranch(workspacePath: string, branchName: string): Promise<void> {
     try {
-      // Asegurar que estamos en el branch base
-      await execAsync('git fetch origin', { cwd: workspacePath });
-      await execAsync('git pull', { cwd: workspacePath });
+      // Asegurar que estamos en el branch base - use safe operations
+      await safeFetch(workspacePath);
+      await safePull(workspacePath);
 
       // Crear y checkout nuevo branch
-      await execAsync(`git checkout -b ${branchName}`, { cwd: workspacePath });
+      await safeGitExec(`git checkout -b ${branchName}`, { cwd: workspacePath });
 
       console.log(`✅ Created branch: ${branchName}`);
     } catch (error: any) {
@@ -192,23 +196,23 @@ export class GitHubService {
    */
   async commitChanges(workspacePath: string, message: string): Promise<void> {
     try {
-      // Configurar git user (usar info del usuario de GitHub)
-      await execAsync('git config user.name "Multi-Agent Platform"', { cwd: workspacePath });
-      await execAsync('git config user.email "noreply@multi-agents.dev"', { cwd: workspacePath });
+      // Configurar git user (usar info del usuario de GitHub) - safe local operations
+      await safeGitExec('git config user.name "Multi-Agent Platform"', { cwd: workspacePath });
+      await safeGitExec('git config user.email "noreply@multi-agents.dev"', { cwd: workspacePath });
 
       // Add all changes
-      await execAsync('git add .', { cwd: workspacePath });
+      await safeGitExec('git add .', { cwd: workspacePath });
 
       // Check if there are changes to commit
-      const { stdout: status } = await execAsync('git status --porcelain', { cwd: workspacePath });
+      const { stdout: status } = await safeGitExec('git status --porcelain', { cwd: workspacePath });
 
       if (!status.trim()) {
         console.log('ℹ️ No changes to commit');
         return;
       }
 
-      // Commit
-      await execAsync(`git commit -m "${this.escapeCommitMessage(message)}"`, {
+      // Commit with safe execution
+      await safeGitExec(`git commit -m "${this.escapeCommitMessage(message)}"`, {
         cwd: workspacePath,
       });
 
@@ -427,8 +431,9 @@ export class GitHubService {
     const workspacePath = this.getWorkspacePath(workspaceId);
 
     try {
-      await execAsync('git fetch origin', { cwd: workspacePath });
-      await execAsync('git pull', { cwd: workspacePath });
+      // Use safe git operations with timeout
+      await safeFetch(workspacePath);
+      await safePull(workspacePath);
       console.log(`🔄 Workspace synced: ${workspaceId}`);
     } catch (error: any) {
       throw new Error(`Failed to sync workspace: ${error.message}`);
@@ -556,13 +561,13 @@ export class GitHubService {
 
       // Stash any uncommitted changes to avoid blocking checkout
       try {
-        await execAsync('git stash', { cwd: workspacePath });
+        await safeGitExec('git stash', { cwd: workspacePath });
       } catch (stashError) {
         console.log('No changes to stash');
       }
 
       // First, check if base branch exists locally
-      const branchExists = await execAsync(
+      const branchExists = await safeGitExec(
         `git show-ref --verify --quiet refs/heads/${baseBranch} && echo "exists" || echo "not-exists"`,
         { cwd: workspacePath }
       ).then(r => r.stdout.trim() === 'exists').catch(() => false);
@@ -570,20 +575,20 @@ export class GitHubService {
       if (branchExists) {
         // Branch exists, just checkout
         console.log(`📋 Checking out existing branch: ${baseBranch}`);
-        await execAsync(`git checkout ${baseBranch}`, { cwd: workspacePath });
+        await safeGitExec(`git checkout ${baseBranch}`, { cwd: workspacePath });
       } else {
         // Branch doesn't exist, checkout from main/master
         console.log(`📋 Branch ${baseBranch} doesn't exist, checking out from main`);
         try {
-          await execAsync(`git checkout main`, { cwd: workspacePath });
+          await safeGitExec(`git checkout main`, { cwd: workspacePath });
         } catch {
           // Try master if main doesn't exist
-          await execAsync(`git checkout master`, { cwd: workspacePath });
+          await safeGitExec(`git checkout master`, { cwd: workspacePath });
         }
       }
 
       // Crear nueva rama de integración
-      await execAsync(`git checkout -b ${integrationBranchName}`, { cwd: workspacePath });
+      await safeGitExec(`git checkout -b ${integrationBranchName}`, { cwd: workspacePath });
 
       console.log(`✅ Created integration branch: ${integrationBranchName}`);
     } catch (error: any) {
@@ -610,8 +615,8 @@ export class GitHubService {
 
         if (localBranchExists) {
           console.log(`📋 Branch ${branchName} exists locally, merging...`);
-          // Merge the local branch directly
-          await execAsync(`git merge ${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
+          // Merge the local branch directly with timeout protection
+          await safeGitExec(`git merge ${branchName} --no-ff -m "Merge ${branchName} for integration testing"`, {
             cwd: workspacePath,
           });
         } else {
@@ -636,7 +641,7 @@ export class GitHubService {
 
           // Abortar el merge para limpiar el estado
           try {
-            await execAsync('git merge --abort', { cwd: workspacePath });
+            await safeGitExec('git merge --abort', { cwd: workspacePath });
           } catch (abortError) {
             console.warn(`⚠️ Could not abort merge (may already be clean)`);
           }
@@ -710,15 +715,18 @@ export class GitHubService {
     targetBranch: string
   ): Promise<{ success: boolean; conflicts: boolean }> {
     try {
-      // Checkout a la rama source
-      await execAsync(`git checkout ${sourceBranch}`, { cwd: workspacePath });
+      // Checkout a la rama source with timeout
+      await safeGitExec(`git checkout ${sourceBranch}`, { cwd: workspacePath });
 
-      // Fetch el target branch
-      await execAsync(`git fetch origin ${targetBranch}`, { cwd: workspacePath });
+      // Fetch el target branch with timeout
+      await safeGitExec(`git fetch origin ${targetBranch}`, {
+        cwd: workspacePath,
+        timeout: 15000, // 15 seconds for fetch
+      });
 
-      // Intentar rebase
+      // Intentar rebase with timeout
       try {
-        await execAsync(`git rebase origin/${targetBranch}`, { cwd: workspacePath });
+        await safeGitExec(`git rebase origin/${targetBranch}`, { cwd: workspacePath });
         return { success: true, conflicts: false };
       } catch (error: any) {
         if (error.message.includes('CONFLICT')) {
@@ -737,7 +745,7 @@ export class GitHubService {
    */
   async abortRebase(workspacePath: string): Promise<void> {
     try {
-      await execAsync('git rebase --abort', { cwd: workspacePath });
+      await safeGitExec('git rebase --abort', { cwd: workspacePath });
       console.log('✅ Rebase aborted');
     } catch (error: any) {
       // No throw - puede que no haya rebase en progreso

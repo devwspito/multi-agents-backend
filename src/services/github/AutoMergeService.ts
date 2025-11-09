@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { GitHubService } from '../GitHubService';
 import { LogService } from '../logging/LogService';
 import { NotificationService } from '../NotificationService';
+import { safeGitExec, safeFetch, safePull, safePushBranch } from '../../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
 
@@ -244,7 +245,8 @@ export class AutoMergeService {
     console.log(`   🔄 Fetching latest from origin...`);
 
     try {
-      await execAsync('git fetch origin', { cwd: repoPath });
+      // Use safe git operation with timeout
+      await safeFetch(repoPath);
       console.log(`   ✅ Fetch complete`);
     } catch (error: any) {
       console.error(`   ❌ Fetch failed: ${error.message}`);
@@ -285,28 +287,28 @@ export class AutoMergeService {
   ): Promise<IMergeConflict[]> {
     try {
       // Checkout main and update
-      await execAsync('git checkout main', { cwd: repoPath });
-      await execAsync('git pull origin main', { cwd: repoPath });
+      await safeGitExec('git checkout main', { cwd: repoPath });
+      await safePull(repoPath);
 
       // Try merge with --no-commit --no-ff to detect conflicts
       try {
-        await execAsync(`git merge --no-commit --no-ff origin/${prBranch}`, {
+        await safeGitExec(`git merge --no-commit --no-ff origin/${prBranch}`, {
           cwd: repoPath,
         });
 
         // No conflicts
-        await execAsync('git merge --abort', { cwd: repoPath });
+        await safeGitExec('git merge --abort', { cwd: repoPath });
         return [];
       } catch (mergeError: any) {
         // Conflicts detected
-        const { stdout } = await execAsync('git diff --name-only --diff-filter=U', {
+        const { stdout } = await safeGitExec('git diff --name-only --diff-filter=U', {
           cwd: repoPath,
         });
 
         const conflictingFiles = stdout.trim().split('\n').filter(Boolean);
 
         // Abort the merge
-        await execAsync('git merge --abort', { cwd: repoPath });
+        await safeGitExec('git merge --abort', { cwd: repoPath });
 
         // Analyze each conflicting file
         const conflicts: IMergeConflict[] = [];
@@ -391,8 +393,8 @@ export class AutoMergeService {
       try {
         // For simple conflicts, we can use "ours" or "theirs" strategy
         // In our case, we trust the PR branch (theirs)
-        await execAsync(`git checkout --theirs ${conflict.file}`, { cwd: repoPath });
-        await execAsync(`git add ${conflict.file}`, { cwd: repoPath });
+        await safeGitExec(`git checkout --theirs ${conflict.file}`, { cwd: repoPath });
+        await safeGitExec(`git add ${conflict.file}`, { cwd: repoPath });
 
         console.log(`     ✅ Resolved: ${conflict.file} (using PR changes)`);
         resolvedCount++;
@@ -451,8 +453,8 @@ export class AutoMergeService {
   ): Promise<string> {
     try {
       // Checkout main
-      await execAsync('git checkout main', { cwd: repoPath });
-      await execAsync('git pull origin main', { cwd: repoPath });
+      await safeGitExec('git checkout main', { cwd: repoPath });
+      await safePull(repoPath);
 
       // Merge with --no-ff (always create merge commit)
       const mergeMessage = `Merge PR #${prNumber} into main
@@ -466,12 +468,13 @@ Co-Authored-By: Claude <noreply@anthropic.com>`;
       );
 
       // Get merge commit SHA
-      const { stdout: commitSha } = await execAsync('git rev-parse HEAD', {
+      const { stdout: commitSha } = await safeGitExec('git rev-parse HEAD', {
         cwd: repoPath,
       });
 
       // Push to origin
-      await execAsync('git push origin main', { cwd: repoPath });
+      // Use safe push with timeout to prevent hanging
+      await safePushBranch(repoPath, 'main');
 
       return commitSha.trim();
     } catch (error: any) {
@@ -491,12 +494,16 @@ Co-Authored-By: Claude <noreply@anthropic.com>`;
 
     try {
       // Delete remote branch
-      await execAsync(`git push origin --delete ${prBranch}`, { cwd: repoPath });
+      // Use safe git operation with timeout
+      await safeGitExec(`git push origin --delete ${prBranch}`, {
+        cwd: repoPath,
+        timeout: 30000, // 30 seconds for push
+      });
       console.log(`   ✅ Deleted remote branch: origin/${prBranch}`);
 
       // Delete local branch (if exists)
       try {
-        await execAsync(`git branch -d ${prBranch}`, { cwd: repoPath });
+        await safeGitExec(`git branch -d ${prBranch}`, { cwd: repoPath });
         console.log(`   ✅ Deleted local branch: ${prBranch}`);
       } catch {
         // Local branch might not exist - ignore

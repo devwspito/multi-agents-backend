@@ -15,6 +15,7 @@ import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
 import { AgentModelConfig, getModelAlias } from '../../config/ModelConfigurations';
+import { safeGitExecSync } from '../../utils/safeGitExecution';
 
 // 🔥 NEW: Best practice services
 import { RetryService } from './RetryService';
@@ -187,7 +188,7 @@ export class OrchestrationCoordinator {
     // 3. Git diff check (verify real file changes)
     if (turnCount % 20 === 0 && turnCount >= 40) {
       try {
-        const gitDiff = execSync('git diff --stat', {
+        const gitDiff = safeGitExecSync('git diff --stat', {
           cwd: workspacePath,
           encoding: 'utf-8',
           timeout: 5000
@@ -1767,17 +1768,16 @@ ${judgeFeedback}
         console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
 
         try {
-          execSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+          safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
           console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
 
           // 🔥 CRITICAL: Pull latest changes from epic branch
           // This ensures story branches include changes from previously merged stories
           try {
-            // Add timeout to prevent hanging on git pull
-            execSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+            // Use safe git pull with timeout to prevent hanging
+            safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
               encoding: 'utf8',
               timeout: 30000, // 30 seconds timeout
-              killSignal: 'SIGKILL'
             });
             console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes from ${epicBranch}`);
             console.log(`   Story will include all previously merged stories`);
@@ -1797,12 +1797,12 @@ ${judgeFeedback}
 
         // Create story branch from epic branch
         try {
-          execSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
+          safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
           console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
         } catch (branchError: any) {
           // Branch might already exist
           if (branchError.message.includes('already exists')) {
-            execSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+            safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
             console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
           } else {
             throw branchError;
@@ -1948,11 +1948,11 @@ After writing code, you MUST:
           // Use git show HEAD to see what was in the last commit
 
           // Show files that were modified in last commit
-          const modifiedFiles = execSync(`cd "${repoPath}" && git show --name-only --pretty=format: HEAD`, { encoding: 'utf8' });
+          const modifiedFiles = safeGitExecSync(`cd "${repoPath}" && git show --name-only --pretty=format: HEAD`, { encoding: 'utf8' });
           console.log(`\n📂 Modified files in last commit:\n${modifiedFiles || '(no files modified)'}`);
 
           // Show actual code changes in last commit (full diff)
-          const diffOutput = execSync(`cd "${repoPath}" && git show HEAD`, { encoding: 'utf8' });
+          const diffOutput = safeGitExecSync(`cd "${repoPath}" && git show HEAD`, { encoding: 'utf8' });
           console.log(`\n📝 LAST COMMIT DIFF:\n${diffOutput.substring(0, 2000)}...\n(truncated, full diff has ${diffOutput.length} chars)`);
 
           // Emit to frontend (full diff, no truncation)

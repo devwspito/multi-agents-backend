@@ -2,6 +2,7 @@ import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { safeGitExec, safeFetch } from '../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
 
@@ -22,12 +23,13 @@ export const createEpicBranchTool = tool(
     try {
       const branchName = `feature/${args.epicId}`;
 
-      // Ensure we're in the repo
-      await execAsync(`cd "${args.repoPath}" && git fetch origin`);
+      // Ensure we're in the repo - use safe fetch
+      await safeFetch(args.repoPath);
 
-      // Create branch from base
-      await execAsync(
-        `cd "${args.repoPath}" && git checkout ${args.baseBranch} && git pull && git checkout -b ${branchName}`
+      // Create branch from base - use safe git operations
+      await safeGitExec(
+        `cd "${args.repoPath}" && git checkout ${args.baseBranch} && git pull && git checkout -b ${branchName}`,
+        { timeout: 30000 }
       );
 
       return {
