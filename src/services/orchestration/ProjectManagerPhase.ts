@@ -111,12 +111,54 @@ export class ProjectManagerPhase extends BasePhase {
    - Branch: ${repo.githubBranch}
    - Execution Order: ${repo.executionOrder || 'not set'}`;
           }).join('\n')}\n
-## Multi-Repo Orchestration Rules:
-- **Backend repositories** (🔧) should handle: APIs, models, database, business logic, server-side code
-- **Frontend repositories** (🎨) should handle: UI components, views, client-side logic, styling
-- Each epic MUST specify which repository it affects in "affectedRepositories"
-- If an epic spans multiple repos, you MUST list concrete file paths for EACH repository
-- Backend typically executes FIRST (executionOrder: 1), then Frontend (executionOrder: 2)
+## 🔥 CRITICAL: Multi-Repo Epic Assignment Rules
+
+**YOU MUST ASSIGN THE CORRECT REPOSITORY TO EACH EPIC BASED ON THE WORK TYPE**:
+
+### 🔧 BACKEND EPICS → BACKEND REPOSITORIES
+**Assign to BACKEND if the epic involves**:
+- ✅ REST APIs, GraphQL endpoints, WebSocket servers
+- ✅ Database models, schemas, migrations, queries
+- ✅ Business logic, services, controllers
+- ✅ Authentication, authorization, middleware
+- ✅ Server-side validation, data processing
+- ✅ Background jobs, cron tasks, workers
+- ✅ Third-party API integrations (server-side)
+
+### 🎨 FRONTEND EPICS → FRONTEND REPOSITORIES
+**Assign to FRONTEND if the epic involves**:
+- ✅ UI components, views, pages, layouts
+- ✅ Client-side state management (Redux, Context)
+- ✅ Forms, user input, client-side validation
+- ✅ Styling, CSS, animations, responsive design
+- ✅ Routing, navigation, browser APIs
+- ✅ Client-side data fetching, caching
+- ✅ User interactions, event handlers
+
+### 📱 MOBILE EPICS → MOBILE REPOSITORIES
+**Assign to MOBILE if the epic involves**:
+- ✅ Native mobile UI, screens, navigation
+- ✅ Device-specific features (camera, GPS, push notifications)
+- ✅ Mobile-specific performance optimizations
+- ✅ App store deployments, versioning
+
+### 📦 SHARED/LIBRARY EPICS → SHARED REPOSITORIES
+**Assign to SHARED if the epic involves**:
+- ✅ Shared types, interfaces, utilities
+- ✅ Common validation rules, constants
+- ✅ Cross-platform helper functions
+
+### ⚠️ MULTI-REPO EPICS (Rare - use with caution)
+**ONLY assign multiple repositories if the epic requires SIMULTANEOUS changes in BOTH repos**:
+- Example: New API endpoint (backend) + UI consuming it (frontend)
+- In this case: "affectedRepositories": ["backend-name", "frontend-name"]
+- The system will AUTOMATICALLY split this into 2 sub-epics
+
+### 🚫 COMMON MISTAKES TO AVOID:
+- ❌ Assigning API routes to frontend → WRONG (APIs = backend)
+- ❌ Assigning React components to backend → WRONG (UI = frontend)
+- ❌ Assigning ALL epics to the same repo → WRONG (analyze each epic)
+- ❌ Using repository names that don't exist → WRONG (use EXACT names from list above)
 `
         : '';
 
@@ -193,16 +235,28 @@ If epics need same files, either:
 {
   "epics": [
     {
-      "id": "epic-1",
-      "title": "Feature name",
-      "description": "What it does",
-      "affectedRepositories": ["repo-name"],
-      "filesToModify": ["src/real/file.js"],
-      "filesToCreate": ["src/new/file.js"],
-      "filesToRead": ["src/existing/file.js"],
-      "estimatedComplexity": "simple|moderate|complex",
+      "id": "epic-backend-api",
+      "title": "Create User API Endpoints",
+      "description": "REST API for user CRUD operations",
+      "affectedRepositories": ["v2_backend"],
+      "filesToModify": ["src/routes/users.ts", "src/controllers/UserController.ts"],
+      "filesToCreate": ["src/models/User.ts", "src/services/UserService.ts"],
+      "filesToRead": ["src/config/database.ts"],
+      "estimatedComplexity": "moderate",
       "dependencies": [],
       "executionOrder": 1
+    },
+    {
+      "id": "epic-frontend-user-ui",
+      "title": "User Management UI",
+      "description": "React components for user management",
+      "affectedRepositories": ["v2_frontend"],
+      "filesToModify": ["src/App.tsx", "src/routes/index.tsx"],
+      "filesToCreate": ["src/components/UserList.tsx", "src/components/UserForm.tsx"],
+      "filesToRead": ["src/api/client.ts"],
+      "estimatedComplexity": "simple",
+      "dependencies": ["epic-backend-api"],
+      "executionOrder": 2
     }
   ],
   "totalTeamsNeeded": 2,

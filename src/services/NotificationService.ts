@@ -352,6 +352,7 @@ export class NotificationService {
     const timestamp = new Date();
 
     const logData = {
+      taskId, // CRITICAL: Include taskId for frontend filtering
       level,
       message,
       timestamp: timestamp.toISOString(),

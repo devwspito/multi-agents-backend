@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "test": "jest",
-    "cleanup-workspaces": "tsx scripts/cleanup-workspaces.ts"
+    "cleanup-workspaces": "tsx scripts/cleanup-workspaces.ts",
+    "verify-branches": "tsx scripts/verify-branches.ts",
+    "fix-branches": "tsx scripts/verify-branches.ts --fix"
   },
   "keywords": [
     "claude",
@@ -47,6 +49,7 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
     "winston": "^3.18.3",
     "zod": "^3.25.76"
   },

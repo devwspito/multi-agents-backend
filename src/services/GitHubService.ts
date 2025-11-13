@@ -5,7 +5,7 @@ import fs from 'fs/promises';
 import { User } from '../models/User';
 import { EnvService } from './EnvService';
 import { IEnvVariable } from '../models/Repository';
-import { safeGitExec, safePushBranch, safeFetch, safePull, safeVerifyRemoteBranch } from '../utils/safeGitExecution';
+import { safeGitExec, safePushBranch, safeFetch, safePull, safeVerifyRemoteBranch, fixGitRemoteAuth } from '../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
 
@@ -68,6 +68,10 @@ export class GitHubService {
         timeout: 60000, // 60 seconds for clone
       });
 
+      // 🔥 CRITICAL: Fix remote URL immediately after cloning
+      console.log(`🔧 [GitHubService] Fixing remote auth after clone...`);
+      fixGitRemoteAuth(workspacePath);
+
       // Checkout al branch correcto
       if (project.githubBranch !== 'main' && project.githubBranch !== 'master') {
         await safeGitExec(`git checkout ${project.githubBranch}`, {
@@ -92,14 +96,16 @@ export class GitHubService {
    * @returns Ruta al repositorio clonado
    */
   async cloneRepositoryForOrchestration(
-    githubRepoName: string,
+    githubRepoUrl: string,
     branch: string,
     githubToken: string,
     targetDir: string,
     envVariables?: IEnvVariable[] // Optional environment variables to inject
   ): Promise<string> {
-    // Extract repo name from "user/repo" format
-    const repoName = githubRepoName.split('/').pop() || githubRepoName;
+    // Extract repo name from URL: https://github.com/user/repo.git -> repo
+    // 🔥 NORMALIZE: Remove .git suffix for consistent directory naming
+    const { normalizeRepoName } = require('../utils/safeGitExecution');
+    const repoName = normalizeRepoName(githubRepoUrl.split('/').pop() || githubRepoUrl);
     const repoPath = path.join(targetDir, repoName);
 
     // Check if already cloned
@@ -127,10 +133,9 @@ export class GitHubService {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`📥 Cloning ${githubRepoName} (branch: ${branch}) to ${repoPath}... (attempt ${attempt}/${maxRetries})`);
+        console.log(`📥 Cloning ${githubRepoUrl} (branch: ${branch}) to ${repoPath}... (attempt ${attempt}/${maxRetries})`);
 
-        // Build authenticated GitHub URL
-        const githubRepoUrl = `https://github.com/${githubRepoName}`;
+        // Add authentication to GitHub URL
         const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
 
         // Clone repository with timeout protection
@@ -140,6 +145,11 @@ export class GitHubService {
         });
 
         console.log(`✅ Repository cloned successfully: ${repoName}`);
+
+        // 🔥 CRITICAL: Fix remote URL immediately after cloning
+        // Remove embedded token so future operations use credential helper
+        console.log(`🔧 [GitHubService] Fixing remote auth for ${repoName}...`);
+        fixGitRemoteAuth(repoPath);
 
         // 🔐 Inject environment variables if provided
         if (envVariables && envVariables.length > 0) {

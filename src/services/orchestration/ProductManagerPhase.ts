@@ -79,6 +79,39 @@ export class ProductManagerPhase extends BasePhase {
     });
 
     try {
+      // 🔥 CRITICAL EARLY VALIDATION: All repositories MUST have type assigned
+      console.log(`\n🔍 [ProductManager] CRITICAL: Validating repository types...`);
+      const repositoriesWithoutType = context.repositories.filter(r => !r.type);
+
+      if (repositoriesWithoutType.length > 0) {
+        const repoNames = repositoriesWithoutType.map(r => r.name || r.githubRepoName).join(', ');
+        console.error(`\n❌ [ProductManager] CRITICAL ERROR: Repositories without type assigned!`);
+        console.error(`   Repositories: ${repoNames}`);
+        console.error(`   🔥 EACH repository MUST have 'type' field: 'backend', 'frontend', 'mobile', or 'shared'`);
+        console.error(`   📋 Please update repositories in MongoDB before creating tasks`);
+        console.error(`\n   Example fix:\n   await Repository.updateOne({ name: '${repositoriesWithoutType[0].name}' }, { $set: { type: 'backend' } });`);
+
+        // Mark task as failed
+        task.status = 'failed';
+        task.orchestration.productManager.status = 'failed';
+        task.orchestration.productManager.error = `Repositories without type: ${repoNames}. Cannot proceed without knowing repository types.`;
+        await task.save();
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ Task FAILED: Repositories [${repoNames}] have no type assigned. Update MongoDB: { type: 'backend' | 'frontend' | 'mobile' | 'shared' }`
+        );
+
+        throw new Error(`CRITICAL: Repositories [${repoNames}] missing required 'type' field. Cannot create epics without knowing repository types. Task marked as FAILED.`);
+      }
+
+      console.log(`   ✅ All ${context.repositories.length} repositories have valid types`);
+      context.repositories.forEach(r => {
+        const emoji = r.type === 'backend' ? '🔧' : r.type === 'frontend' ? '🎨' : r.type === 'mobile' ? '📱' : '📦';
+        console.log(`      ${emoji} ${r.name || r.githubRepoName}: ${r.type.toUpperCase()}`);
+      });
+
       // Build repositories information
       const repoInfo = context.repositories.length > 0
         ? `\n## Available Repositories:\n${context.repositories.map((repo, i) =>

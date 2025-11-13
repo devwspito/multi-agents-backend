@@ -75,7 +75,16 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
     const { status, priority, projectId, repositoryId } = req.query;
 
-    const filter: any = { userId: req.user!.id };
+    // Check if user exists in the request
+    if (!req.user || !req.user.id) {
+      console.error('No user found in request after authentication');
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated properly'
+      });
+    }
+
+    const filter: any = { userId: req.user.id };
 
     if (status) filter.status = status;
     if (priority) filter.priority = priority;
@@ -85,17 +94,42 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       filter.repositoryIds = repositoryId; // Mongoose busca automáticamente en el array
     }
 
-    const tasks = await Task.find(filter)
-      .populate('repositoryIds', 'name githubRepoName')
-      .populate('projectId', 'name')
-      .sort({ createdAt: -1 })
-      .select('-__v')
-      .lean();
+    console.log('Tasks filter:', filter);
 
-    res.json({
+    // Execute query with timeout to prevent hanging
+    let tasks = [];
+    try {
+      const query = Task.find(filter)
+        .select('_id title description status priority projectId repositoryIds tags createdAt updatedAt')
+        .sort({ updatedAt: -1 })
+        .limit(50)
+        .lean();
+
+      // Use Promise.race to implement timeout (increased to 10s for large datasets)
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Query timeout')), 10000)
+      );
+
+      tasks = await Promise.race([query.exec(), timeoutPromise]) as any[];
+      console.log(`Tasks query successful: Found ${tasks?.length || 0} tasks`);
+    } catch (dbError: any) {
+      console.error('Tasks database error:', dbError);
+      // Return empty array on error to not block frontend
+      tasks = [];
+    }
+
+    // Ensure response is always sent
+    return res.json({
       success: true,
-      data: tasks,
-      count: tasks.length,
+      data: {
+        tasks: tasks || [],
+        pagination: {
+          total: tasks?.length || 0,
+          page: 1,
+          limit: 50
+        }
+      },
+      count: tasks?.length || 0,
     });
   } catch (error) {
     console.error('Error fetching tasks:', error);

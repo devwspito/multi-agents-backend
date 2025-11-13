@@ -125,11 +125,12 @@ export class E2ETestingPhase extends BasePhase {
       }));
 
       // Build repository context
+      const { normalizeRepoName } = require('../../utils/safeGitExecution');
       const repoContext = repositories.map(repo => ({
-        name: repo.githubRepoName.split('/').pop(),
+        name: normalizeRepoName(repo.githubRepoName.split('/').pop() || ''),
         fullName: repo.githubRepoName,
         type: repo.type || 'unknown',
-        path: workspacePath ? `${workspacePath}/${repo.githubRepoName.split('/').pop()}` : '',
+        path: workspacePath ? `${workspacePath}/${normalizeRepoName(repo.githubRepoName.split('/').pop() || '')}` : '',
         hasEnvVariables: repo.envVariables && repo.envVariables.length > 0,
       }));
 

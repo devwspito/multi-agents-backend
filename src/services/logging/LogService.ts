@@ -144,6 +144,12 @@ export class LogService {
     this.storeInDatabase(message, context, timestamp).catch((err) => {
       console.error('[LogService] Failed to store log:', err.message);
     });
+
+    // 3. Emit to WebSocket for real-time frontend updates
+    this.emitToWebSocket(message, context, timestamp).catch((err) => {
+      // Silent fail - don't disrupt logging if socket fails
+      console.error('[LogService] Failed to emit to WebSocket:', err.message);
+    });
   }
 
   /**
@@ -239,6 +245,65 @@ export class LogService {
       // Fallback to console if DB fails
       console.error('[LogService] Failed to store in DB:', err);
     }
+  }
+
+  /**
+   * Emit log to WebSocket for real-time frontend updates
+   */
+  private static async emitToWebSocket(
+    message: string,
+    context: LogContext & { level: LogLevel; category: LogCategory },
+    timestamp: Date
+  ): Promise<void> {
+    // Import NotificationService dynamically to avoid circular dependencies
+    const { NotificationService } = await import('../NotificationService');
+
+    // Convert taskId to string if it's an ObjectId
+    const taskIdStr = context.taskId.toString();
+
+    // Map LogLevel to console levels
+    let consoleLevel: 'log' | 'info' | 'warn' | 'error' = 'log';
+    switch (context.level) {
+      case 'ERROR':
+        consoleLevel = 'error';
+        break;
+      case 'WARN':
+        consoleLevel = 'warn';
+        break;
+      case 'INFO':
+      case 'SUCCESS':
+        consoleLevel = 'info';
+        break;
+      case 'DEBUG':
+      default:
+        consoleLevel = 'log';
+        break;
+    }
+
+    // Format message with context for frontend display
+    let formattedMessage = message;
+
+    // Add agent context if present
+    if (context.agentType) {
+      const agentName = context.agentInstanceId || context.agentType;
+      formattedMessage = `[${agentName}] ${message}`;
+    }
+
+    // Add phase context if present
+    if (context.phase) {
+      formattedMessage = `[${context.phase.toUpperCase()}] ${formattedMessage}`;
+    }
+
+    // Add epic/story context if present
+    if (context.epicName) {
+      formattedMessage += ` (Epic: ${context.epicName})`;
+    }
+    if (context.storyTitle) {
+      formattedMessage += ` (Story: ${context.storyTitle})`;
+    }
+
+    // Emit using NotificationService
+    await NotificationService.emitConsoleLog(taskIdStr, consoleLevel, formattedMessage);
   }
 
   /**

@@ -21,7 +21,6 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 import { RetryService } from './RetryService';
 // import { SchemaValidationService } from './SchemaValidation'; // Unused - available for future use
 import { CostBudgetService } from './CostBudgetService';
-import { SecretsDetectionService } from './SecretsDetectionService';
 
 import path from 'path';
 import os from 'os';
@@ -896,7 +895,7 @@ export class OrchestrationCoordinator {
       }
 
       await this.githubService.cloneRepositoryForOrchestration(
-        repo.githubRepoName,
+        repo.githubRepoUrl,
         repo.githubBranch || 'main',
         githubToken,  // Use user's token for all repos
         taskWorkspace,
@@ -1019,15 +1018,26 @@ export class OrchestrationCoordinator {
     const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
 
     // Get repository type from task or context for developer specialization
-    let repositoryType: 'frontend' | 'backend' | 'mobile' | 'fullstack' | 'library' | 'unknown' = 'unknown';
+    // 🔥 ONLY 'frontend' | 'backend' | 'unknown' - NO OTHER TYPES EXIST
+    let repositoryType: 'frontend' | 'backend' | 'unknown' = 'unknown';
     if (taskId && agentType === 'developer') {
       try {
         const task = await Task.findById(taskId).populate('projectId');
         if (task?.projectId) {
           const project = task.projectId as any;
-          // Get repository type from the first repository (if multi-repo)
+
+          // 🔥 CRITICAL: Repository.type enum is ONLY 'backend' | 'frontend'
           if (project.repositories && project.repositories.length > 0) {
-            repositoryType = project.repositories[0].type || 'unknown';
+            const types = project.repositories.map((r: any) => r.type).filter(Boolean);
+
+            if (types.length === 0) {
+              // No types assigned, use unknown
+              repositoryType = 'unknown';
+            } else {
+              // Use first valid type found (all must be backend or frontend)
+              const validType = types.find((t: string) => t === 'backend' || t === 'frontend');
+              repositoryType = validType || 'unknown';
+            }
           } else if (project.repository) {
             repositoryType = project.repository.type || 'unknown';
           }
@@ -1058,8 +1068,9 @@ export class OrchestrationCoordinator {
         console.log(`🎯 [ExecuteAgent] Task ${taskId} has modelConfig: preset=${preset}, hasCustomConfig=${!!customConfig}`);
 
         if (preset === 'custom' && customConfig) {
-          modelConfig = customConfig as AgentModelConfig;
-          console.log(`🎯 [ExecuteAgent] Using custom model configuration`);
+          // Map DB camelCase keys to AgentModelConfig kebab-case keys
+          modelConfig = configs.mapDbConfigToAgentModelConfig(customConfig);
+          console.log(`🎯 [ExecuteAgent] Using custom model configuration (mapped from DB format)`);
         } else if (preset) {
           switch (preset) {
             case 'max':
@@ -1088,21 +1099,8 @@ export class OrchestrationCoordinator {
     modelConfig = configs.optimizeConfigForBudget(modelConfig);
     console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
 
-    // 🔥 CRITICAL: Model optimization strategy without sacrificing quality
-    let fullModelId: string;
-
-    // Force certain agents to use better models for reliability
-    const criticalAgents = ['qa-engineer', 'judge', 'fixer', 'e2e-fixer'];
-    const shouldUpgrade = criticalAgents.includes(agentType);
-
-    if (shouldUpgrade) {
-      const topModel = configs.getTopModelFromConfig(modelConfig);
-      fullModelId = topModel;
-      console.log(`🚀 [ExecuteAgent] UPGRADING ${agentType} to top model for reliability: ${topModel}`);
-    } else {
-      fullModelId = getAgentModel(agentType, modelConfig);
-    }
-
+    // Get model from optimized config (optimizeConfigForBudget already assigned top/bottom models)
+    const fullModelId = getAgentModel(agentType, modelConfig);
     const sdkModel = getModelAlias(fullModelId); // e.g., 'sonnet'
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
@@ -1239,65 +1237,22 @@ export class OrchestrationCoordinator {
         throw new Error(`SDK query failed: ${queryError.message}`);
       }
 
-      // 🔥 TIMEOUT PROTECTION: Prevent agents from hanging indefinitely
-      // Max execution time: 10 minutes per agent
-      const AGENT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-
-      // Simply collect the result - SDK handles everything
+      // 🔥 TRUST THE SDK: Let SDK handle all timeouts and error recovery
+      // We simply consume the stream and collect messages
       let finalResult: any = null;
       const allMessages: any[] = [];
       let turnCount = 0;
-      let lastMessageTime = Date.now();
-      const MESSAGE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes without messages = stuck
 
-      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages (timeout: ${AGENT_TIMEOUT_MS / 1000}s)...`);
-
-      // 🔥 CRITICAL: Monitor for stuck streams
-      let warningIssued = false;
-      const messageMonitor = setInterval(() => {
-        const timeSinceLastMessage = Date.now() - lastMessageTime;
-
-        // Issue warning at 2 minutes
-        if (!warningIssued && timeSinceLastMessage > 2 * 60 * 1000) {
-          console.warn(`⚠️  [ExecuteAgent] Stream slow - no messages for 2 minutes`);
-          console.warn(`   Agent: ${agentType}`);
-          console.warn(`   Turn count: ${turnCount}`);
-          console.warn(`   Messages received: ${allMessages.length}`);
-          NotificationService.emitConsoleLog(
-            taskId || 'unknown',
-            'warn',
-            `⚠️ ${agentType} appears slow - checking for issues...`
-          );
-          warningIssued = true;
-        }
-
-        // Force recovery at 3 minutes
-        if (timeSinceLastMessage > MESSAGE_TIMEOUT_MS) {
-          console.error(`💀 [ExecuteAgent] Stream appears stuck - no messages for ${MESSAGE_TIMEOUT_MS / 1000}s`);
-          console.error(`   Agent: ${agentType}`);
-          console.error(`   Last activity: ${new Date(lastMessageTime).toISOString()}`);
-          console.error(`   Turn count: ${turnCount}`);
-
-          clearInterval(messageMonitor);
-
-          // Throw error to trigger retry with top model
-          const error = new Error(`Agent ${agentType} stream stuck - no messages for ${MESSAGE_TIMEOUT_MS / 1000}s`);
-          (error as any).isTimeout = true;
-          throw error;
-        }
-      }, 30000); // Check every 30 seconds
+      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
+      console.log(`   SDK will handle timeouts and error recovery automatically`);
 
       try {
-        // Wrap stream consumption with timeout using Promise.race
-        await Promise.race([
-          // Main stream processing
-          (async () => {
-            for await (const message of stream) {
-              lastMessageTime = Date.now(); // Update last message time
-              allMessages.push(message);
+        // Simple stream consumption - SDK handles everything
+        for await (const message of stream) {
+          allMessages.push(message);
 
-              // 🔥 CRITICAL: Log FULL message if it has an error flag
-              if ((message as any).is_error === true) {
+          // 🔥 CRITICAL: Log FULL message if it has an error flag
+          if ((message as any).is_error === true) {
             console.error(`\n${'='.repeat(80)}`);
             console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
             console.error(`${'='.repeat(80)}`);
@@ -1403,41 +1358,18 @@ export class OrchestrationCoordinator {
 
             console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
           }
-            }
-          })(), // End of main stream processing
-          // Timeout promise
-          new Promise((_, reject) =>
-            setTimeout(
-              () => reject(new Error(`Agent execution timeout after ${AGENT_TIMEOUT_MS / 1000}s`)),
-              AGENT_TIMEOUT_MS
-            )
-          ),
-        ]);
-
-        // Clean up monitor on success
-        clearInterval(messageMonitor);
+        }
       } catch (streamError: any) {
-        // Clean up monitor on error
-        clearInterval(messageMonitor);
-
-        // Check if this is a timeout error or stuck stream
-        const isTimeout = streamError.message?.includes('timeout') || streamError.message?.includes('stuck');
-
-        console.error(`❌ [ExecuteAgent] Error consuming stream${isTimeout ? ' (TIMEOUT)' : ''}:`, {
+        console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
           message: streamError.message,
           stack: streamError.stack,
           code: streamError.code,
           turnCount,
           lastMessages: allMessages.slice(-3),
-          isTimeout,
         });
 
-        // Re-throw with timeout flag for retry logic
-        const error: any = new Error(streamError.message);
-        error.isTimeout = isTimeout;
-        error.turnCount = turnCount;
-        error.agentType = agentType;
-        throw error;
+        // Re-throw - SDK already provides detailed error info
+        throw streamError;
       }
 
       console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
@@ -1458,19 +1390,6 @@ export class OrchestrationCoordinator {
 
       console.log(`\n📝 [ExecuteAgent] Extracted output length: ${output.length} chars`);
       console.log(`📝 [ExecuteAgent] Output preview: ${output.substring(0, 200)}...`);
-
-      // 🔥 SECRETS DETECTION: Sanitize output before returning
-      const { sanitized, warning } = SecretsDetectionService.sanitizeAgentOutput(
-        agentType,
-        output
-      );
-
-      if (warning) {
-        console.warn(warning);
-        if (taskId) {
-          NotificationService.emitConsoleLog(taskId, 'warn', warning);
-        }
-      }
 
       // Calculate cost with ACTUAL pricing for Claude models (from official docs)
       // Claude 3.5 Sonnet (claude-sonnet-4-5-20250929) pricing:
@@ -1520,7 +1439,7 @@ export class OrchestrationCoordinator {
       console.log(`   Total cost: $${cost.toFixed(4)}`);
 
       return {
-        output: sanitized, // Use sanitized output
+        output: output,
         usage: (finalResult as any)?.usage || {},
         cost: cost,
         stopReason: (finalResult as any)?.stop_reason,
@@ -1654,9 +1573,51 @@ export class OrchestrationCoordinator {
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
     judgeFeedback?: string, // Judge feedback for retry attempts
-    epicBranchName?: string // Epic branch name from TeamOrchestrationPhase
+    epicBranchName?: string, // Epic branch name from TeamOrchestrationPhase
+    forceTopModel?: boolean // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
   ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
+
+    // 🚀 RETRY OPTIMIZATION: Use topModel when Judge rejected code
+    if (forceTopModel && judgeFeedback) {
+      const configs = await import('../../config/ModelConfigurations');
+
+      // Get the actual AgentModelConfig from the task
+      let actualConfig: configs.AgentModelConfig = configs.STANDARD_CONFIG;
+
+      if (task.orchestration.modelConfig) {
+        const { preset, customConfig } = task.orchestration.modelConfig;
+
+        if (preset === 'custom' && customConfig) {
+          actualConfig = configs.mapDbConfigToAgentModelConfig(customConfig);
+        } else if (preset) {
+          switch (preset) {
+            case 'max': actualConfig = configs.MAX_CONFIG; break;
+            case 'premium': actualConfig = configs.PREMIUM_CONFIG; break;
+            case 'standard': actualConfig = configs.STANDARD_CONFIG; break;
+          }
+        }
+      }
+
+      const topModel = configs.getTopModelFromConfig(actualConfig);
+      const topModelName = topModel.includes('opus') ? 'Opus' :
+                          topModel.includes('sonnet') ? 'Sonnet' : 'Haiku';
+
+      console.log(`🚀 [Developer ${member.instanceId}] RETRY with topModel: ${topModelName}`);
+      console.log(`   Reason: Judge rejected code, using best available model for retry`);
+
+      // Temporarily override developer model to topModel
+      const updatedConfig: configs.AgentModelConfig = {
+        ...actualConfig,
+        'developer': topModel
+      };
+
+      // Save back with correct structure (preset + customConfig wrapper)
+      task.orchestration.modelConfig = {
+        preset: 'custom',
+        customConfig: updatedConfig as any
+      };
+    }
 
     // Get all stories for this developer
     if (!stories || stories.length === 0) {
@@ -1688,26 +1649,41 @@ export class OrchestrationCoordinator {
 
       console.log(`📝 [Developer ${member.instanceId}] Working on story: ${story.title}`);
 
-      // 🔥 CRITICAL FIX: Get epic to find target repository (use EventStore epics)
-      const epic = epicsList.find((e: any) => e.id === story.epicId);
-      if (!epic) {
-        console.error(`❌ [Developer ${member.instanceId}] Epic ${story.epicId} not found for story ${storyId}`);
-        throw new Error(`Epic ${story.epicId} not found - cannot determine target repository`);
-      }
+      // 🔥 CRITICAL FIX: Get target repository from STORY (inherited from epic in TechLeadPhase)
+      // Stories now have targetRepository field directly - no need to look up epic
+      const targetRepository = story.targetRepository;
 
-      // Get target repository from epic
-      // Priority: epic.targetRepository > first repo's githubRepoName > first repo's name
-      const targetRepository = epic.targetRepository || repositories[0]?.githubRepoName || repositories[0]?.name;
+      // 🔥 VALIDATION: targetRepository MUST exist (set by TechLeadPhase)
       if (!targetRepository) {
-        console.error(`❌ [Developer ${member.instanceId}] No target repository defined for epic ${epic.id}`);
-        throw new Error(`Epic ${epic.id} has no targetRepository - cannot execute developer`);
+        console.error(`❌ [Developer ${member.instanceId}] Story ${storyId} has NO targetRepository!`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Epic: ${story.epicId}`);
+        console.error(`   Available repositories: ${repositories.map(r => r.name || r.githubRepoName).join(', ')}`);
+        console.error(`   🔥 CRITICAL: This should have been set by TechLeadPhase - check EventStore`);
+
+        // Mark task as failed instead of using dangerous fallback
+        const Task = require('../../models/Task').Task;
+        const dbTask = await Task.findById(task._id);
+        if (dbTask) {
+          dbTask.status = 'failed';
+          dbTask.orchestration.developers = {
+            status: 'failed',
+            error: `Story ${storyId} missing targetRepository - data integrity issue`,
+          };
+          await dbTask.save();
+        }
+
+        throw new Error(`Story ${storyId} has no targetRepository - cannot execute developer. Task marked as FAILED.`);
       }
 
       // 🔥 CRITICAL FIX: Extract repo name from full path (e.g., "devwspito/v2_frontend" → "v2_frontend")
       // Git clones repos with just the repo name, not the full owner/repo path
-      const repoName = targetRepository.includes('/')
-        ? targetRepository.split('/').pop()
-        : targetRepository;
+      const { normalizeRepoName } = require('../../utils/safeGitExecution');
+      const repoName = normalizeRepoName(
+        targetRepository.includes('/')
+          ? targetRepository.split('/').pop() || targetRepository
+          : targetRepository
+      );
 
       console.log(`📂 [Developer ${member.instanceId}] Target repository: ${targetRepository}`);
       console.log(`📂 [Developer ${member.instanceId}] Repository directory: ${repoName}`);
@@ -1764,7 +1740,9 @@ ${judgeFeedback}
         // First, ensure we're on the epic base branch WITH LATEST CHANGES
         // 🔥 CRITICAL FIX: Use the actual epic branch name from TeamOrchestrationPhase
         // Epic branch names are unique with timestamp (e.g., epic/358cdca9-epic-1-1761118801698-l5tvun)
-        const epicBranch = epicBranchName || epic.branchName || `epic/${epic.id}`;
+        // Find the epic for this story
+        const storyEpic = epicsList.find((e: any) => e.id === story.epicId);
+        const epicBranch = epicBranchName || story.epicBranch || storyEpic?.branchName || `epic/${story.epicId}`;
         console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
 
         try {
@@ -1844,13 +1822,32 @@ ${judgeFeedback ? 'Fix the code based on Judge feedback above.' : 'Implement thi
 ## 🚨 MANDATORY: Git workflow (MUST DO):
 ⚠️ **You are already on branch: ${branchName}** (branch was created for you)
 
-After writing code, you MUST:
+After writing code, you MUST follow this EXACT sequence:
 1. cd ${targetRepository}
 2. git add .
 3. git commit -m "Implement: ${story.title}"
 4. git push origin ${branchName}
+5. **MANDATORY: Print commit SHA**:
+   \`\`\`bash
+   git rev-parse HEAD
+   \`\`\`
+   Then output: 📍 Commit SHA: <the-40-character-sha>
 
-**CRITICAL: You MUST commit and push your code. Judge will review your branch.**`;
+6. **MANDATORY: Verify push succeeded**:
+   \`\`\`bash
+   git ls-remote origin ${branchName}
+   \`\`\`
+   Check that output shows your commit SHA
+
+7. **MANDATORY: Print SUCCESS marker**:
+   Output exactly this line:
+   ✅ DEVELOPER_FINISHED_SUCCESSFULLY
+
+**CRITICAL RULES:**
+- You MUST see "✅ DEVELOPER_FINISHED_SUCCESSFULLY" in your output
+- Judge will ONLY review if you print this success marker
+- If git push fails, retry it until it succeeds
+- If you cannot push, print "❌ DEVELOPER_FAILED" and explain why`;
 
       // 🔥 DEBUG: Log if attachments are being passed
       if (attachments && attachments.length > 0) {

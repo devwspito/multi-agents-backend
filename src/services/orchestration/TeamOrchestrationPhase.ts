@@ -7,6 +7,7 @@ import { DevelopersPhase } from './DevelopersPhase';
 import { QAPhase } from './QAPhase';
 import { GitHubService } from '../GitHubService';
 import { PRManagementService } from '../github/PRManagementService';
+import { safeGitExecSync, fixGitRemoteAuth, normalizeRepoName } from '../../utils/safeGitExecution';
 
 /**
  * Team Orchestration Phase
@@ -499,8 +500,19 @@ export class TeamOrchestrationPhase extends BasePhase {
       const branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
       const workspacePath = parentContext.workspacePath;
 
-      // Determine target repository (use first affected repo or first repo in context)
-      const targetRepository = epic.affectedRepositories?.[0] || parentContext.repositories[0]?.name;
+      // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
+      if (!epic.targetRepository) {
+        console.error(`\n❌❌❌ [Team ${teamNumber}] CRITICAL ERROR: Epic has NO targetRepository!`);
+        console.error(`   Epic: ${epic.title}`);
+        console.error(`   Epic ID: ${epic.id}`);
+        console.error(`\n   💀 CANNOT CREATE BRANCH WITHOUT KNOWING WHICH REPOSITORY`);
+        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in createEpicBranch`);
+      }
+
+      // 🔥 NORMALIZE: Remove .git suffix if present (ProjectManager may add it, but DB doesn't have it)
+      const targetRepository = normalizeRepoName(epic.targetRepository);
+      let pushSuccessful = false;
 
       if (workspacePath && targetRepository) {
         console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
@@ -509,24 +521,97 @@ export class TeamOrchestrationPhase extends BasePhase {
         // 🔥 FIX: Navigate into the actual repository directory
         const repoPath = `${workspacePath}/${targetRepository}`;
 
+        // 🔥 CRITICAL: Verify repository directory exists
+        const fs = require('fs');
+        if (!fs.existsSync(repoPath)) {
+          console.error(`❌ [Team ${teamNumber}] Repository directory does not exist: ${repoPath}`);
+          console.error(`   Workspace: ${workspacePath}`);
+          console.error(`   Target repo: ${targetRepository}`);
+          console.error(`   Available repos: ${parentContext.repositories.map((r: any) => r.name || r.full_name).join(', ')}`);
+          throw new Error(`Repository directory not found: ${repoPath}`);
+        }
+
+        console.log(`✅ [Team ${teamNumber}] Repository directory verified: ${repoPath}`);
+
         try {
-          // Navigate to repository and create branch
-          const { execSync: exec } = await import('child_process');
-          exec(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
-          console.log(`✅ [Team ${teamNumber}] Branch created: ${branchName}`);
+          // Create epic branch LOCALLY (will be pushed later with commits)
+          // Epic branch should be created from current HEAD (main or whatever is checked out)
+          // but NOT pushed until it has actual commits from work
+          console.log(`🌿 [Team ${teamNumber}] Creating epic branch locally: ${branchName}`);
+
+          // Ensure we start from a clean state
+          try {
+            safeGitExecSync(`git checkout main`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [Team ${teamNumber}] Checked out main branch as base`);
+          } catch (mainError: any) {
+            console.warn(`⚠️  [Team ${teamNumber}] Could not checkout main: ${mainError.message}`);
+            // Continue - use current branch as base
+          }
+
+          safeGitExecSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`✅ [Team ${teamNumber}] Epic branch created locally: ${branchName}`);
+
+          // 🔥 CRITICAL: Create initial commit in epic branch
+          // This ensures epic branch has a base for story branches to branch from
+          const fs = require('fs');
+          const epicReadmePath = `${repoPath}/EPIC_${epic.id}.md`;
+          const epicReadmeContent = `# Epic: ${epic.title}\n\n${epic.description || 'Epic in progress...'}\n\n**Status:** In Progress\n**Created:** ${new Date().toISOString()}\n`;
+
+          fs.writeFileSync(epicReadmePath, epicReadmeContent, 'utf8');
+          console.log(`📝 [Team ${teamNumber}] Created epic README: EPIC_${epic.id}.md`);
+
+          safeGitExecSync(`git add .`, { cwd: repoPath, encoding: 'utf8' });
+          safeGitExecSync(`git commit -m "chore: Initialize epic ${epic.id} - ${epic.title}"`, {
+            cwd: repoPath,
+            encoding: 'utf8'
+          });
+          console.log(`✅ [Team ${teamNumber}] Created initial commit in epic branch`);
+
+          // Push epic branch with initial commit
+          try {
+            fixGitRemoteAuth(repoPath);
+            safeGitExecSync(`git push -u origin ${branchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 30000
+            });
+            console.log(`✅ [Team ${teamNumber}] Epic branch pushed to remote with initial commit`);
+            pushSuccessful = true;
+          } catch (pushError: any) {
+            console.error(`❌ [Team ${teamNumber}] Failed to push epic branch: ${pushError.message}`);
+            pushSuccessful = false;
+            throw new Error(`Cannot proceed without epic branch on remote: ${pushError.message}`);
+          }
 
           NotificationService.emitConsoleLog(
             taskId,
             'info',
-            `✅ Team ${teamNumber}: Created branch ${branchName} in ${targetRepository}`
+            `✅ Team ${teamNumber}: Created and pushed branch ${branchName} in ${targetRepository}`
           );
         } catch (gitError: any) {
           // Branch might already exist
           console.log(`⚠️  [Team ${teamNumber}] Branch might already exist: ${gitError.message}`);
           try {
-            const { execSync: exec } = await import('child_process');
-            exec(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+            safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
             console.log(`✅ [Team ${teamNumber}] Checked out existing branch: ${branchName}`);
+
+            // 🔥 CRITICAL: Also push existing branch to ensure it's on remote
+            try {
+              console.log(`📤 [Team ${teamNumber}] Ensuring epic branch is on remote...`);
+
+              // Fix remote auth before pushing
+              fixGitRemoteAuth(repoPath);
+
+              safeGitExecSync(`git push -u origin ${branchName}`, {
+                cwd: repoPath,
+                encoding: 'utf8',
+                timeout: 30000
+              });
+              console.log(`✅ [Team ${teamNumber}] Epic branch confirmed on remote: ${branchName}`);
+            } catch (pushError: any) {
+              // Might already be on remote, that's fine
+              console.log(`ℹ️  [Team ${teamNumber}] Branch push result: ${pushError.message}`);
+            }
           } catch (checkoutError: any) {
             console.error(`❌ [Team ${teamNumber}] Failed to create/checkout branch: ${checkoutError.message}`);
           }
@@ -550,6 +635,18 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamContext.setData('teamEpic', epicWithBranch);
       teamContext.setData('epicBranch', branchName);
       teamContext.setData('targetRepository', targetRepository); // 🔥 Pass repository name to team
+
+      // 🌿 REGISTER EPIC BRANCH IN CENTRAL REGISTRY
+      teamContext.registerBranch({
+        name: branchName,
+        type: 'epic',
+        repository: targetRepository,
+        baseBranch: 'main',
+        created: true,
+        pushed: pushSuccessful,
+        merged: false,
+      });
+      console.log(`🌿 [Team ${teamNumber}] Registered epic branch: ${branchName} → ${targetRepository} (pushed: ${pushSuccessful})`);
 
       // 🔥 CRITICAL: Update EventStore with the actual branch name
       // This allows all downstream phases (Developers, Judge, QA) to access the correct branch
@@ -752,7 +849,17 @@ export class TeamOrchestrationPhase extends BasePhase {
       const { execSync } = require('child_process');
       const { NotificationService } = await import('../NotificationService');
 
-      const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
+      // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
+      if (!epic.targetRepository) {
+        console.error(`\n❌❌❌ [PR] CRITICAL ERROR: Epic has NO targetRepository!`);
+        console.error(`   Epic: ${epic.title}`);
+        console.error(`   Epic ID: ${epic.id}`);
+        console.error(`\n   💀 CANNOT CREATE PR WITHOUT KNOWING WHICH REPOSITORY`);
+        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in createEpicPullRequest`);
+      }
+
+      const targetRepo = epic.targetRepository;
       const repoPath = `${workspacePath}/${targetRepo}`;
 
       console.log(`\n📬 [PR] Creating Pull Request for epic: ${epic.title}`);
@@ -781,17 +888,20 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Push epic branch to remote WITH TIMEOUT
       try {
-        // 🔥 CRITICAL: Add timeout to prevent hanging on git push
-        execSync(
-          `cd "${repoPath}" && timeout 30 git push -u origin ${epicBranch} 2>&1`,
-          {
-            encoding: 'utf8',
-            timeout: 30000 // 30 seconds max
-          }
-        );
+        console.log(`📤 [PR] Pushing ${epicBranch} to remote...`);
+
+        // 🔥 CRITICAL: Fix remote auth before pushing
+        fixGitRemoteAuth(repoPath);
+
+        // Push using safe git execution
+        safeGitExecSync(`git push -u origin ${epicBranch}`, {
+          cwd: repoPath,
+          encoding: 'utf8',
+          timeout: 30000 // 30 seconds max
+        });
         console.log(`✅ [PR] Pushed ${epicBranch} to remote`);
       } catch (pushError: any) {
-        console.error(`❌ [PR] Failed to push branch (timeout after 30s or error): ${pushError.message}`);
+        console.error(`❌ [PR] Failed to push branch: ${pushError.message}`);
         NotificationService.emitConsoleLog(
           taskId,
           'warn',

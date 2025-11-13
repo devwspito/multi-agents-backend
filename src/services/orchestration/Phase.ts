@@ -1,6 +1,23 @@
 import { ITask } from '../../models/Task';
 
 /**
+ * Branch Registry Entry
+ *
+ * Stores branch information for Git operations
+ */
+export interface BranchInfo {
+  name: string;           // Full branch name (e.g., 'epic/xxx' or 'story/xxx')
+  type: 'epic' | 'story'; // Branch type
+  epicId?: string;        // Epic ID if story branch
+  storyId?: string;       // Story ID if story branch
+  repository: string;     // Repository name
+  baseBranch: string;     // Base branch (usually 'main' or epic branch name)
+  created: boolean;       // Whether branch was created successfully
+  pushed: boolean;        // Whether branch was pushed to remote
+  merged: boolean;        // Whether branch was merged to base
+}
+
+/**
  * Orchestration Context
  *
  * Shared state passed between phases in the pipeline.
@@ -14,6 +31,9 @@ export class OrchestrationContext {
   sharedData: Map<string, any>;
   conversationHistory: any[]; // For context compaction
 
+  // 🌿 Branch Registry - Central source of truth for all Git branches
+  branchRegistry: Map<string, BranchInfo>; // key: branch name, value: branch info
+
   constructor(
     task: ITask,
     repositories: any[] = [],
@@ -25,6 +45,7 @@ export class OrchestrationContext {
     this.phaseResults = new Map();
     this.sharedData = new Map();
     this.conversationHistory = []; // Initialize empty conversation history
+    this.branchRegistry = new Map(); // Initialize branch registry
   }
 
   /**
@@ -60,6 +81,72 @@ export class OrchestrationContext {
    */
   allPhasesPassed(): boolean {
     return Array.from(this.phaseResults.values()).every((r) => r.success);
+  }
+
+  /**
+   * Register a branch in the registry
+   */
+  registerBranch(branchInfo: BranchInfo): void {
+    this.branchRegistry.set(branchInfo.name, branchInfo);
+    console.log(`🌿 [Branch Registry] Registered: ${branchInfo.name} (${branchInfo.type}, repo: ${branchInfo.repository})`);
+  }
+
+  /**
+   * Get branch info by name
+   */
+  getBranch(branchName: string): BranchInfo | undefined {
+    return this.branchRegistry.get(branchName);
+  }
+
+  /**
+   * Get epic branch for a repository
+   */
+  getEpicBranch(repository: string): BranchInfo | undefined {
+    const branches = Array.from(this.branchRegistry.values());
+    for (const branch of branches) {
+      if (branch.type === 'epic' && branch.repository === repository) {
+        return branch;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get all story branches for an epic
+   */
+  getStoryBranches(epicId: string, repository?: string): BranchInfo[] {
+    const stories: BranchInfo[] = [];
+    const branches = Array.from(this.branchRegistry.values());
+    for (const branch of branches) {
+      if (branch.type === 'story' && branch.epicId === epicId) {
+        if (!repository || branch.repository === repository) {
+          stories.push(branch);
+        }
+      }
+    }
+    return stories;
+  }
+
+  /**
+   * Mark branch as pushed
+   */
+  markBranchPushed(branchName: string): void {
+    const branch = this.branchRegistry.get(branchName);
+    if (branch) {
+      branch.pushed = true;
+      console.log(`✅ [Branch Registry] Marked ${branchName} as pushed`);
+    }
+  }
+
+  /**
+   * Mark branch as merged
+   */
+  markBranchMerged(branchName: string): void {
+    const branch = this.branchRegistry.get(branchName);
+    if (branch) {
+      branch.merged = true;
+      console.log(`✅ [Branch Registry] Marked ${branchName} as merged`);
+    }
   }
 }
 

@@ -96,10 +96,46 @@ export class TechLeadPhase extends BasePhase {
       const epicBranch = context.getData<string>('epicBranch');
 
       if (multiTeamMode) {
+        // 🔥 CRITICAL: teamEpic MUST have targetRepository - NO FALLBACKS
+        if (!teamEpic.targetRepository) {
+          console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Team Epic has NO targetRepository!`);
+          console.error(`   Epic: ${teamEpic.title}`);
+          console.error(`   Epic ID: ${teamEpic.id}`);
+          console.error(`\n   💀 WE DON'T KNOW WHICH REPOSITORY THIS EPIC BELONGS TO`);
+          console.error(`   💀 CANNOT EXECUTE TECHLEAD - WOULD BE ARBITRARY`);
+          console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
+          throw new Error(`HUMAN_REQUIRED: Team Epic ${teamEpic.id} has no targetRepository`);
+        }
+
+        // 🔥 NORMALIZE: Remove .git suffix if present (defensive coding)
+        const { normalizeRepoName } = require('../../utils/safeGitExecution');
+        const targetRepo = normalizeRepoName(teamEpic.targetRepository);
+        const repoObj = context.repositories.find(r =>
+          r.name === targetRepo || r.githubRepoName === targetRepo || r.full_name === targetRepo
+        );
+
         console.log(`\n🎯 [TechLead] Multi-Team Mode: Working on epic: ${teamEpic.id}`);
         console.log(`   Epic: ${teamEpic.title}`);
         console.log(`   Branch: ${epicBranch}`);
+
+        // 🔥 CRITICAL: Validate repository and type
+        if (!repoObj) {
+          console.error(`   ❌ ERROR: Repository ${targetRepo} NOT FOUND in context`);
+          console.error(`   Available repos: ${context.repositories.map(r => r.name || r.githubRepoName).join(', ')}`);
+          throw new Error(`Repository ${targetRepo} not found in context.repositories`);
+        }
+
+        if (!repoObj.type) {
+          console.error(`   ❌ ERROR: Repository ${targetRepo} has NO TYPE in database`);
+          console.error(`   Please set 'type' field in MongoDB: 'backend', 'frontend', 'mobile', or 'shared'`);
+          throw new Error(`Repository ${targetRepo} missing required 'type' field`);
+        }
+
+        const repoTypeEmoji = repoObj.type === 'backend' ? '🔧' : repoObj.type === 'frontend' ? '🎨' : repoObj.type === 'mobile' ? '📱' : '📦';
+
+        console.log(`   Target Repo: ${repoTypeEmoji} ${targetRepo} (${repoObj.type.toUpperCase()})`);
         console.log(`   Complexity: ${teamEpic.estimatedComplexity}`);
+        console.log(`   🔥 CRITICAL: Tech Lead will ONLY create stories for ${repoObj.type.toUpperCase()} tasks`);
       }
 
       // TODO: Add epicsIdentified to IAgentStep if needed
@@ -144,7 +180,7 @@ ${previousOutput}
       // 🔥 NEW: Get Master Epic context for contract awareness
       const masterEpic = context.getData<any>('masterEpic');
 
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic) : `Act as the tech-lead agent.
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories) : `Act as the tech-lead agent.
 
 # Architecture & Planning
 ${revisionSection}
@@ -395,11 +431,40 @@ ${repoInfo}
         });
       });
 
+      // 🔥 CRITICAL: VALIDATE and INHERIT targetRepository for multi-team mode
+      if (multiTeamMode && teamEpic) {
+        console.log(`\n🔍 [TechLead] Validating targetRepository for multi-team epic...`);
+
+        for (const epic of parsed.epics) {
+          // 🔥 FIX: If agent didn't return targetRepository, inherit from teamEpic
+          if (!epic.targetRepository) {
+            console.warn(`⚠️  [TechLead] Epic ${epic.id} missing targetRepository in agent response`);
+            console.log(`   📋 Inheriting from teamEpic: ${teamEpic.targetRepository}`);
+            epic.targetRepository = teamEpic.targetRepository;
+          }
+
+          // 🔥 CRITICAL: Validate targetRepository is NOT null/undefined
+          if (!epic.targetRepository) {
+            console.error(`❌ [TechLead] Epic ${epic.id} has NO targetRepository!`);
+            console.error(`   TeamEpic targetRepository: ${teamEpic.targetRepository || 'NULL'}`);
+            console.error(`   Available repositories: ${context.repositories.map(r => r.name || r.githubRepoName).join(', ')}`);
+            throw new Error(`Epic ${epic.id} missing targetRepository - cannot proceed without knowing target repository`);
+          }
+
+          console.log(`   ✅ Epic ${epic.id} → ${epic.targetRepository}`);
+        }
+      }
+
       // 🔥 EVENT SOURCING: Emit events instead of storing nested objects
       const { eventStore } = await import('../EventStore');
 
       // Emit epic events
       for (const epic of parsed.epics) {
+        // 🔥 CRITICAL: targetRepository MUST exist at this point (validated above)
+        if (!epic.targetRepository) {
+          throw new Error(`Epic ${epic.id} has no targetRepository - this should have been caught earlier!`);
+        }
+
         await eventStore.append({
           taskId: task._id as any,
           eventType: 'EpicCreated',
@@ -410,11 +475,12 @@ ${repoInfo}
             description: epic.description,
             branchName: epic.branchName,
             stories: epic.stories.map((s: any) => s.id), // Story IDs only
-            targetRepository: epic.targetRepository || undefined,
+            targetRepository: epic.targetRepository, // 🔥 NEVER undefined/null here
           },
         });
 
         // Emit story events for each story in this epic
+        // 🔥 CRITICAL: Stories INHERIT targetRepository from their epic
         for (const story of epic.stories) {
           await eventStore.append({
             taskId: task._id as any,
@@ -433,6 +499,7 @@ ${repoInfo}
               filesToModify: story.filesToModify || [],
               filesToCreate: story.filesToCreate || [],
               dependencies: story.dependencies || [],
+              targetRepository: epic.targetRepository, // 🔥 INHERIT from epic
             },
           });
         }
@@ -653,9 +720,43 @@ ${repoInfo}
    * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
    * 🔥 NEW: Includes Master Epic context for contract awareness
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, workspacePath: string, firstRepo?: string, branchName?: string, masterEpic?: any): string {
-    const targetRepo = epic.targetRepository || epic.affectedRepositories?.[0] || firstRepo || 'repository-name';
-    const repoType = epic.targetRepository ? (epic.targetRepository.includes('frontend') || epic.targetRepository.includes('ws-project') ? 'FRONTEND' : 'BACKEND') : 'UNKNOWN';
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, workspacePath: string, firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[]): string {
+    // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
+    if (!epic.targetRepository) {
+      console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository in buildMultiTeamPrompt!`);
+      console.error(`   Epic: ${epic.title || epic.name}`);
+      console.error(`   Epic ID: ${epic.id}`);
+      console.error(`\n   💀 WE DON'T KNOW WHICH REPOSITORY THIS EPIC BELONGS TO`);
+      console.error(`   💀 CANNOT BUILD PROMPT - WOULD BE ARBITRARY`);
+      console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+      throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in buildMultiTeamPrompt`);
+    }
+
+    const targetRepo = epic.targetRepository;
+
+    // 🔥 FIXED: Get REAL repository type from database instead of string heuristic
+    const repoObj = repositories?.find(r =>
+      r.name === targetRepo ||
+      r.githubRepoName === targetRepo ||
+      r.full_name === targetRepo
+    );
+
+    // 🔥 CRITICAL: Handle null type (repos without type assigned yet)
+    if (!repoObj) {
+      console.error(`❌ [TechLead] Repository ${targetRepo} NOT FOUND in context.repositories`);
+      console.error(`   Available repos: ${repositories?.map(r => r.name || r.githubRepoName).join(', ')}`);
+      throw new Error(`HUMAN_REQUIRED: Repository ${targetRepo} not found in context.repositories`);
+    }
+
+    if (!repoObj.type) {
+      console.error(`❌ [TechLead] Repository ${targetRepo} has NO TYPE assigned in database!`);
+      console.error(`   Please set type in MongoDB: 'backend', 'frontend', 'mobile', or 'shared'`);
+      console.error(`   Tech Lead CANNOT work without knowing repository type - ABORTING`);
+      throw new Error(`HUMAN_REQUIRED: Repository ${targetRepo} missing required 'type' field in database`);
+    }
+
+    const repoType = repoObj?.type ? repoObj.type.toUpperCase() : 'UNKNOWN';
+    const repoTypeEmoji = repoObj?.type === 'backend' ? '🔧' : repoObj?.type === 'frontend' ? '🎨' : repoObj?.type === 'mobile' ? '📱' : '📦';
 
     // Master Epic context if available
     let masterEpicContext = '';
@@ -681,21 +782,48 @@ ${sharedContracts.sharedTypes?.length > 0 ? `Types: ${sharedContracts.sharedType
 `;
     }
 
+    // 🔥 CRITICAL: Repository-specific guidance
+    const repoGuidance = repoObj?.type === 'backend' ? `
+## 🔧 BACKEND Repository - Focus On:
+✅ **APIs & Endpoints**: Express routes, controllers, API handlers
+✅ **Business Logic**: Services, models, database operations
+✅ **Data Processing**: Validation, transformation, calculations
+✅ **Server-Side**: Authentication, authorization, middleware
+✅ **Database**: Schemas, queries, migrations, seeds
+✅ **Tests**: Unit tests (Jest), integration tests, API tests
+
+❌ **DO NOT** assign UI/frontend tasks (React components, CSS, pages, hooks)
+❌ **DO NOT** assign client-side state management (Redux, Context, etc.)
+` : repoObj?.type === 'frontend' ? `
+## 🎨 FRONTEND Repository - Focus On:
+✅ **UI Components**: React components, hooks, pages
+✅ **State Management**: Redux, Context, local state
+✅ **Styling**: CSS, styled-components, Tailwind
+✅ **Client-Side**: Routing, forms, validation, API calls
+✅ **User Experience**: Interactions, animations, responsiveness
+✅ **Tests**: Component tests (Jest + RTL), E2E tests
+
+❌ **DO NOT** assign backend tasks (APIs, database, server logic)
+❌ **DO NOT** assign Express routes or MongoDB schemas
+` : '';
+
     return `TECH LEAD - MULTI-TEAM MODE
 ${masterEpicContext}
 
 ## Epic: ${epic.id} - ${epic.title}
 **Complexity**: ${epic.estimatedComplexity}
-**Target**: ${targetRepo} (${repoType})
+**Target**: ${repoTypeEmoji} ${targetRepo} (${repoType})
 **Branch**: ${branchName || `epic/${epic.id}`}
 
 ## Workspace: ${workspacePath}/${targetRepo}
 ${repoInfo}
+${repoGuidance}
 
-## INSTRUCTIONS:
+## 🎯 INSTRUCTIONS:
 1. EXPLORE codebase (max 2 min): cd ${workspacePath}/${targetRepo} && find src
-2. BREAK INTO 2-5 STORIES (each 1-3 hours work)
-3. ASSIGN DEVELOPERS (1 dev per story)
+2. **CRITICAL**: Only create stories appropriate for ${repoType} repository
+3. BREAK INTO 2-5 STORIES (each 1-3 hours work)
+4. ASSIGN DEVELOPERS (1 dev per story)
 
 ## JSON OUTPUT ONLY:
 \`\`\`json

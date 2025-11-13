@@ -30,7 +30,7 @@ export class ApprovalPhase extends BasePhase {
   readonly name = 'Approval';
   readonly description = 'Waiting for human approval before proceeding';
 
-  private readonly MAX_WAIT_TIME_MS = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly MAX_WAIT_TIME_MS = 1 * 60 * 60 * 1000; // 1 hour (reduced from 24 hours for better CI/CD compatibility)
 
   constructor() {
     super();

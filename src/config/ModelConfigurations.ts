@@ -175,6 +175,28 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
 }
 
 /**
+ * Convert DB camelCase keys to AgentModelConfig kebab-case keys
+ * DB uses: { problemAnalyst, productManager, projectManager, techLead, developer, ... }
+ * AgentModelConfig uses: { 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', ... }
+ */
+export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
+  return {
+    'problem-analyst': dbConfig.problemAnalyst || dbConfig['problem-analyst'] || 'claude-sonnet-4-5-20250929',
+    'product-manager': dbConfig.productManager || dbConfig['product-manager'] || 'claude-sonnet-4-5-20250929',
+    'project-manager': dbConfig.projectManager || dbConfig['project-manager'] || 'claude-sonnet-4-5-20250929',
+    'tech-lead': dbConfig.techLead || dbConfig['tech-lead'] || 'claude-sonnet-4-5-20250929',
+    'developer': dbConfig.developer || 'claude-haiku-4-5-20251001',
+    'judge': dbConfig.judge || 'claude-sonnet-4-5-20250929',
+    'qa-engineer': dbConfig.qaEngineer || dbConfig['qa-engineer'] || 'claude-sonnet-4-5-20250929',
+    'fixer': dbConfig.fixer || 'claude-sonnet-4-5-20250929',
+    'merge-coordinator': dbConfig.mergeCoordinator || dbConfig['merge-coordinator'] || 'claude-haiku-4-5-20251001',
+    'auto-merge': dbConfig.autoMerge || dbConfig['auto-merge'] || 'claude-haiku-4-5-20251001',
+    'e2e-tester': dbConfig.e2eTester || dbConfig['e2e-tester'] || 'claude-haiku-4-5-20251001',
+    'e2e-fixer': dbConfig.e2eFixer || dbConfig['e2e-fixer'] || 'claude-sonnet-4-5-20250929',
+  };
+}
+
+/**
  * Get model for a specific agent type
  */
 export function getAgentModel(
