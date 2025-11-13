@@ -11,6 +11,7 @@ import path from 'path';
 import { env } from './config/env';
 import { connectDatabase } from './config/database';
 import { WorkspaceCleanupScheduler } from './services/WorkspaceCleanupScheduler';
+import { setupConsoleInterceptor } from './utils/consoleInterceptor';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -295,6 +296,7 @@ class AgentPlatformApp {
               console.log(`📜 Re-emitting ${task.logs.length} historical logs to socket ${socket.id}`);
               task.logs.forEach((log: any) => {
                 socket.emit('console:log', {
+                  taskId: taskId, // CRITICAL: Include taskId for frontend filtering
                   level: log.level,
                   message: log.message,
                   timestamp: log.timestamp,
@@ -387,6 +389,7 @@ class AgentPlatformApp {
       recoveryService.recoverAllInterruptedOrchestrations().catch((error) => {
         console.error('❌ Orchestration recovery failed:', error);
       });
+      console.log('✅ Auto-recovery of interrupted orchestrations is ENABLED');
 
       // Inicializar middleware
       this.initializeMiddleware();
@@ -399,6 +402,9 @@ class AgentPlatformApp {
 
       // Inicializar WebSocket
       this.initializeWebSocket();
+
+      // Setup console interceptor for WebSocket log emission
+      setupConsoleInterceptor();
 
       // Iniciar servidor HTTP
       this.httpServer.listen(this.port, () => {

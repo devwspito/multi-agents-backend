@@ -20,11 +20,11 @@ import { LogService } from '../logging/LogService';
  * - Fases pendientes: Ejecutar normalmente
  */
 export class OrchestrationRecoveryService {
-  private orchestrator: OrchestrationCoordinator;
   private isRecoveryInProgress: boolean = false;
+  private recoveredTasks: Set<string> = new Set(); // Track recovered tasks to avoid duplicates
 
   constructor() {
-    this.orchestrator = new OrchestrationCoordinator();
+    // Don't create a shared orchestrator - create one per task
   }
 
   /**
@@ -59,14 +59,32 @@ export class OrchestrationRecoveryService {
         console.log(`  - Task ${task._id}: ${task.title} (Phase: ${task.orchestration.currentPhase})`);
       });
 
-      // Recuperar cada task (secuencialmente para evitar sobrecarga)
-      for (const taskRaw of interruptedTasksRaw) {
+      // 🔥 CRITICAL: Recover tasks with controlled concurrency
+      // This ensures each task gets its own orchestrator instance
+      // But we add a small delay between each to avoid overwhelming the system
+      const recoveryPromises = interruptedTasksRaw.map(async (taskRaw, index) => {
+        const taskId = taskRaw._id.toString();
+
+        // Add a small delay between task recoveries to prevent overwhelming
+        if (index > 0) {
+          const delay = index * 2000; // 2 seconds between each task
+          console.log(`⏱️  [Recovery] Waiting ${delay}ms before recovering task ${index + 1}/${interruptedTasksRaw.length}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+
+        // Prevent duplicate recovery
+        if (this.recoveredTasks.has(taskId)) {
+          console.log(`⏭️  [Recovery] Task ${taskId} already being recovered, skipping`);
+          return;
+        }
+        this.recoveredTasks.add(taskId);
+
         try {
           // Convertir a documento de Mongoose solo para recoverTask
           const task = await Task.findById(taskRaw._id);
           if (!task) {
-            console.log(`⚠️  [Recovery] Task ${taskRaw._id} not found, skipping`);
-            continue;
+            console.log(`⚠️  [Recovery] Task ${taskId} not found, skipping`);
+            return;
           }
 
           await this.recoverTask(task);
@@ -92,11 +110,17 @@ export class OrchestrationRecoveryService {
             error,
           });
 
-          NotificationService.emitTaskFailed(taskRaw._id.toString(), {
+          NotificationService.emitTaskFailed(taskId, {
             error: `Recovery failed: ${error.message}`,
           });
+        } finally {
+          // Clean up from recovered set after processing
+          this.recoveredTasks.delete(taskId);
         }
-      }
+      });
+
+      // Wait for all recoveries to complete
+      await Promise.allSettled(recoveryPromises);
 
       console.log('✅ [Recovery] All interrupted orchestrations processed');
     } catch (error: any) {
@@ -139,8 +163,12 @@ export class OrchestrationRecoveryService {
 
       console.log(`✅ [Recovery] Starting orchestration for task ${taskId}`);
 
+      // 🔥 CRITICAL: Create a NEW orchestrator instance for each task
+      // This prevents conflicts when multiple tasks are recovered
+      const taskOrchestrator = new OrchestrationCoordinator();
+
       // Reanudar orquestación (el coordinador detectará qué fases ya completaron)
-      await this.orchestrator.orchestrateTask(taskId);
+      await taskOrchestrator.orchestrateTask(taskId);
 
       console.log(`✅ [Recovery] Task ${taskId} recovered successfully`);
     } catch (error: any) {

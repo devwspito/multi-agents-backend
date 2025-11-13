@@ -85,9 +85,9 @@ const repositorySchema = new Schema<IRepository>(
     },
     type: {
       type: String,
-      enum: ['backend', 'frontend', 'mobile', 'shared'],
+      enum: ['backend', 'frontend'],
       required: true,
-      default: 'backend',
+      // 🔥 NO DEFAULT: Force explicit type assignment - prevents silent failures
     },
     pathPatterns: {
       type: [String],

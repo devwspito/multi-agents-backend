@@ -61,6 +61,7 @@ export interface TaskState {
     filesToModify?: string[];
     filesToCreate?: string[];
     dependencies?: string[];
+    targetRepository?: string; // 🔥 CRITICAL: Inherited from epic
     completedBy?: string;
     completedAt?: Date;
     error?: string;
@@ -262,6 +263,18 @@ export class EventStore {
           break;
 
         case 'EpicCreated':
+          // 🔥 CRITICAL VALIDATION: targetRepository MUST exist
+          if (!payload.targetRepository) {
+            console.error(`\n❌❌❌ [EventStore] CRITICAL ERROR: EpicCreated event missing targetRepository!`);
+            console.error(`   Epic ID: ${payload.id}`);
+            console.error(`   Epic Name: ${payload.name}`);
+            console.error(`   Branch: ${payload.branchName}`);
+            console.error(`   Event payload:`, JSON.stringify(payload, null, 2));
+            console.error(`   🔥 THIS IS A DATA INTEGRITY VIOLATION`);
+            console.error(`   🔥 ALL EPICS MUST HAVE targetRepository ASSIGNED BY TECHLEAD/PROJECTMANAGER`);
+            throw new Error(`CRITICAL: EpicCreated event for ${payload.id} has no targetRepository - stopping server to prevent catastrophic failure`);
+          }
+
           state.epics.push({
             id: payload.id,
             name: payload.name,
@@ -276,6 +289,18 @@ export class EventStore {
           break;
 
         case 'StoryCreated':
+          // 🔥 CRITICAL VALIDATION: targetRepository MUST exist
+          if (!payload.targetRepository) {
+            console.error(`\n❌❌❌ [EventStore] CRITICAL ERROR: StoryCreated event missing targetRepository!`);
+            console.error(`   Story ID: ${payload.id}`);
+            console.error(`   Epic ID: ${payload.epicId}`);
+            console.error(`   Title: ${payload.title}`);
+            console.error(`   Event payload:`, JSON.stringify(payload, null, 2));
+            console.error(`   🔥 THIS IS A DATA INTEGRITY VIOLATION`);
+            console.error(`   🔥 ALL STORIES MUST HAVE targetRepository ASSIGNED BY TECHLEAD`);
+            throw new Error(`CRITICAL: StoryCreated event for ${payload.id} has no targetRepository - stopping server to prevent catastrophic failure`);
+          }
+
           state.stories.push({
             id: payload.id,
             epicId: payload.epicId,
@@ -290,6 +315,7 @@ export class EventStore {
             filesToModify: payload.filesToModify || [],
             filesToCreate: payload.filesToCreate || [],
             dependencies: payload.dependencies || [],
+            targetRepository: payload.targetRepository, // 🔥 CRITICAL: Inherit from epic
           });
           break;
 

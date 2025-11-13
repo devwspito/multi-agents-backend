@@ -151,6 +151,7 @@ export class JudgePhase extends BasePhase {
     let totalApproved = 0;
     let totalFailed = 0;
     let lastFeedback: string | undefined;
+    let lastIteration: number | undefined;
 
     for (const story of stories) {
       console.log(`\n📋 [Judge] Evaluating story: ${story.title}`);
@@ -169,6 +170,7 @@ export class JudgePhase extends BasePhase {
       } else {
         totalFailed++;
         lastFeedback = result.feedback; // Store feedback for single-story mode
+        lastIteration = result.iteration; // Store iteration number
         console.error(`❌ [Judge] Story "${story.title}" FAILED after ${this.MAX_RETRIES} attempts`);
       }
     }
@@ -195,6 +197,8 @@ export class JudgePhase extends BasePhase {
           approved: totalApproved,
           failed: totalFailed,
           feedback: lastFeedback, // Include feedback for rejected stories
+          iteration: lastIteration, // Include iteration number
+          maxRetries: this.MAX_RETRIES, // Include max retries
         },
       };
     }
@@ -270,7 +274,7 @@ export class JudgePhase extends BasePhase {
     workspacePath: string | null,
     context: OrchestrationContext,
     multiTeamMode: boolean
-  ): Promise<{ status: 'approved' | 'failed'; feedback?: string }> {
+  ): Promise<{ status: 'approved' | 'failed'; feedback?: string; iteration?: number }> {
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       console.log(`🔍 [Judge] Story "${story.title}" - Evaluation attempt ${attempt}/${this.MAX_RETRIES}`);
@@ -344,7 +348,7 @@ export class JudgePhase extends BasePhase {
           `✅ Story **"${story.title}"** approved by Judge`
         );
 
-        return { status: 'approved' };
+        return { status: 'approved', iteration: attempt };
       } else {
         // ❌ CODE NEEDS CHANGES
         story.judgeStatus = 'changes_requested';
@@ -385,12 +389,13 @@ export class JudgePhase extends BasePhase {
           return {
             status: 'failed',
             feedback: `Failed after ${this.MAX_RETRIES} attempts. Last feedback: ${evaluation.feedback}`,
+            iteration: attempt,
           };
         }
       }
     }
 
-    return { status: 'failed', feedback: 'Max retries exceeded' };
+    return { status: 'failed', feedback: 'Max retries exceeded', iteration: this.MAX_RETRIES };
   }
 
   /**
@@ -430,6 +435,15 @@ export class JudgePhase extends BasePhase {
       console.warn(`⚠️  [Judge] No commit SHA provided - will review current HEAD`);
     }
 
+    // 🔥 CRITICAL: Get LITERAL branch name from Developer (belt-and-suspenders with story.branchName)
+    const storyBranchName = context.getData<string>('storyBranchName') || story.branchName;
+    if (storyBranchName) {
+      console.log(`🔀 [Judge] Will review EXACT branch: ${storyBranchName}`);
+      console.log(`   This is the LITERAL branch Developer worked on`);
+    } else {
+      console.error(`❌ [Judge] No branch name provided - cannot verify correct branch!`);
+    }
+
     // Get target repository from context or story's epic
     let targetRepository = context.getData<string>('targetRepository');
     if (!targetRepository && (story as any).epicId) {
@@ -437,16 +451,43 @@ export class JudgePhase extends BasePhase {
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
       const epic = state.epics?.find((e: any) => e.id === (story as any).epicId);
-      targetRepository = epic?.targetRepository || (epic as any)?.affectedRepositories?.[0];
+
+      // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
+      if (!epic) {
+        console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: Cannot find epic for story!`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Story ID: ${story.id}`);
+        console.error(`   Epic ID: ${(story as any).epicId}`);
+        console.error(`\n   💀 CANNOT DETERMINE TARGET REPOSITORY`);
+        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        throw new Error(`HUMAN_REQUIRED: Cannot find epic ${(story as any).epicId} for story ${story.id}`);
+      }
+
+      if (!epic.targetRepository) {
+        console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: Epic has NO targetRepository!`);
+        console.error(`   Epic: ${epic.title || epic.name}`);
+        console.error(`   Epic ID: ${epic.id}`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`\n   💀 CANNOT DETERMINE WHERE TO REVIEW CODE`);
+        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in Judge phase`);
+      }
+
+      targetRepository = epic.targetRepository;
     }
+
     if (!targetRepository) {
-      // Fallback to first repository
-      targetRepository = context.repositories[0]?.name || context.repositories[0]?.githubRepoName;
+      console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: No targetRepository found!`);
+      console.error(`   Story: ${story.title}`);
+      console.error(`   Story ID: ${story.id}`);
+      console.error(`\n   💀 CANNOT DETERMINE WHERE TO REVIEW CODE`);
+      console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+      throw new Error(`HUMAN_REQUIRED: No targetRepository for story ${story.id} in Judge phase`);
     }
 
-    console.log(`📂 [Judge] Target repository: ${targetRepository || 'not specified'}`);
+    console.log(`📂 [Judge] Target repository: ${targetRepository}`);
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository);
+    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName);
 
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
     // This ensures ALL agents receive the same multimedia context
@@ -559,13 +600,15 @@ export class JudgePhase extends BasePhase {
     developer: any,
     workspacePath: string | null,
     commitSHA?: string,
-    targetRepository?: string
+    targetRepository?: string,
+    storyBranchName?: string
   ): string {
     return `# Judge - Code Review
 
 ## Story: ${story.title}
 Developer: ${developer.instanceId}
 ${targetRepository ? `Repository: ${targetRepository}` : ''}
+${storyBranchName ? `Branch: ${storyBranchName}` : ''}
 ${commitSHA ? `Commit: ${commitSHA}` : ''}
 
 Files to check:
@@ -608,29 +651,102 @@ Files to check:
   }
 
   /**
-   * Parse Judge agent output
+   * Parse Judge agent output - ROBUST multi-strategy JSON extraction
    */
   private parseJudgeOutput(output: string): { status: string; feedback: string } {
+    console.log(`🔍 [Judge] Parsing output (length: ${output.length} chars)...`);
+
+    // STRATEGY 1: Clean JSON (no markdown) - MOST COMMON after prompt fix
     try {
-      // Try to extract JSON from output
-      const jsonMatch = output.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          status: parsed.status,
-          feedback: parsed.feedback || 'No feedback provided',
-        };
+      const trimmed = output.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        const parsed = JSON.parse(trimmed);
+        if (parsed.approved !== undefined && parsed.verdict) {
+          console.log(`✅ [Judge] Strategy 1 SUCCESS: Clean JSON found`);
+          return {
+            status: parsed.approved ? 'approved' : 'changes_requested',
+            feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
+          };
+        }
       }
-    } catch (error) {
-      console.warn(`⚠️  Failed to parse Judge output as JSON, using fallback`);
+    } catch (e) {
+      console.log(`⚠️  [Judge] Strategy 1 failed: ${e}`);
     }
 
-    // Fallback: analyze output text
-    const approved = output.toLowerCase().includes('approved') && !output.toLowerCase().includes('changes_requested');
+    // STRATEGY 2: Extract LAST valid JSON object (handles markdown before JSON)
+    try {
+      // Match all potential JSON objects
+      const jsonMatches = output.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
+      if (jsonMatches && jsonMatches.length > 0) {
+        // Try from LAST match backwards (most recent JSON is usually the verdict)
+        for (let i = jsonMatches.length - 1; i >= 0; i--) {
+          try {
+            const parsed = JSON.parse(jsonMatches[i]);
+            if (parsed.approved !== undefined && parsed.verdict) {
+              console.log(`✅ [Judge] Strategy 2 SUCCESS: Found JSON at position ${i + 1}/${jsonMatches.length}`);
+              return {
+                status: parsed.approved ? 'approved' : 'changes_requested',
+                feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
+              };
+            }
+          } catch (e) {
+            continue; // Try next match
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`⚠️  [Judge] Strategy 2 failed: ${e}`);
+    }
+
+    // STRATEGY 3: Extract from code blocks (```json ... ```)
+    try {
+      const codeBlockMatch = output.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlockMatch && codeBlockMatch[1]) {
+        const parsed = JSON.parse(codeBlockMatch[1]);
+        if (parsed.approved !== undefined) {
+          console.log(`✅ [Judge] Strategy 3 SUCCESS: JSON in code block`);
+          return {
+            status: parsed.approved ? 'approved' : 'changes_requested',
+            feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
+          };
+        }
+      }
+    } catch (e) {
+      console.log(`⚠️  [Judge] Strategy 3 failed: ${e}`);
+    }
+
+    // STRATEGY 4: Look for JSON-like strings with "approved" field
+    try {
+      const approvedMatch = output.match(/"approved"\s*:\s*(true|false)/);
+      const verdictMatch = output.match(/"verdict"\s*:\s*"([^"]+)"/);
+      const feedbackMatch = output.match(/"feedback"\s*:\s*"([^"]+)"/);
+      const reasoningMatch = output.match(/"reasoning"\s*:\s*"([^"]+)"/);
+
+      if (approvedMatch) {
+        const approved = approvedMatch[1] === 'true';
+        const feedback = feedbackMatch?.[1] || reasoningMatch?.[1] || 'See review output';
+        console.log(`✅ [Judge] Strategy 4 SUCCESS: Extracted fields from text`);
+        return {
+          status: approved ? 'approved' : 'changes_requested',
+          feedback: feedback,
+        };
+      }
+    } catch (e) {
+      console.log(`⚠️  [Judge] Strategy 4 failed: ${e}`);
+    }
+
+    // FALLBACK: Text analysis
+    console.warn(`⚠️  [Judge] ALL parsing strategies failed, using text analysis fallback`);
+    const hasApprovedTrue = output.includes('"approved": true') || output.includes('"approved":true');
+    const hasApprovedFalse = output.includes('"approved": false') || output.includes('"approved":false');
+    const hasVerdictApproved = output.includes('"verdict": "APPROVED"') || output.includes('"verdict":"APPROVED"');
+    const hasChangesRequested = output.toLowerCase().includes('changes_requested');
+
+    const approved = (hasApprovedTrue || hasVerdictApproved) && !hasApprovedFalse && !hasChangesRequested;
 
     return {
       status: approved ? 'approved' : 'changes_requested',
-      feedback: output,
+      feedback: output, // Return full output as feedback
     };
   }
 
@@ -656,10 +772,47 @@ Files to check:
       return;
     }
 
+    // 🔥 CRITICAL: Format feedback for Developer to understand clearly
+    let formattedFeedback = judgeFeedback;
+    try {
+      // Try to parse as JSON first
+      const feedbackJson = JSON.parse(judgeFeedback);
+      if (feedbackJson.feedback || feedbackJson.reasoning) {
+        formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
+
+${feedbackJson.feedback || feedbackJson.reasoning}
+
+⚠️ CRITICAL INSTRUCTIONS:
+1. Read the feedback above carefully
+2. Make ALL required changes
+3. Test your changes
+4. Commit with descriptive message
+5. Report commit SHA with marker: 📍 Commit SHA: <your-sha-here>
+
+❌ DO NOT mark as complete until ALL feedback items are addressed.`;
+        console.log(`✅ [Judge] Formatted JSON feedback for Developer`);
+      }
+    } catch (e) {
+      // Not JSON - format as structured text
+      formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
+
+${judgeFeedback}
+
+⚠️ CRITICAL INSTRUCTIONS:
+1. Read the feedback above carefully
+2. Make ALL required changes
+3. Test your changes
+4. Commit with descriptive message
+5. Report commit SHA with marker: 📍 Commit SHA: <your-sha-here>
+
+❌ DO NOT mark as complete until ALL feedback items are addressed.`;
+      console.log(`✅ [Judge] Formatted text feedback for Developer`);
+    }
+
     NotificationService.emitAgentMessage(
       taskId,
       'Judge',
-      `🔄 Requesting ${developer.instanceId} to retry with feedback:\n\n${judgeFeedback}`
+      `🔄 Requesting ${developer.instanceId} to retry with feedback:\n\n${formattedFeedback}`
     );
 
     // Execute developer again with Judge feedback
@@ -676,6 +829,7 @@ Files to check:
     console.log(`📂 [Judge] Passing epic branch to developer for retry: ${epicBranchName || 'not specified'}`);
 
     try {
+      console.log(`🚀 [Judge] Executing developer retry with topModel upgrade`);
       await executeDeveloperFn(
         task,
         developer,
@@ -685,11 +839,159 @@ Files to check:
         attachments,
         state.stories,
         state.epics,
-        judgeFeedback, // Pass Judge feedback for retry
-        epicBranchName // Epic branch name from TeamOrchestrationPhase
+        formattedFeedback, // Pass FORMATTED Judge feedback for retry (structured and clear)
+        epicBranchName, // Epic branch name from TeamOrchestrationPhase
+        true // 🚀 forceTopModel: Use best model for retry (Judge rejected the code)
       );
 
       console.log(`✅ [Judge] Developer ${developer.instanceId} completed retry for story "${story.title}"`);
+
+      // 🔥 CRITICAL: Get updated story from EventStore after developer retry
+      // Developer may have updated branchName or other fields
+      // Use exponential backoff retry in case EventStore has lag
+      let updatedStory: any = null;
+      const maxRetries = 3;
+      const baseDelay = 500; // 500ms
+
+      for (let retryAttempt = 0; retryAttempt < maxRetries; retryAttempt++) {
+        try {
+          const updatedState = await eventStore.getCurrentState(task._id as any);
+          updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+          if (updatedStory && updatedStory.branchName) {
+            console.log(`✅ [POST-RETRY SYNC] Retrieved story from EventStore (attempt ${retryAttempt + 1}/${maxRetries})`);
+            break;
+          } else {
+            console.warn(`⚠️  [POST-RETRY SYNC] Story ${story.id} not found or incomplete in EventStore (attempt ${retryAttempt + 1}/${maxRetries})`);
+            if (retryAttempt < maxRetries - 1) {
+              const delay = baseDelay * Math.pow(2, retryAttempt); // Exponential backoff
+              console.log(`⏳ [POST-RETRY SYNC] Waiting ${delay}ms before retry...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+        } catch (eventStoreError: any) {
+          console.error(`❌ [POST-RETRY SYNC] EventStore error (attempt ${retryAttempt + 1}/${maxRetries}): ${eventStoreError.message}`);
+          if (retryAttempt < maxRetries - 1) {
+            const delay = baseDelay * Math.pow(2, retryAttempt);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      if (!updatedStory) {
+        console.error(`❌ [POST-RETRY SYNC] Could not find story ${story.id} in EventStore after ${maxRetries} attempts`);
+        console.error(`   This is a critical error - cannot continue retry loop without updated story`);
+        return;
+      }
+
+      // 🔥 CRITICAL: Update story reference for next evaluation
+      Object.assign(story, updatedStory);
+      console.log(`✅ [POST-RETRY SYNC] Updated story from EventStore:`);
+      console.log(`   Branch: ${story.branchName}`);
+      console.log(`   Status: ${story.status}`);
+
+      // 🔥 CRITICAL: Sync workspace after developer retry BEFORE next Judge review
+      // Developer pushed new commits, Judge needs to see them
+      if (workspacePath && repositories.length > 0 && story.branchName) {
+        try {
+          console.log(`\n🔄 [POST-RETRY SYNC] Syncing workspace with developer's latest commits...`);
+
+          // 🔥 CRITICAL: Use story.targetRepository, NOT repositories[0]
+          if (!story.targetRepository) {
+            console.error(`\n❌❌❌ [POST-RETRY SYNC] Story has NO targetRepository!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   Story ID: ${story.id}`);
+            console.error(`\n   💀 CANNOT SYNC WORKSPACE - DON'T KNOW WHICH REPOSITORY`);
+            console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+            throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no targetRepository in POST-RETRY SYNC`);
+          }
+
+          const targetRepo = repositories.find(r =>
+            r.name === story.targetRepository ||
+            r.full_name === story.targetRepository ||
+            r.githubRepoName === story.targetRepository
+          );
+
+          if (!targetRepo) {
+            console.error(`\n❌❌❌ [POST-RETRY SYNC] Repository ${story.targetRepository} NOT FOUND!`);
+            console.error(`   Available repos: ${repositories.map(r => r.name).join(', ')}`);
+            throw new Error(`HUMAN_REQUIRED: Repository ${story.targetRepository} not found in context`);
+          }
+
+          const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+
+          // Fetch and pull latest commits
+          const { safeGitExecSync } = await import('../../utils/safeGitExecution');
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+
+          // 🔥 FIX: Stash any unstaged changes before checkout
+          // Developer might have left uncommitted changes
+          try {
+            const statusOutput = safeGitExecSync(`git status --porcelain`, { cwd: repoPath, encoding: 'utf8' });
+            if (statusOutput.trim().length > 0) {
+              console.log(`⚠️  [POST-RETRY SYNC] Detected unstaged changes, attempting to stash...`);
+
+              try {
+                // First try: Normal stash
+                safeGitExecSync(`git stash push -u -m "Judge auto-stash before retry sync"`, {
+                  cwd: repoPath,
+                  encoding: 'utf8'
+                });
+                console.log(`✅ [POST-RETRY SYNC] Successfully stashed unstaged changes`);
+              } catch (stashError: any) {
+                console.warn(`⚠️  [POST-RETRY SYNC] Stash failed: ${stashError.message}`);
+                console.log(`🔧 [POST-RETRY SYNC] Attempting hard reset to clean workspace...`);
+
+                try {
+                  // Fallback: Hard reset to HEAD (DANGEROUS but necessary to continue)
+                  safeGitExecSync(`git reset --hard HEAD`, {
+                    cwd: repoPath,
+                    encoding: 'utf8'
+                  });
+                  // Also clean untracked files
+                  safeGitExecSync(`git clean -fd`, {
+                    cwd: repoPath,
+                    encoding: 'utf8'
+                  });
+                  console.log(`✅ [POST-RETRY SYNC] Hard reset successful - workspace is clean`);
+                  console.warn(`⚠️  [POST-RETRY SYNC] WARNING: Uncommitted changes were DISCARDED`);
+                } catch (resetError: any) {
+                  console.error(`❌ [POST-RETRY SYNC] Hard reset failed: ${resetError.message}`);
+                  console.error(`   Cannot clean workspace - git operations may fail`);
+                  // Continue anyway - let subsequent git commands fail if needed
+                }
+              }
+            }
+          } catch (statusError: any) {
+            console.warn(`⚠️  [POST-RETRY SYNC] Could not check git status: ${statusError.message}`);
+            // Continue anyway
+          }
+
+          safeGitExecSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          safeGitExecSync(`git pull origin ${story.branchName}`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: 30000
+          });
+          console.log(`✅ [POST-RETRY SYNC] Workspace updated with developer's retry commits`);
+
+          // 🔥 CRITICAL: Update commitSHA in context for next Judge evaluation
+          // Developer created a NEW commit during retry - Judge must evaluate the NEW code
+          const newCommitSHA = safeGitExecSync('git rev-parse HEAD', {
+            cwd: repoPath,
+            encoding: 'utf8'
+          }).trim();
+
+          const oldCommitSHA = context.getData<string>('commitSHA');
+          context.setData('commitSHA', newCommitSHA);
+
+          console.log(`📍 [POST-RETRY SYNC] Updated commitSHA for next evaluation:`);
+          console.log(`   Previous: ${oldCommitSHA || 'none'}`);
+          console.log(`   Current:  ${newCommitSHA}`);
+        } catch (syncError: any) {
+          console.error(`❌ [POST-RETRY SYNC] Failed to sync: ${syncError.message}`);
+        }
+      }
     } catch (error: any) {
       console.error(`❌ [Judge] Developer retry failed: ${error.message}`);
     }

@@ -1,11 +1,10 @@
 /**
  * Safe Git Execution Utilities
  *
- * Provides timeout-protected wrappers for Git operations to prevent hanging
- * on network issues, credential prompts, or other blocking operations.
+ * Provides OPTIONAL timeout protection for Git operations.
+ * Timeouts are OPT-IN via environment variable to avoid breaking working operations.
  *
- * CRITICAL: All git operations that interact with remotes MUST use these wrappers
- * to prevent the entire application from hanging.
+ * Set GIT_ENABLE_TIMEOUTS=true to enable timeouts (use only if you have hanging issues)
  */
 
 import { exec, execSync as nodeExecSync } from 'child_process';
@@ -13,14 +12,29 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-// Default timeouts for different git operations
+/**
+ * Normalize repository name by removing .git suffix
+ * Ensures consistent naming across cloning, path resolution, and git operations
+ *
+ * @example
+ * normalizeRepoName("v2_backend.git") // "v2_backend"
+ * normalizeRepoName("v2_backend") // "v2_backend"
+ */
+export function normalizeRepoName(name: string): string {
+  return name.replace(/\.git$/, '');
+}
+
+// Timeouts are OPT-IN - only used if GIT_ENABLE_TIMEOUTS=true
+const TIMEOUTS_ENABLED = process.env.GIT_ENABLE_TIMEOUTS === 'true';
+
+// Generous timeouts for large repositories and slow connections
 const GIT_TIMEOUTS = {
-  FETCH: 15000,    // 15 seconds for fetch
-  PUSH: 30000,     // 30 seconds for push
-  PULL: 30000,     // 30 seconds for pull
-  CLONE: 60000,    // 60 seconds for clone
-  LS_REMOTE: 10000, // 10 seconds for ls-remote
-  DEFAULT: 20000,   // 20 seconds default
+  FETCH: 120000,    // 2 minutes for fetch
+  PUSH: 180000,     // 3 minutes for push
+  PULL: 180000,     // 3 minutes for pull
+  CLONE: 300000,    // 5 minutes for clone
+  LS_REMOTE: 30000, // 30 seconds for ls-remote
+  DEFAULT: 120000,  // 2 minutes default
 };
 
 /**
@@ -39,7 +53,18 @@ export async function safeGitExec(
     env?: NodeJS.ProcessEnv;
   } = {}
 ): Promise<{ stdout: string; stderr: string }> {
-  // Determine timeout based on command type
+  // Only use timeout if explicitly enabled or explicitly provided
+  const useTimeout = TIMEOUTS_ENABLED || options.timeout !== undefined;
+
+  if (!useTimeout) {
+    // No timeout - let git operation complete naturally
+    return await execAsync(command, {
+      cwd: options.cwd,
+      env: options.env || process.env,
+    });
+  }
+
+  // Determine timeout based on command type (only when enabled)
   let timeout = options.timeout || GIT_TIMEOUTS.DEFAULT;
 
   if (command.includes('push')) timeout = options.timeout || GIT_TIMEOUTS.PUSH;
@@ -48,39 +73,22 @@ export async function safeGitExec(
   else if (command.includes('clone')) timeout = options.timeout || GIT_TIMEOUTS.CLONE;
   else if (command.includes('ls-remote')) timeout = options.timeout || GIT_TIMEOUTS.LS_REMOTE;
 
-  // Wrap command with timeout utility (works on Unix systems)
   const timeoutSeconds = Math.ceil(timeout / 1000);
-  const safeCommand = `timeout ${timeoutSeconds} ${command}`;
-
   console.log(`⏱️  [Git] Executing with ${timeoutSeconds}s timeout: ${command.substring(0, 50)}...`);
 
   try {
-    const result = await Promise.race([
-      execAsync(safeCommand, {
-        cwd: options.cwd,
-        env: options.env || process.env,
-        timeout: timeout + 1000, // Node timeout slightly higher than shell timeout
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Git command timed out after ${timeoutSeconds}s: ${command}`)), timeout)
-      ),
-    ]);
+    const result = await execAsync(command, {
+      cwd: options.cwd,
+      env: options.env || process.env,
+      timeout: timeout,
+    });
 
     return result;
   } catch (error: any) {
-    // Check if it's a timeout error
-    if (error.message.includes('timed out') || error.code === 124) {
+    if (error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM' || error.killed) {
       console.error(`❌ [Git] Command timed out after ${timeoutSeconds}s: ${command.substring(0, 50)}...`);
-      throw new Error(`Git operation timed out after ${timeoutSeconds} seconds. This usually means:
-- Network connectivity issues
-- Git is waiting for credentials (check your auth setup)
-- Remote repository is not responding
-- The operation is taking longer than expected
-
-Command: ${command}`);
+      throw new Error(`Git operation timed out after ${timeoutSeconds} seconds`);
     }
-
-    // Re-throw other errors
     throw error;
   }
 }
@@ -101,7 +109,30 @@ export function safeGitExecSync(
     encoding?: BufferEncoding;
   } = {}
 ): string {
-  // Determine timeout based on command type
+  // Only use timeout if explicitly enabled or explicitly provided
+  const useTimeout = TIMEOUTS_ENABLED || options.timeout !== undefined;
+
+  if (!useTimeout) {
+    // No timeout - let git operation complete naturally
+    try {
+      return nodeExecSync(command, {
+        cwd: options.cwd,
+        encoding: options.encoding || 'utf8',
+      }) as string;
+    } catch (error: any) {
+      // Enhance error message with context
+      if (error.code === 'ENOENT' || error.message?.includes('ENOENT')) {
+        throw new Error(
+          `Failed to execute git command (directory not found or invalid): ${command}\n` +
+          `  Working directory: ${options.cwd || process.cwd()}\n` +
+          `  Error: ${error.message}`
+        );
+      }
+      throw error;
+    }
+  }
+
+  // Determine timeout based on command type (only when enabled)
   let timeout = options.timeout || GIT_TIMEOUTS.DEFAULT;
 
   if (command.includes('push')) timeout = options.timeout || GIT_TIMEOUTS.PUSH;
@@ -110,33 +141,22 @@ export function safeGitExecSync(
   else if (command.includes('clone')) timeout = options.timeout || GIT_TIMEOUTS.CLONE;
   else if (command.includes('ls-remote')) timeout = options.timeout || GIT_TIMEOUTS.LS_REMOTE;
 
-  // Wrap command with timeout utility
   const timeoutSeconds = Math.ceil(timeout / 1000);
-  const safeCommand = `timeout ${timeoutSeconds} ${command} 2>&1 || echo "GIT_TIMEOUT_ERROR:$?"`;
-
   console.log(`⏱️  [Git] Executing sync with ${timeoutSeconds}s timeout: ${command.substring(0, 50)}...`);
 
   try {
-    const result = nodeExecSync(safeCommand, {
+    const result = nodeExecSync(command, {
       cwd: options.cwd,
       encoding: options.encoding || 'utf8',
-      timeout: timeout + 1000, // Node timeout slightly higher
+      timeout: timeout,
     });
-
-    // Check if command timed out
-    if (result.includes('GIT_TIMEOUT_ERROR:124')) {
-      throw new Error(`Git operation timed out after ${timeoutSeconds} seconds`);
-    }
 
     return result as string;
   } catch (error: any) {
-    // Check if it's a timeout error
-    if (error.message.includes('timed out') || error.message.includes('GIT_TIMEOUT_ERROR')) {
+    if (error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM' || error.message.includes('ETIMEDOUT')) {
       console.error(`❌ [Git] Command timed out after ${timeoutSeconds}s: ${command.substring(0, 50)}...`);
-      throw new Error(`Git operation timed out after ${timeoutSeconds} seconds. Check network/auth.`);
+      throw new Error(`Git operation timed out after ${timeoutSeconds} seconds`);
     }
-
-    // Re-throw other errors
     throw error;
   }
 }
@@ -269,6 +289,54 @@ export async function safePull(
     return true;
   } catch (error: any) {
     console.error(`❌ [Git] Failed to pull: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Fix git remote URL to remove embedded token and use credential helper
+ *
+ * Removes expired/invalid tokens from remote URLs that cause authentication failures.
+ * Replaces `https://TOKEN@github.com/user/repo` with `https://github.com/user/repo`
+ * so git uses the system credential helper (GitHub CLI, osxkeychain, etc.)
+ *
+ * @param repoPath - Path to the git repository
+ * @returns true if remote was fixed, false if no fix needed
+ */
+export function fixGitRemoteAuth(repoPath: string): boolean {
+  try {
+    // Get current remote URL
+    const currentRemote = nodeExecSync('git remote get-url origin', {
+      cwd: repoPath,
+      encoding: 'utf8',
+      timeout: 5000
+    }).trim();
+
+    // Check if remote has embedded token
+    if (currentRemote.includes('@github.com') && !currentRemote.startsWith('git@')) {
+      console.log(`🔧 [Git] Fixing remote URL to use credential helper...`);
+      console.log(`   Old remote: ${currentRemote.replace(/\/\/.*@/, '//*****@')}`); // Mask token
+
+      // Extract repo path (user/repo)
+      const repoMatch = currentRemote.match(/github\.com\/(.+?)(?:\.git)?$/);
+      if (repoMatch) {
+        const githubRepoPath = repoMatch[1].replace(/\.git$/, '');
+        const newRemote = `https://github.com/${githubRepoPath}`;
+
+        nodeExecSync(`git remote set-url origin ${newRemote}`, {
+          cwd: repoPath,
+          encoding: 'utf8',
+          timeout: 5000
+        });
+
+        console.log(`   ✅ Remote URL updated to: ${newRemote}`);
+        return true;
+      }
+    }
+
+    return false; // No fix needed
+  } catch (error: any) {
+    console.warn(`⚠️  [Git] Could not fix remote URL: ${error.message}`);
     return false;
   }
 }

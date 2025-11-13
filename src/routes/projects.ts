@@ -102,32 +102,81 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const { isActive } = req.query;
 
-    const filter: any = { userId: req.user!.id };
+    // Check if user exists in the request
+    if (!req.user || !req.user.id) {
+      console.error('No user found in request after authentication');
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated properly'
+      });
+    }
+
+    const filter: any = { userId: req.user.id };
     if (isActive !== undefined) {
       filter.isActive = isActive === 'true';
     }
 
-    const projects = await Project.find(filter)
-      .sort({ createdAt: -1 })
-      .select('-__v')
-      .lean();
+    console.log('Projects filter:', filter);
 
-    // Agregar repositorios a cada proyecto
+    let projects;
+    try {
+      const query = Project.find(filter)
+        .sort({ createdAt: -1 })
+        .select('-__v')
+        .lean();
+
+      // Use Promise.race to implement timeout
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Query timeout')), 5000)
+      );
+
+      projects = await Promise.race([query.exec(), timeoutPromise]) as any[];
+      console.log(`Projects query successful: Found ${projects?.length || 0} projects`);
+    } catch (dbError: any) {
+      console.error('Projects database error:', dbError);
+      projects = []; // Return empty array on error instead of throwing
+    }
+
+    // Obtener repositorios para cada proyecto
     const projectsWithRepos = await Promise.all(
       projects.map(async (project) => {
-        const repositories = await Repository.find({ projectId: project._id })
-          .select('-__v')
-          .lean();
+        const projectObj = project.toObject ? project.toObject() : project;
+
+        // Fetch repositories for this project
+        let repositories = [];
+        try {
+          repositories = await Repository.find({ projectId: projectObj._id })
+            .select('-__v')
+            .lean();
+        } catch (repoError) {
+          console.error(`Error fetching repositories for project ${projectObj._id}:`, repoError);
+        }
+
         return {
-          ...project,
-          repositories,
+          _id: projectObj._id,
+          name: projectObj.name,
+          description: projectObj.description,
+          repositoryUrl: projectObj.repositoryUrl,
+          userId: projectObj.userId,
+          createdAt: projectObj.createdAt,
+          updatedAt: projectObj.updatedAt,
+          repositories: repositories
         };
       })
     );
 
+    console.log('Returning projects:', projectsWithRepos.map(p => ({ id: p._id, name: p.name, repoCount: p.repositories?.length || 0 })));
+
     res.json({
       success: true,
-      data: projectsWithRepos,
+      data: {
+        projects: projectsWithRepos,
+        pagination: {
+          total: projectsWithRepos.length,
+          page: 1,
+          limit: 50
+        }
+      },
       count: projectsWithRepos.length,
     });
   } catch (error) {

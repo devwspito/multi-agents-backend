@@ -177,11 +177,12 @@ export class E2EFixerPhase extends BasePhase {
 
     try {
       // Build repository context
+      const { normalizeRepoName } = require('../../utils/safeGitExecution');
       const repoContext = repositories.map(repo => ({
-        name: repo.githubRepoName.split('/').pop(),
+        name: normalizeRepoName(repo.githubRepoName.split('/').pop() || ''),
         fullName: repo.githubRepoName,
         type: repo.type || 'unknown',
-        path: workspacePath ? `${workspacePath}/${repo.githubRepoName.split('/').pop()}` : '',
+        path: workspacePath ? `${workspacePath}/${normalizeRepoName(repo.githubRepoName.split('/').pop() || '')}` : '',
       }));
 
       const frontendRepo = repoContext.find(r => r.type === 'frontend');

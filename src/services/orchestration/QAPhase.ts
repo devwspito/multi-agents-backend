@@ -278,11 +278,12 @@ export class QAPhase extends BasePhase {
       }
 
       // Build repository context for QA
+      const { normalizeRepoName } = require('../../utils/safeGitExecution');
       const repoContext = repositories.map(repo => ({
-        name: repo.githubRepoName.split('/').pop(),
+        name: normalizeRepoName(repo.githubRepoName.split('/').pop() || ''),
         fullName: repo.githubRepoName,
         type: repo.type || 'unknown',
-        path: workspacePath ? path.join(workspacePath, repo.githubRepoName.split('/').pop() || '') : ''
+        path: workspacePath ? path.join(workspacePath, normalizeRepoName(repo.githubRepoName.split('/').pop() || '')) : ''
       }));
 
       // Execute QA agent
@@ -290,41 +291,110 @@ export class QAPhase extends BasePhase {
 
 ## Task: ${task.title}
 
+## Working Directory: ${workspacePath || this.workspaceDir}
+
 ## Repos to Test (${repositories.length}):
 ${repoContext.map(r => `- ${r.name} at ${r.path}`).join('\n')}
 
 ## Epic Branches Merged:
-${branchesToTest.map(b => `- ${b}`).join('\n')}
+${branchesToTest.length > 0 ? branchesToTest.map(b => `- ${b}`).join('\n') : '- No branches to merge (testing main/master branch directly)'}
 
-## 🎯 INSTRUCTIONS (Be thorough but efficient):
+${!mergeSuccess ? `## ⚠️ MERGE CONFLICTS DETECTED:
+${mergeConflicts.map(c => `- ${c}`).join('\n')}
 
-1. **RUN TESTS** (2 min max):
-   - npm test or yarn test
-   - Check build: npm run build
-   - Verify lint: npm run lint
+**Note: Conflicts were auto-resolved. Please verify the merge is correct.**
+` : ''}
 
-2. **TEST FUNCTIONALITY**:
-   - Verify main features work
-   - Check happy path first
-   - Test error handling
+## 🎯 CRITICAL INSTRUCTIONS - EXECUTE IN THIS EXACT ORDER:
 
-3. **REPORT RESULTS**:
-   - List what passed ✅
-   - List any failures ❌
-   - GO/NO-GO decision
+### STEP 1: Verify Current Directory (5 seconds)
+\`\`\`bash
+pwd
+ls -la
+\`\`\`
 
-## SUCCESS CRITERIA:
-- Build compiles without errors
-- Tests pass (or no tests exist)
-- No critical runtime errors
-- Main functionality works
+### STEP 2: Navigate to Project Root (10 seconds)
+${repositories.length > 0 ? `\`\`\`bash
+cd ${repoContext[0].path}
+ls -la
+\`\`\`
 
-## OUTPUT FORMAT:
-1. Test Results: PASS/FAIL with details
-2. Issues Found: List any bugs
-3. Decision: GO (ready for PR) or NO-GO (needs fixes)
+If package.json doesn't exist, try:
+\`\`\`bash
+find . -name "package.json" -type f | head -5
+\`\`\`
+Then cd to the correct directory.` : 'Already in correct directory'}
 
-Be concise but thorough. Focus on functionality over perfection.`;
+### STEP 3: Install Dependencies (30 seconds max)
+\`\`\`bash
+# Check if node_modules exists
+if [ ! -d "node_modules" ]; then
+  npm install --legacy-peer-deps || npm install || echo "No package.json found"
+fi
+\`\`\`
+
+### STEP 4: Run Build (1 minute max)
+\`\`\`bash
+# Try common build commands
+npm run build || npm run compile || npm run tsc || echo "No build script"
+\`\`\`
+
+### STEP 5: Run Tests (2 minutes max)
+\`\`\`bash
+# Try common test commands
+npm test -- --watchAll=false || npm run test:ci || npm run test || echo "No tests configured"
+\`\`\`
+
+### STEP 6: Check for TypeScript/Lint Errors (30 seconds)
+\`\`\`bash
+# Only if these scripts exist
+npm run lint || npx tsc --noEmit || echo "No lint/type checking"
+\`\`\`
+
+### STEP 7: Verify Core Functionality (1 minute)
+- If it's a web app: Check if dev server starts (npm run dev/start)
+- If it's a library: Check if main exports work
+- If it's a CLI: Check if help command works
+
+## 🛑 DECISION CRITERIA (IMPORTANT):
+
+### ✅ APPROVE (GO) if ALL of these are true:
+1. Code compiles/builds without errors
+2. No runtime crashes
+3. Tests pass OR no tests exist
+4. Main functionality appears to work
+
+### ❌ REJECT (NO-GO) if ANY of these occur:
+1. Build fails completely
+2. Runtime crashes on startup
+3. Critical tests fail (>50% failure rate)
+4. Core functionality is broken
+
+## 📋 OUTPUT FORMAT (MANDATORY):
+
+\`\`\`
+TEST SUMMARY
+============
+Build: [PASS/FAIL] - <one line reason>
+Tests: [PASS/FAIL/NONE] - <one line reason>
+Lint: [PASS/FAIL/NONE] - <one line reason>
+Runtime: [PASS/FAIL] - <one line reason>
+
+ISSUES FOUND:
+1. <issue description if any>
+2. <issue description if any>
+
+DECISION: [GO/NO-GO]
+REASON: <one sentence explanation>
+\`\`\`
+
+## ⚠️ EDGE CASES:
+- If no package.json exists, check for other build systems (Makefile, gradle, etc)
+- If no tests exist, mark as PASS with note "No tests configured"
+- If build takes >2 minutes, kill it and mark as FAIL
+- Focus on FUNCTIONALITY over style issues
+
+Start immediately with STEP 1. Be efficient and decisive.`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context

@@ -4,7 +4,7 @@ import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
-import { safeGitExecSync } from '../../utils/safeGitExecution';
+import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
 
 /**
  * Developers Phase
@@ -295,7 +295,7 @@ export class DevelopersPhase extends BasePhase {
           executionOrder: orderedEpics.map((e, i) => ({
             order: i + 1,
             epicName: e.name,
-            targetRepo: e.targetRepository || repositories[0]?.full_name || repositories[0]?.name || 'default',
+            targetRepo: e.targetRepository || 'MISSING', // 🔥 No fallback - should fail if missing
           })),
         },
       });
@@ -303,7 +303,7 @@ export class DevelopersPhase extends BasePhase {
       // Log each epic in execution order
       for (let i = 0; i < orderedEpics.length; i++) {
         const epic = orderedEpics[i];
-        const repo = epic.targetRepository || repositories[0]?.full_name || repositories[0]?.name || 'default';
+        const repo = epic.targetRepository || 'MISSING'; // 🔥 No fallback
         await LogService.info(`Execution order ${i + 1}: ${epic.name} → ${repo}`, {
           taskId,
           category: 'epic',
@@ -595,6 +595,62 @@ export class DevelopersPhase extends BasePhase {
   }> {
     const taskId = (task._id as any).toString();
 
+    // 🔥 CRITICAL VALIDATION: Epic MUST have targetRepository
+    if (!epic.targetRepository) {
+      console.error(`\n❌❌❌ [PIPELINE] CRITICAL ERROR: Epic has NO targetRepository!`);
+      console.error(`   Epic: ${epic.name}`);
+      console.error(`   Epic ID: ${epic.id}`);
+      console.error(`\n   💀 WE DON'T KNOW WHICH REPOSITORY THIS EPIC BELONGS TO`);
+      console.error(`   💀 CANNOT EXECUTE DEVELOPER - WOULD BE ARBITRARY`);
+      console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
+
+      // Mark task as FAILED
+      const Task = require('../../models/Task').Task;
+      const dbTask = await Task.findById(task._id);
+      if (dbTask) {
+        dbTask.status = 'failed';
+        dbTask.orchestration.developers = {
+          status: 'failed',
+          error: `Epic ${epic.id} has no targetRepository - cannot determine which repo to work in`,
+          humanRequired: true,
+        };
+        await dbTask.save();
+      }
+
+      throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository`);
+    }
+
+    // 🔥 CRITICAL VALIDATION: Story MUST have targetRepository (inherited from epic)
+    if (!story.targetRepository) {
+      console.error(`\n❌❌❌ [PIPELINE] CRITICAL ERROR: Story has NO targetRepository!`);
+      console.error(`   Story: ${story.title}`);
+      console.error(`   Story ID: ${story.id}`);
+      console.error(`   Epic: ${epic.name} (targetRepository: ${epic.targetRepository})`);
+      console.error(`\n   💀 Story should have inherited targetRepository from epic`);
+      console.error(`   💀 This is a DATA INTEGRITY issue`);
+      console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
+
+      // Mark task as FAILED
+      const Task = require('../../models/Task').Task;
+      const dbTask = await Task.findById(task._id);
+      if (dbTask) {
+        dbTask.status = 'failed';
+        dbTask.orchestration.developers = {
+          status: 'failed',
+          error: `Story ${story.id} has no targetRepository - data integrity issue`,
+          humanRequired: true,
+        };
+        await dbTask.save();
+      }
+
+      throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no targetRepository`);
+    }
+
+    // 🔥 SUCCESS: We know EXACTLY where to work
+    console.log(`✅ [PIPELINE] Repository assignment validated:`);
+    console.log(`   Epic: ${epic.name} → ${epic.targetRepository}`);
+    console.log(`   Story: ${story.title} → ${story.targetRepository}`);
+
     try {
       // STEP 1: Developer implements story
       console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
@@ -626,6 +682,12 @@ export class DevelopersPhase extends BasePhase {
         console.log(`💰 [Developer ${developer.instanceId}] Cost: $${developerCost.toFixed(4)} (${developerTokens.input + developerTokens.output} tokens)`);
       }
 
+      // 🔥 CRITICAL: Wait for git push to fully complete on remote
+      // Developer agent may have finished but push still propagating
+      console.log(`⏳ [PIPELINE] Waiting 3 seconds for git push to propagate to remote...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      console.log(`✅ [PIPELINE] Wait complete - proceeding to verification`);
+
       // Verify story has branch
       const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
@@ -640,55 +702,142 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
+      // 🔥 CRITICAL: Validate Developer finished successfully
+      const developerOutput = developerResult?.output || '';
+      const developerFinishedSuccessfully = developerOutput.includes('✅ DEVELOPER_FINISHED_SUCCESSFULLY');
+      const developerFailed = developerOutput.includes('❌ DEVELOPER_FAILED');
+
+      if (developerFailed) {
+        console.error(`❌ [PIPELINE] Developer explicitly reported FAILURE`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Developer output (last 500 chars):\n${developerOutput.slice(-500)}`);
+        return {
+          developerCost,
+          judgeCost: 0,
+          developerTokens,
+          judgeTokens: { input: 0, output: 0 }
+        };
+      }
+
+      if (!developerFinishedSuccessfully) {
+        console.error(`❌ [PIPELINE] Developer did NOT report success marker`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Expected: "✅ DEVELOPER_FINISHED_SUCCESSFULLY"`);
+        console.error(`   Developer output (last 1000 chars):\n${developerOutput.slice(-1000)}`);
+        console.error(`   Judge CANNOT review without success confirmation - STOPPING`);
+        return {
+          developerCost,
+          judgeCost: 0,
+          developerTokens,
+          judgeTokens: { input: 0, output: 0 }
+        };
+      }
+
+      console.log(`✅ [PIPELINE] Developer reported SUCCESS - proceeding to Judge`);
+
       // 🔥 CRITICAL FIX: Extract commit SHA from Developer's output
       // Following Anthropic best practice: "subagents should verify details"
       // Developer REPORTS their commit SHA, we don't guess it
       let commitSHA: string | null = null;
 
-      if (developerResult?.output) {
+      if (developerOutput) {
         // Look for pattern: "📍 Commit SHA: abc123def456..."
-        const commitMatch = developerResult.output.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
+        const commitMatch = developerOutput.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
         if (commitMatch && commitMatch[1]) {
           commitSHA = commitMatch[1];
           console.log(`✅ [PIPELINE] Developer reported commit SHA: ${commitSHA}`);
-          console.log(`   Branch: ${updatedStory.branchName}`);
+          console.log(`   Story: ${story.title}`);
+          console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
           console.log(`   This is the EXACT code Judge will review`);
         } else {
           console.warn(`⚠️  [PIPELINE] Developer did NOT report commit SHA in output`);
-          console.warn(`   Developer output length: ${developerResult.output.length} chars`);
+          console.warn(`   Developer output length: ${developerOutput.length} chars`);
           console.warn(`   Searching output for commit SHA...`);
         }
       }
 
-      // Fallback: Try to get commit SHA from git (old way - not recommended)
+      // 🔥 NO FALLBACK: Developer MUST report commit SHA
       if (!commitSHA) {
-        console.warn(`⚠️  [PIPELINE] Falling back to git rev-parse HEAD (NOT RECOMMENDED)`);
-        const { execSync } = require('child_process');
-        const targetRepo = repositories.length > 0 ? repositories[0] : null;
-        if (!targetRepo || !workspacePath) {
-          console.error(`❌ [PIPELINE] No repository or workspace for commit verification`);
-          console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
-          return {
-            developerCost: 0,
-            judgeCost: 0,
-            developerTokens: { input: 0, output: 0 },
-            judgeTokens: { input: 0, output: 0 }
+        console.error(`\n❌❌❌ [PIPELINE] CRITICAL ERROR: Developer did NOT report commit SHA!`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Story ID: ${story.id}`);
+        console.error(`   Developer: ${developer.instanceId}`);
+        console.error(`\n   🔥 THIS IS UNACCEPTABLE - Developer MUST report:`);
+        console.error(`      📍 Commit SHA: [40-character SHA]`);
+        console.error(`      ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
+        console.error(`\n   💀 WITHOUT COMMIT SHA, WE DON'T KNOW WHAT CODE TO REVIEW`);
+        console.error(`   💀 CONTINUING WOULD BE ARBITRARY AND DANGEROUS`);
+        console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
+
+        // Mark task as FAILED
+        const Task = require('../../models/Task').Task;
+        const dbTask = await Task.findById(task._id);
+        if (dbTask) {
+          dbTask.status = 'failed';
+          dbTask.orchestration.developers = {
+            status: 'failed',
+            error: `Developer ${developer.instanceId} did not report commit SHA for story ${story.id}`,
+            humanRequired: true,
           };
+          await dbTask.save();
         }
 
-        const repoPath = `${workspacePath}/${targetRepo.name}`;
+        throw new Error(`HUMAN_REQUIRED: Developer did not report commit SHA - cannot determine what code to review`);
+      }
+
+      // 🔥 CRITICAL: Verify commit exists on remote BEFORE Judge evaluation
+      console.log(`\n🔍 [PRE-JUDGE] Verifying commit ${commitSHA} exists on remote...`);
+      if (workspacePath && repositories.length > 0) {
+        // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+        if (!epic.targetRepository) {
+          throw new Error(`Epic ${epic.id} has no targetRepository - cannot verify commit`);
+        }
+
+        const targetRepo = repositories.find(r =>
+          r.name === epic.targetRepository ||
+          r.full_name === epic.targetRepository ||
+          r.githubRepoName === epic.targetRepository
+        );
+
+        if (!targetRepo) {
+          throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+        }
+
+        const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+
         try {
-          commitSHA = safeGitExecSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
-          console.log(`📍 [PIPELINE] Fallback commit SHA from git: ${commitSHA}`);
-        } catch (error: any) {
-          console.error(`❌ [PIPELINE] Failed to get commit SHA: ${error.message}`);
-          console.error(`   Judge CANNOT review without commit SHA - STOPPING`);
-          return {
-            developerCost: 0,
-            judgeCost: 0,
-            developerTokens: { input: 0, output: 0 },
-            judgeTokens: { input: 0, output: 0 }
-          };
+          // Check if commit exists on remote by grepping ls-remote output
+          // NOTE: `git ls-remote origin <SHA>` does NOT work - it only matches refs, not commits
+          // We must use `git ls-remote origin | grep <SHA>` to find commits in branch history
+          const lsRemote = safeGitExecSync(
+            `git ls-remote origin`,
+            { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+          );
+
+          // Search for commit SHA in ls-remote output
+          const commitFound = lsRemote.includes(commitSHA);
+
+          if (!commitFound) {
+            console.error(`❌ [PRE-JUDGE] Commit ${commitSHA} NOT found on remote!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   Story ID: ${story.id}`);
+            console.error(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
+            console.error(`   Repository: ${epic.targetRepository}`);
+            console.error(`   This means Developer did NOT push commits successfully`);
+            console.error(`   Judge CANNOT evaluate non-existent commit - STOPPING`);
+            console.error(`\n   📋 Remote refs found:\n${lsRemote}`);
+            return {
+              developerCost,
+              judgeCost: 0,
+              developerTokens,
+              judgeTokens: { input: 0, output: 0 }
+            };
+          }
+
+          console.log(`✅ [PRE-JUDGE] Commit ${commitSHA} verified on remote`);
+        } catch (verifyError: any) {
+          console.warn(`⚠️  [PRE-JUDGE] Could not verify commit on remote: ${verifyError.message}`);
+          console.warn(`   Proceeding anyway, but Judge may fail...`);
         }
       }
 
@@ -699,6 +848,141 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   Workspace: ${workspacePath}`);
       console.log(`   If Judge fails to access this commit → Pipeline STOPS`);
 
+      // 🔥 CRITICAL: Sync workspace with remote BEFORE Judge reviews
+      // Developer pushed changes to remote, Judge needs to pull them
+      if (workspacePath && repositories.length > 0) {
+        try {
+          console.log(`\n🔄 [PRE-JUDGE SYNC] Syncing workspace with remote...`);
+
+          // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+          if (!epic.targetRepository) {
+            throw new Error(`Epic ${epic.id} has no targetRepository - cannot sync workspace`);
+          }
+
+          const targetRepo = repositories.find(r =>
+            r.name === epic.targetRepository ||
+            r.full_name === epic.targetRepository ||
+            r.githubRepoName === epic.targetRepository
+          );
+
+          if (!targetRepo) {
+            throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+          }
+
+          const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+
+          // Fetch all branches from remote
+          console.log(`   [1/3] Fetching from remote...`);
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          console.log(`   ✅ Fetched latest refs from remote`);
+
+          // 🔥 NEW: Verify branch exists on remote BEFORE attempting checkout
+          console.log(`\n🔍 [PRE-CHECKOUT] Verifying branch exists on remote...`);
+          console.log(`   Branch: ${updatedStory.branchName}`);
+          console.log(`   This is the EXACT branch Developer worked on`);
+
+          const lsRemoteBranches = safeGitExecSync(
+            `git ls-remote --heads origin ${updatedStory.branchName}`,
+            { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+          );
+
+          if (!lsRemoteBranches || lsRemoteBranches.trim().length === 0) {
+            console.error(`\n❌ [PRE-CHECKOUT] Branch ${updatedStory.branchName} does NOT exist on remote!`);
+            console.error(`   This means Developer did NOT push the branch successfully`);
+            console.error(`   Judge CANNOT review non-existent branch - STOPPING`);
+            console.error(`\n   📋 Try running: git ls-remote --heads origin`);
+            throw new Error(`Branch ${updatedStory.branchName} not found on remote - Developer push failed`);
+          }
+
+          console.log(`✅ [PRE-CHECKOUT] Branch verified on remote:`);
+          console.log(`   ${lsRemoteBranches.trim()}`);
+
+          // Checkout the story branch WITH RETRY
+          console.log(`\n   [2/3] Checking out story branch: ${updatedStory.branchName}`);
+          let checkoutSuccess = false;
+          const maxCheckoutRetries = 3;
+
+          for (let retryAttempt = 0; retryAttempt < maxCheckoutRetries; retryAttempt++) {
+            try {
+              safeGitExecSync(`git checkout ${updatedStory.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+              console.log(`   ✅ Checked out story branch (attempt ${retryAttempt + 1}/${maxCheckoutRetries})`);
+              checkoutSuccess = true;
+              break;
+            } catch (checkoutError: any) {
+              console.error(`   ❌ Checkout failed (attempt ${retryAttempt + 1}/${maxCheckoutRetries}): ${checkoutError.message}`);
+
+              if (retryAttempt < maxCheckoutRetries - 1) {
+                // Try creating branch from remote
+                try {
+                  console.log(`   🔧 Attempting to create branch from remote...`);
+                  safeGitExecSync(`git checkout -b ${updatedStory.branchName} origin/${updatedStory.branchName}`, {
+                    cwd: repoPath,
+                    encoding: 'utf8'
+                  });
+                  console.log(`   ✅ Created and checked out branch from remote`);
+                  checkoutSuccess = true;
+                  break;
+                } catch (createError: any) {
+                  console.error(`   ❌ Create from remote also failed: ${createError.message}`);
+                  const delay = 2000 * (retryAttempt + 1); // 2s, 4s, 6s
+                  console.log(`   ⏳ Waiting ${delay}ms before retry...`);
+                  await new Promise(resolve => setTimeout(resolve, delay));
+                  // Re-fetch to get latest refs
+                  safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                }
+              }
+            }
+          }
+
+          if (!checkoutSuccess) {
+            console.error(`❌ [PRE-JUDGE SYNC] Failed to checkout branch after ${maxCheckoutRetries} attempts`);
+            console.error(`   Branch: ${updatedStory.branchName}`);
+            console.error(`   This means branch does NOT exist on remote - Developer failed to push`);
+            throw new Error(`Branch ${updatedStory.branchName} not found after ${maxCheckoutRetries} retries`);
+          }
+
+          // Pull latest commits from this branch
+          console.log(`   [3/3] Pulling latest commits from ${updatedStory.branchName}...`);
+          safeGitExecSync(`git pull origin ${updatedStory.branchName}`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: 30000
+          });
+          console.log(`   ✅ Pulled latest commits`);
+
+          // Verify we're on the correct commit
+          const currentSHA = safeGitExecSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
+          console.log(`\n🔍 [VERIFICATION] Commit sync status:`);
+          console.log(`   Expected SHA: ${commitSHA}`);
+          console.log(`   Current SHA:  ${currentSHA}`);
+          console.log(`   Match: ${currentSHA === commitSHA ? '✅ YES' : '⚠️  NO (different commits)'}`);
+
+          if (currentSHA !== commitSHA) {
+            console.warn(`\n⚠️  WARNING: Workspace is on different commit!`);
+            console.warn(`   This means Judge will review DIFFERENT code than Developer wrote`);
+            console.warn(`   Expected: ${commitSHA}`);
+            console.warn(`   Current:  ${currentSHA}`);
+            console.warn(`   Proceeding with current commit (${currentSHA})...`);
+            // Update commitSHA to match reality
+            commitSHA = currentSHA;
+          } else {
+            console.log(`✅ [SYNC COMPLETE] Judge will review the exact commit Developer created`);
+          }
+        } catch (syncError: any) {
+          console.error(`❌ [SYNC ERROR] Failed to sync workspace: ${syncError.message}`);
+          console.error(`   Judge CANNOT review without proper sync - STOPPING`);
+          console.error(`   This is a CRITICAL failure - branch or commit not accessible`);
+
+          // 🔥 FAIL HARD: Don't let Judge review if sync fails
+          return {
+            developerCost,
+            judgeCost: 0,
+            developerTokens,
+            judgeTokens: { input: 0, output: 0 }
+          };
+        }
+      }
+
       // Create isolated context for Judge
       const judgeContext = new OrchestrationContext(task, repositories, workspacePath);
       judgeContext.setData('storyToReview', updatedStory);
@@ -706,6 +990,7 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('developmentTeam', [developer]); // Only this developer
       judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
       judgeContext.setData('commitSHA', commitSHA); // 🔥 CRITICAL: Exact commit to review
+      judgeContext.setData('storyBranchName', updatedStory.branchName); // 🔥 CRITICAL: LITERAL branch name from Developer
 
       const { JudgePhase } = await import('./JudgePhase');
 
@@ -734,7 +1019,17 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   judgeResult.data?.status: ${judgeResult.data?.status}`);
       console.log(`   Checking if: judgeResult.success (${judgeResult.success}) && judgeResult.data?.status ('${judgeResult.data?.status}') === 'approved'`);
 
-      if (judgeResult.success && judgeResult.data?.status === 'approved') {
+      // 🔥 FIX: Judge returns status in data object from JudgePhase:189-192
+      const judgeStatus = judgeResult.data?.status;
+      const isApproved = judgeResult.success && judgeStatus === 'approved';
+
+      console.log(`✅ [VERDICT] Judge decision: ${isApproved ? 'APPROVED ✅' : 'REJECTED ❌'}`);
+
+      // Get iteration info for rejection messages
+      const iteration = judgeResult.data?.iteration || 1;
+      const maxRetries = judgeResult.data?.maxRetries || 3;
+
+      if (isApproved) {
         console.log(`✅ [STEP 2/3] Judge APPROVED story: ${story.title}`);
 
         // STEP 3: Merge to epic branch
@@ -746,15 +1041,39 @@ export class DevelopersPhase extends BasePhase {
         // Story is now part of epic branch, no need to keep individual story branch
         if (workspacePath && repositories.length > 0) {
           try {
-            const { execSync } = require('child_process');
-            // 🔥 FIX: Get correct repository based on epic.targetRepository
-            const targetRepoName = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
-            const targetRepo = repositories.find(r => r.name === targetRepoName || r.full_name === targetRepoName) || repositories[0];
+            // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+            if (!epic.targetRepository) {
+              throw new Error(`Epic ${epic.id} has no targetRepository - cannot cleanup story branch`);
+            }
+
+            const targetRepo = repositories.find(r =>
+              r.name === epic.targetRepository ||
+              r.full_name === epic.targetRepository ||
+              r.githubRepoName === epic.targetRepository
+            );
+
+            if (!targetRepo) {
+              throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+            }
+
             const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
             const storyBranch = updatedStory.branchName;
 
+            // 🗑️ Delete LOCAL branch
             safeGitExecSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
-            console.log(`🧹 Cleaned up story branch: ${storyBranch} (already merged to epic)`);
+            console.log(`🧹 Cleaned up LOCAL story branch: ${storyBranch}`);
+
+            // 🗑️ Delete REMOTE branch (GitHub) to prevent clutter
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
+                encoding: 'utf8',
+                timeout: 15000 // 15 seconds timeout
+              });
+              console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch} (GitHub)`);
+            } catch (remoteDeleteError: any) {
+              console.warn(`⚠️  Could not delete remote branch ${storyBranch}: ${remoteDeleteError.message}`);
+              // Non-critical - branch might not exist on remote or already deleted
+            }
           } catch (cleanupError: any) {
             // Non-critical error - branch might not exist or already deleted
             console.warn(`⚠️  Could not cleanup story branch: ${cleanupError.message}`);
@@ -764,7 +1083,7 @@ export class DevelopersPhase extends BasePhase {
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
       } else {
         // Judge REJECTED - keep branch for investigation
-        console.error(`❌ [STEP 2/3] Judge REJECTED story: ${story.title}`);
+        console.error(`❌ [STEP ${iteration}/${maxRetries}] Judge REJECTED story: ${story.title}`);
         console.error(`   Feedback: ${judgeResult.data?.feedback || judgeResult.error}`);
         console.error(`❌ [PIPELINE] Story pipeline FAILED - NOT merging`);
 
@@ -829,7 +1148,6 @@ export class DevelopersPhase extends BasePhase {
         const repositories = context.repositories;
         const targetRepo = repositories.length > 0 ? repositories[0] : null;
         if (targetRepo) {
-          const { execSync } = require('child_process');
           const repoPath = `${workspacePath}/${targetRepo.name}`;
           console.log(`🔀 [Judge] Checking out branch ${story.branchName} in ${repoPath}`);
 
@@ -906,65 +1224,153 @@ export class DevelopersPhase extends BasePhase {
     repositories: any[],
     taskId: string
   ): Promise<void> {
-    console.log(`\n🔀 [Merge] Merging story branch → epic branch`);
-    console.log(`   From: ${story.branchName}`);
-    console.log(`   To: epic/${epic.id}`);
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🔀 [Merge] STARTING STORY TO EPIC MERGE`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`   Story: ${story.title || story.id}`);
+    console.log(`   Story Branch: ${story.branchName}`);
+    console.log(`   Epic: ${epic.title || epic.id}`);
+    console.log(`   Epic Branch: ${epic.branchName || `epic/${epic.id}`}`);
+    console.log(`${'='.repeat(80)}\n`);
 
     if (!workspacePath) {
       console.error(`❌ [Merge] No workspace path available`);
       throw new Error('Workspace path required for merge');
     }
 
+    if (!story.branchName) {
+      console.error(`❌ [Merge] Story has no branch name - cannot merge`);
+      throw new Error(`Story ${story.id} has no branch`);
+    }
+
     try {
-      const { execSync } = require('child_process');
       const { NotificationService } = await import('../NotificationService');
 
-      // Get target repository
-      const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
-      const repoPath = `${workspacePath}/${targetRepo}`;
-      // 🔥 CRITICAL: Use the unique branch name from epic, NOT a generic one
-      const epicBranch = epic.branchName || `epic/${epic.id}-fallback`;
+      // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+      if (!epic.targetRepository) {
+        throw new Error(`Epic ${epic.id} has no targetRepository - cannot merge to main`);
+      }
 
-      console.log(`📂 [Merge] Repository: ${targetRepo}`);
-      console.log(`📂 [Merge] Path: ${repoPath}`);
+      const targetRepoObj = repositories.find(r =>
+        r.name === epic.targetRepository ||
+        r.full_name === epic.targetRepository ||
+        r.githubRepoName === epic.targetRepository
+      );
+
+      if (!targetRepoObj) {
+        throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+      }
+
+      const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
+      // 🔥 CRITICAL: Use the unique branch name from epic, NOT a generic one
+      const epicBranch = epic.branchName;
+
+      if (!epicBranch) {
+        throw new Error(`Epic ${epic.id} has no branchName - cannot merge`);
+      }
+
+      console.log(`📂 [Merge] Repository: ${epic.targetRepository}`);
+      console.log(`📂 [Merge] Workspace Path: ${workspacePath}`);
+      console.log(`📂 [Merge] Repo Path: ${repoPath}`);
+      console.log(`📂 [Merge] Epic Branch: ${epicBranch}`);
 
       // 1. Checkout epic branch
-      safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+      console.log(`\n[STEP 1/4] Checking out epic branch: ${epicBranch}...`);
+      const checkoutOutput = safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
       console.log(`✅ [Merge] Checked out ${epicBranch}`);
+      console.log(`   Git output: ${checkoutOutput.substring(0, 100)}`);
 
       // 2. Pull latest changes from epic branch
+      console.log(`\n[STEP 2/4] Pulling latest changes from remote...`);
       try {
-        safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+        const pullOutput = safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
           encoding: 'utf8',
           timeout: 30000, // 30 seconds for pull
         });
         console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
-      } catch (pullError) {
-        console.warn(`⚠️  [Merge] Pull failed (branch might not exist on remote yet)`);
+        console.log(`   Git output: ${pullOutput.substring(0, 100)}`);
+      } catch (pullError: any) {
+        console.warn(`⚠️  [Merge] Pull failed (branch might not exist on remote yet): ${pullError.message}`);
       }
 
       // 3. Merge story branch with timeout protection
+      console.log(`\n[STEP 3/4] Merging story branch into epic...`);
+      console.log(`   Executing: git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`);
       const mergeOutput = safeGitExecSync(
         `cd "${repoPath}" && git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`,
         { encoding: 'utf8' }
       );
-      console.log(`✅ [Merge] Merged ${story.branchName} → ${epicBranch}`);
-      console.log(`   Output: ${mergeOutput.substring(0, 200)}...`);
+      console.log(`✅ [Merge] MERGE SUCCESSFUL: ${story.branchName} → ${epicBranch}`);
+      console.log(`   Git merge output:\n${mergeOutput}`);
 
       // 4. Push epic branch WITH TIMEOUT
-      // 🔥 CRITICAL: Add timeout to prevent hanging
+      console.log(`\n[STEP 4/4] Pushing epic branch to remote...`);
+      console.log(`   Executing: git push origin ${epicBranch}`);
+
+      // 🔥 CRITICAL FIX: Remove token-based auth from remote URL before pushing
+      // The remote may have an old/expired token that causes authentication failures
+      console.log(`🔧 [Merge] Fixing git remote authentication...`);
+      const authFixed = fixGitRemoteAuth(repoPath);
+      if (authFixed) {
+        console.log(`✅ [Merge] Git remote URL fixed to use credential helper`);
+      } else {
+        console.log(`ℹ️  [Merge] Git remote URL already clean (no token embedded)`);
+      }
+
+      // Verify current remote URL
       try {
-        execSync(
-          `cd "${repoPath}" && timeout 30 git push origin ${epicBranch} 2>&1 || echo "PUSH_FAILED"`,
-          {
-            encoding: 'utf8',
-            timeout: 30000 // 30 seconds max
+        const currentRemote = safeGitExecSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf8' });
+        console.log(`📋 [Merge] Current remote URL: ${currentRemote.replace(/\/\/.*@/, '//*****@')}`);
+      } catch (e) {
+        console.warn(`⚠️  [Merge] Could not get current remote URL`);
+      }
+
+      // Try to push with retries
+      let pushSucceeded = false;
+      let lastError: any = null;
+      const maxRetries = 3;
+
+      for (let attempt = 1; attempt <= maxRetries && !pushSucceeded; attempt++) {
+        try {
+          console.log(`📤 [Merge] Push attempt ${attempt}/${maxRetries}...`);
+          const pushOutput = safeGitExecSync(
+            `git push origin ${epicBranch}`,
+            {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 30000 // 30 seconds max
+            }
+          );
+          console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
+          console.log(`   Git push output:\n${pushOutput}`);
+          pushSucceeded = true;
+        } catch (pushError: any) {
+          lastError = pushError;
+          console.error(`❌ [Merge] Push attempt ${attempt} failed: ${pushError.message}`);
+
+          if (attempt < maxRetries) {
+            const delay = 2000 * attempt; // 2s, 4s, 6s
+            console.log(`⏳ [Merge] Waiting ${delay/1000}s before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
           }
-        );
-        console.log(`✅ [Merge] Pushed ${epicBranch} to remote`);
-      } catch (pushError: any) {
-        console.error(`❌ [Merge] Failed to push ${epicBranch} (timeout after 30s or error): ${pushError.message}`);
-        console.warn(`⚠️  [Merge] Continuing without push - manual push may be needed`);
+        }
+      }
+
+      if (!pushSucceeded) {
+        console.error(`❌ [Merge] CRITICAL: All ${maxRetries} push attempts failed!`);
+        console.error(`   Epic branch: ${epicBranch}`);
+        console.error(`   Repository: ${repoPath}`);
+        console.error(`   Last error: ${lastError?.message}`);
+        console.error(`   Epic branch has been merged LOCALLY but NOT pushed to remote`);
+        console.error(`   This means the code is LOST if we continue`);
+        console.error(`\n   🔧 Troubleshooting:`);
+        console.error(`   1. Check GitHub authentication: gh auth status`);
+        console.error(`   2. Check git credentials: git config --list | grep credential`);
+        console.error(`   3. Manual push: cd "${repoPath}" && git push origin ${epicBranch}`);
+
+        // 🔥 CRITICAL: DO NOT continue if push fails
+        // Story branch will be deleted and code will be lost forever
+        throw new Error(`Failed to push epic branch ${epicBranch} to remote after ${maxRetries} attempts: ${lastError?.message}`);
       }
 
       NotificationService.emitConsoleLog(
@@ -977,7 +1383,14 @@ export class DevelopersPhase extends BasePhase {
       story.mergedToEpic = true;
       story.mergedAt = new Date();
 
-      console.log(`\n✅ [Merge] Story ${story.id} successfully merged to epic branch!\n`);
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`✅ [Merge] STORY MERGE COMPLETED SUCCESSFULLY`);
+      console.log(`   Story: ${story.title || story.id}`);
+      console.log(`   Story Branch: ${story.branchName}`);
+      console.log(`   Epic Branch: ${epicBranch}`);
+      console.log(`   Merged to Epic: ${story.mergedToEpic}`);
+      console.log(`   Merged At: ${story.mergedAt}`);
+      console.log(`${'='.repeat(80)}\n`);
     } catch (error: any) {
       console.error(`❌ [Merge] Failed to merge story ${story.id}: ${error.message}`);
 
@@ -994,9 +1407,22 @@ export class DevelopersPhase extends BasePhase {
 
         // Abort the conflicted merge
         try {
-          const { execSync } = require('child_process');
-          const targetRepo = epic.targetRepository || repositories[0]?.name || repositories[0]?.full_name;
-          const repoPath = `${workspacePath}/${targetRepo}`;
+          // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+          if (!epic.targetRepository) {
+            throw new Error(`Epic ${epic.id} has no targetRepository - cannot abort merge`);
+          }
+
+          const targetRepoObj = repositories.find(r =>
+            r.name === epic.targetRepository ||
+            r.full_name === epic.targetRepository ||
+            r.githubRepoName === epic.targetRepository
+          );
+
+          if (!targetRepoObj) {
+            throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+          }
+
+          const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
           safeGitExecSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
           console.log(`✅ [Merge] Aborted conflicted merge`);
         } catch (abortError) {

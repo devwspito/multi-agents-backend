@@ -19,6 +19,8 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
   try {
     const token = extractToken(req);
 
+    console.log('[Auth] Token extraction:', token ? `Token found (${token.substring(0, 20)}...)` : 'No token');
+
     if (!token) {
       res.status(401).json({
         success: false,
@@ -28,12 +30,20 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
     }
 
     // Verificar JWT
-    const decoded = jwt.verify(token, env.JWT_SECRET) as {
-      userId: string;
-      githubId: string;
-    };
+    let decoded: any;
+    try {
+      decoded = jwt.verify(token, env.JWT_SECRET) as {
+        userId: string;
+        githubId: string;
+      };
+      console.log('[Auth] Token decoded successfully:', decoded);
+    } catch (jwtError: any) {
+      console.error('[Auth] JWT verification failed:', jwtError.message);
+      throw jwtError;
+    }
 
     // Buscar usuario
+    console.log('[Auth] Looking for user with ID:', decoded.userId);
     const user = await User.findById(decoded.userId);
 
     if (!user) {
@@ -62,10 +72,15 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       return;
     }
 
-    console.error('Authentication error:', error);
+    console.error('[Auth] Authentication error - Full details:', {
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+      token: extractToken(req)?.substring(0, 20) + '...'
+    });
     res.status(500).json({
       success: false,
       message: 'Authentication failed',
+      error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 }
