@@ -172,6 +172,20 @@ export interface IOrchestration {
     filesModified?: string[];
     changes?: string[];
     fixed?: boolean;
+    // Last Chance Mode (attempt 2) tracking
+    lastChanceMode?: boolean;
+    lastChanceAnalysis?: {
+      automatable: boolean;
+      fixes?: any[];
+      totalEstimatedCost?: number;
+      reasoning?: string;
+      recommendation?: string;
+    };
+    analysisCost?: number;
+    fixerCost?: number;
+    totalCost?: number;
+    escalated?: boolean;
+    budgetExceeded?: boolean;
   };
 
   // Fase 5: QA Engineer (único)
