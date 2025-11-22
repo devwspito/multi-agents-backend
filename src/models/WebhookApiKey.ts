@@ -7,6 +7,12 @@ export interface IWebhookApiKey extends Document {
   name: string;
   isActive: boolean;
   rateLimit: number;
+
+  // Task Configuration for auto-generated tasks
+  // Determines which model configuration to use (standard/premium/max)
+  // ErrorDetective will always use the topModel from the selected config
+  taskConfig: 'standard' | 'premium' | 'max';
+
   lastUsedAt?: Date;
   requestCount: number;
   createdAt: Date;
@@ -44,6 +50,11 @@ const webhookApiKeySchema = new Schema<IWebhookApiKey>(
     rateLimit: {
       type: Number,
       default: 60,
+    },
+    taskConfig: {
+      type: String,
+      enum: ['standard', 'premium', 'max'],
+      default: 'standard', // Balanced configuration by default
     },
     lastUsedAt: {
       type: Date,

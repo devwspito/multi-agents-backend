@@ -125,7 +125,7 @@ export class ProjectManagerPhaseOptimized extends BasePhase {
     context: OrchestrationContext,
     validationErrors?: string[]
   ): string {
-    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath);
+    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath || undefined);
     // FIXED: Now properly reads masterEpic from context
     const masterEpic = context.getData('masterEpic') || context.getData('productManagerOutput');
 

@@ -113,13 +113,13 @@ export class ProductManagerPhase extends BasePhase {
       });
 
       // Build repositories information
-      const repoInfo = context.repositories.length > 0
+      const _repoInfo = context.repositories.length > 0
         ? `\n## Available Repositories:\n${context.repositories.map((repo, i) =>
             `${i + 1}. ${repo.githubRepoName} (branch: ${repo.githubBranch})`
           ).join('\n')}\n`
         : '';
 
-      const workspaceInfo = workspaceStructure
+      const _workspaceInfo = workspaceStructure
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nAnalyze all repositories to understand the full system.`
         : '';
 
@@ -184,7 +184,7 @@ ${context.repositories.map(r => `- ${r.name}/ (${r.type})`).join('\n')}
 2. **ANALYZE**: Define naming conventions & contracts for cross-repo consistency
 3. **OUTPUT JSON**: Master epic with shared specifications
 
-${task.attachments?.length > 0 ? `📎 ${task.attachments.length} image(s) attached - analyze for requirements\n` : ''}
+${task.attachments && task.attachments.length > 0 ? `📎 ${task.attachments.length} image(s) attached - analyze for requirements\n` : ''}
 ${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creation\n` : ''}
 
 ## JSON OUTPUT ONLY:

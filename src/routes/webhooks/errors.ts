@@ -16,6 +16,8 @@ import { WebhookApiKey } from '../../models/WebhookApiKey';
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { LogService } from '../../services/logging/LogService';
 import { NotificationService } from '../../services/NotificationService';
+import { ErrorDetectiveService } from '../../services/ErrorDetectiveService';
+import { STANDARD_CONFIG, PREMIUM_CONFIG, MAX_CONFIG } from '../../config/ModelConfigurations';
 // import { WebhookNotificationService } from '../../services/webhooks/WebhookNotificationService'; // DISABLED - requires SMTP setup
 import { z } from 'zod';
 
@@ -140,19 +142,48 @@ router.post(
 
       const { errorType, severity, message, stackTrace, metadata } = payload;
       const projectId = req.webhookAuth!.projectId;
+      const apiKeyDoc = req.webhookAuth!.apiKeyDoc;
 
       console.log(`\n${'='.repeat(80)}`);
       console.log(`🚨 Webhook Error Notification Received`);
       console.log(`Project: ${projectId}`);
       console.log(`Error: ${errorType} - ${severity}`);
       console.log(`Message: ${message.substring(0, 100)}`);
+      console.log(`Task Config: ${apiKeyDoc.taskConfig || 'standard'}`);
       console.log(`${'='.repeat(80)}\n`);
 
-      // Map severity to priority
-      const priority = mapSeverityToPriority(severity);
+      // 🔍 Step 1: Analyze error using ErrorDetective (runs BEFORE task creation)
+      console.log(`🕵️  Analyzing error with ErrorDetective...`);
+      const errorDetective = new ErrorDetectiveService();
 
-      // Build task description
-      const description = `**Error Type:** ${errorType}\n**Severity:** ${severity}\n**Message:** ${message}\n\n**Stack Trace:**\n\`\`\`\n${stackTrace?.substring(0, 10000) || 'N/A'}\n\`\`\`\n\n**Metadata:**\n\`\`\`json\n${JSON.stringify(metadata || {}, null, 2)}\n\`\`\``;
+      const analysisResult = await errorDetective.analyzeError({
+        errorLogs: message,
+        stackTrace,
+        environment: (metadata as any)?.environment || 'production',
+        errorType,
+        timestamp: new Date(),
+        metadata,
+      });
+
+      if (!analysisResult.success) {
+        console.error(`❌ ErrorDetective analysis failed: ${analysisResult.error}`);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to analyze error',
+          details: analysisResult.error,
+        });
+      }
+
+      console.log(`✅ ErrorDetective analysis complete`);
+      console.log(`   Severity: ${analysisResult.analysis?.severity}`);
+      console.log(`   Root cause: ${analysisResult.analysis?.rootCause?.substring(0, 100)}...`);
+      console.log(`   Cost: $${analysisResult.cost_usd?.toFixed(4)}`);
+
+      // Use ErrorDetective's formatted task description
+      const description = analysisResult.taskDescription!;
+
+      // Map severity to priority (use analyzed severity, not client-provided)
+      const priority = mapSeverityToPriority(analysisResult.analysis?.severity || severity);
 
       // Find active repositories for project
       const repositories = await Repository.find({
@@ -252,19 +283,56 @@ router.post(
         });
       } else {
         // ✨ NEW ERROR: Create new task
+        // Map taskConfig to model configuration
+        const configMap = {
+          standard: STANDARD_CONFIG,
+          premium: PREMIUM_CONFIG,
+          max: MAX_CONFIG,
+        };
+        const taskConfig = apiKeyDoc.taskConfig || 'standard';
+        const modelConfig = configMap[taskConfig as keyof typeof configMap];
+
+        console.log(`📋 Creating task with config: ${taskConfig}`);
+        console.log(`   Model config:`, {
+          problemAnalyst: modelConfig['problem-analyst'],
+          productManager: modelConfig['product-manager'],
+          developer: modelConfig.developer,
+          errorDetective: modelConfig['error-detective'],
+        });
+
         task = await Task.create({
-          title: `[AUTO] ${errorType}: ${message.substring(0, 100)}`,
+          title: `[AUTO] ${analysisResult.analysis?.errorType || errorType}: ${message.substring(0, 80)}`,
           description,
           priority,
           projectId,
           repositoryIds: repositories.map((r) => r._id),
           status: 'pending',
-          tags: ['webhook', 'auto-generated', severity],
+          tags: ['webhook', 'auto-generated', analysisResult.analysis?.severity || severity, 'error-detective'],
           orchestration: {
             productManager: { agent: 'product-manager', status: 'pending' },
             projectManager: { agent: 'project-manager', status: 'pending' },
-            totalCost: 0,
-            totalTokens: 0,
+            totalCost: analysisResult.cost_usd || 0, // Start with ErrorDetective cost
+            totalTokens: analysisResult.usage?.total_tokens || 0,
+
+            // Auto-approval configuration (no human approval needed for webhook errors)
+            autoApprovalEnabled: true,
+            autoApprovalPhases: [
+              'problem-analyst',
+              'product-manager',
+              'project-manager',
+              'tech-lead',
+              'team-orchestration',
+              'development',
+              'judge',
+              'test-creator',
+              'qa-engineer',
+              'contract-testing',
+              'contract-fixer',
+              'merge-coordinator',
+            ],
+
+            // Model configuration from API key
+            modelConfig,
           },
           webhookMetadata: {
             errorHash,
@@ -272,6 +340,7 @@ router.post(
             firstOccurrence: new Date(),
             lastOccurrence: new Date(),
             source: 'webhook-errors',
+            errorDetectiveAnalysis: analysisResult.analysis, // Store analysis for reference
           },
         });
 

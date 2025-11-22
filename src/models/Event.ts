@@ -70,7 +70,26 @@ export type EventType =
   // Merge events
   | 'MergeCoordinatorStarted'
   | 'MergeCoordinatorCompleted'
-  | 'MergeCoordinatorFailed';
+  | 'MergeCoordinatorFailed'
+
+  // Fixer events
+  | 'FixerStarted'
+  | 'FixerCompleted'
+  | 'FixerFailed'
+
+  // Test Creator events
+  | 'TestCreatorStarted'
+  | 'TestCreatorCompleted'
+  | 'TestCreatorFailed'
+
+  // Error Detective events
+  | 'ErrorDetectiveStarted'
+  | 'ErrorDetectiveCompleted'
+  | 'ErrorDetectiveFailed'
+
+  // Team/Developer events (optimized phases)
+  | 'TeamDevelopersCompleted'
+  | 'TechLeadTeamCompleted';
 
 /**
  * Event - Immutable record of something that happened

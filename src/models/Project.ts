@@ -7,6 +7,7 @@ export interface IProject extends Document {
   status?: string;
   userId: mongoose.Types.ObjectId;
   apiKey?: string; // Project-specific Anthropic API key (falls back to user's defaultApiKey)
+  webhookApiKey?: string; // Webhook API Key for external error reporting (format: sk-<random>)
 
   // Settings
   settings?: {
@@ -89,6 +90,13 @@ const projectSchema = new Schema<IProject>(
       required: false,
       select: false, // Don't include in queries by default (security)
     },
+    webhookApiKey: {
+      type: String,
+      required: false,
+      unique: true, // Each project gets unique webhook API key
+      sparse: true, // Allow null values (not all projects need webhooks)
+      select: false, // Don't include in queries by default (security)
+    },
     settings: {
       defaultBranch: { type: String, default: 'main' },
       autoDeployment: { type: Boolean, default: false },
@@ -137,6 +145,7 @@ const projectSchema = new Schema<IProject>(
 
 // Index for efficient queries
 projectSchema.index({ userId: 1, isActive: 1 });
+projectSchema.index({ webhookApiKey: 1 }); // Fast lookup by webhook API key
 projectSchema.index({ userId: 1, status: 1 });
 projectSchema.index({ userId: 1, type: 1 });
 

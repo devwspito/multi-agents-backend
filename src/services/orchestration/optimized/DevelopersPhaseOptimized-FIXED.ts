@@ -3,7 +3,6 @@ import { NotificationService } from '../../NotificationService';
 import { LogService } from '../../logging/LogService';
 import { RepositoryHelper } from '../utils/RepositoryHelper';
 import { safeGitExecSync } from '../../../utils/safeGitExecution';
-import path from 'path';
 
 /**
  * FIXED: Developers Phase - Now properly pushes branches to remote
@@ -16,7 +15,6 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
   readonly description = 'Implementing technical stories';
 
   private readonly MAX_PARALLEL_DEVELOPERS = 2;
-  private readonly STORY_TIMEOUT_MS = 600000; // 10 minutes per story
 
   constructor(
     private executeDeveloperFn: Function,
@@ -76,8 +74,8 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
     }
 
     NotificationService.emitAgentStarted(taskId, 'Developers');
-    await LogService.agentStarted('developers', taskId, {
-      phase: 'implementation',
+    await LogService.agentStarted('developer', taskId, {
+      phase: 'development',
       multiTeam: isMultiTeam
     });
 
@@ -140,7 +138,7 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
     const branches = new Map<string, string>();
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return branches;
@@ -195,7 +193,7 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
     const results: any[] = [];
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     // Group stories by epic for better parallelization
@@ -311,7 +309,7 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
       const commitMessage = `feat(${epicId}): ${story.title}\n\nImplemented by Developer-${story.id}`;
       try {
         safeGitExecSync('git add -A', { cwd: repoPath });
-        const commitResult = safeGitExecSync(`git commit -m "${commitMessage}"`, { cwd: repoPath });
+        const _commitResult = safeGitExecSync(`git commit -m "${commitMessage}"`, { cwd: repoPath });
         console.log(`[Developer ${story.id}] Committed changes`);
       } catch (error: any) {
         if (error.message?.includes('nothing to commit')) {
@@ -358,7 +356,7 @@ export class DevelopersPhaseOptimizedFixed extends BasePhase {
   /**
    * Build optimized developer prompt
    */
-  private buildDeveloperPrompt(story: any, repo: any, context: OrchestrationContext): string {
+  private buildDeveloperPrompt(story: any, repo: any, _context: OrchestrationContext): string {
     return `# Developer Task: ${story.title}
 
 ## Context
@@ -401,7 +399,7 @@ Start implementation immediately.`;
   ): Promise<void> {
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return;
@@ -458,7 +456,7 @@ Start implementation immediately.`;
   ): Promise<void> {
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return;
@@ -547,7 +545,7 @@ Start implementation immediately.`;
     await eventStore.append({
       taskId: task._id as any,
       eventType: isMultiTeam ? 'TeamDevelopersCompleted' : 'DevelopersCompleted',
-      agentName: 'developers',
+      agentName: 'developer',
       payload: {
         implemented: successCount,
         total: results.length,
@@ -589,7 +587,7 @@ Start implementation immediately.`;
   private initializeState(task: any, startTime: number): void {
     if (!task.orchestration.developers) {
       task.orchestration.developers = {
-        agent: 'developers',
+        agent: 'developer',
         status: 'pending'
       } as any;
     }
@@ -613,7 +611,7 @@ Start implementation immediately.`;
     }
 
     NotificationService.emitAgentFailed(taskId, 'Developers', error.message);
-    await LogService.agentFailed('developers', taskId, error, { phase: 'implementation' });
+    await LogService.agentFailed('developer', taskId, error, { phase: 'development' });
 
     return {
       phaseName: this.name,

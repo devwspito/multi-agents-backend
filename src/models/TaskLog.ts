@@ -25,7 +25,8 @@ export type LogCategory =
   | 'webhook'         // Webhook events
   | 'scheduled_cleanup' // Scheduled cleanup operations
   | 'integration'     // E2E integration testing
-  | 'error';          // Errors and failures
+  | 'error'           // Errors and failures
+  | 'agent-failure';  // Agent-specific failures
 
 /**
  * Task Log Entry
@@ -44,8 +45,8 @@ export interface ITaskLog extends Document {
   message: string;
 
   // Context (optional but recommended)
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed' | 'multi-team';
-  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'e2e-fixer';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed' | 'multi-team' | 'error-resolution' | 'contract-testing';
+  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'test-creator' | 'contract-tester' | 'error-detective';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -117,6 +118,7 @@ const taskLogSchema = new Schema<ITaskLog>(
         'scheduled_cleanup',
         'integration',
         'error',
+        'agent-failure',
       ],
       required: true,
       index: true, // Filter by category
@@ -127,11 +129,11 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     phase: {
       type: String,
-      enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'e2e', 'completed', 'multi-team'],
+      enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'e2e', 'completed', 'multi-team', 'error-resolution', 'contract-testing'],
     },
     agentType: {
       type: String,
-      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge', 'e2e-tester', 'e2e-fixer'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge', 'e2e-tester', 'contract-fixer', 'test-creator', 'contract-tester', 'error-detective'],
     },
     agentInstanceId: String,
     epicId: String,
