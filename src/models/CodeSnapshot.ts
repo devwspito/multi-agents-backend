@@ -30,7 +30,7 @@ export interface ICodeSnapshot extends Document {
 
   // Context
   phase: 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e';
-  agentType: 'developer' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'fixer' | 'e2e-fixer';
+  agentType: 'developer' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'fixer' | 'contract-fixer';
   agentInstanceId: string; // "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -104,7 +104,7 @@ const codeSnapshotSchema = new Schema<ICodeSnapshot>(
     },
     agentType: {
       type: String,
-      enum: ['developer', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'fixer', 'e2e-fixer'],
+      enum: ['developer', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'fixer', 'contract-fixer'],
       required: true,
     },
     agentInstanceId: {

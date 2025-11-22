@@ -40,7 +40,7 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'e2e-testing', 'e2e-fixer'])
+    z.enum(['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer'])
   ).optional(),
 });
 
@@ -58,7 +58,7 @@ const modelConfigSchema = z.object({
     mergeCoordinator: z.string().optional(),
     autoMerge: z.string().optional(),
     e2eTester: z.string().optional(),
-    e2eFixer: z.string().optional(),
+    contractFixer: z.string().optional(),
   }).optional(),
 });
 
@@ -678,7 +678,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/approve/:phase
  * Aprobar o rechazar una fase de la orquestación
- * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge, e2e-testing, e2e-fixer
+ * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer
  */
 router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -786,13 +786,17 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = (task.orchestration as any).autoMerge;
         phaseName = 'Auto-Merge';
         break;
-      case 'e2e-testing':
-        agentStep = (task.orchestration as any).e2eTester;
-        phaseName = 'E2E Testing';
+      case 'test-creator':
+        agentStep = (task.orchestration as any).testCreator;
+        phaseName = 'Test Creator';
         break;
-      case 'e2e-fixer':
-        agentStep = (task.orchestration as any).e2eFixer;
-        phaseName = 'E2E Fixer';
+      case 'contract-testing':
+        agentStep = (task.orchestration as any).contractTesting;
+        phaseName = 'Contract Testing';
+        break;
+      case 'contract-fixer':
+        agentStep = (task.orchestration as any).contractFixer;
+        phaseName = 'Contract Fixer';
         break;
       case 'team-orchestration':
         // Team orchestration phase - approval to START multi-team execution
@@ -840,7 +844,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, qa-engineer, merge-coordinator, auto-merge, e2e-testing, e2e-fixer`,
+          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer`,
         });
         return;
     }

@@ -211,6 +211,9 @@ export class ApprovalPhase extends BasePhase {
       'Developers': 'development',
       'TeamOrchestration': 'team-orchestration', // Use its own phase name for approval
       'AutoMerge': 'auto-merge',
+      'TestCreator': 'test-creator',
+      'contract-testing': 'contract-testing', // Already kebab-case
+      'contract-fixer': 'contract-fixer', // Already kebab-case
     };
 
     if (specialCases[phase]) {
@@ -235,9 +238,12 @@ export class ApprovalPhase extends BasePhase {
       'Developers': 'Development Team',
       'TeamOrchestration': 'Team Orchestration',
       'Judge': 'Judge Evaluation',
+      'TestCreator': 'Test Creator',
       'QA': 'QA Engineer',
       'Merge': 'Merge Coordinator',
       'AutoMerge': 'Auto-Merge',
+      'contract-testing': 'Contract Testing',
+      'contract-fixer': 'Contract Fixer',
     };
 
     return phaseNames[phase] || phase;

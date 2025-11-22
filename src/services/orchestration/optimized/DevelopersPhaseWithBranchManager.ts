@@ -4,7 +4,6 @@ import { LogService } from '../../logging/LogService';
 import { RepositoryHelper } from '../utils/RepositoryHelper';
 import { GitBranchManager } from '../utils/GitBranchManager';
 import { safeGitExecSync } from '../../../utils/safeGitExecution';
-import path from 'path';
 
 /**
  * ENHANCED: Developers Phase with GitBranchManager
@@ -17,7 +16,6 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
   readonly description = 'Implementing technical stories with guaranteed branch management';
 
   private readonly MAX_PARALLEL_DEVELOPERS = 2;
-  private readonly STORY_TIMEOUT_MS = 600000;
   private branchManager: GitBranchManager;
 
   constructor(
@@ -74,8 +72,8 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
     }
 
     NotificationService.emitAgentStarted(taskId, 'Developers');
-    await LogService.agentStarted('developers', taskId, {
-      phase: 'implementation',
+    await LogService.agentStarted('developer', taskId, {
+      phase: 'development',
       multiTeam: isMultiTeam
     });
 
@@ -107,7 +105,7 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
       // Verify all branches are on remote
       const repos = RepositoryHelper.buildRepoContext(
         context.repositories,
-        context.workspacePath
+        context.workspacePath || undefined
       );
       if (repos.length > 0) {
         const verification = await this.branchManager.verifyRemoteBranches(repos[0].path);
@@ -143,7 +141,7 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
     const branches = new Map<string, string>();
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return branches;
@@ -188,7 +186,7 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
     const results: any[] = [];
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     const storyGroups = this.groupStoriesByEpic(stories);
@@ -338,7 +336,7 @@ export class DevelopersPhaseWithBranchManager extends BasePhase {
     }
   }
 
-  private buildDeveloperPrompt(story: any, repo: any, context: OrchestrationContext): string {
+  private buildDeveloperPrompt(story: any, repo: any, _context: OrchestrationContext): string {
     return `# Developer Task: ${story.title}
 
 ## Context
@@ -372,7 +370,7 @@ Start implementation immediately.`;
   ): Promise<void> {
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return;
@@ -428,7 +426,7 @@ Start implementation immediately.`;
   ): Promise<void> {
     const repos = RepositoryHelper.buildRepoContext(
       context.repositories,
-      context.workspacePath
+      context.workspacePath || undefined
     );
 
     if (repos.length === 0) return;
@@ -499,7 +497,7 @@ Start implementation immediately.`;
     await eventStore.append({
       taskId: task._id as any,
       eventType: isMultiTeam ? 'TeamDevelopersCompleted' : 'DevelopersCompleted',
-      agentName: 'developers',
+      agentName: 'developer',
       payload: {
         implemented: successCount,
         total: results.length,
@@ -540,7 +538,7 @@ Start implementation immediately.`;
   private initializeState(task: any, startTime: number): void {
     if (!task.orchestration.developers) {
       task.orchestration.developers = {
-        agent: 'developers',
+        agent: 'developer',
         status: 'pending'
       } as any;
     }
@@ -561,7 +559,7 @@ Start implementation immediately.`;
     }
 
     NotificationService.emitAgentFailed(taskId, 'Developers', error.message);
-    await LogService.agentFailed('developers', taskId, error, { phase: 'implementation' });
+    await LogService.agentFailed('developer', taskId, error, { phase: 'development' });
 
     return {
       phaseName: this.name,

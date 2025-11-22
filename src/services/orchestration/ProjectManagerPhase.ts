@@ -162,7 +162,7 @@ export class ProjectManagerPhase extends BasePhase {
 `
         : '';
 
-      const workspaceInfo = workspaceStructure
+      const _workspaceInfo = workspaceStructure
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nDefine scope and dependencies across all repositories.`
         : '';
 

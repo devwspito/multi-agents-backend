@@ -53,7 +53,7 @@ export class ProductManagerPhaseOptimized extends BasePhase {
     const startTime = Date.now();
     const task = context.task;
     const taskId = (task._id as any).toString();
-    const repositories = context.repositories;
+    const _repositories = context.repositories;
 
     // Initialize state
     this.initializeState(task, startTime);
@@ -131,7 +131,7 @@ export class ProductManagerPhaseOptimized extends BasePhase {
    * Build optimized prompt using PromptBuilder
    */
   private buildOptimizedPrompt(task: any, context: OrchestrationContext): string {
-    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath);
+    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath || undefined);
     const isContinuation = task.orchestration.continuations?.length > 0;
 
     const builder = new PromptBuilder()

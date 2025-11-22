@@ -192,10 +192,10 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
   },
 
   /**
-   * E2E Fixer
-   * Needs: Full file operations to fix e2e issues
+   * Contract Fixer
+   * Needs: Full file operations to fix contract issues
    */
-  'e2e-fixer': {
+  'contract-fixer': {
     allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
     deniedCommands: [
       'rm -rf',

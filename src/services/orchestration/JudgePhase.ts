@@ -595,10 +595,10 @@ export class JudgePhase extends BasePhase {
    * Build evaluation prompt for Judge agent
    */
   private buildJudgePrompt(
-    task: any,
+    _task: any,
     story: any,
     developer: any,
-    workspacePath: string | null,
+    _workspacePath: string | null,
     commitSHA?: string,
     targetRepository?: string,
     storyBranchName?: string
@@ -718,7 +718,6 @@ Files to check:
     // STRATEGY 4: Look for JSON-like strings with "approved" field
     try {
       const approvedMatch = output.match(/"approved"\s*:\s*(true|false)/);
-      const verdictMatch = output.match(/"verdict"\s*:\s*"([^"]+)"/);
       const feedbackMatch = output.match(/"feedback"\s*:\s*"([^"]+)"/);
       const reasoningMatch = output.match(/"reasoning"\s*:\s*"([^"]+)"/);
 

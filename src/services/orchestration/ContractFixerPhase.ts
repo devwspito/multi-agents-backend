@@ -4,25 +4,25 @@ import { LogService } from '../logging/LogService';
 import crypto from 'crypto';
 
 /**
- * E2E Fixer Phase
+ * Contract Fixer Phase
  *
- * Fixes frontend-backend integration issues detected by E2E Testing Phase.
- * Only executes when E2E Testing detects integration errors.
+ * Fixes frontend-backend integration issues detected by Contract Testing Phase.
+ * Only executes when Contract Testing detects integration errors.
  *
  * Responsibilities:
- * 1. Receive integration error details from E2E Testing
+ * 1. Receive integration error details from Contract Testing
  * 2. Analyze the root cause (missing endpoint, CORS, payload mismatch, etc.)
  * 3. Fix the issue (create routes, configure CORS, align payloads)
  * 4. Commit and push fixes
- * 5. Allow E2E Testing to retry
+ * 5. Allow Contract Testing to retry
  *
  * SMART RETRY LOGIC:
  * - Allows multiple attempts if errors are DIFFERENT (different error hash)
  * - Limits to MAX_RETRIES (3) if the SAME error persists
  * - Allows continuation if unable to fix after max retries
  */
-export class E2EFixerPhase extends BasePhase {
-  readonly name = 'e2e-fixer';
+export class ContractFixerPhase extends BasePhase {
+  readonly name = 'contract-fixer';
   readonly description = 'Fixing frontend-backend integration issues';
   private readonly MAX_RETRIES = 3;
 
@@ -39,15 +39,15 @@ export class E2EFixerPhase extends BasePhase {
   }
 
   /**
-   * Skip if E2E didn't fail OR if we've exceeded max retries for same error
+   * Skip if Contract Testing didn't fail OR if we've exceeded max retries for same error
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
     const e2eErrors = context.getData<string>('e2eErrors');
     const e2eErrorType = context.getData<string>('e2eErrorType');
-    const shouldRunFixer = context.getData<boolean>('shouldRunE2EFixer');
+    const shouldRunFixer = context.getData<boolean>('shouldRunContractFixer');
 
-    console.log(`🔧 [E2EFixer] shouldSkip() called - Checking context data:`, {
+    console.log(`🔧 [ContractFixer] shouldSkip() called - Checking context data:`, {
       hasE2eErrors: !!e2eErrors,
       e2eErrorsLength: e2eErrors?.length || 0,
       e2eErrorType: e2eErrorType,
@@ -56,8 +56,8 @@ export class E2EFixerPhase extends BasePhase {
 
     // Don't run if no errors or not explicitly requested
     if (!e2eErrors || !shouldRunFixer) {
-      console.log(`❌ [SKIP] E2E Fixer will be skipped:`, {
-        reason: !e2eErrors ? 'No E2E errors found in context' : 'Not requested to run',
+      console.log(`❌ [SKIP] Contract Fixer will be skipped:`, {
+        reason: !e2eErrors ? 'No contract errors found in context' : 'Not requested to run',
         e2eErrors: e2eErrors ? 'present' : 'missing',
         shouldRunFixer,
       });
@@ -68,11 +68,11 @@ export class E2EFixerPhase extends BasePhase {
     const currentErrorHash = this.calculateErrorHash(e2eErrors, e2eErrorType || 'unknown');
 
     // Get fixer state from task
-    const fixerState = task.orchestration.e2eFixer;
+    const fixerState = task.orchestration.contractFixer;
     const lastErrorHash = fixerState?.lastErrorHash;
     const attempts = fixerState?.attempts || 0;
 
-    console.log(`🔧 [E2EFixer] Retry analysis:`, {
+    console.log(`🔧 [ContractFixer] Retry analysis:`, {
       currentErrorHash,
       lastErrorHash,
       attempts,
@@ -82,7 +82,7 @@ export class E2EFixerPhase extends BasePhase {
 
     // If error is DIFFERENT, allow retry (reset attempts)
     if (lastErrorHash && currentErrorHash !== lastErrorHash) {
-      console.log(`✅ [E2EFixer] Error changed - allowing retry (resetting attempt counter)`);
+      console.log(`✅ [ContractFixer] Error changed - allowing retry (resetting attempt counter)`);
       console.log(`   Old error hash: ${lastErrorHash}`);
       console.log(`   New error hash: ${currentErrorHash}`);
       return false; // Execute fixer
@@ -90,18 +90,18 @@ export class E2EFixerPhase extends BasePhase {
 
     // If SAME error and exceeded max retries, skip
     if (attempts >= this.MAX_RETRIES && currentErrorHash === lastErrorHash) {
-      console.log(`❌ [SKIP] E2E Fixer exceeded max retries (${this.MAX_RETRIES}) for same error`);
+      console.log(`❌ [SKIP] Contract Fixer exceeded max retries (${this.MAX_RETRIES}) for same error`);
       console.log(`   Error hash: ${currentErrorHash}`);
       console.log(`   Will allow continuation with documented errors`);
 
       // Mark that we've given up, allow continuation
-      context.setData('e2eFixerGaveUp', true);
-      context.setData('e2eFixerMaxRetriesReached', true);
+      context.setData('contractFixerGaveUp', true);
+      context.setData('contractFixerMaxRetriesReached', true);
 
       return true; // Skip - we tried enough times
     }
 
-    console.log(`✅ [E2EFixer] Will execute - attempt ${attempts + 1}/${this.MAX_RETRIES}`);
+    console.log(`✅ [ContractFixer] Will execute - attempt ${attempts + 1}/${this.MAX_RETRIES}`);
     console.log(`   Error type: ${e2eErrorType}`);
     console.log(`   Error hash: ${currentErrorHash}`);
     return false;
@@ -121,15 +121,15 @@ export class E2EFixerPhase extends BasePhase {
     // Calculate error hash
     const currentErrorHash = this.calculateErrorHash(e2eErrors || '', e2eErrorType);
 
-    console.log(`\n🔧 [E2EFixer] Starting E2E Fixer`);
+    console.log(`\n🔧 [ContractFixer] Starting Contract Fixer`);
     console.log(`   Error type: ${e2eErrorType}`);
     console.log(`   Error hash: ${currentErrorHash}`);
     console.log(`   Will attempt to fix integration issues`);
 
     // Initialize or update phase state
-    if (!task.orchestration.e2eFixer) {
-      task.orchestration.e2eFixer = {
-        agent: 'e2e-fixer',
+    if (!task.orchestration.contractFixer) {
+      task.orchestration.contractFixer = {
+        agent: 'contract-fixer',
         status: 'pending',
         attempts: 0,
         errorHistory: [],
@@ -137,24 +137,24 @@ export class E2EFixerPhase extends BasePhase {
     }
 
     // Check if error changed - reset attempts if so
-    const lastErrorHash = task.orchestration.e2eFixer!.lastErrorHash;
+    const lastErrorHash = task.orchestration.contractFixer!.lastErrorHash;
     if (lastErrorHash && lastErrorHash !== currentErrorHash) {
-      console.log(`🔄 [E2EFixer] Error changed - resetting attempt counter`);
-      task.orchestration.e2eFixer!.attempts = 0;
+      console.log(`🔄 [ContractFixer] Error changed - resetting attempt counter`);
+      task.orchestration.contractFixer!.attempts = 0;
     }
 
     // Increment attempts
-    const currentAttempt = (task.orchestration.e2eFixer!.attempts || 0) + 1;
-    task.orchestration.e2eFixer!.attempts = currentAttempt;
-    task.orchestration.e2eFixer!.lastErrorHash = currentErrorHash;
+    const currentAttempt = (task.orchestration.contractFixer!.attempts || 0) + 1;
+    task.orchestration.contractFixer!.attempts = currentAttempt;
+    task.orchestration.contractFixer!.lastErrorHash = currentErrorHash;
 
     console.log(`   Attempt: ${currentAttempt}/${this.MAX_RETRIES}`);
 
     // Record error in history
-    if (!task.orchestration.e2eFixer!.errorHistory) {
-      task.orchestration.e2eFixer!.errorHistory = [];
+    if (!task.orchestration.contractFixer!.errorHistory) {
+      task.orchestration.contractFixer!.errorHistory = [];
     }
-    task.orchestration.e2eFixer!.errorHistory.push({
+    task.orchestration.contractFixer!.errorHistory.push({
       errorHash: currentErrorHash,
       errorType: e2eErrorType,
       attempt: currentAttempt,
@@ -162,13 +162,13 @@ export class E2EFixerPhase extends BasePhase {
     });
 
     const startTime = new Date();
-    task.orchestration.e2eFixer!.status = 'in_progress';
-    task.orchestration.e2eFixer!.startedAt = startTime;
+    task.orchestration.contractFixer!.status = 'in_progress';
+    task.orchestration.contractFixer!.startedAt = startTime;
     await task.save();
 
-    NotificationService.emitAgentStarted(taskId, 'E2E Fixer');
+    NotificationService.emitAgentStarted(taskId, 'Contract Fixer');
 
-    await LogService.agentStarted('e2e-fixer', taskId, {
+    await LogService.agentStarted('contract-fixer', taskId, {
       phase: 'e2e',
       metadata: {
         errorType: e2eErrorType,
@@ -188,8 +188,8 @@ export class E2EFixerPhase extends BasePhase {
       const frontendRepo = repoContext.find(r => r.type === 'frontend');
       const backendRepo = repoContext.find(r => r.type === 'backend');
 
-      // Build prompt for E2E Fixer
-      const prompt = `You are the E2E Fixer Agent. The E2E Tester detected integration issues between frontend and backend.
+      // Build prompt for Contract Fixer
+      const prompt = `You are the Contract Fixer Agent. The Contract Testing phase detected integration issues between frontend and backend.
 
 # Integration Errors Detected
 
@@ -316,48 +316,48 @@ If you cannot fix the issue:
 
 Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and push. Don't just describe what to do - DO IT.
 
-**E2E Fixing Guidelines**:
+**Contract Fixing Guidelines**:
 - Prioritize fixing integration issues that block the entire flow (API contracts, shared types, communication)
 - If there are multiple integration points failing, fix them in order of criticality
 - Focus on making services communicate correctly - detailed error handling can come later
 - Test your fixes incrementally if possible (fix one integration point, verify, move to next)`;
 
-      // Execute E2E Fixer
+      // Execute Contract Fixer
       const result = await this.executeAgentFn(
-        'e2e-fixer',
+        'contract-fixer',
         prompt,
         workspacePath || process.cwd(),
         taskId,
-        'E2E Fixer',
+        'Contract Fixer',
         undefined, // sessionId
         undefined  // fork
       );
 
-      console.log(`✅ [E2EFixer] Fixer execution complete`);
+      console.log(`✅ [ContractFixer] Fixer execution complete`);
 
       // Parse fixer output
       const parsed = this.parseFixerOutput(result.output || '');
 
-      console.log(`📊 [E2EFixer] Parsed result:`, {
+      console.log(`📊 [ContractFixer] Parsed result:`, {
         fixed: parsed.fixed,
         filesModifiedCount: parsed.filesModified.length,
         changesCount: parsed.changes.length,
       });
 
       if (parsed.fixed) {
-        console.log(`✅ [E2EFixer] Successfully fixed integration errors`);
+        console.log(`✅ [ContractFixer] Successfully fixed integration errors`);
         console.log(`   Files modified: ${parsed.filesModified.length > 0 ? parsed.filesModified.join(', ') : 'unknown'}`);
 
         // Update task with success
-        task.orchestration.e2eFixer!.status = 'completed';
-        task.orchestration.e2eFixer!.completedAt = new Date();
-        task.orchestration.e2eFixer!.output = result.output;
-        task.orchestration.e2eFixer!.sessionId = result.sessionId;
-        task.orchestration.e2eFixer!.usage = result.usage;
-        task.orchestration.e2eFixer!.cost_usd = result.cost;
-        task.orchestration.e2eFixer!.fixed = true;
-        task.orchestration.e2eFixer!.filesModified = parsed.filesModified;
-        task.orchestration.e2eFixer!.changes = parsed.changes;
+        task.orchestration.contractFixer!.status = 'completed';
+        task.orchestration.contractFixer!.completedAt = new Date();
+        task.orchestration.contractFixer!.output = result.output;
+        task.orchestration.contractFixer!.sessionId = result.sessionId;
+        task.orchestration.contractFixer!.usage = result.usage;
+        task.orchestration.contractFixer!.cost_usd = result.cost;
+        task.orchestration.contractFixer!.fixed = true;
+        task.orchestration.contractFixer!.filesModified = parsed.filesModified;
+        task.orchestration.contractFixer!.changes = parsed.changes;
 
         // Update costs
         task.orchestration.totalCost += result.cost;
@@ -368,11 +368,11 @@ Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and p
 
         NotificationService.emitAgentCompleted(
           taskId,
-          'E2E Fixer',
+          'Contract Fixer',
           `Fixed ${e2eErrorType} errors: ${parsed.changes.length > 0 ? parsed.changes.join(', ') : 'See logs'}`
         );
 
-        await LogService.agentCompleted('e2e-fixer', taskId, {
+        await LogService.agentCompleted('contract-fixer', taskId, {
           phase: 'e2e',
           metadata: {
             errorType: e2eErrorType,
@@ -381,9 +381,9 @@ Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and p
           },
         });
 
-        // Mark to run E2E Testing again
+        // Mark to run Contract Testing again
         context.setData('shouldRunE2ETesting', true);
-        context.setData('shouldRunE2EFixer', false);
+        context.setData('shouldRunContractFixer', false);
 
         return {
           success: true,
@@ -391,73 +391,73 @@ Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and p
             fixed: true,
             filesModified: parsed.filesModified,
             changes: parsed.changes,
-            shouldRetryE2E: true,
+            shouldRetryContractTesting: true,
           },
         };
       } else {
-        console.log(`❌ [E2EFixer] Could not fix integration errors`);
+        console.log(`❌ [ContractFixer] Could not fix integration errors`);
 
         // Update task with failure
-        task.orchestration.e2eFixer!.status = 'failed';
-        task.orchestration.e2eFixer!.completedAt = new Date();
-        task.orchestration.e2eFixer!.output = result.output;
-        task.orchestration.e2eFixer!.error = 'Could not fix integration errors';
-        task.orchestration.e2eFixer!.fixed = false;
+        task.orchestration.contractFixer!.status = 'failed';
+        task.orchestration.contractFixer!.completedAt = new Date();
+        task.orchestration.contractFixer!.output = result.output;
+        task.orchestration.contractFixer!.error = 'Could not fix integration errors';
+        task.orchestration.contractFixer!.fixed = false;
         await task.save();
 
         NotificationService.emitAgentMessage(
           taskId,
-          'E2E Fixer',
-          `⚠️ E2E Fixer attempted to fix ${e2eErrorType} errors but was unsuccessful. Integration issues will be documented in final report.`
+          'Contract Fixer',
+          `⚠️ Contract Fixer attempted to fix ${e2eErrorType} errors but was unsuccessful. Integration issues will be documented in final report.`
         );
 
-        await LogService.agentFailed('e2e-fixer', taskId, new Error('Could not fix integration errors'), {
+        await LogService.agentFailed('contract-fixer', taskId, new Error('Could not fix integration errors'), {
           phase: 'e2e',
         });
 
-        // Mark that E2E Fixer failed on this attempt
-        const attempts = task.orchestration.e2eFixer!.attempts || 0;
+        // Mark that Contract Fixer failed on this attempt
+        const attempts = task.orchestration.contractFixer!.attempts || 0;
         const maxRetriesReached = attempts >= this.MAX_RETRIES;
 
-        context.setData('e2eFixerFailed', true);
-        context.setData('shouldRunE2EFixer', false);
+        context.setData('contractFixerFailed', true);
+        context.setData('shouldRunContractFixer', false);
 
         if (maxRetriesReached) {
-          console.log(`⚠️  [E2EFixer] Max retries reached (${this.MAX_RETRIES}) - allowing continuation with documented errors`);
-          context.setData('e2eFixerMaxRetriesReached', true);
-          context.setData('shouldRunE2ETesting', false); // Don't retry E2E
+          console.log(`⚠️  [ContractFixer] Max retries reached (${this.MAX_RETRIES}) - allowing continuation with documented errors`);
+          context.setData('contractFixerMaxRetriesReached', true);
+          context.setData('shouldRunE2ETesting', false); // Don't retry Contract Testing
         } else {
-          // Still have retries left, can try E2E Testing again
+          // Still have retries left, can try Contract Testing again
           context.setData('shouldRunE2ETesting', true);
         }
 
         return {
           success: false,
           error: maxRetriesReached
-            ? 'E2E Fixer reached max retries - allowing continuation'
-            : 'E2E Fixer could not resolve integration errors',
+            ? 'Contract Fixer reached max retries - allowing continuation'
+            : 'Contract Fixer could not resolve integration errors',
           data: {
             fixed: false,
             maxRetriesReached,
-            shouldRetryE2E: !maxRetriesReached,
+            shouldRetryContractTesting: !maxRetriesReached,
           },
         };
       }
     } catch (error: any) {
-      console.error(`❌ [E2EFixer] Critical error: ${error.message}`);
+      console.error(`❌ [ContractFixer] Critical error: ${error.message}`);
 
       // Update task with error
-      task.orchestration.e2eFixer!.status = 'failed';
-      task.orchestration.e2eFixer!.completedAt = new Date();
-      task.orchestration.e2eFixer!.error = error.message;
-      task.orchestration.e2eFixer!.fixed = false;
+      task.orchestration.contractFixer!.status = 'failed';
+      task.orchestration.contractFixer!.completedAt = new Date();
+      task.orchestration.contractFixer!.error = error.message;
+      task.orchestration.contractFixer!.fixed = false;
       await task.save();
 
-      await LogService.agentFailed('e2e-fixer', taskId, error, {
+      await LogService.agentFailed('contract-fixer', taskId, error, {
         phase: 'e2e',
       });
 
-      context.setData('e2eFixerFailed', true);
+      context.setData('contractFixerFailed', true);
       context.setData('e2eAttempt', 2);
 
       return {
@@ -468,7 +468,7 @@ Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and p
   }
 
   /**
-   * Parse E2E Fixer output (expects JSON)
+   * Parse Contract Fixer output (expects JSON)
    */
   private parseFixerOutput(output: string): {
     fixed: boolean;
@@ -493,7 +493,7 @@ Remember: Use tools immediately. Read files, Edit/Write fixes, Bash commit and p
         };
       }
     } catch (error) {
-      console.warn(`⚠️ Failed to parse E2E Fixer output as JSON`);
+      console.warn(`⚠️ Failed to parse Contract Fixer output as JSON`);
     }
 
     // Fallback: check if output says "fixed"

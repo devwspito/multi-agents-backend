@@ -5,7 +5,7 @@ import fs from 'fs/promises';
 import { User } from '../models/User';
 import { EnvService } from './EnvService';
 import { IEnvVariable } from '../models/Repository';
-import { safeGitExec, safePushBranch, safeFetch, safePull, safeVerifyRemoteBranch, fixGitRemoteAuth } from '../utils/safeGitExecution';
+import { safeGitExec, safeFetch, safePull, fixGitRemoteAuth } from '../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
 
@@ -179,8 +179,8 @@ export class GitHubService {
       }
     }
 
-    console.error(`❌ All ${maxRetries} clone attempts failed for ${githubRepoName}`);
-    throw new Error(`Failed to clone repository ${githubRepoName} after ${maxRetries} attempts: ${lastError.message}`);
+    console.error(`❌ All ${maxRetries} clone attempts failed for ${repoName}`);
+    throw new Error(`Failed to clone repository ${repoName} after ${maxRetries} attempts: ${lastError.message}`);
   }
 
   /**

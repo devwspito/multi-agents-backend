@@ -25,7 +25,6 @@ import { CostBudgetService } from './CostBudgetService';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
-import { execSync } from 'child_process';
 
 /**
  * DeveloperProgress - Tracks developer execution in real-time
@@ -96,9 +95,10 @@ export class OrchestrationCoordinator {
     'ProjectManager',      // 2. Break into epics (Sonnet 4.5 orchestrator)
     'Approval',            // 2.5 Human approval gate
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
-    'e2e-testing',          // 4. End-to-end integration testing (frontend-backend)
-    'e2e-fixer',            // 4.5 Fix integration issues if E2E detected errors
-    'Approval',            // 5. Human approval gate (final approval - all teams done + E2E passed)
+    'TestCreator',         // 3.5 Create comprehensive test suites (unit, integration, E2E)
+    'contract-testing',    // 4. API contract verification (static analysis - no server startup)
+    'contract-fixer',      // 4.5 Fix contract issues if contract testing detected errors (loop: contract-testing → contract-fixer → contract-testing)
+    'Approval',            // 5. Human approval gate (final approval - all teams done + contracts verified)
     'AutoMerge',           // 6. Automatically merge PRs to main
   ];
 
@@ -588,14 +588,14 @@ export class OrchestrationCoordinator {
           }
         }
 
-        // 🔥 SPECIAL HANDLING: e2e-testing → e2e-fixer → e2e-testing smart retry loop
-        if (phaseName === 'e2e-testing' && result.success && result.data?.hasErrors) {
-          console.log(`🔧 [E2ETesting] E2E detected integration errors - executing E2E Fixer phase`);
+        // 🔥 SPECIAL HANDLING: contract-testing → contract-fixer → contract-testing smart retry loop
+        if (phaseName === 'contract-testing' && result.success && result.data?.hasErrors) {
+          console.log(`🔧 [ContractTesting] Contract testing detected API contract errors - executing Contract Fixer phase`);
           console.log(`   Error type: ${result.data?.errorType}`);
-          NotificationService.emitConsoleLog(taskId, 'info', `🔧 E2E Testing detected integration errors - executing E2E Fixer to resolve`);
+          NotificationService.emitConsoleLog(taskId, 'info', `🔧 Contract testing detected API contract errors - executing Contract Fixer to resolve`);
 
-          // Mark that E2E Fixer should run
-          context.setData('shouldRunE2EFixer', true);
+          // Mark that Contract Fixer should run
+          context.setData('shouldRunContractFixer', true);
 
           // Loop: Execute Fixer → Test → Fixer... until fixed or max retries
           let retryCount = 0;
@@ -603,76 +603,76 @@ export class OrchestrationCoordinator {
           let fixed = false;
 
           while (retryCount < maxRetries && !fixed) {
-            console.log(`\n🔄 [E2E Loop] Iteration ${retryCount + 1}/${maxRetries}`);
+            console.log(`\n🔄 [Contract Loop] Iteration ${retryCount + 1}/${maxRetries}`);
 
-            // Execute E2E Fixer
-            const e2eFixerPhase = this.createPhase('e2e-fixer', context);
-            if (!e2eFixerPhase) {
-              console.log(`❌ [E2E Loop] Could not create E2E Fixer phase - breaking loop`);
+            // Execute Contract Fixer
+            const contractFixerPhase = this.createPhase('contract-fixer', context);
+            if (!contractFixerPhase) {
+              console.log(`❌ [Contract Loop] Could not create Contract Fixer phase - breaking loop`);
               break;
             }
 
-            const e2eFixerResult = await e2eFixerPhase.execute(context);
-            console.log(`🔧 [E2EFixer] Execution completed:`, {
-              success: e2eFixerResult.success,
-              fixed: e2eFixerResult.data?.fixed,
-              maxRetriesReached: e2eFixerResult.data?.maxRetriesReached,
+            const contractFixerResult = await contractFixerPhase.execute(context);
+            console.log(`🔧 [ContractFixer] Execution completed:`, {
+              success: contractFixerResult.success,
+              fixed: contractFixerResult.data?.fixed,
+              maxRetriesReached: contractFixerResult.data?.maxRetriesReached,
             });
 
             // Check if max retries reached for same error
-            if (e2eFixerResult.data?.maxRetriesReached) {
-              console.log(`⚠️  [E2E Loop] Max retries reached for same error - allowing continuation with documented errors`);
-              NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ E2E Fixer tried ${maxRetries} times but couldn't fix the same error - allowing continuation`);
+            if (contractFixerResult.data?.maxRetriesReached) {
+              console.log(`⚠️  [Contract Loop] Max retries reached for same error - allowing continuation with documented errors`);
+              NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Contract Fixer tried ${maxRetries} times but couldn't fix the same error - allowing continuation`);
               break;
             }
 
             // Check if fixer succeeded
-            if (e2eFixerResult.success && e2eFixerResult.data?.fixed) {
-              console.log(`✅ [E2EFixer] Fixed integration errors - re-running E2E Testing`);
-              NotificationService.emitConsoleLog(taskId, 'info', `✅ E2E Fixer completed - re-running integration tests`);
+            if (contractFixerResult.success && contractFixerResult.data?.fixed) {
+              console.log(`✅ [ContractFixer] Fixed contract errors - re-running Contract Testing`);
+              NotificationService.emitConsoleLog(taskId, 'info', `✅ Contract Fixer completed - re-running contract tests`);
 
-              // Re-run E2E Testing
-              const e2eTestingPhaseRetry = this.createPhase('e2e-testing', context);
-              if (e2eTestingPhaseRetry) {
-                const e2eTestingResultRetry = await e2eTestingPhaseRetry.execute(context);
+              // Re-run Contract Testing
+              const contractTestingPhaseRetry = this.createPhase('contract-testing', context);
+              if (contractTestingPhaseRetry) {
+                const contractTestingResultRetry = await contractTestingPhaseRetry.execute(context);
 
-                if (e2eTestingResultRetry.success) {
-                  if (e2eTestingResultRetry.data?.hasErrors) {
+                if (contractTestingResultRetry.success) {
+                  if (contractTestingResultRetry.data?.hasErrors) {
                     // Still has errors - check if error changed
-                    console.log(`⚠️  [E2E Loop] E2E Testing still reports errors - may be different error, continuing loop`);
-                    context.setData('shouldRunE2EFixer', true);
+                    console.log(`⚠️  [Contract Loop] Contract testing still reports errors - may be different error, continuing loop`);
+                    context.setData('shouldRunContractFixer', true);
                     retryCount++;
                   } else {
                     // No errors - success!
-                    console.log(`✅ [E2E Loop] E2E Testing passed - integration verified`);
-                    NotificationService.emitConsoleLog(taskId, 'info', `✅ E2E Testing passed - frontend-backend integration verified`);
+                    console.log(`✅ [Contract Loop] Contract testing passed - integration verified`);
+                    NotificationService.emitConsoleLog(taskId, 'info', `✅ Contract testing passed - frontend-backend contracts verified`);
                     fixed = true;
                     break;
                   }
                 } else {
-                  console.log(`❌ [E2E Loop] E2E Testing failed critically: ${e2eTestingResultRetry.error}`);
+                  console.log(`❌ [Contract Loop] Contract testing failed critically: ${contractTestingResultRetry.error}`);
                   break;
                 }
               }
             } else {
               // Fixer failed this iteration
-              console.log(`⚠️  [E2EFixer] Could not fix on this attempt (${retryCount + 1}/${maxRetries})`);
+              console.log(`⚠️  [ContractFixer] Could not fix on this attempt (${retryCount + 1}/${maxRetries})`);
 
-              if (e2eFixerResult.data?.shouldRetryE2E) {
-                // Can retry E2E Testing to see if error changed
-                console.log(`🔄 [E2E Loop] Will retry E2E Testing to detect if error changed`);
+              if (contractFixerResult.data?.shouldRetryContractTesting) {
+                // Can retry Contract Testing to see if error changed
+                console.log(`🔄 [Contract Loop] Will retry contract testing to detect if error changed`);
                 retryCount++;
               } else {
                 // Don't retry
-                console.log(`⏹️  [E2E Loop] Stopping retry loop`);
+                console.log(`⏹️  [Contract Loop] Stopping retry loop`);
                 break;
               }
             }
           }
 
           if (!fixed && retryCount >= maxRetries) {
-            console.log(`⚠️  [E2E Loop] Completed ${maxRetries} iterations without full fix - allowing continuation with documented errors`);
-            NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ E2E testing completed with remaining integration issues - documented for review`);
+            console.log(`⚠️  [Contract Loop] Completed ${maxRetries} iterations without full fix - allowing continuation with documented errors`);
+            NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Contract testing completed with remaining contract issues - documented for review`);
           }
         }
 
@@ -844,11 +844,14 @@ export class OrchestrationCoordinator {
       case 'Fixer':
         return new (require('./FixerPhase').FixerPhase)(executeAgentWithContext);
 
-      case 'e2e-testing':
-        return new (require('./E2ETestingPhase').E2ETestingPhase)(executeAgentWithContext);
+      case 'TestCreator':
+        return new (require('./TestCreatorPhase').TestCreatorPhase)(executeAgentWithContext);
 
-      case 'e2e-fixer':
-        return new (require('./E2EFixerPhase').E2EFixerPhase)(executeAgentWithContext);
+      case 'contract-testing':
+        return new (require('./ContractTestingPhase').ContractTestingPhase)(executeAgentWithContext);
+
+      case 'contract-fixer':
+        return new (require('./ContractFixerPhase').ContractFixerPhase)(executeAgentWithContext);
 
       case 'Approval':
         return new ApprovalPhase();
@@ -1047,8 +1050,11 @@ export class OrchestrationCoordinator {
       }
     }
 
-    // Get agent configuration with specialization for developers
-    const agentDef = agentType === 'developer'
+    // Get agent configuration with specialization
+    // - Developers: get repository-specific specialization (frontend/backend)
+    // - QA agents: get test-engineer specialization (always applied)
+    const needsSpecialization = agentType === 'developer' || agentType === 'qa-engineer' || agentType === 'contract-tester';
+    const agentDef = needsSpecialization
       ? getAgentDefinitionWithSpecialization(agentType, repositoryType)
       : getAgentDefinition(agentType);
 
@@ -1583,7 +1589,7 @@ export class OrchestrationCoordinator {
       const configs = await import('../../config/ModelConfigurations');
 
       // Get the actual AgentModelConfig from the task
-      let actualConfig: configs.AgentModelConfig = configs.STANDARD_CONFIG;
+      let actualConfig: typeof configs.STANDARD_CONFIG = configs.STANDARD_CONFIG;
 
       if (task.orchestration.modelConfig) {
         const { preset, customConfig } = task.orchestration.modelConfig;
@@ -1607,7 +1613,7 @@ export class OrchestrationCoordinator {
       console.log(`   Reason: Judge rejected code, using best available model for retry`);
 
       // Temporarily override developer model to topModel
-      const updatedConfig: configs.AgentModelConfig = {
+      const updatedConfig: typeof configs.STANDARD_CONFIG = {
         ...actualConfig,
         'developer': topModel
       };

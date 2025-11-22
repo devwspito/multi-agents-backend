@@ -120,7 +120,7 @@ export class TechLeadPhaseOptimized extends BasePhase {
     context: OrchestrationContext,
     isMultiTeam: boolean
   ): string {
-    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath);
+    const repos = RepositoryHelper.buildRepoContext(context.repositories, context.workspacePath || undefined);
     const builder = new PromptBuilder();
 
     // Common header

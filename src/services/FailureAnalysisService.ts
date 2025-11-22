@@ -93,8 +93,10 @@ export class FailureAnalysisService {
       {
         taskId,
         category: 'agent-failure',
-        phase,
-        ...failure,
+        phase: phase as any,
+        agentType: failure.agentType,
+        classification: failure.classification,
+        severity: failure.severity,
       }
     );
 
@@ -107,7 +109,7 @@ export class FailureAnalysisService {
   /**
    * Classify failure type
    */
-  private classifyFailure(error: Error, context?: any): FailureClassification {
+  private classifyFailure(error: Error, _context?: any): FailureClassification {
     const message = error.message.toLowerCase();
     const code = (error as any).code;
 

@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'e2e-fixer';
+export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -224,15 +224,25 @@ export interface IOrchestration {
     }[];
   };
 
-  // Fase 8: E2E Testing (tests real frontend-backend integration)
-  e2eTesting?: IAgentStep & {
-    integrationPass?: boolean;
-    backendStarted?: boolean;
-    frontendStarted?: boolean;
+  // Fase 7.5: Test Creator (creates comprehensive test suites before QA validation)
+  testCreator?: IAgentStep & {
+    testsCreated?: number; // Total test files created
+    coveragePercentage?: number; // Code coverage achieved (target: >85%)
+    unitTests?: number;
+    integrationTests?: number;
+    e2eTests?: number;
   };
 
-  // Fase 8.5: E2E Fixer (fixes integration issues detected by E2E Testing)
-  e2eFixer?: IAgentStep & {
+  // Fase 8: Contract Testing (verifies API contracts through static analysis)
+  contractTesting?: IAgentStep & {
+    contractsValid?: boolean;
+    backendEndpoints?: number;
+    frontendCalls?: number;
+    contractIssues?: number;
+  };
+
+  // Fase 8.5: Contract Fixer (fixes integration issues detected by Contract Testing)
+  contractFixer?: IAgentStep & {
     errorType?: string; // endpoint-not-found, cors, payload-mismatch, etc.
     filesModified?: string[];
     changes?: string[];
@@ -245,6 +255,23 @@ export interface IOrchestration {
       attempt: number;
       timestamp: Date;
     }>;
+  };
+
+  // Fase 9: Error Detective (analyzes runtime errors and provides fix recommendations)
+  errorDetective?: IAgentStep & {
+    errorsAnalyzed?: number;
+    fixesRecommended?: number;
+    automationPossible?: boolean;
+    errorType?: string;
+    severity?: string;
+    rootCauseConfidence?: number;
+    actionableInsights?: string[];
+  };
+
+  // Legacy: Developer phase (used by optimized phases)
+  developers?: IAgentStep & {
+    storiesCompleted?: number;
+    filesModified?: number;
   };
 
   // Métricas globales
@@ -263,7 +290,7 @@ export interface IOrchestration {
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'e2e-testing' | 'e2e-fixer')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'contract-testing' | 'contract-fixer')[]; // Fases que se auto-aprueban
 
   // Model configuration
   modelConfig?: {
@@ -280,7 +307,7 @@ export interface IOrchestration {
       mergeCoordinator?: string;
       autoMerge?: string;
       e2eTester?: string;
-      e2eFixer?: string;
+      contractFixer?: string;
     };
   };
 
@@ -414,7 +441,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective'],
       required: true,
     },
     status: {
@@ -671,9 +698,78 @@ const taskSchema = new Schema<ITask>(
           mergeCommitSha: String,
         }],
       },
+      testCreator: {
+        agent: { type: String, default: 'test-creator' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        testsCreated: Number,
+        coveragePercentage: Number,
+        unitTests: Number,
+        integrationTests: Number,
+        e2eTests: Number,
+      },
+      contractTesting: {
+        agent: { type: String, default: 'contract-tester' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        contractsValid: Boolean,
+        backendEndpoints: Number,
+        frontendCalls: Number,
+        contractIssues: Number,
+      },
+      contractFixer: {
+        agent: { type: String, default: 'contract-fixer' },
+        status: { type: String, default: 'pending' },
+        startedAt: Date,
+        completedAt: Date,
+        output: String,
+        error: String,
+        sessionId: String,
+        usage: {
+          input_tokens: Number,
+          output_tokens: Number,
+          cache_creation_input_tokens: Number,
+          cache_read_input_tokens: Number,
+        },
+        cost_usd: Number,
+        errorType: String,
+        filesModified: [String],
+        changes: [String],
+        fixed: Boolean,
+        attempts: Number,
+        lastErrorHash: String,
+        errorHistory: [{
+          errorHash: String,
+          errorType: String,
+          attempt: Number,
+          timestamp: Date,
+        }],
+      },
       currentPhase: {
         type: String,
-        enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'completed'],
+        enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'e2e', 'completed', 'multi-team', 'error-resolution', 'contract-testing'],
         default: 'analysis',
       },
       totalCost: {
@@ -708,7 +804,7 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'e2e-testing', 'e2e-fixer'],
+        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
@@ -729,7 +825,7 @@ const taskSchema = new Schema<ITask>(
           mergeCoordinator: String,
           autoMerge: String,
           e2eTester: String,
-          e2eFixer: String,
+          contractFixer: String,
         },
       },
       approvalHistory: [{

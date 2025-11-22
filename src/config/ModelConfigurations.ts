@@ -41,8 +41,10 @@ export interface AgentModelConfig {
   'fixer': ClaudeModel;
   'merge-coordinator': ClaudeModel;
   'auto-merge': ClaudeModel;
-  'e2e-tester': ClaudeModel;
-  'e2e-fixer': ClaudeModel;
+  'test-creator': ClaudeModel;
+  'contract-tester': ClaudeModel;
+  'contract-fixer': ClaudeModel;
+  'error-detective': ClaudeModel;
 }
 
 /**
@@ -64,11 +66,13 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
   'judge': 'claude-opus-4-1-20250805',              // 🧠 Critical: Code review
   'qa-engineer': 'claude-opus-4-1-20250805',         // 🧠 Critical: Error detection
   'fixer': 'claude-opus-4-1-20250805',              // 🧠 Critical: Bug fixes
-  'e2e-fixer': 'claude-opus-4-1-20250805',           // 🧠 Critical: Integration fixes
+  'contract-fixer': 'claude-opus-4-1-20250805',      // 🧠 Critical: Contract fixes
+  'error-detective': 'claude-opus-4-1-20250805',     // 🧠 Critical: Error analysis
   'developer': 'claude-sonnet-4-5-20250929', // 💨 Execution: Implements architecture
   'merge-coordinator': 'claude-sonnet-4-5-20250929', // 💨 Execution: Git operations
   'auto-merge': 'claude-sonnet-4-5-20250929',       // 💨 Execution: Automated merge
-  'e2e-tester': 'claude-sonnet-4-5-20250929',      // 💨 Execution: Script execution
+  'test-creator': 'claude-sonnet-4-5-20250929',     // 💨 Execution: Creates comprehensive test suites
+  'contract-tester': 'claude-sonnet-4-5-20250929',      // 💨 Execution: Static analysis
 };
 
 /**
@@ -90,11 +94,13 @@ export const STANDARD_CONFIG: AgentModelConfig = {
   'judge': 'claude-sonnet-4-5-20250929',          // 🧠 Critical: Code review
   'qa-engineer': 'claude-sonnet-4-5-20250929',     // 🧠 Critical: Error detection
   'fixer': 'claude-sonnet-4-5-20250929',          // 🧠 Critical: Bug fixes
-  'e2e-fixer': 'claude-sonnet-4-5-20250929',       // 🧠 Critical: Integration fixes
+  'contract-fixer': 'claude-sonnet-4-5-20250929',  // 🧠 Critical: Contract fixes
+  'error-detective': 'claude-sonnet-4-5-20250929', // 🧠 Critical: Error analysis
   'developer': 'claude-haiku-4-5-20251001',  // 💨 Execution: Implementation
   'merge-coordinator': 'claude-haiku-4-5-20251001', // 💨 Execution: Git coordination
   'auto-merge': 'claude-haiku-4-5-20251001',       // 💨 Execution: Automated merge
-  'e2e-tester': 'claude-haiku-4-5-20251001',       // 💨 Execution: Script execution
+  'test-creator': 'claude-haiku-4-5-20251001',     // 💨 Execution: Test suite creation
+  'contract-tester': 'claude-haiku-4-5-20251001',       // 💨 Execution: Static analysis
 };
 
 /**
@@ -117,8 +123,10 @@ export const MAX_CONFIG: AgentModelConfig = {
   'fixer': 'claude-opus-4-1-20250805',
   'merge-coordinator': 'claude-opus-4-1-20250805',
   'auto-merge': 'claude-opus-4-1-20250805',
-  'e2e-tester': 'claude-opus-4-1-20250805',
-  'e2e-fixer': 'claude-opus-4-1-20250805',
+  'test-creator': 'claude-opus-4-1-20250805',
+  'contract-tester': 'claude-opus-4-1-20250805',
+  'contract-fixer': 'claude-opus-4-1-20250805',
+  'error-detective': 'claude-opus-4-1-20250805',
 };
 
 /**
@@ -164,13 +172,15 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
     'judge': topModel,             // Code quality evaluation
     'qa-engineer': topModel,        // Error detection
     'fixer': topModel,             // Precise bug fixes
-    'e2e-fixer': topModel,          // Complex integration fixes
+    'contract-fixer': topModel,      // Contract violation fixes
+    'error-detective': topModel,     // Error root cause analysis (CRITICAL)
 
     // 💨 EXECUTION - Use BOTTOM MODEL (economical)
     'developer': bottomModel,      // Code implementation
     'merge-coordinator': bottomModel, // Mechanical git operations
     'auto-merge': bottomModel,       // Simple automation
-    'e2e-tester': bottomModel,       // Script execution (curl, npm)
+    'test-creator': bottomModel,     // Test suite generation
+    'contract-tester': bottomModel,       // Static analysis
   };
 }
 
@@ -191,8 +201,10 @@ export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
     'fixer': dbConfig.fixer || 'claude-sonnet-4-5-20250929',
     'merge-coordinator': dbConfig.mergeCoordinator || dbConfig['merge-coordinator'] || 'claude-haiku-4-5-20251001',
     'auto-merge': dbConfig.autoMerge || dbConfig['auto-merge'] || 'claude-haiku-4-5-20251001',
-    'e2e-tester': dbConfig.e2eTester || dbConfig['e2e-tester'] || 'claude-haiku-4-5-20251001',
-    'e2e-fixer': dbConfig.e2eFixer || dbConfig['e2e-fixer'] || 'claude-sonnet-4-5-20250929',
+    'test-creator': dbConfig.testCreator || dbConfig['test-creator'] || 'claude-haiku-4-5-20251001',
+    'contract-tester': dbConfig.contractTester || dbConfig['contract-tester'] || 'claude-haiku-4-5-20251001',
+    'contract-fixer': dbConfig.contractFixer || dbConfig['contract-fixer'] || 'claude-sonnet-4-5-20250929',
+    'error-detective': dbConfig.errorDetective || dbConfig['error-detective'] || 'claude-opus-4-1-20250805', // Default to Opus for critical error analysis
   };
 }
 

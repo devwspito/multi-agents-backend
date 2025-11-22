@@ -90,7 +90,7 @@ export class QAPhaseOptimized extends BasePhase {
       const mergeResult = await this.mergeEpicBranches(
         essentials.branches,
         repositories,
-        workspacePath
+        workspacePath || undefined
       );
 
       // 4. EXECUTE QA VALIDATION (optimized prompt)
@@ -113,7 +113,7 @@ export class QAPhaseOptimized extends BasePhase {
       const prResults = await this.createPullRequests(
         task,
         repositories,
-        workspacePath,
+        workspacePath || undefined,
         essentials.branches
       );
 

@@ -143,7 +143,7 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
         const projectObj = project.toObject ? project.toObject() : project;
 
         // Fetch repositories for this project
-        let repositories = [];
+        let repositories: any[] = [];
         try {
           repositories = await Repository.find({ projectId: projectObj._id })
             .select('-__v')

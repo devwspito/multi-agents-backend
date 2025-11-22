@@ -2,7 +2,7 @@ import { Server as SocketServer } from 'socket.io';
 
 export interface OrchestrationEvent {
   taskId: string;
-  agentType: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'e2e-fixer';
+  agentType: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer';
   status: 'started' | 'in-progress' | 'completed' | 'failed';
   message: string;
   timestamp: Date;
