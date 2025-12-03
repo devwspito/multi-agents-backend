@@ -220,18 +220,57 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Execute groups sequentially
       for (const [order, epics] of orderedGroups) {
-        console.log(`\n🔧 [Phase ${order}] Executing ${epics.length} epic(s) in parallel...\n`);
-        NotificationService.emitConsoleLog(taskId, 'info', `🔧 Phase ${order}: ${epics.map((e: any) => e.targetRepository).join(', ')}`);
+        console.log(`\n🔧 [Phase ${order}] Executing ${epics.length} epic(s)...\n`);
 
-        const groupPromises = epics.map((epic: any) =>
-          this.executeTeam(epic, ++teamCounter, context)
-        );
+        // 🔥 CRITICAL FIX: Check for git conflicts BEFORE parallel execution
+        // If multiple epics use SAME repository → CANNOT execute in parallel (git race condition)
+        const reposInGroup = epics.map((e: any) => e.targetRepository);
+        const uniqueRepos = new Set(reposInGroup);
+        const hasGitConflict = uniqueRepos.size !== epics.length;
 
-        const groupResults = await Promise.allSettled(groupPromises);
+        let groupResults: PromiseSettledResult<any>[] = [];
+
+        if (hasGitConflict) {
+          console.warn(`\n⚠️  [RACE CONDITION PREVENTION] Multiple epics targeting SAME repository detected!`);
+          console.warn(`   Epics: ${epics.length}, Unique repos: ${uniqueRepos.size}`);
+          console.warn(`   Repositories: ${Array.from(uniqueRepos).join(', ')}`);
+          console.warn(`   🔒 EXECUTING SEQUENTIALLY to prevent git conflicts`);
+          console.warn(`   ⚠️  Parallel execution would cause: checkout conflicts, lost changes, branch corruption\n`);
+
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️  Phase ${order}: Git conflict detected - executing ${epics.length} epic(s) SEQUENTIALLY`
+          );
+
+          // SEQUENTIAL execution (safe - no git conflicts)
+          for (const epic of epics) {
+            console.log(`   🔧 Executing epic: ${epic.targetRepository} (sequential mode)`);
+            try {
+              const result = await this.executeTeam(epic, ++teamCounter, context);
+              groupResults.push({ status: 'fulfilled', value: result });
+            } catch (error) {
+              groupResults.push({ status: 'rejected', reason: error });
+            }
+          }
+        } else {
+          // PARALLEL execution (safe - different repos)
+          console.log(`   ✅ All epics use DIFFERENT repositories - safe for parallel execution`);
+          console.log(`   Repositories: ${Array.from(uniqueRepos).join(', ')}`);
+
+          NotificationService.emitConsoleLog(taskId, 'info', `🔧 Phase ${order}: ${epics.length} epic(s) in PARALLEL`);
+
+          const groupPromises = epics.map((epic: any) =>
+            this.executeTeam(epic, ++teamCounter, context)
+          );
+
+          groupResults = await Promise.allSettled(groupPromises);
+        }
+
         teamResults.push(...groupResults);
 
         // Check if this phase failed
-        const groupFailed = groupResults.filter(r =>
+        const groupFailed = groupResults.filter((r: PromiseSettledResult<any>) =>
           r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)
         ).length;
 

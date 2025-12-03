@@ -484,7 +484,16 @@ export class JudgePhase extends BasePhase {
       console.log(`   📍 Commit SHA: ${commitSHA}`);
       console.log(`   ✅ Will review EXACT commit that developer created`);
     } else {
-      console.warn(`   ⚠️  No commit SHA - reviewing current HEAD (may not be developer's exact work)`);
+      // 🔥 CRITICAL FIX: Fail hard if no commit SHA - we MUST know what to review
+      console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: No commit SHA provided!`);
+      console.error(`   Story: ${story.title}`);
+      console.error(`   Story ID: ${story.id}`);
+      console.error(`   Developer: ${developer?.instanceId}`);
+      console.error(`\n   💀 WITHOUT COMMIT SHA, WE DON'T KNOW WHAT CODE TO REVIEW`);
+      console.error(`   💀 Reviewing HEAD would be ARBITRARY and DANGEROUS`);
+      console.error(`   💀 Different commit = different code = incorrect review`);
+      console.error(`\n   🛑 STOPPING REVIEW - HUMAN INTERVENTION REQUIRED`);
+      throw new Error(`HUMAN_REQUIRED: No commit SHA for story ${story.id} - cannot determine which code to review`);
     }
 
     // 🔥 CRITICAL: Get LITERAL branch name from Developer

@@ -231,6 +231,45 @@ export class DevelopersPhase extends BasePhase {
 
       console.log(`✅ [Developers] State validated: ${epics.length} epics with ${state.stories.length} total stories`);
 
+      // 🔥 CRITICAL FIX: Validate ALL epics have targetRepository BEFORE processing
+      // Fail fast to avoid wasting cost on developer execution with invalid epics
+      console.log(`\n🔍 [Developers] Validating epic targetRepository fields...`);
+      const invalidEpics = epics.filter((epic: any) => !epic.targetRepository);
+
+      if (invalidEpics.length > 0) {
+        console.error(`\n❌❌❌ [Developers] CRITICAL VALIDATION ERROR!`);
+        console.error(`   ${invalidEpics.length}/${epics.length} epic(s) have NO targetRepository`);
+        console.error(`\n   💀 WE DON'T KNOW WHICH REPOSITORY THESE EPICS BELONG TO`);
+        console.error(`   💀 CANNOT EXECUTE DEVELOPERS - WOULD BE ARBITRARY`);
+        console.error(`\n   📋 Invalid epics:`);
+        invalidEpics.forEach((epic: any) => {
+          console.error(`      - Epic: ${epic.name || epic.id}`);
+          console.error(`        ID: ${epic.id}`);
+          console.error(`        targetRepository: ${epic.targetRepository || 'MISSING'}`);
+        });
+        console.error(`\n   🛑 STOPPING PHASE - HUMAN INTERVENTION REQUIRED`);
+
+        // Mark task as failed
+        const Task = require('../../models/Task').Task;
+        const dbTask = await Task.findById(task._id);
+        if (dbTask) {
+          dbTask.status = 'failed';
+          dbTask.orchestration.developers = {
+            status: 'failed',
+            error: `${invalidEpics.length} epic(s) have no targetRepository - cannot determine which repo to work in`,
+            humanRequired: true,
+            invalidEpics: invalidEpics.map((e: any) => ({ id: e.id, name: e.name })),
+          };
+          await dbTask.save();
+        }
+
+        throw new Error(
+          `HUMAN_REQUIRED: ${invalidEpics.length} epic(s) have no targetRepository - Tech Lead phase incomplete`
+        );
+      }
+
+      console.log(`✅ [Developers] All ${epics.length} epic(s) have valid targetRepository`);
+
       await LogService.info(`Processing ${epics.length} epics across ${repositories.length} repositories`, {
         taskId,
         category: 'orchestration',
@@ -928,6 +967,19 @@ export class DevelopersPhase extends BasePhase {
           console.log(`\n   [2/3] Checking out story branch: ${updatedStory.branchName}`);
           let checkoutSuccess = false;
           const maxCheckoutRetries = 3;
+
+          // 🔥 CRITICAL FIX: Validate branchName exists BEFORE any git operations
+          if (!updatedStory.branchName) {
+            console.error(`\n❌❌❌ [PRE-JUDGE SYNC] CRITICAL ERROR: Story has NO branchName!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   Story ID: ${story.id}`);
+            console.error(`\n   💀 CANNOT CHECKOUT BRANCH - branchName is undefined/null`);
+            console.error(`   💀 Git command would be invalid: git checkout undefined`);
+            console.error(`\n   🛑 STOPPING SYNC - HUMAN INTERVENTION REQUIRED`);
+            throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no branchName - cannot checkout branch for Judge review`);
+          }
+
+          console.log(`✅ [PRE-JUDGE SYNC] Validated branchName: ${updatedStory.branchName}`);
 
           for (let retryAttempt = 0; retryAttempt < maxCheckoutRetries; retryAttempt++) {
             try {
