@@ -28,7 +28,8 @@
       "WebFetch(domain:platform.claude.com)",
       "WebFetch(domain:github.com)",
       "Bash(rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
