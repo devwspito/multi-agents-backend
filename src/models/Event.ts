@@ -106,6 +106,7 @@ export interface IEvent extends Document {
     cost?: number;
     duration?: number;
     error?: string;
+    [key: string]: any; // Allow additional properties
   };
 }
 

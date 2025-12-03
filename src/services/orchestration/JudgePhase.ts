@@ -185,6 +185,9 @@ export class JudgePhase extends BasePhase {
       await task.save();
     }
 
+    // Log final verdict
+    console.log(`📊 [Judge] Verdict: ${allPassed ? 'All stories approved' : `${totalFailed} stories failed`}`);
+
     // 🔥 SINGLE-STORY MODE: Return simple approval status
     if (multiTeamMode && storyToReview) {
       const storyStatus = allPassed ? 'approved' : 'rejected';
@@ -368,10 +371,24 @@ export class JudgePhase extends BasePhase {
           console.log(`🔄 [Judge] Story failed evaluation - Developer will retry (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
 
           // Execute developer retry with Judge feedback
-          await this.retryDeveloperWork(task, developer, story, context, evaluation.feedback);
-
-          // Continue to next iteration (Judge will re-evaluate)
-          continue;
+          try {
+            await this.retryDeveloperWork(task, developer, story, context, evaluation.feedback);
+            // Continue to next iteration (Judge will re-evaluate)
+            continue;
+          } catch (retryError: any) {
+            // 🔥 Retry failed catastrophically - mark story as failed and stop retrying
+            console.error(`❌ [Judge] Developer retry failed catastrophically: ${retryError.message}`);
+            NotificationService.emitAgentMessage(
+              (task._id as any).toString(),
+              'Judge',
+              `❌ Story **"${story.title}"** retry FAILED: ${retryError.message}`
+            );
+            return {
+              status: 'failed',
+              feedback: `Retry failed: ${retryError.message}`,
+              iteration: attempt,
+            };
+          }
         } else {
           // MAX RETRIES REACHED
           story.status = 'failed';
@@ -465,7 +482,7 @@ export class JudgePhase extends BasePhase {
 
       if (!epic.targetRepository) {
         console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: Epic has NO targetRepository!`);
-        console.error(`   Epic: ${epic.title || epic.name}`);
+        console.error(`   Epic: ${epic.name}`);
         console.error(`   Epic ID: ${epic.id}`);
         console.error(`   Story: ${story.title}`);
         console.error(`\n   💀 CANNOT DETERMINE WHERE TO REVIEW CODE`);
@@ -762,13 +779,29 @@ Files to check:
     console.log(`🔄 [Judge] Developer ${developer.instanceId} retrying story "${story.title}" with feedback`);
 
     const taskId = (task._id as any).toString();
-    const workspacePath = context.workspacePath;
+
+    // 🔥 CRITICAL: Use ORIGINAL workspace path, NOT Judge's worktree
+    // Judge's context.workspacePath is the worktree (IS the repo directly)
+    // Developer expects parent workspace with repo subdirectories inside
+    // e.g., Judge worktree: /tmp/judge-123-v2_frontend (IS the repo)
+    //       Developer expects: /tmp/workspace (with /tmp/workspace/v2_frontend inside)
+    const workspacePath = context.getData<string>('originalWorkspacePath') || context.workspacePath;
+
+    console.log(`📂 [Judge Retry] Using workspace for developer: ${workspacePath}`);
+    console.log(`   Original context.workspacePath (Judge worktree): ${context.workspacePath}`);
+    console.log(`   Using originalWorkspacePath for developer: ${context.getData<string>('originalWorkspacePath') || 'NOT SET - falling back'}`);
+
+    if (workspacePath === context.workspacePath && context.workspacePath?.includes('judge-')) {
+      console.warn(`⚠️  [Judge Retry] WARNING: Using Judge worktree as developer workspace!`);
+      console.warn(`   This may cause "No such file or directory" errors`);
+      console.warn(`   Developer will try to access ${workspacePath}/<repoName> but it IS the repo`);
+    }
 
     // Get executeDeveloperFn from context
     const executeDeveloperFn = context.getData<Function>('executeDeveloperFn');
     if (!executeDeveloperFn || typeof executeDeveloperFn !== 'function') {
       console.error('❌ [Judge] executeDeveloperFn not found in context or not a function');
-      return;
+      throw new Error('executeDeveloperFn not available - cannot retry developer');
     }
 
     // 🔥 CRITICAL: Format feedback for Developer to understand clearly
@@ -823,12 +856,24 @@ ${judgeFeedback}
     const { eventStore } = await import('../EventStore');
     const state = await eventStore.getCurrentState(task._id as any);
 
+    // 🔥 CRITICAL: Verify story has branchName before retry
+    const storyFromEventStore = state.stories.find((s: any) => s.id === story.id);
+    if (storyFromEventStore?.branchName) {
+      console.log(`✅ [Judge] Story has branchName for retry: ${storyFromEventStore.branchName}`);
+    } else {
+      console.warn(`⚠️  [Judge] Story does NOT have branchName - retry may create new branch!`);
+      console.warn(`   Story ID: ${story.id}`);
+      console.warn(`   Stories in EventStore: ${state.stories.length}`);
+    }
+
     // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
     const epicBranchName = context.getData<string>('epicBranch');
     console.log(`📂 [Judge] Passing epic branch to developer for retry: ${epicBranchName || 'not specified'}`);
 
     try {
       console.log(`🚀 [Judge] Executing developer retry with topModel upgrade`);
+      console.log(`   Stories passed to developer: ${state.stories.length}`);
+      console.log(`   Story "${story.id}" branchName: ${storyFromEventStore?.branchName || 'NOT SET'}`);
       await executeDeveloperFn(
         task,
         developer,
@@ -880,7 +925,8 @@ ${judgeFeedback}
       if (!updatedStory) {
         console.error(`❌ [POST-RETRY SYNC] Could not find story ${story.id} in EventStore after ${maxRetries} attempts`);
         console.error(`   This is a critical error - cannot continue retry loop without updated story`);
-        return;
+        // 🔥 FIX: Throw error instead of silent return - this will stop the retry loop
+        throw new Error(`POST-RETRY SYNC: Story ${story.id} not found in EventStore after developer retry`);
       }
 
       // 🔥 CRITICAL: Update story reference for next evaluation
@@ -889,35 +935,37 @@ ${judgeFeedback}
       console.log(`   Branch: ${story.branchName}`);
       console.log(`   Status: ${story.status}`);
 
-      // 🔥 CRITICAL: Sync workspace after developer retry BEFORE next Judge review
+      // 🔥 CRITICAL: Sync Judge's workspace after developer retry BEFORE next Judge review
       // Developer pushed new commits, Judge needs to see them
-      if (workspacePath && repositories.length > 0 && story.branchName) {
+      const judgeUsingWorktree = context.getData<boolean>('judgeUsingWorktree') ?? false;
+
+      console.log(`📍 [POST-RETRY SYNC] Configuration:`);
+      console.log(`   Mode: ${judgeUsingWorktree ? 'WORKTREE' : 'FALLBACK (main repo)'}`);
+      console.log(`   Context workspace: ${context.workspacePath || 'NOT SET'}`);
+      console.log(`   Story branch: ${story.branchName || 'NOT SET'}`);
+
+      // Validate we have required data
+      if (!context.workspacePath) {
+        console.error(`❌ [POST-RETRY SYNC] CRITICAL: context.workspacePath is null!`);
+        throw new Error(`POST-RETRY SYNC: No workspace path in context`);
+      }
+
+      if (story.branchName) {
         try {
-          console.log(`\n🔄 [POST-RETRY SYNC] Syncing workspace with developer's latest commits...`);
+          // 🔥 SIMPLIFIED: context.workspacePath is ALWAYS the repo path now
+          // - Worktree mode: judgeWorktreePath (IS the repo directly)
+          // - Fallback mode: judgeRepoPath (also the repo - ${workspacePath}/${repoName})
+          // Both point to the actual git repository, not the parent workspace
+          const repoPath = context.workspacePath!;
 
-          // 🔥 CRITICAL: Use story.targetRepository, NOT repositories[0]
-          if (!story.targetRepository) {
-            console.error(`\n❌❌❌ [POST-RETRY SYNC] Story has NO targetRepository!`);
-            console.error(`   Story: ${story.title}`);
-            console.error(`   Story ID: ${story.id}`);
-            console.error(`\n   💀 CANNOT SYNC WORKSPACE - DON'T KNOW WHICH REPOSITORY`);
-            console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
-            throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no targetRepository in POST-RETRY SYNC`);
+          if (!repoPath) {
+            throw new Error('POST-RETRY SYNC: context.workspacePath is null');
           }
 
-          const targetRepo = repositories.find(r =>
-            r.name === story.targetRepository ||
-            r.full_name === story.targetRepository ||
-            r.githubRepoName === story.targetRepository
-          );
-
-          if (!targetRepo) {
-            console.error(`\n❌❌❌ [POST-RETRY SYNC] Repository ${story.targetRepository} NOT FOUND!`);
-            console.error(`   Available repos: ${repositories.map(r => r.name).join(', ')}`);
-            throw new Error(`HUMAN_REQUIRED: Repository ${story.targetRepository} not found in context`);
-          }
-
-          const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+          console.log(`\n🔄 [POST-RETRY SYNC] Syncing Judge workspace with developer's latest commits...`);
+          console.log(`   Mode: ${judgeUsingWorktree ? 'ISOLATED WORKTREE' : 'FALLBACK (main repo)'}`);
+          console.log(`   Repository path: ${repoPath}`);
+          console.log(`   Branch to sync: ${story.branchName}`);
 
           // Fetch and pull latest commits
           const { safeGitExecSync } = await import('../../utils/safeGitExecution');
@@ -966,13 +1014,32 @@ ${judgeFeedback}
             // Continue anyway
           }
 
-          safeGitExecSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
-          safeGitExecSync(`git pull origin ${story.branchName}`, {
-            cwd: repoPath,
-            encoding: 'utf8',
-            timeout: 30000
-          });
-          console.log(`✅ [POST-RETRY SYNC] Workspace updated with developer's retry commits`);
+          // Get latest remote commit
+          const latestRemoteCommit = safeGitExecSync(
+            `git rev-parse origin/${story.branchName}`,
+            { cwd: repoPath, encoding: 'utf8' }
+          ).trim();
+
+          console.log(`   Latest remote commit: ${latestRemoteCommit.substring(0, 8)}`);
+
+          if (judgeUsingWorktree) {
+            // 🔥 Judge worktree is DETACHED HEAD - we can't checkout a branch
+            // Reset the detached HEAD to the latest remote commit
+            safeGitExecSync(`git reset --hard ${latestRemoteCommit}`, {
+              cwd: repoPath,
+              encoding: 'utf8'
+            });
+            console.log(`✅ [POST-RETRY SYNC] Judge worktree updated (DETACHED HEAD reset)`);
+          } else {
+            // Fallback: normal branch checkout and pull
+            safeGitExecSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+            safeGitExecSync(`git pull origin ${story.branchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 30000
+            });
+            console.log(`✅ [POST-RETRY SYNC] Main repo updated (checkout + pull)`);
+          }
 
           // 🔥 CRITICAL: Update commitSHA in context for next Judge evaluation
           // Developer created a NEW commit during retry - Judge must evaluate the NEW code
@@ -989,10 +1056,16 @@ ${judgeFeedback}
           console.log(`   Current:  ${newCommitSHA}`);
         } catch (syncError: any) {
           console.error(`❌ [POST-RETRY SYNC] Failed to sync: ${syncError.message}`);
+          // 🔥 FIX: Propagate sync error - Judge cannot evaluate without updated code
+          throw new Error(`POST-RETRY SYNC failed: ${syncError.message}. Judge cannot evaluate outdated code.`);
         }
+      } else {
+        console.warn(`⚠️  [POST-RETRY SYNC] No branch name on story - cannot sync`);
       }
     } catch (error: any) {
       console.error(`❌ [Judge] Developer retry failed: ${error.message}`);
+      // 🔥 FIX: Re-throw to stop the retry loop - don't silently continue with broken state
+      throw error;
     }
   }
 }

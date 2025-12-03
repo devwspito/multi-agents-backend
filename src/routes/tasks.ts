@@ -3,13 +3,14 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { uploadMultipleImages } from '../middleware/upload';
 import { Task } from '../models/Task';
 import { Repository } from '../models/Repository';
+// v1 OrchestrationCoordinator - battle-tested with full prompts
 import { OrchestrationCoordinator } from '../services/orchestration/OrchestrationCoordinator';
 import { z } from 'zod';
 import mongoose from 'mongoose';
 
 const router = Router();
-// 🔥 IMPORTANT: No longer using a shared instance for parallel task safety
-// const orchestrationCoordinator = new OrchestrationCoordinator();
+// Shared orchestration coordinator instance
+const orchestrationCoordinator = new OrchestrationCoordinator();
 
 // Validación schemas con Zod
 const createTaskSchema = z.object({
@@ -19,7 +20,7 @@ const createTaskSchema = z.object({
   projectId: z.string().optional(),
   repositoryIds: z.array(z.string()).optional(), // Array de repository IDs
   tags: z.array(z.string()).optional(),
-  modelConfig: z.enum(['standard', 'premium', 'balanced', 'economy', 'max']).optional(), // Model preset configuration
+  modelConfig: z.enum(['standard', 'premium', 'recommended', 'balanced', 'economy', 'max']).optional(), // Model preset configuration
 });
 
 const startTaskSchema = z.object({
@@ -45,7 +46,7 @@ const autoApprovalConfigSchema = z.object({
 });
 
 const modelConfigSchema = z.object({
-  preset: z.enum(['max', 'premium', 'standard', 'custom']).optional(),
+  preset: z.enum(['max', 'premium', 'recommended', 'standard', 'custom']).optional(),
   customConfig: z.object({
     problemAnalyst: z.string().optional(),
     productManager: z.string().optional(),
@@ -133,7 +134,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
     });
   } catch (error) {
     console.error('Error fetching tasks:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Failed to fetch tasks',
     });
@@ -349,24 +350,19 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     console.log(`📝 Task description: ${task.description}`);
     console.log(`📎 Task attachments: ${task.attachments?.length || 0}`);
 
-    // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
-    const taskOrchestrator = new OrchestrationCoordinator();
-
-    // Iniciar orquestación con nuevo OrchestrationCoordinator (phase-based, SDK compliant)
-    taskOrchestrator
-      .orchestrateTask((task._id as any).toString())
-      .catch((error) => {
-        console.error('❌ Orchestration error:', error);
-      });
+    // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
+    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
+      console.error('❌ Orchestration error:', error);
+    });
 
     res.json({
       success: true,
-      message: 'Phase-based orchestration started (SDK compliant)',
+      message: 'Orchestration started',
       data: {
         taskId: (task._id as any).toString(),
         status: task.status,
         description: task.description,
-        info: 'Orchestration follows Claude Agent SDK best practices: ProductManager → ProjectManager → TechLead → Developers → Judge → QA → Merge',
+        info: 'Orchestration: ProblemAnalysis → ProductManagement → ProjectManagement → TechLead → Development → CodeReview → QATesting → AutoMerge',
       },
     });
   } catch (error) {
@@ -449,7 +445,7 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
       previousStatus: task.status,
     });
 
-    // Clear paused state if any (DO NOT touch currentPhase - OrchestrationCoordinator handles it)
+    // Clear paused state if any (DO NOT touch currentPhase - v2 OrchestrationEngine handles it)
     task.orchestration.paused = false;
     task.orchestration.cancelRequested = false;
 
@@ -481,15 +477,10 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
     console.log(`📦 Preserving ${task.repositoryIds.length} repositories`);
     console.log(`🌿 Preserving existing epic branches`);
 
-    // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
-    const taskOrchestrator = new OrchestrationCoordinator();
-
-    // Restart orchestration (will reuse existing branches and context)
-    taskOrchestrator
-      .orchestrateTask((task._id as any).toString())
-      .catch((error) => {
-        console.error('❌ Orchestration continuation error:', error);
-      });
+    // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
+    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
+      console.error('❌ Orchestration continuation error:', error);
+    });
 
     res.json({
       success: true,
@@ -1413,12 +1404,8 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       '▶️  Orchestration resuming...'
     );
 
-    // Reanudar orquestación
-    const { OrchestrationCoordinator } = await import('../services/orchestration/OrchestrationCoordinator');
-    const coordinator = new OrchestrationCoordinator();
-
-    // Ejecutar en background (no bloquear respuesta)
-    coordinator.orchestrateTask(req.params.id).catch((error) => {
+    // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
+    orchestrationCoordinator.orchestrateTask(req.params.id).catch((error) => {
       console.error(`❌ Error resuming task ${req.params.id}:`, error);
     });
 
@@ -1519,11 +1506,11 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Import model configurations
-    const { MAX_CONFIG, PREMIUM_CONFIG, STANDARD_CONFIG } = await import('../config/ModelConfigurations');
+    const { MAX_CONFIG, PREMIUM_CONFIG, RECOMMENDED_CONFIG, STANDARD_CONFIG } = await import('../config/ModelConfigurations');
 
     // Get current configuration
     const modelConfig = task.orchestration.modelConfig || {
-      preset: 'standard',
+      preset: 'recommended', // Default to recommended for optimal quality/cost
       customConfig: undefined,
     };
 
@@ -1531,6 +1518,7 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
     const presets = {
       max: MAX_CONFIG,
       premium: PREMIUM_CONFIG,
+      recommended: RECOMMENDED_CONFIG, // 🌟 Best balance of quality and cost
       standard: STANDARD_CONFIG,
     };
 

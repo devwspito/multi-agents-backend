@@ -1,6 +1,6 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { safeGitExec, safeFetch } from '../utils/safeGitExecution';
 
@@ -185,6 +185,141 @@ export const analyzeCodeQualityTool = tool(
 );
 
 /**
+ * Custom Tool: Execute Command
+ * Execute shell commands with timeout support
+ */
+export const executeCommandTool = tool(
+  'execute_command',
+  'Execute shell commands with timeout (curl, wget, npm, etc.)',
+  {
+    command: z.string().describe('The shell command to execute'),
+    workingDir: z.string().optional().describe('Working directory (defaults to repository root)'),
+    timeout: z.number().default(60000).describe('Timeout in milliseconds (default: 60s)'),
+    env: z.record(z.string()).optional().describe('Additional environment variables'),
+  },
+  async (args) => {
+    try {
+      const { stdout, stderr } = await execAsync(args.command, {
+        cwd: args.workingDir,
+        timeout: args.timeout,
+        env: { ...process.env, ...args.env },
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              stdout,
+              stderr,
+              exitCode: 0,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+              stdout: error.stdout || '',
+              stderr: error.stderr || error.message,
+              exitCode: error.code || -1,
+              timedOut: error.killed || false,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
+/**
+ * Custom Tool: Execute Streaming Command
+ * Execute long-running commands with output streaming
+ */
+export const executeStreamingCommandTool = tool(
+  'execute_streaming_command',
+  'Execute long-running shell commands (npm install, build processes, etc.)',
+  {
+    command: z.string().describe('The shell command to execute'),
+    workingDir: z.string().optional().describe('Working directory'),
+    timeout: z.number().default(300000).describe('Timeout in milliseconds (default: 5min)'),
+    env: z.record(z.string()).optional().describe('Additional environment variables'),
+  },
+  async (args) => {
+    return new Promise((resolve) => {
+      const outputChunks: string[] = [];
+      const errorChunks: string[] = [];
+
+      const child = spawn(args.command, [], {
+        shell: true,
+        cwd: args.workingDir,
+        env: { ...process.env, ...args.env },
+      });
+
+      const timeoutId = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              stdout: outputChunks.join(''),
+              stderr: errorChunks.join(''),
+              exitCode: -1,
+              timedOut: true,
+              error: 'Command timed out',
+            }, null, 2),
+          }],
+        });
+      }, args.timeout);
+
+      child.stdout?.on('data', (data) => outputChunks.push(data.toString()));
+      child.stderr?.on('data', (data) => errorChunks.push(data.toString()));
+
+      child.on('close', (code) => {
+        clearTimeout(timeoutId);
+        resolve({
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: code === 0,
+              stdout: outputChunks.join(''),
+              stderr: errorChunks.join(''),
+              exitCode: code || 0,
+              timedOut: false,
+            }, null, 2),
+          }],
+        });
+      });
+
+      child.on('error', (error) => {
+        clearTimeout(timeoutId);
+        resolve({
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+              stdout: outputChunks.join(''),
+              stderr: errorChunks.join(''),
+              exitCode: -1,
+              timedOut: false,
+            }, null, 2),
+          }],
+        });
+      });
+    });
+  }
+);
+
+/**
  * Custom Tool: Validate Security Compliance
  * Checks for common security issues and compliance
  */
@@ -327,6 +462,22 @@ export function createCustomToolsServer() {
       runIntegrationTestsTool,
       analyzeCodeQualityTool,
       validateSecurityComplianceTool,
+      executeCommandTool,
+      executeStreamingCommandTool,
     ],
   });
+}
+
+/**
+ * Get all custom tools as array
+ */
+export function getCustomTools() {
+  return [
+    createEpicBranchTool,
+    runIntegrationTestsTool,
+    analyzeCodeQualityTool,
+    validateSecurityComplianceTool,
+    executeCommandTool,
+    executeStreamingCommandTool,
+  ];
 }

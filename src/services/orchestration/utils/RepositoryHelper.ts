@@ -77,7 +77,7 @@ export class RepositoryHelper {
   /**
    * Build workspace structure summary
    */
-  static buildWorkspaceStructure(workspacePath: string, repositories: RepoInfo[]): string[] {
+  static buildWorkspaceStructure(_workspacePath: string, repositories: RepoInfo[]): string[] {
     const structure: string[] = [];
     structure.push(`workspace/`);
 

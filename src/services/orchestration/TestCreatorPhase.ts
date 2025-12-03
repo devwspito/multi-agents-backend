@@ -465,7 +465,7 @@ Start immediately with STEP 1.`;
 
       // Parse JSON output to extract metrics
       let testsCreated = 0;
-      let coveragePercentage = 0;
+      let coveragePercentage: number | string = 0;
       try {
         const jsonMatch = result.output.match(/```json\n([\s\S]*?)\n```/) ||
                          result.output.match(/\{[\s\S]*"testsCreated"[\s\S]*\}/);
@@ -474,7 +474,10 @@ Start immediately with STEP 1.`;
           testsCreated = (parsed.testsCreated?.unitTests || 0) +
                         (parsed.testsCreated?.integrationTests || 0) +
                         (parsed.testsCreated?.e2eTests || 0);
-          coveragePercentage = parsed.coverage?.statements || 0;
+
+          // Coverage can be a number or a string (like "N/A")
+          const rawCoverage = parsed.coverage?.statements;
+          coveragePercentage = typeof rawCoverage === 'number' ? rawCoverage : (rawCoverage || 0);
 
           task.orchestration.testCreator!.testsCreated = testsCreated;
           task.orchestration.testCreator!.coveragePercentage = coveragePercentage;
@@ -520,10 +523,14 @@ Start immediately with STEP 1.`;
       NotificationService.emitAgentMessage(taskId, 'Test Creator', result.output);
 
       // Notify completion
+      const coverageDisplay = typeof coveragePercentage === 'number'
+        ? `${coveragePercentage.toFixed(1)}%`
+        : coveragePercentage;
+
       NotificationService.emitAgentCompleted(
         taskId,
         'Test Creator',
-        `Created tests for ${epicBranches.length} epic branches. Coverage: ${coveragePercentage.toFixed(1)}%. Tests: ${testsCreated}`
+        `Created tests for ${epicBranches.length} epic branches. Coverage: ${coverageDisplay}. Tests: ${testsCreated}`
       );
 
       await LogService.agentCompleted('test-creator', taskId, {

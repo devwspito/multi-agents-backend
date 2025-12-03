@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { OutputParser } from './utils/OutputParser';
 
 /**
  * Fixer Phase
@@ -716,6 +717,7 @@ If you cannot fix:
 
   /**
    * Parse Analyst output (expects JSON)
+   * 🔥 FIX: Use OutputParser instead of greedy regex
    */
   private parseAnalysisOutput(output: string): {
     automatable: boolean;
@@ -724,21 +726,21 @@ If you cannot fix:
     reasoning?: string;
     recommendation?: string;
   } {
-    try {
-      const jsonMatch = output.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          automatable: parsed.automatable === true,
-          fixes: parsed.fixes || [],
-          totalEstimatedCost: parsed.totalEstimatedCost || 0,
-          reasoning: parsed.reasoning || '',
-          recommendation: parsed.recommendation || '',
-        };
-      }
-    } catch (error) {
-      console.warn(`⚠️ Failed to parse Analyst output as JSON`);
+    // 🔥 Use centralized OutputParser for robust JSON extraction
+    const result = OutputParser.extractJSON(output);
+
+    if (result.success && result.data) {
+      const parsed = result.data;
+      return {
+        automatable: parsed.automatable === true,
+        fixes: parsed.fixes || [],
+        totalEstimatedCost: parsed.totalEstimatedCost || 0,
+        reasoning: parsed.reasoning || '',
+        recommendation: parsed.recommendation || '',
+      };
     }
+
+    console.warn(`⚠️ Failed to parse Analyst output as JSON: ${result.error}`);
 
     // Fallback: not automatable
     return {
@@ -749,32 +751,33 @@ If you cannot fix:
 
   /**
    * Parse Fixer output (expects JSON)
+   * 🔥 FIX: Use OutputParser instead of greedy regex
    */
   private parseFixerOutput(output: string): {
     fixed: boolean;
     changes: string[];
     filesModified: string[];
   } {
-    try {
-      const jsonMatch = output.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+    // 🔥 Use centralized OutputParser for robust JSON extraction
+    const result = OutputParser.extractJSON(output);
 
-        // Ensure changes and filesModified are always arrays
-        const changes = Array.isArray(parsed.changes) ? parsed.changes :
-                       (parsed.changes ? [parsed.changes] : []);
-        const filesModified = Array.isArray(parsed.filesModified) ? parsed.filesModified :
-                             (parsed.filesModified ? [parsed.filesModified] : []);
+    if (result.success && result.data) {
+      const parsed = result.data;
 
-        return {
-          fixed: parsed.fixed === true,
-          changes,
-          filesModified,
-        };
-      }
-    } catch (error) {
-      console.warn(`⚠️ Failed to parse Fixer output as JSON`);
+      // Ensure changes and filesModified are always arrays
+      const changes = Array.isArray(parsed.changes) ? parsed.changes :
+                     (parsed.changes ? [parsed.changes] : []);
+      const filesModified = Array.isArray(parsed.filesModified) ? parsed.filesModified :
+                           (parsed.filesModified ? [parsed.filesModified] : []);
+
+      return {
+        fixed: parsed.fixed === true,
+        changes,
+        filesModified,
+      };
     }
+
+    console.warn(`⚠️ Failed to parse Fixer output as JSON: ${result.error}`);
 
     // Fallback: check if output says "fixed"
     const fixed = output.toLowerCase().includes('fixed') && !output.toLowerCase().includes('could not fix');

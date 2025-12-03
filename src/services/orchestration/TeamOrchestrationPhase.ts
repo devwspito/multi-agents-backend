@@ -161,8 +161,33 @@ export class TeamOrchestrationPhase extends BasePhase {
         );
       }
 
+      // 🔥 FIX: Validate targetRepository EARLY (before any processing)
+      const epicsWithoutRepo = projectManagerEpics.filter(epic => !epic.targetRepository);
+      if (epicsWithoutRepo.length > 0) {
+        const epicIds = epicsWithoutRepo.map((e: any) => e.id || e.title).join(', ');
+        console.error(`\n${'🚨'.repeat(40)}`);
+        console.error(`🚨 CRITICAL: EPICS WITHOUT TARGET REPOSITORY`);
+        console.error(`🚨 ${epicsWithoutRepo.length} epic(s) have NO targetRepository assigned`);
+        console.error(`🚨 Invalid epics: ${epicIds}`);
+        console.error(`🚨 Each epic MUST specify which repository it belongs to`);
+        console.error(`🚨 BLOCKING EXECUTION - Cannot proceed without repository assignment`);
+        console.error(`${'🚨'.repeat(40)}\n`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `🚨 CRITICAL: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}`
+        );
+
+        throw new Error(
+          `🚨 CRITICAL VALIDATION FAILURE: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}. ` +
+          `Project Manager must assign a target repository to each epic. ` +
+          `Available repositories: ${context.repositories.map(r => r.name).join(', ')}`
+        );
+      }
+
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
-      console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths`);
+      console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths and target repositories`);
 
       // 🔥 SEQUENTIAL EXECUTION BY EXECUTION ORDER
       // Group epics by executionOrder
@@ -862,7 +887,10 @@ export class TeamOrchestrationPhase extends BasePhase {
       const targetRepo = epic.targetRepository;
       const repoPath = `${workspacePath}/${targetRepo}`;
 
-      console.log(`\n📬 [PR] Creating Pull Request for epic: ${epic.title}`);
+      // 🔥 FIX: Use epic.title with fallback to epic.id to avoid undefined
+      const epicTitle = epic.title || epic.name || epic.id || 'Untitled Epic';
+
+      console.log(`\n📬 [PR] Creating Pull Request for epic: ${epicTitle}`);
       console.log(`   Branch: ${epicBranch} → main`);
       console.log(`   Repository: ${targetRepo}`);
 
@@ -870,7 +898,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       const ghAvailable = await this.ensureGitHubCLI();
       if (!ghAvailable) {
         console.log(`⚠️  [PR] GitHub CLI not available - showing manual instructions`);
-        const prTitle = `Epic: ${epic.title}`;
+        const prTitle = `Epic: ${epicTitle}`;
         console.log(`\n📋 [PR] Manual PR instructions:`);
         console.log(`   1. Push branch: git push -u origin ${epicBranch}`);
         console.log(`   2. Go to your repository on GitHub`);
@@ -911,7 +939,8 @@ export class TeamOrchestrationPhase extends BasePhase {
       }
 
       // Create PR using GitHub CLI
-      const prTitle = `Epic: ${epic.title}`;
+      // 🔥 FIX: Use epicTitle (already defined above with fallback)
+      const prTitle = `Epic: ${epicTitle}`;
       const prBody = `## 🎯 Epic Summary\n\n${epic.description || 'No description provided'}\n\n## 📊 Details\n\n- **Complexity**: ${epic.estimatedComplexity || 'Unknown'}\n- **Stories**: ${epic.stories?.length || 0}\n- **Affected Repositories**: ${epic.affectedRepositories?.join(', ') || targetRepo}\n\n## ✅ Validation\n\n- ✅ Code reviewed by Judge (per story)\n- ✅ Integration tested by QA Engineer\n- ✅ All stories merged to epic branch\n\n## 📝 Instructions\n\n1. Review the changes\n2. Approve and merge this PR\n3. Epic will be deployed to production\n\n---\n🤖 Generated with Multi-Agent Platform`;
 
       try {

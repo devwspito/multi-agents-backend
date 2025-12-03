@@ -34,6 +34,17 @@ export class GitHubService {
   }
 
   /**
+   * Helper: Execute GitHub API request
+   */
+  private async executeGitHubRequest<T>(
+    requestFn: () => Promise<Response>,
+    parseResponse: (response: Response) => Promise<T>
+  ): Promise<T> {
+    const response = await requestFn();
+    return parseResponse(response);
+  }
+
+  /**
    * Clona el repositorio de un proyecto en su workspace aislado
    * @param customPath - Ruta personalizada para clonar (útil para multi-repo)
    */
@@ -63,9 +74,10 @@ export class GitHubService {
       const repoUrlWithToken = this.getAuthenticatedRepoUrl(project.githubRepoUrl, user.accessToken);
 
       // Use safe git operations with timeout
+      // 🔥 Increased timeout for large repos - 3 minutes
       await safeGitExec(`git clone ${repoUrlWithToken} ${workspacePath}`, {
         cwd: parentDir,
-        timeout: 60000, // 60 seconds for clone
+        timeout: 180000, // 180 seconds (3 minutes) for clone - large repos need more time
       });
 
       // 🔥 CRITICAL: Fix remote URL immediately after cloning
@@ -139,9 +151,10 @@ export class GitHubService {
         const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
 
         // Clone repository with timeout protection
+        // 🔥 Increased timeout for large repos - 3 minutes
         await safeGitExec(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
           cwd: targetDir,
-          timeout: 60000, // 60 seconds for clone
+          timeout: 180000, // 180 seconds (3 minutes) for clone - large repos need more time
         });
 
         console.log(`✅ Repository cloned successfully: ${repoName}`);
@@ -162,13 +175,17 @@ export class GitHubService {
         lastError = error;
         console.error(`❌ Clone attempt ${attempt}/${maxRetries} failed:`, error.message);
 
-        // If SSL or connection error and not last attempt, retry with exponential backoff
+        // If network/timeout error and not last attempt, retry with exponential backoff
         if (attempt < maxRetries && (
           error.message.includes('SSL_ERROR') ||
           error.message.includes('unable to access') ||
-          error.message.includes('Connection refused')
+          error.message.includes('Connection refused') ||
+          error.message.includes('timed out') ||
+          error.message.includes('timeout') ||
+          error.message.includes('ETIMEDOUT') ||
+          error.message.includes('ECONNRESET')
         )) {
-          const waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+          const waitTime = Math.pow(2, attempt) * 2000; // 4s, 8s, 16s (longer waits for network issues)
           console.log(`⏳ Retrying in ${waitTime / 1000}s...`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
@@ -326,28 +343,30 @@ export class GitHubService {
       const [owner, repo] = project.githubRepoName.split('/');
       const baseBranch = options.baseBranch || project.githubBranch;
 
-      // Crear PR usando GitHub API
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${user.accessToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/vnd.github.v3+json',
-        },
-        body: JSON.stringify({
-          title: options.title,
-          body: options.description,
-          head: options.branch,
-          base: baseBranch,
+      // Crear PR usando GitHub API (with rate limiting if enabled)
+      const pr = await this.executeGitHubRequest<{ html_url: string; number: number }>(
+        () => fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${user.accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/vnd.github.v3+json',
+          },
+          body: JSON.stringify({
+            title: options.title,
+            body: options.description,
+            head: options.branch,
+            base: baseBranch,
+          }),
         }),
-      });
-
-      if (!response.ok) {
-        const error: any = await response.json();
-        throw new Error(error.message || 'Failed to create PR');
-      }
-
-      const pr: any = await response.json();
+        async (response) => {
+          if (!response.ok) {
+            const error: any = await response.json();
+            throw new Error(error.message || 'Failed to create PR');
+          }
+          return response.json() as Promise<{ html_url: string; number: number }>;
+        }
+      );
 
       console.log(`✅ Pull Request created: ${pr.html_url}`);
 
@@ -466,18 +485,20 @@ export class GitHubService {
 
       const [owner, repo] = repository.githubRepoName.split('/');
 
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
-        headers: {
-          Authorization: `Bearer ${user.accessToken}`,
-          Accept: 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch PR: ${response.statusText}`);
-      }
-
-      return await response.json();
+      return await this.executeGitHubRequest(
+        () => fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}`, {
+          headers: {
+            Authorization: `Bearer ${user.accessToken}`,
+            Accept: 'application/vnd.github.v3+json',
+          },
+        }),
+        async (response) => {
+          if (!response.ok) {
+            throw new Error(`Failed to fetch PR: ${response.statusText}`);
+          }
+          return response.json();
+        }
+      );
     } catch (error: any) {
       console.error('❌ Error fetching PR:', error);
       throw error;
@@ -494,19 +515,21 @@ export class GitHubService {
 
       const [owner, repo] = repository.githubRepoName.split('/');
 
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files`, {
-        headers: {
-          Authorization: `Bearer ${user.accessToken}`,
-          Accept: 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch PR files: ${response.statusText}`);
-      }
-
-      const files = (await response.json()) as any[];
-      return files.map((f) => f.filename);
+      return await this.executeGitHubRequest(
+        () => fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files`, {
+          headers: {
+            Authorization: `Bearer ${user.accessToken}`,
+            Accept: 'application/vnd.github.v3+json',
+          },
+        }),
+        async (response) => {
+          if (!response.ok) {
+            throw new Error(`Failed to fetch PR files: ${response.statusText}`);
+          }
+          const files = (await response.json()) as any[];
+          return files.map((f) => f.filename);
+        }
+      );
     } catch (error: any) {
       console.error('❌ Error fetching PR files:', error);
       throw error;
@@ -528,22 +551,26 @@ export class GitHubService {
 
       const [owner, repo] = repository.githubRepoName.split('/');
 
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/merge`, {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${user.accessToken}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/vnd.github.v3+json',
-        },
-        body: JSON.stringify({
-          merge_method: mergeMethod,
+      await this.executeGitHubRequest(
+        () => fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/merge`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${user.accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/vnd.github.v3+json',
+          },
+          body: JSON.stringify({
+            merge_method: mergeMethod,
+          }),
         }),
-      });
-
-      if (!response.ok) {
-        const error: any = await response.json();
-        throw new Error(error.message || 'Failed to merge PR');
-      }
+        async (response) => {
+          if (!response.ok) {
+            const error: any = await response.json();
+            throw new Error(error.message || 'Failed to merge PR');
+          }
+          return null;
+        }
+      );
 
       console.log(`✅ PR #${prNumber} merged successfully`);
     } catch (error: any) {

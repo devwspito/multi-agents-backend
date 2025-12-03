@@ -13,10 +13,11 @@
  */
 
 import { LogService } from './logging/LogService';
+import { AgentType } from '../models/Task';
 
 export interface AgentFailure {
   taskId: string;
-  agentType: string;
+  agentType: AgentType;
   phase: string;
   timestamp: Date;
   error: {
@@ -68,7 +69,7 @@ export class FailureAnalysisService {
   ): Promise<AgentFailure> {
     const failure: AgentFailure = {
       taskId,
-      agentType,
+      agentType: agentType as AgentType,
       phase,
       timestamp: new Date(),
       error: {
@@ -95,8 +96,10 @@ export class FailureAnalysisService {
         category: 'agent-failure',
         phase: phase as any,
         agentType: failure.agentType,
-        classification: failure.classification,
-        severity: failure.severity,
+        metadata: {
+          classification: failure.classification,
+          severity: failure.classification.severity
+        }
       }
     );
 
