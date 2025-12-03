@@ -931,32 +931,67 @@ export class DevelopersPhase extends BasePhase {
 
           for (let retryAttempt = 0; retryAttempt < maxCheckoutRetries; retryAttempt++) {
             try {
-              safeGitExecSync(`git checkout ${updatedStory.branchName}`, { cwd: repoPath, encoding: 'utf8' });
-              console.log(`   ✅ Checked out story branch (attempt ${retryAttempt + 1}/${maxCheckoutRetries})`);
+              // 🔥 FIX: Clean working directory BEFORE checkout to avoid conflicts
+              try {
+                const statusCheck = safeGitExecSync(`git status --porcelain`, { cwd: repoPath, encoding: 'utf8' });
+                if (statusCheck.trim().length > 0) {
+                  console.log(`   ⚠️  Detected uncommitted changes, cleaning workspace...`);
+                  // Stash any changes (safer than hard reset)
+                  try {
+                    safeGitExecSync(`git stash push -u -m "Auto-stash before checkout (retry ${retryAttempt + 1})"`, {
+                      cwd: repoPath,
+                      encoding: 'utf8'
+                    });
+                    console.log(`   ✅ Stashed uncommitted changes`);
+                  } catch (stashError: any) {
+                    // If stash fails, force clean with reset + clean
+                    console.warn(`   ⚠️  Stash failed, forcing clean: ${stashError.message}`);
+                    safeGitExecSync(`git reset --hard HEAD`, { cwd: repoPath, encoding: 'utf8' });
+                    safeGitExecSync(`git clean -fd`, { cwd: repoPath, encoding: 'utf8' });
+                    console.log(`   ✅ Force cleaned workspace`);
+                  }
+                }
+              } catch (cleanError: any) {
+                console.warn(`   ⚠️  Could not clean workspace: ${cleanError.message}`);
+              }
+
+              // 🔥 FIX: Check if branch exists LOCALLY before trying to create
+              let branchExistsLocally = false;
+              try {
+                safeGitExecSync(`git show-ref --verify --quiet refs/heads/${updatedStory.branchName}`, {
+                  cwd: repoPath,
+                  encoding: 'utf8'
+                });
+                branchExistsLocally = true;
+                console.log(`   ℹ️  Branch exists locally, will checkout existing branch`);
+              } catch (e) {
+                console.log(`   ℹ️  Branch does NOT exist locally, will create from remote`);
+              }
+
+              if (branchExistsLocally) {
+                // Branch exists locally - just checkout
+                safeGitExecSync(`git checkout ${updatedStory.branchName}`, { cwd: repoPath, encoding: 'utf8' });
+                console.log(`   ✅ Checked out existing local branch (attempt ${retryAttempt + 1}/${maxCheckoutRetries})`);
+              } else {
+                // Branch does NOT exist locally - create from remote
+                safeGitExecSync(`git checkout -b ${updatedStory.branchName} origin/${updatedStory.branchName}`, {
+                  cwd: repoPath,
+                  encoding: 'utf8'
+                });
+                console.log(`   ✅ Created and checked out branch from remote (attempt ${retryAttempt + 1}/${maxCheckoutRetries})`);
+              }
+
               checkoutSuccess = true;
               break;
             } catch (checkoutError: any) {
               console.error(`   ❌ Checkout failed (attempt ${retryAttempt + 1}/${maxCheckoutRetries}): ${checkoutError.message}`);
 
               if (retryAttempt < maxCheckoutRetries - 1) {
-                // Try creating branch from remote
-                try {
-                  console.log(`   🔧 Attempting to create branch from remote...`);
-                  safeGitExecSync(`git checkout -b ${updatedStory.branchName} origin/${updatedStory.branchName}`, {
-                    cwd: repoPath,
-                    encoding: 'utf8'
-                  });
-                  console.log(`   ✅ Created and checked out branch from remote`);
-                  checkoutSuccess = true;
-                  break;
-                } catch (createError: any) {
-                  console.error(`   ❌ Create from remote also failed: ${createError.message}`);
-                  const delay = 2000 * (retryAttempt + 1); // 2s, 4s, 6s
-                  console.log(`   ⏳ Waiting ${delay}ms before retry...`);
-                  await new Promise(resolve => setTimeout(resolve, delay));
-                  // Re-fetch to get latest refs
-                  safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
-                }
+                const delay = 2000 * (retryAttempt + 1); // 2s, 4s, 6s
+                console.log(`   ⏳ Waiting ${delay}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                // Re-fetch to get latest refs
+                safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
               }
             }
           }
@@ -968,45 +1003,58 @@ export class DevelopersPhase extends BasePhase {
             throw new Error(`Branch ${updatedStory.branchName} not found after ${maxCheckoutRetries} retries`);
           }
 
-          // Pull latest commits from this branch
-          console.log(`   [3/3] Pulling latest commits from ${updatedStory.branchName}...`);
-          safeGitExecSync(`git pull origin ${updatedStory.branchName}`, {
-            cwd: repoPath,
-            encoding: 'utf8',
-            timeout: 30000
-          });
-          console.log(`   ✅ Pulled latest commits`);
+          // 🔥 FIX: Use reset instead of pull to avoid rebase conflicts
+          console.log(`   [3/3] Syncing with remote ${updatedStory.branchName}...`);
+          try {
+            // Fetch latest
+            safeGitExecSync(`git fetch origin ${updatedStory.branchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 30000
+            });
 
-          // Verify we're on the correct commit
-          const currentSHA = safeGitExecSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
-          console.log(`\n🔍 [VERIFICATION] Commit sync status:`);
-          console.log(`   Expected SHA: ${commitSHA}`);
-          console.log(`   Current SHA:  ${currentSHA}`);
-          console.log(`   Match: ${currentSHA === commitSHA ? '✅ YES' : '⚠️  NO (different commits)'}`);
+            // Reset to remote branch (avoids merge/rebase conflicts)
+            safeGitExecSync(`git reset --hard origin/${updatedStory.branchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8'
+            });
+            console.log(`   ✅ Synced with remote (hard reset)`);
 
-          if (currentSHA !== commitSHA) {
-            console.warn(`\n⚠️  WARNING: Workspace is on different commit!`);
-            console.warn(`   This means Judge will review DIFFERENT code than Developer wrote`);
-            console.warn(`   Expected: ${commitSHA}`);
-            console.warn(`   Current:  ${currentSHA}`);
-            console.warn(`   Proceeding with current commit (${currentSHA})...`);
-            // Update commitSHA to match reality
-            commitSHA = currentSHA;
-          } else {
-            console.log(`✅ [SYNC COMPLETE] Judge will review the exact commit Developer created`);
+            // Verify we're on the correct commit
+            const currentSHA = safeGitExecSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf8' }).trim();
+            console.log(`\n🔍 [VERIFICATION] Commit sync status:`);
+            console.log(`   Expected SHA: ${commitSHA}`);
+            console.log(`   Current SHA:  ${currentSHA}`);
+            console.log(`   Match: ${currentSHA === commitSHA ? '✅ YES' : '⚠️  NO (different commits)'}`);
+
+            if (currentSHA !== commitSHA) {
+              console.warn(`\n⚠️  WARNING: Workspace is on different commit!`);
+              console.warn(`   This means Judge will review DIFFERENT code than Developer wrote`);
+              console.warn(`   Expected: ${commitSHA}`);
+              console.warn(`   Current:  ${currentSHA}`);
+              console.warn(`   Proceeding with current commit (${currentSHA})...`);
+              // Update commitSHA to match reality
+              commitSHA = currentSHA;
+            } else {
+              console.log(`✅ [SYNC COMPLETE] Judge will review the exact commit Developer created`);
+            }
+          } catch (syncError: any) {
+            console.error(`❌ [SYNC ERROR] Failed to sync workspace: ${syncError.message}`);
+            console.error(`   Judge CANNOT review without proper sync - STOPPING`);
+            console.error(`   This is a CRITICAL failure - branch or commit not accessible`);
+
+            // 🔥 FAIL HARD: Don't let Judge review if sync fails
+            return {
+              developerCost,
+              judgeCost: 0,
+              developerTokens,
+              judgeTokens: { input: 0, output: 0 }
+            };
           }
-        } catch (syncError: any) {
-          console.error(`❌ [SYNC ERROR] Failed to sync workspace: ${syncError.message}`);
-          console.error(`   Judge CANNOT review without proper sync - STOPPING`);
-          console.error(`   This is a CRITICAL failure - branch or commit not accessible`);
-
-          // 🔥 FAIL HARD: Don't let Judge review if sync fails
-          return {
-            developerCost,
-            judgeCost: 0,
-            developerTokens,
-            judgeTokens: { input: 0, output: 0 }
-          };
+        } catch (outerSyncError: any) {
+          console.error(`❌ [PRE-JUDGE SYNC] Failed to sync workspace with remote: ${outerSyncError.message}`);
+          console.error(`   Judge CANNOT review without proper workspace sync`);
+          // Continue without failing - Judge might still be able to work
         }
       }
 
