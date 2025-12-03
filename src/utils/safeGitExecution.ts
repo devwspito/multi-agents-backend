@@ -294,6 +294,133 @@ export async function safePull(
 }
 
 /**
+ * Validate git remote URL for security
+ *
+ * Validates that git remote URLs match expected patterns to prevent:
+ * - Pushing to wrong organization/account
+ * - Accidentally exposing code to unauthorized repos
+ * - Security breaches via malicious remote URLs
+ *
+ * @param repoPath - Path to the git repository
+ * @param options - Validation options
+ * @returns Validation result with details
+ */
+export function validateGitRemoteUrl(
+  repoPath: string,
+  options: {
+    allowedHosts?: string[];
+    allowedOrganizations?: string[];
+    requireHttps?: boolean;
+  } = {}
+): { valid: boolean; reason?: string; remoteUrl?: string } {
+  try {
+    // Get current remote URL
+    const remoteUrl = nodeExecSync('git remote get-url origin', {
+      cwd: repoPath,
+      encoding: 'utf8',
+      timeout: 5000,
+    }).trim();
+
+    console.log(`\n🔍 [Git] Validating remote URL for security...`);
+    console.log(`   Repository path: ${repoPath}`);
+    console.log(`   Remote URL: ${remoteUrl}`);
+
+    // Default allowed hosts (GitHub, GitLab, Bitbucket, self-hosted)
+    const allowedHosts = options.allowedHosts || [
+      'github.com',
+      'gitlab.com',
+      'bitbucket.org',
+    ];
+
+    // Check 1: HTTPS requirement (security best practice)
+    if (options.requireHttps !== false) {
+      if (!remoteUrl.startsWith('https://') && !remoteUrl.startsWith('git@')) {
+        console.error(`   ❌ Remote URL does NOT use HTTPS or SSH`);
+        return {
+          valid: false,
+          reason: `Remote URL must use HTTPS or SSH protocol for security. Current: ${remoteUrl.split(':')[0]}://`,
+          remoteUrl,
+        };
+      }
+    }
+
+    // Check 2: Allowed hosts (prevent push to unauthorized servers)
+    let hostMatch = false;
+    for (const allowedHost of allowedHosts) {
+      if (remoteUrl.includes(allowedHost)) {
+        hostMatch = true;
+        console.log(`   ✅ Host matches allowed list: ${allowedHost}`);
+        break;
+      }
+    }
+
+    if (!hostMatch) {
+      console.error(`   ❌ Host NOT in allowed list: ${allowedHosts.join(', ')}`);
+      return {
+        valid: false,
+        reason: `Remote host not in allowed list. Allowed: ${allowedHosts.join(', ')}. Current URL: ${remoteUrl}`,
+        remoteUrl,
+      };
+    }
+
+    // Check 3: Organization/user validation (if specified)
+    if (options.allowedOrganizations && options.allowedOrganizations.length > 0) {
+      let orgMatch = false;
+
+      for (const org of options.allowedOrganizations) {
+        // Match patterns: github.com/ORG/repo or github.com:ORG/repo
+        if (remoteUrl.includes(`/${org}/`) || remoteUrl.includes(`:${org}/`)) {
+          orgMatch = true;
+          console.log(`   ✅ Organization matches allowed list: ${org}`);
+          break;
+        }
+      }
+
+      if (!orgMatch) {
+        console.error(`   ❌ Organization NOT in allowed list: ${options.allowedOrganizations.join(', ')}`);
+        return {
+          valid: false,
+          reason: `Repository organization not in allowed list. Allowed: ${options.allowedOrganizations.join(', ')}. Current URL: ${remoteUrl}`,
+          remoteUrl,
+        };
+      }
+    }
+
+    // Check 4: Detect suspicious patterns (embedded credentials, IP addresses, etc.)
+    const suspiciousPatterns = [
+      { pattern: /\/\/[^@]+:[^@]+@/, name: 'embedded credentials (user:pass@)' },
+      { pattern: /\/\/\d+\.\d+\.\d+\.\d+/, name: 'IP address instead of domain' },
+      { pattern: /localhost|127\.0\.0\.1/, name: 'localhost reference' },
+    ];
+
+    for (const { pattern, name } of suspiciousPatterns) {
+      if (pattern.test(remoteUrl)) {
+        console.warn(`   ⚠️  Suspicious pattern detected: ${name}`);
+        console.warn(`   🔒 This may be a security risk - please review`);
+        return {
+          valid: false,
+          reason: `Suspicious pattern detected in remote URL: ${name}. URL: ${remoteUrl}`,
+          remoteUrl,
+        };
+      }
+    }
+
+    console.log(`   ✅ Remote URL passed all security validation checks`);
+
+    return {
+      valid: true,
+      remoteUrl,
+    };
+  } catch (error: any) {
+    console.error(`   ❌ Failed to validate remote URL: ${error.message}`);
+    return {
+      valid: false,
+      reason: `Failed to get remote URL: ${error.message}`,
+    };
+  }
+}
+
+/**
  * Fix git remote URL to remove embedded token and use credential helper
  *
  * Removes expired/invalid tokens from remote URLs that cause authentication failures.

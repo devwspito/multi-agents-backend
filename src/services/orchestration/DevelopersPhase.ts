@@ -4,7 +4,7 @@ import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
-import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
+import { safeGitExecSync, fixGitRemoteAuth, validateGitRemoteUrl } from '../../utils/safeGitExecution';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 
 /**
@@ -1451,6 +1451,37 @@ export class DevelopersPhase extends BasePhase {
       } catch (e) {
         console.warn(`⚠️  [Merge] Could not get current remote URL`);
       }
+
+      // 🔥 CRITICAL FIX: Validate remote URL for security BEFORE pushing
+      console.log(`\n🔐 [Merge] Validating remote URL for security...`);
+      const validation = validateGitRemoteUrl(repoPath, {
+        // Allow common git hosting providers
+        allowedHosts: ['github.com', 'gitlab.com', 'bitbucket.org'],
+        // Optional: Add allowedOrganizations if you want to restrict to specific orgs
+        // allowedOrganizations: ['your-org', 'your-company'],
+        requireHttps: true,
+      });
+
+      if (!validation.valid) {
+        console.error(`\n❌❌❌ [Merge] SECURITY VALIDATION FAILED!`);
+        console.error(`   Repository: ${repoPath}`);
+        console.error(`   Remote URL: ${validation.remoteUrl || 'unknown'}`);
+        console.error(`   Reason: ${validation.reason}`);
+        console.error(`\n   🛑 REFUSING TO PUSH to potentially unauthorized remote`);
+        console.error(`   🛑 This prevents accidentally exposing code to wrong repositories`);
+        console.error(`\n   🔧 To fix this:`);
+        console.error(`   1. Verify the remote URL is correct: cd "${repoPath}" && git remote get-url origin`);
+        console.error(`   2. Update remote if needed: git remote set-url origin <correct-url>`);
+        console.error(`   3. Ensure remote uses HTTPS or SSH (not HTTP)`);
+        console.error(`   4. Ensure remote points to authorized git host (GitHub, GitLab, etc.)`);
+
+        throw new Error(
+          `HUMAN_REQUIRED: Git remote URL failed security validation - ${validation.reason}. ` +
+          `Repository: ${repoPath}. Remote: ${validation.remoteUrl}`
+        );
+      }
+
+      console.log(`✅ [Merge] Remote URL validation passed - safe to push`);
 
       // Try to push with retries
       let pushSucceeded = false;
