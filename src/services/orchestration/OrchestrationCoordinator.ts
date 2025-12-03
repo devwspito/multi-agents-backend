@@ -325,6 +325,11 @@ export class OrchestrationCoordinator {
       const workspacePath = await this.setupWorkspace(taskId, repositories, user.accessToken);
       const workspaceStructure = await this.getWorkspaceStructure(workspacePath);
 
+      // 🔥 FIX: Enrich repositories with localPath after cloning
+      repositories.forEach((repo: any) => {
+        repo.localPath = path.join(workspacePath, repo.name);
+      });
+
       // Create orchestration context (shared state for all phases)
       const context = new OrchestrationContext(task, repositories, workspacePath);
 
