@@ -488,24 +488,30 @@ Remove overlapping files from one epic to eliminate conflict.
 - 2-5 epics maximum
 - Include filesToModify/filesToCreate/filesToRead for overlap detection
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - agents think in text
+✅ DO use clear sections and completion markers
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me analyze...", "I'll review...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+List each epic clearly:
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+**Epic 1**: [Title]
+ID: epic-1
+Description: [What this delivers]
+Repositories: [backend, frontend, etc.]
+Files to modify: [list]
+Files to create: [list]
+Priority: [number]
+Complexity: simple|moderate|complex
+Dependencies: [list or none]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+**Epic 2**: [Title]
+...
+
+📍 Total Epics: [number]
+📍 Total Teams: [number]
+✅ EPICS_CREATED`,
     model: 'sonnet',
   },
 
@@ -954,24 +960,35 @@ Description:
 - Used by components as: await trackEvent('click', { button: 'submit' })
 \`\`\`
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - architects think in diagrams and text
+✅ DO use clear sections and completion markers
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me analyze...", "I'll review...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+Structure your architecture and stories clearly:
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+**Architecture Overview**
+[Description of the technical approach]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+**Story 1**: [Title]
+ID: story-001
+Branch: story/001-description
+Repository: [backend|frontend]
+Files to modify: [list exact paths]
+Files to create: [list exact paths]
+Tasks:
+- [Task 1]
+- [Task 2]
+Dependencies: [story IDs or none]
+Complexity: simple|moderate|complex
+
+**Story 2**: [Title]
+...
+
+📍 Total Stories: [number]
+📍 Epic ID: [epic-id]
+✅ ARCHITECTURE_COMPLETE`,
     model: 'sonnet',
   },
 
@@ -1359,27 +1376,52 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - **Preserve Intent**: Keep the developer's original goal intact
 - **No Silent Failures**: Always report what you fixed
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - fixers explain their work in text
+✅ DO use clear sections and completion markers
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me analyze...", "I'll fix...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+Report your fix clearly:
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+**Fix Report**
 
-Example output:
-{"fixed":true,"attempts":1,"changes":["file1.ts: Fixed missing import"],"filesModified":["src/file1.ts"],"errorType":"syntax","summary":"Fixed import error"}
+Error Type: [syntax|type|runtime|test|lint]
+Attempts: [number]
+Files Modified:
+- [file1.ts]: [what was changed]
+- [file2.ts]: [what was changed]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }
+Changes Made:
+1. [Description of change 1]
+2. [Description of change 2]
+
+Summary: [Brief summary of what was fixed]
+
+🔥 MANDATORY: End with ONE of these:
+✅ FIX_APPLIED
+✅ FIX_VERIFIED
+
+OR if failed:
+❌ FIX_FAILED
+📍 Reason: [why it failed]
+
+Example:
+"**Fix Report**
+
+Error Type: syntax
+Attempts: 1
+Files Modified:
+- src/auth.ts: Added missing import
+
+Changes Made:
+1. Added import { User } from './models/User' at line 2
+2. No other changes needed
+
+Summary: Fixed missing import causing compilation error
+
+✅ FIX_APPLIED
+✅ FIX_VERIFIED"
 
 ## Success Criteria
 
