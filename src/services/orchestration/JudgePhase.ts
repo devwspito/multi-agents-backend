@@ -69,23 +69,54 @@ export class JudgePhase extends BasePhase {
     const state = await eventStore.getCurrentState(task._id as any);
     const stories = state.stories || [];
 
+    console.log(`\n🔍 [Judge.shouldSkip] Checking if Judge already reviewed code...`);
+    console.log(`   Total stories: ${stories.length}`);
+    console.log(`   Total Judge evaluations: ${judgeEvaluations.length}`);
+
     if (judgeEvaluations.length === 0 || stories.length === 0) {
+      console.log(`   ❌ No evaluations yet OR no stories - Judge MUST run`);
       return false;
     }
 
     // Check if all stories have approved evaluations
-    const allStoriesApproved = stories.every((story: any) => {
+    console.log(`\n📋 [Judge.shouldSkip] Checking each story's evaluation status:`);
+
+    const evaluationStatus = stories.map((story: any) => {
       const evaluation = judgeEvaluations.find((e: any) => e.storyId === story.id);
-      return evaluation && evaluation.status === 'approved';
+      const hasEval = !!evaluation;
+      const status = evaluation?.status || 'NOT_EVALUATED';
+
+      console.log(`   📝 Story: ${story.title || story.id}`);
+      console.log(`      Story ID: ${story.id}`);
+      console.log(`      Has evaluation: ${hasEval ? '✅ YES' : '❌ NO'}`);
+      if (hasEval) {
+        console.log(`      Status: ${status === 'approved' ? '✅ APPROVED' : '❌ ' + status}`);
+        console.log(`      Developer: ${evaluation.developerId || 'unknown'}`);
+        console.log(`      Iteration: ${evaluation.iteration || 1}`);
+        const timestamp = (evaluation as any).timestamp;
+        console.log(`      Timestamp: ${timestamp ? new Date(timestamp).toISOString() : 'unknown'}`);
+      }
+
+      return { story, hasEval, status };
     });
 
+    const allStoriesApproved = evaluationStatus.every(s => s.hasEval && s.status === 'approved');
+
     if (allStoriesApproved) {
-      console.log(`[SKIP] Judge already approved all stories (recovery mode)`);
+      console.log(`\n✅ [SKIP] Judge already approved ALL ${stories.length} stories`);
+      console.log(`✅ All stories were reviewed during development (per-story mode)`);
+      console.log(`✅ No need to re-evaluate - skipping Judge phase`);
       context.setData('judgeComplete', true);
       return true;
+    } else {
+      const unevaluated = evaluationStatus.filter(s => !s.hasEval || s.status !== 'approved');
+      console.log(`\n❌ [NO SKIP] Judge has NOT approved all stories yet`);
+      console.log(`❌ Stories needing evaluation: ${unevaluated.length}`);
+      unevaluated.forEach(s => {
+        console.log(`   - ${s.story.title || s.story.id}: ${s.hasEval ? s.status : 'NOT_EVALUATED'}`);
+      });
+      return false;
     }
-
-    return false;
   }
 
   protected async executePhase(
@@ -429,15 +460,16 @@ export class JudgePhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string }> {
 
-    // Validate inputs with detailed logging
-    console.log(`🔍 [Judge.evaluateCode] Validating inputs...`);
-    console.log(`   task: ${task ? 'exists' : 'MISSING'}`);
-    console.log(`   task._id: ${task?._id ? task._id : 'MISSING'}`);
-    console.log(`   developer: ${developer ? 'exists' : 'MISSING'}`);
-    console.log(`   developer.instanceId: ${developer?.instanceId ? developer.instanceId : 'MISSING'}`);
-    console.log(`   story: ${story ? 'exists' : 'MISSING'}`);
-    console.log(`   story.id: ${story?.id ? story.id : 'MISSING'}`);
+    // 🔍 DETAILED LOGGING: Show exactly what Judge is about to review
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`⚖️  [JUDGE] STARTING CODE REVIEW`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`📋 Story: ${story.title}`);
+    console.log(`🆔 Story ID: ${story.id}`);
+    console.log(`👤 Developer: ${developer?.instanceId || 'UNKNOWN'}`);
+    console.log(`📝 Description: ${story.description || 'No description'}`);
 
+    // Validate critical inputs
     if (!task?._id) {
       throw new Error(`Invalid task object - missing _id field`);
     }
@@ -447,47 +479,37 @@ export class JudgePhase extends BasePhase {
 
     // Get commit SHA if available
     const commitSHA = context.getData<string>('commitSHA');
+    console.log(`\n🔍 [Judge] Code Location Details:`);
     if (commitSHA) {
-      console.log(`📍 [Judge] Will review EXACT commit: ${commitSHA}`);
+      console.log(`   📍 Commit SHA: ${commitSHA}`);
+      console.log(`   ✅ Will review EXACT commit that developer created`);
     } else {
-      console.warn(`⚠️  [Judge] No commit SHA provided - will review current HEAD`);
+      console.warn(`   ⚠️  No commit SHA - reviewing current HEAD (may not be developer's exact work)`);
     }
 
-    // 🔥 CRITICAL: Get LITERAL branch name from Developer (belt-and-suspenders with story.branchName)
+    // 🔥 CRITICAL: Get LITERAL branch name from Developer
     const storyBranchName = context.getData<string>('storyBranchName') || story.branchName;
     if (storyBranchName) {
-      console.log(`🔀 [Judge] Will review EXACT branch: ${storyBranchName}`);
-      console.log(`   This is the LITERAL branch Developer worked on`);
+      console.log(`   🔀 Branch: ${storyBranchName}`);
+      console.log(`   ✅ Will review code on EXACT branch developer worked on`);
     } else {
-      console.error(`❌ [Judge] No branch name provided - cannot verify correct branch!`);
+      console.error(`   ❌ No branch name - cannot verify correct branch!`);
     }
 
     // Get target repository from context or story's epic
     let targetRepository = context.getData<string>('targetRepository');
     if (!targetRepository && (story as any).epicId) {
-      // Try to get from epic
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
       const epic = state.epics?.find((e: any) => e.id === (story as any).epicId);
 
-      // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
       if (!epic) {
-        console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: Cannot find epic for story!`);
-        console.error(`   Story: ${story.title}`);
-        console.error(`   Story ID: ${story.id}`);
-        console.error(`   Epic ID: ${(story as any).epicId}`);
-        console.error(`\n   💀 CANNOT DETERMINE TARGET REPOSITORY`);
-        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        console.error(`\n❌ [Judge] CRITICAL: Cannot find epic for story!`);
         throw new Error(`HUMAN_REQUIRED: Cannot find epic ${(story as any).epicId} for story ${story.id}`);
       }
 
       if (!epic.targetRepository) {
-        console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: Epic has NO targetRepository!`);
-        console.error(`   Epic: ${epic.name}`);
-        console.error(`   Epic ID: ${epic.id}`);
-        console.error(`   Story: ${story.title}`);
-        console.error(`\n   💀 CANNOT DETERMINE WHERE TO REVIEW CODE`);
-        console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+        console.error(`\n❌ [Judge] CRITICAL: Epic has NO targetRepository!`);
         throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in Judge phase`);
       }
 
@@ -495,15 +517,38 @@ export class JudgePhase extends BasePhase {
     }
 
     if (!targetRepository) {
-      console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: No targetRepository found!`);
-      console.error(`   Story: ${story.title}`);
-      console.error(`   Story ID: ${story.id}`);
-      console.error(`\n   💀 CANNOT DETERMINE WHERE TO REVIEW CODE`);
-      console.error(`\n   🛑 STOPPING - HUMAN INTERVENTION REQUIRED`);
+      console.error(`\n❌ [Judge] CRITICAL: No targetRepository found!`);
       throw new Error(`HUMAN_REQUIRED: No targetRepository for story ${story.id} in Judge phase`);
     }
 
-    console.log(`📂 [Judge] Target repository: ${targetRepository}`);
+    console.log(`   📂 Repository: ${targetRepository}`);
+    console.log(`   📁 Workspace: ${workspacePath || 'NOT SET'}`);
+
+    // Show files that should have been modified/created
+    console.log(`\n📝 [Judge] Expected File Changes:`);
+    const filesToModify = (story as any).filesToModify || [];
+    const filesToCreate = (story as any).filesToCreate || [];
+
+    if (filesToModify.length > 0) {
+      console.log(`   ✏️  Files to MODIFY (${filesToModify.length}):`);
+      filesToModify.forEach((f: string) => console.log(`      - ${f}`));
+    } else {
+      console.log(`   ⚠️  No files marked to MODIFY`);
+    }
+
+    if (filesToCreate.length > 0) {
+      console.log(`   ➕ Files to CREATE (${filesToCreate.length}):`);
+      filesToCreate.forEach((f: string) => console.log(`      - ${f}`));
+    } else {
+      console.log(`   ⚠️  No files marked to CREATE`);
+    }
+
+    const totalExpectedFiles = filesToModify.length + filesToCreate.length;
+    console.log(`   📊 Total expected file changes: ${totalExpectedFiles}`);
+
+    if (totalExpectedFiles === 0) {
+      console.warn(`   ⚠️  WARNING: No expected file changes listed - Judge may have limited context`);
+    }
 
     const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName);
 
@@ -580,8 +625,10 @@ export class JudgePhase extends BasePhase {
         }
       );
 
-      console.log(`✅ [Judge] executeAgentFn completed successfully`);
-      console.log(`   Output length: ${result.output?.length || 0} chars`);
+      console.log(`\n✅ [Judge] Judge agent execution completed successfully`);
+      console.log(`   📊 Output length: ${result.output?.length || 0} chars`);
+      console.log(`   💰 Cost: $${result.cost?.toFixed(4) || 0}`);
+      console.log(`   📈 Tokens: ${(result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0)}`);
 
       // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
       const { NotificationService: NS } = await import('../NotificationService');
@@ -591,8 +638,36 @@ export class JudgePhase extends BasePhase {
         `\n${'='.repeat(80)}\n⚖️ JUDGE - FULL OUTPUT (Story: ${story.title})\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
       );
 
-      // Parse judge output (expecting JSON with status and feedback)
+      // Parse judge output
+      console.log(`\n🔍 [Judge] Parsing Judge's decision...`);
       const parsed = this.parseJudgeOutput(result.output);
+
+      // Log the verdict clearly
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`⚖️  [JUDGE] VERDICT FOR STORY: ${story.title}`);
+      console.log(`${'='.repeat(80)}`);
+      console.log(`📋 Story ID: ${story.id}`);
+      console.log(`👤 Developer: ${developer.instanceId}`);
+      console.log(`📍 Commit: ${commitSHA || 'HEAD'}`);
+      console.log(`🔀 Branch: ${storyBranchName || 'unknown'}`);
+
+      if (parsed.status === 'approved') {
+        console.log(`\n✅ VERDICT: APPROVED`);
+        console.log(`✅ Code meets all quality standards`);
+        if (parsed.feedback && parsed.feedback !== 'Code approved - meets all quality standards') {
+          console.log(`📝 Notes from Judge:`);
+          console.log(`   ${parsed.feedback}`);
+        }
+      } else {
+        console.log(`\n❌ VERDICT: CHANGES REQUESTED`);
+        console.log(`❌ Code does NOT meet quality standards`);
+        console.log(`\n📋 Feedback from Judge:`);
+        const feedbackLines = parsed.feedback.split('\n');
+        feedbackLines.forEach(line => {
+          if (line.trim()) console.log(`   ${line}`);
+        });
+      }
+      console.log(`${'='.repeat(80)}\n`);
 
       return {
         status: parsed.status === 'approved' ? 'approved' : 'changes_requested',
