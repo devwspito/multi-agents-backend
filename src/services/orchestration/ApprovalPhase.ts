@@ -205,15 +205,22 @@ export class ApprovalPhase extends BasePhase {
   private normalizePhase(phase: string): string {
     // Special case mappings to match API routes
     const specialCases: Record<string, string> = {
+      'ProblemAnalyst': 'problem-analyst',
+      'ProductManager': 'product-manager',
+      'ProjectManager': 'project-manager',
+      'TechLead': 'tech-lead',
       'QA': 'qa-engineer',
       'Merge': 'merge-coordinator',
       'Judge': 'judge',
+      'Fixer': 'fixer',
       'Developers': 'development',
-      'TeamOrchestration': 'team-orchestration', // Use its own phase name for approval
+      'TeamOrchestration': 'team-orchestration',
       'AutoMerge': 'auto-merge',
       'TestCreator': 'test-creator',
+      'ErrorDetective': 'error-detective',
       'contract-testing': 'contract-testing', // Already kebab-case
       'contract-fixer': 'contract-fixer', // Already kebab-case
+      'contract-tester': 'contract-tester', // Already kebab-case
     };
 
     if (specialCases[phase]) {
@@ -232,6 +239,7 @@ export class ApprovalPhase extends BasePhase {
    */
   private getPhaseName(phase: string): string {
     const phaseNames: Record<string, string> = {
+      'ProblemAnalyst': 'Problem Analyst',
       'ProductManager': 'Product Manager',
       'ProjectManager': 'Project Manager',
       'TechLead': 'Tech Lead',
@@ -240,10 +248,13 @@ export class ApprovalPhase extends BasePhase {
       'Judge': 'Judge Evaluation',
       'TestCreator': 'Test Creator',
       'QA': 'QA Engineer',
+      'Fixer': 'Fixer',
       'Merge': 'Merge Coordinator',
       'AutoMerge': 'Auto-Merge',
+      'ErrorDetective': 'Error Detective',
       'contract-testing': 'Contract Testing',
       'contract-fixer': 'Contract Fixer',
+      'contract-tester': 'Contract Tester',
     };
 
     return phaseNames[phase] || phase;
