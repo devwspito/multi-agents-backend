@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import {
   analyzeRepositoryAffinity,
   getRepositoryExecutionOrder,
@@ -57,16 +58,21 @@ export class ProjectManagerPhase extends BasePhase {
         // CRITICAL: Parse and restore epics to context for TeamOrchestration
         try {
           const outputText = context.task.orchestration.projectManager.output;
-          const jsonMatch = outputText.match(/```json\s*([\s\S]*?)\s*```/);
 
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[1]);
-            if (parsed.epics && Array.isArray(parsed.epics)) {
-              // Validate and separate epics (same as normal execution)
-              const validatedEpics = this.validateAndSeparateEpics(parsed.epics, context);
-              context.setData('epics', validatedEpics);
-              context.setData('totalTeamsNeeded', parsed.totalTeamsNeeded || validatedEpics.length);
-              console.log(`✅ [ProjectManager] Restored ${validatedEpics.length} epic(s) from previous execution`);
+          // Check for completion marker
+          if (hasMarker(outputText, '✅ EPICS_CREATED')) {
+            // Try extracting JSON from markdown blocks
+            const jsonMatch = outputText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[1]);
+              if (parsed.epics && Array.isArray(parsed.epics)) {
+                // Validate and separate epics (same as normal execution)
+                const validatedEpics = this.validateAndSeparateEpics(parsed.epics, context);
+                context.setData('epics', validatedEpics);
+                context.setData('totalTeamsNeeded', parsed.totalTeamsNeeded || validatedEpics.length);
+                console.log(`✅ [ProjectManager] Restored ${validatedEpics.length} epic(s) from previous execution`);
+              }
             }
           }
         } catch (error) {
@@ -295,26 +301,60 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
         attachments.length > 0 ? attachments : undefined // Pass attachments
       );
 
-      // Parse JSON response - expecting PURE JSON (no markdown)
-      let parsed: any;
-      const trimmedOutput = result.output.trim();
+      // Parse response - now using plain text with markers + optional JSON for structured data
+      let parsed: any = null;
 
-      // STEP 1: Try parsing as pure JSON (EXPECTED case)
-      try {
-        parsed = JSON.parse(trimmedOutput);
-        if (parsed.epics && Array.isArray(parsed.epics)) {
-          console.log('✅ [ProjectManager] Parsed as pure JSON');
-        } else {
-          console.warn('⚠️  [ProjectManager] JSON parsed but missing epics array');
-          parsed = null;
+      // STEP 0: Check for completion marker (agent should always include this)
+      const epicsCreated = hasMarker(result.output, '✅ EPICS_CREATED');
+      if (epicsCreated) {
+        console.log('✅ [ProjectManager] EPICS_CREATED marker found');
+
+        // Extract metadata from markers
+        const totalEpics = extractMarkerValue(result.output, '📍 Total Epics:');
+        const totalTeams = extractMarkerValue(result.output, '📍 Total Teams:');
+
+        if (totalEpics) {
+          console.log(`   Total Epics: ${totalEpics}`);
         }
-      } catch (e) {
-        console.warn('⚠️  [ProjectManager] Output is not pure JSON, trying fallback extraction...');
+        if (totalTeams) {
+          console.log(`   Total Teams: ${totalTeams}`);
+        }
+      } else {
+        console.warn('⚠️  [ProjectManager] No EPICS_CREATED marker - output may be incomplete');
       }
 
-      // STEP 2: Fallback - extract JSON from text (if model added text before/after)
+      // STEP 1: Try extracting JSON from markdown blocks (agent may include structured data)
+      const markdownMatch = result.output.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      if (markdownMatch) {
+        try {
+          parsed = JSON.parse(markdownMatch[1].trim());
+          if (parsed.epics && Array.isArray(parsed.epics)) {
+            console.log('✅ [ProjectManager] Parsed epics from JSON block');
+          } else {
+            parsed = null;
+          }
+        } catch (e) {
+          console.warn('⚠️  [ProjectManager] Failed to parse JSON block');
+        }
+      }
+
+      // STEP 2: Fallback - try parsing entire output as JSON (backward compatibility)
       if (!parsed) {
-        // Find JSON object starting with {"epics" anywhere in output
+        const trimmedOutput = result.output.trim();
+        try {
+          parsed = JSON.parse(trimmedOutput);
+          if (parsed.epics && Array.isArray(parsed.epics)) {
+            console.log('✅ [ProjectManager] Parsed as pure JSON (backward compatibility)');
+          } else {
+            parsed = null;
+          }
+        } catch (e) {
+          // Not pure JSON, continue
+        }
+      }
+
+      // STEP 3: Extract JSON from text
+      if (!parsed) {
         const jsonPatterns = ['{"epics"', '{ "epics"', '{\n  "epics"', '{\n"epics"'];
         let jsonStartIndex = -1;
 
@@ -326,7 +366,6 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
         if (jsonStartIndex !== -1) {
           try {
             const jsonSubstring = result.output.substring(jsonStartIndex);
-            // Find matching closing brace by counting braces
             let braceCount = 0;
             let endIndex = 0;
             for (let i = 0; i < jsonSubstring.length; i++) {
@@ -341,30 +380,13 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
               const jsonText = jsonSubstring.substring(0, endIndex);
               parsed = JSON.parse(jsonText);
               if (parsed.epics && Array.isArray(parsed.epics)) {
-                console.log('⚠️  [ProjectManager] Extracted JSON from text (model did not output pure JSON)');
+                console.log('⚠️  [ProjectManager] Extracted JSON from text');
               } else {
                 parsed = null;
               }
             }
           } catch (e) {
-            // Continue to markdown fallback
-          }
-        }
-      }
-
-      // STEP 3: Last resort - try markdown blocks (deprecated but kept for safety)
-      if (!parsed) {
-        const markdownMatch = result.output.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-        if (markdownMatch) {
-          try {
-            parsed = JSON.parse(markdownMatch[1].trim());
-            if (parsed.epics && Array.isArray(parsed.epics)) {
-              console.warn('⚠️  [ProjectManager] Parsed from markdown block (model should output pure JSON!)');
-            } else {
-              parsed = null;
-            }
-          } catch (e) {
-            // Failed all attempts
+            // Failed
           }
         }
       }
@@ -373,7 +395,7 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
       if (!parsed || !parsed.epics || !Array.isArray(parsed.epics)) {
         console.log('\n🔍 [ProjectManager] FULL Agent output:\n', result.output);
         NotificationService.emitConsoleLog(taskId, 'error', `❌ Project Manager parsing failed. Full output:\n${result.output}`);
-        throw new Error(`Project Manager did not return valid JSON with epics array. Found ${parsed?.epics ? 'non-array epics' : 'no epics'}`);
+        throw new Error(`Project Manager did not return valid epics array. Marker: ${epicsCreated ? 'FOUND' : 'MISSING'}`);
       }
 
       if (parsed.epics.length === 0) {

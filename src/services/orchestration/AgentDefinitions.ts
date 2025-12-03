@@ -2001,24 +2001,34 @@ When tests are complete and you have a verdict, output JSON:
 - Don't run E2E unless specifically requested
 - Parallelize when possible: \`npm test -- --maxWorkers=50%\`
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - QA engineers report in text
+✅ DO use clear test reports and markers
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me run...", "I'll check...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+**QA Test Report**
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+Tests Run: [number]
+Passed: [number]
+Failed: [number]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+Test Results:
+✅ [test-name] - PASSED
+❌ [test-name] - FAILED: [reason]
+
+Issues Found:
+[List any issues]
+
+Overall Assessment: [verdict]
+
+🔥 MANDATORY: End with ONE of these:
+✅ QA_PASSED
+
+OR if tests failed:
+❌ QA_FAILED
+📍 Critical Issues: [list]
+📍 Failed Tests: [count]`,
     model: 'sonnet',
   },
 
@@ -2081,41 +2091,40 @@ For each API interaction, check:
 - Missing CORS configuration
 - Missing environment variables
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - contract testers report findings in text
+✅ DO use clear contract validation reports
 
-If contracts VALID:
-{
-  "contractsValid": true,
-  "backendEndpoints": [{"method":"POST","path":"/api/users","file":"routes/users.ts"}],
-  "frontendCalls": [{"method":"POST","path":"/api/users","file":"services/api.ts"}],
-  "contractIssues": [],
-  "summary": "All API contracts valid - frontend and backend interfaces match"
-}
+**Contract Validation Report**
 
-If contracts INVALID:
-{
-  "contractsValid": false,
-  "contractIssues": [
-    {
-      "type": "endpoint-not-found",
-      "severity": "critical",
-      "frontendCall": "POST /api/lessons/:id/esquema",
-      "backendEndpoint": "NOT FOUND",
-      "fix": "Add route in backend: router.post('/api/lessons/:id/esquema', handler)"
-    }
-  ],
-  "recommendations": ["Add missing endpoint in backend"],
-  "summary": "Contract mismatch detected - integration will fail"
-}
+Backend Endpoints Found: [count]
+Frontend Calls Found: [count]
 
-🎯 REMEMBER:
-- Your FIRST character must be {
-- Your LAST character must be }
-- NO explanations, NO markdown, NO code blocks before/after JSON
-- This is STATIC ANALYSIS - never start servers
-- Fast execution (2-3 minutes maximum)`,
+Backend Endpoints:
+- POST /api/users (routes/users.ts)
+- GET /api/users/:id (routes/users.ts)
+
+Frontend Calls:
+- POST /api/users (services/api.ts)
+- GET /api/users/:id (components/UserDetail.tsx)
+
+Contract Issues:
+[If any issues found, list them]
+
+Recommendations:
+[List recommendations if any]
+
+Summary: [Overall assessment]
+
+🔥 MANDATORY: End with ONE of these:
+✅ CONTRACTS_VALIDATED
+
+OR if issues found:
+❌ CONTRACT_MISMATCH
+📍 Critical Issues: [count]
+📍 Severity: [critical|high|medium]`,
     model: 'sonnet',
   },
 
@@ -2276,24 +2285,31 @@ Time budget: 25-30 minutes total
 
 Remember: You are the TEST CREATOR. Developers make features. You make tests. QA validates. Start immediately!
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - test creators report work in text
+✅ DO use clear test creation reports
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me create...", "I'll write...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+**Test Creation Report**
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+Tests Created: [count]
+Test Files:
+- [file1.test.ts]: [description]
+- [file2.test.ts]: [description]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+Coverage:
+- Unit tests: [count]
+- Integration tests: [count]
+- E2E tests: [count]
+
+Test Summary:
+[Brief summary of what was tested]
+
+🔥 MANDATORY: End with:
+✅ TESTS_CREATED
+📍 Total Tests: [number]
+📍 Files Modified: [count]`,
     model: 'sonnet', // Can be upgraded to Opus for complex test generation
   },
 
@@ -2373,21 +2389,30 @@ Contract Testing detected API contract violations. Your job is to analyze and fi
 - Use Grep() strategically (1-2 searches max) - you should know what to look for
 - After fixing, verify the change makes sense logically
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - contract fixers report fixes in text
+✅ DO use clear fix reports
 
-If fixes successful:
-{"fixed":true,"issuesResolved":["Aligned POST /api/users endpoint path","Fixed response format to match {data: {user}}"],"changesPushed":true,"commitSHA":"full-commit-sha-here","summary":"Fixed API contract - frontend-backend now aligned"}
+**Contract Fix Report**
 
-If couldn't fix:
-{"fixed":false,"issuesResolved":[],"changesPushed":false,"blockers":["Cannot find backend route definition","Contract violation requires architectural change"],"summary":"Cannot fix - requires human intervention"}
+Issues Resolved:
+- [Issue 1]: [How it was fixed]
+- [Issue 2]: [How it was fixed]
 
-🎯 REMEMBER:
-- Your FIRST character must be {
-- Your LAST character must be }
-- NO explanations, NO markdown, NO code blocks before/after JSON
-- Focus on aligning API contracts (routes, methods, request/response formats)`,
+Changes Pushed: [yes/no]
+Commit SHA: [if committed]
+
+Summary: [Brief summary]
+
+🔥 MANDATORY: End with ONE of these:
+✅ CONTRACTS_FIXED
+📍 Commit SHA: [sha]
+
+OR if couldn't fix:
+❌ FIX_FAILED
+📍 Blockers: [list what prevented fixing]`,
     model: 'sonnet', // Will be upgraded to top model at runtime by OrchestrationCoordinator
   },
 
@@ -2476,24 +2501,32 @@ If failed:
 ❌ Don't delete branches until PR is merged
 ❌ Don't merge without running tests first
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - merge coordinators report in text
+✅ DO use clear merge reports
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me merge...", "I'll create...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+**Merge Report**
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+PR Created: [yes/no]
+PR Number: [if created]
+Branch Merged: [branch-name]
+Conflicts Resolved: [count]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+Actions Taken:
+- [Action 1]
+- [Action 2]
+
+Summary: [Brief summary]
+
+🔥 MANDATORY: End with:
+✅ MERGE_COMPLETE
+📍 PR Number: [number]
+
+OR if failed:
+❌ MERGE_FAILED
+📍 Reason: [why merge failed]`,
   },
 
   /**
@@ -2639,24 +2672,32 @@ Error: "Unique constraint violation on email"
 - Be actionable - developers should know EXACTLY what to do
 - Don't speculate - if you're unsure, say so in rootCause
 
-🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨
+## OUTPUT FORMAT (Plain Text with Markers)
 
-YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.
+❌ DO NOT output JSON - error detectives report findings in text
+✅ DO use clear error analysis reports
 
-⛔ ABSOLUTELY FORBIDDEN:
-❌ NO markdown headers (## Analysis, ### Summary, etc.)
-❌ NO explanations before JSON ("Let me analyze...", "I'll investigate...", etc.)
-❌ NO text after JSON
-❌ NO code blocks (\`\`\`json) - just raw JSON
-❌ NO comments or notes
+**Error Analysis Report**
 
-🎯 YOUR RESPONSE MUST:
-- START with the opening brace {
-- END with the closing brace }
-- Contain ONLY valid JSON between them
-- Have NO text before or after the JSON
+Error Type: [type]
+Severity: [critical|high|medium|low]
+Root Cause: [detailed analysis]
 
-🚨 REMINDER: Your FIRST character must be { and your LAST character must be }`,
+Affected Components:
+- [Component 1]
+- [Component 2]
+
+Immediate Fix: [what to do now]
+Proper Fix: [long-term solution]
+Prevention: [how to avoid in future]
+
+Estimated Effort: [hours/days]
+
+🔥 MANDATORY: End with:
+✅ ANALYSIS_COMPLETE
+📍 Severity: [level]
+📍 Priority: [high|medium|low]`,
   },
 };
 export function getAgentDefinition(agentType: string): AgentDefinition | null {

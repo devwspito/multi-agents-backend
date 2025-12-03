@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import fs from 'fs';
 import path from 'path';
 
@@ -411,35 +412,52 @@ ${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creat
       });
 
       // 🔥 NEW: Parse and store Master Epic + identifiedFiles from Product Manager output
+      // Now using plain text markers instead of JSON
       let masterEpic = null;
       let identifiedFiles: Record<string, { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] }> = {};
-      try {
-        const jsonMatch = result.output.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[1]);
-          if (parsed.masterEpic) {
-            masterEpic = parsed.masterEpic;
-            console.log(`✅ [ProductManager] Extracted Master Epic: ${masterEpic.id}`);
-            console.log(`   Global Naming Conventions: ${Object.keys(masterEpic.globalNamingConventions || {}).length} conventions`);
-            console.log(`   Shared Contracts: ${(masterEpic.sharedContracts?.apiEndpoints || []).length} APIs, ${(masterEpic.sharedContracts?.sharedTypes || []).length} types`);
-            console.log(`   Affected Repositories: ${masterEpic.affectedRepositories?.join(', ')}`);
-          }
 
-          // 🔥 CRITICAL: Extract identifiedFiles for ProjectManager
-          if (parsed.identifiedFiles) {
-            identifiedFiles = parsed.identifiedFiles;
-            console.log(`✅ [ProductManager] Extracted identifiedFiles:`);
-            for (const [repo, files] of Object.entries(identifiedFiles)) {
-              const f = files as { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] };
-              const totalFiles = (f.filesToModify?.length || 0) + (f.filesToCreate?.length || 0) + (f.filesToRead?.length || 0);
-              console.log(`   ${repo}: ${totalFiles} files (modify: ${f.filesToModify?.length || 0}, create: ${f.filesToCreate?.length || 0}, read: ${f.filesToRead?.length || 0})`);
-            }
-          } else {
-            console.warn(`⚠️  [ProductManager] NO identifiedFiles in output - ProjectManager will need to explore codebase`);
-          }
+      // Check for completion marker
+      if (hasMarker(result.output, '✅ EPIC_DEFINED')) {
+        console.log(`✅ [ProductManager] Epic defined successfully`);
+
+        // Extract Epic ID
+        const epicId = extractMarkerValue(result.output, '📍 Epic ID:');
+        if (epicId) {
+          masterEpic = { id: epicId };
+          console.log(`✅ [ProductManager] Extracted Epic ID: ${epicId}`);
         }
-      } catch (error: any) {
-        console.warn(`⚠️  [ProductManager] Failed to parse JSON output: ${error.message}`);
+
+        // Try to parse any JSON sections in the output for structured data
+        // (the agent may still include JSON for complex data structures)
+        try {
+          const jsonMatch = result.output.match(/```json\s*([\s\S]*?)\s*```/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (parsed.masterEpic) {
+              masterEpic = parsed.masterEpic;
+              console.log(`   Global Naming Conventions: ${Object.keys(masterEpic.globalNamingConventions || {}).length} conventions`);
+              console.log(`   Shared Contracts: ${(masterEpic.sharedContracts?.apiEndpoints || []).length} APIs, ${(masterEpic.sharedContracts?.sharedTypes || []).length} types`);
+              console.log(`   Affected Repositories: ${masterEpic.affectedRepositories?.join(', ')}`);
+            }
+
+            // 🔥 CRITICAL: Extract identifiedFiles for ProjectManager
+            if (parsed.identifiedFiles) {
+              identifiedFiles = parsed.identifiedFiles;
+              console.log(`✅ [ProductManager] Extracted identifiedFiles:`);
+              for (const [repo, files] of Object.entries(identifiedFiles)) {
+                const f = files as { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] };
+                const totalFiles = (f.filesToModify?.length || 0) + (f.filesToCreate?.length || 0) + (f.filesToRead?.length || 0);
+                console.log(`   ${repo}: ${totalFiles} files (modify: ${f.filesToModify?.length || 0}, create: ${f.filesToCreate?.length || 0}, read: ${f.filesToRead?.length || 0})`);
+              }
+            } else {
+              console.warn(`⚠️  [ProductManager] NO identifiedFiles in output - ProjectManager will need to explore codebase`);
+            }
+          }
+        } catch (error: any) {
+          console.warn(`⚠️  [ProductManager] Failed to parse optional JSON sections: ${error.message}`);
+        }
+      } else {
+        console.warn(`⚠️  [ProductManager] No EPIC_DEFINED marker found - epic may not be complete`);
       }
 
       // Store phase data for next phases
