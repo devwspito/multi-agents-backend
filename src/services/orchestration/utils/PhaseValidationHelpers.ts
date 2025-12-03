@@ -263,9 +263,20 @@ export function validateRequiredPhaseContext(
 
   const missingKeys: string[] = [];
   for (const key of requiredKeys) {
-    const value = context.getData(key);
+    // 🔥 FIX: Check BOTH sharedData (via getData) AND direct context properties
+    // Some data is stored as direct properties (e.g., context.repositories)
+    // Others are in sharedData (e.g., context.getData('epics'))
+    const valueFromSharedData = context.getData(key);
+    const valueFromContext = (context as any)[key]; // Direct property access
+
+    const value = valueFromSharedData !== undefined ? valueFromSharedData : valueFromContext;
+
+    // 🔥 FIX: Also check if arrays are empty (empty array = missing data)
     if (value === undefined || value === null) {
       missingKeys.push(key);
+    } else if (Array.isArray(value) && value.length === 0) {
+      console.warn(`   ⚠️  [${phaseName}] ${key} is an empty array`);
+      missingKeys.push(`${key} (empty)`);
     }
   }
 
