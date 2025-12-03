@@ -3,6 +3,16 @@ import { IStory } from '../../models/Task';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
+import {
+  initializeJudgeOrchestration,
+  addOrUpdateJudgeEvaluation,
+  updateJudgeStatus,
+} from '../../utils/atomicTaskOperations';
+import {
+  getDataRequired,
+  getDataOptional,
+  getDataArray,
+} from './utils/ContextHelpers';
 
 /**
  * Judge Phase
@@ -154,20 +164,13 @@ export class JudgePhase extends BasePhase {
       };
     }
 
-    // Initialize judge step in task (skip in multi-team mode to avoid conflicts)
+    // 🔥 ATOMIC FIX: Initialize judge orchestration atomically to prevent race conditions
+    // Use $setOnInsert to only create if doesn't exist (multiple phases may try simultaneously)
     if (!multiTeamMode) {
-      if (!task.orchestration.judge) {
-        task.orchestration.judge = {
-          agent: 'judge',
-          status: 'in_progress',
-          startedAt: new Date(),
-          evaluations: [],
-        } as any;
-      }
+      await initializeJudgeOrchestration(taskId);
 
-      task.orchestration.judge!.status = 'in_progress';
-      task.orchestration.judge!.startedAt = new Date();
-      await task.save();
+      // Update status to in_progress (this is idempotent)
+      await updateJudgeStatus(taskId, 'in_progress');
     }
 
     NotificationService.emitAgentStarted(taskId, 'Judge');
@@ -210,11 +213,14 @@ export class JudgePhase extends BasePhase {
     // === JUDGE VERDICT ===
     const allPassed = totalFailed === 0;
 
-    // Save results (skip in multi-team mode to avoid conflicts)
+    // 🔥 ATOMIC FIX: Update judge status atomically
     if (!multiTeamMode) {
-      task.orchestration.judge!.status = allPassed ? 'completed' : 'failed';
-      task.orchestration.judge!.completedAt = new Date();
-      await task.save();
+      await updateJudgeStatus(
+        taskId,
+        allPassed ? 'completed' : 'failed',
+        new Date() // completedAt
+      );
+      console.log(`✅ [Judge] Status updated atomically: ${allPassed ? 'completed' : 'failed'}`);
     }
 
     // Log final verdict
@@ -342,30 +348,40 @@ export class JudgePhase extends BasePhase {
         context
       );
 
-      // Store evaluation in task
-      const existingEvalIndex = task.orchestration.judge.evaluations.findIndex(
-        (e: any) => e.storyId === story.id && e.developerId === developer.instanceId
-      );
-
-      const evaluationRecord = {
-        storyId: story.id,
-        developerId: developer.instanceId,
-        status: evaluation.status,
-        feedback: evaluation.feedback,
-        iteration: attempt,
-        timestamp: new Date(),
-      };
-
-      if (existingEvalIndex >= 0) {
-        task.orchestration.judge.evaluations[existingEvalIndex] = evaluationRecord;
-      } else {
-        task.orchestration.judge.evaluations.push(evaluationRecord);
-      }
-
-      // Save evaluation (skip in multi-team mode to avoid conflicts)
+      // 🔥 ATOMIC FIX: Store evaluation atomically to prevent race conditions
+      // Use addOrUpdateJudgeEvaluation instead of direct array manipulation
       if (!multiTeamMode) {
-        task.markModified('orchestration.judge.evaluations');
-        await task.save();
+        const taskIdStr = (task._id as any).toString();
+        await addOrUpdateJudgeEvaluation(taskIdStr, {
+          storyId: story.id,
+          developerId: developer.instanceId,
+          status: evaluation.status,
+          feedback: evaluation.feedback,
+          iteration: attempt,
+          timestamp: new Date(),
+        });
+
+        console.log(`✅ [Judge] Evaluation saved atomically for story ${story.id}`);
+      } else {
+        // Multi-team mode: still need local update for in-memory consistency
+        const existingEvalIndex = task.orchestration.judge.evaluations.findIndex(
+          (e: any) => e.storyId === story.id && e.developerId === developer.instanceId
+        );
+
+        const evaluationRecord = {
+          storyId: story.id,
+          developerId: developer.instanceId,
+          status: evaluation.status,
+          feedback: evaluation.feedback,
+          iteration: attempt,
+          timestamp: new Date(),
+        };
+
+        if (existingEvalIndex >= 0) {
+          task.orchestration.judge.evaluations[existingEvalIndex] = evaluationRecord;
+        } else {
+          task.orchestration.judge.evaluations.push(evaluationRecord);
+        }
       }
 
       // === CHECK RESULT ===
@@ -477,15 +493,16 @@ export class JudgePhase extends BasePhase {
       throw new Error(`Invalid developer object - missing instanceId field`);
     }
 
-    // Get commit SHA if available
-    const commitSHA = context.getData<string>('commitSHA');
+    // 🔥 SAFE CONTEXT ACCESS: Use getDataRequired to validate commitSHA exists
     console.log(`\n🔍 [Judge] Code Location Details:`);
-    if (commitSHA) {
+    let commitSHA: string;
+    try {
+      commitSHA = getDataRequired<string>(context, 'commitSHA');
       console.log(`   📍 Commit SHA: ${commitSHA}`);
       console.log(`   ✅ Will review EXACT commit that developer created`);
-    } else {
-      // 🔥 CRITICAL FIX: Fail hard if no commit SHA - we MUST know what to review
-      console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: No commit SHA provided!`);
+    } catch (error: any) {
+      // getDataRequired throws clear error if missing
+      console.error(`\n❌❌❌ [Judge] CRITICAL ERROR: ${error.message}`);
       console.error(`   Story: ${story.title}`);
       console.error(`   Story ID: ${story.id}`);
       console.error(`   Developer: ${developer?.instanceId}`);
@@ -496,8 +513,8 @@ export class JudgePhase extends BasePhase {
       throw new Error(`HUMAN_REQUIRED: No commit SHA for story ${story.id} - cannot determine which code to review`);
     }
 
-    // 🔥 CRITICAL: Get LITERAL branch name from Developer
-    const storyBranchName = context.getData<string>('storyBranchName') || story.branchName;
+    // 🔥 SAFE CONTEXT ACCESS: Get branch name with fallback to story.branchName
+    const storyBranchName = getDataOptional<string>(context, 'storyBranchName') || story.branchName;
     if (storyBranchName) {
       console.log(`   🔀 Branch: ${storyBranchName}`);
       console.log(`   ✅ Will review code on EXACT branch developer worked on`);
@@ -505,8 +522,8 @@ export class JudgePhase extends BasePhase {
       console.error(`   ❌ No branch name - cannot verify correct branch!`);
     }
 
-    // Get target repository from context or story's epic
-    let targetRepository = context.getData<string>('targetRepository');
+    // 🔥 SAFE CONTEXT ACCESS: Get target repository (optional - may come from epic)
+    let targetRepository = getDataOptional<string>(context, 'targetRepository');
     if (!targetRepository && (story as any).epicId) {
       const { eventStore } = await import('../EventStore');
       const state = await eventStore.getCurrentState(task._id as any);
@@ -561,9 +578,9 @@ export class JudgePhase extends BasePhase {
 
     const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName);
 
-    // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+    // 🔥 SAFE CONTEXT ACCESS: Retrieve processed attachments (optional - defaults to empty array)
     // This ensures ALL agents receive the same multimedia context
-    const attachments = context.getData<any[]>('attachments') || [];
+    const attachments = getDataArray<any>(context, 'attachments');
 
     // Convert taskId with extra safety
     let taskId: string;
