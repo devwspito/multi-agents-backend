@@ -8,6 +8,11 @@ import { QAPhase } from './QAPhase';
 import { GitHubService } from '../GitHubService';
 import { PRManagementService } from '../github/PRManagementService';
 import { safeGitExecSync, fixGitRemoteAuth, normalizeRepoName } from '../../utils/safeGitExecution';
+import {
+  validateRetryLimit,
+  validateRepositoryRemotes,
+  validateRequiredPhaseContext,
+} from './utils/PhaseValidationHelpers';
 
 /**
  * Team Orchestration Phase
@@ -101,6 +106,12 @@ export class TeamOrchestrationPhase extends BasePhase {
     });
 
     try {
+      // 🔥 CRITICAL FIX: Validate retry limit BEFORE any processing (fail-fast)
+      validateRetryLimit(context, 'teamOrchestration', 3);
+
+      // 🔥 CRITICAL FIX: Validate required context from previous phases
+      validateRequiredPhaseContext(context, 'teamOrchestration', ['repositories']);
+
       // Get EPICS from Project Manager - MUST support recovery after restart
       let projectManagerEpics = context.getData<any[]>('epics') || [];
 
@@ -188,6 +199,17 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
       console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths and target repositories`);
+
+      // 🔥 CRITICAL FIX: Validate all repositories have valid git remotes BEFORE spawning teams
+      // This prevents ALL team git operations from failing with unclear errors
+      await validateRepositoryRemotes(
+        context.repositories,
+        'teamOrchestration',
+        {
+          allowedHosts: ['github.com', 'gitlab.com', 'bitbucket.org'],
+          requireHttps: true,
+        }
+      );
 
       // 🔥 SEQUENTIAL EXECUTION BY EXECUTION ORDER
       // Group epics by executionOrder
