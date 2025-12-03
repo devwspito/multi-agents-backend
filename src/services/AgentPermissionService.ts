@@ -7,11 +7,15 @@
  * "Block dangerous commands"
  *
  * https://skywork.ai/blog/claude-agent-sdk-best-practices-ai-agents-2025/
+ *
+ * NOTE: SDK has its own permission model via bypassPermissions/permissionMode.
+ * This service provides additional domain-specific validation.
  */
 
 export interface AgentPermissions {
   allowedTools: string[];
   deniedCommands: string[];
+  allowedCommands?: string[]; // Whitelist of specific commands (curl, wget, etc.)
   requiresApproval?: string[];
   allowedPaths?: string[]; // Optional: Restrict to specific directories
 }
@@ -30,7 +34,8 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
    * Needs: Research and analysis (read-only)
    */
   'problem-analyst': {
-    allowedTools: ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Bash'],
+    allowedTools: ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Bash', 'execute_command'],
+    allowedCommands: ['curl', 'wget', 'npm', 'node', 'git', 'cat', 'ls', 'grep', 'find'],
     deniedCommands: [
       'rm -rf',
       'sudo',
@@ -48,7 +53,8 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
    * Needs: Requirements analysis (read-only + light bash for project structure)
    */
   'product-manager': {
-    allowedTools: ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Bash'],
+    allowedTools: ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Bash', 'execute_command'],
+    allowedCommands: ['curl', 'wget', 'npm', 'node', 'git', 'cat', 'ls', 'grep', 'find'],
     deniedCommands: [
       'rm -rf',
       'sudo',
@@ -99,12 +105,13 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
 
   /**
    * Developer
-   * Needs: Full file operations, git, testing
+   * Needs: Full file operations, git, testing, external commands
    * APPROVAL: Phase-level (not command-level)
    * Once Phase approved → ALL commands execute automatically
    */
   'developer': {
-    allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
+    allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash', 'WebFetch'],
+    allowedCommands: ['curl', 'wget', 'npm', 'node', 'git', 'python', 'python3', 'tsc', 'jest', 'eslint', 'docker', 'cat', 'ls', 'grep', 'find', 'mkdir', 'cp', 'mv'],
     deniedCommands: [
       'rm -rf',
       'sudo',
@@ -142,6 +149,7 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
    */
   'qa': {
     allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+    allowedCommands: ['npm', 'node', 'jest', 'curl', 'wget', 'git', 'cat', 'ls', 'grep', 'find'],
     deniedCommands: [
       'rm -rf',
       'sudo',
@@ -161,6 +169,7 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
    */
   'fixer': {
     allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
+    allowedCommands: ['curl', 'wget', 'npm', 'node', 'git', 'python', 'python3', 'tsc', 'jest', 'eslint', 'cat', 'ls', 'grep', 'find', 'mkdir', 'cp', 'mv'],
     deniedCommands: [
       'rm -rf',
       'sudo',
@@ -227,10 +236,25 @@ export class PermissionViolationError extends Error {
   }
 }
 
+// Simple whitelist of allowed commands
+const ALLOWED_COMMANDS = [
+  'git', 'npm', 'npx', 'node', 'curl', 'wget', 'cat', 'ls', 'pwd', 'echo',
+  'grep', 'find', 'mkdir', 'touch', 'cp', 'mv', 'rm', 'head', 'tail',
+  'tsc', 'eslint', 'prettier', 'jest', 'vitest', 'mocha', 'pytest',
+];
+
 /**
  * Agent Permission Service
  */
 export class AgentPermissionService {
+  /**
+   * Check if a command is in the global whitelist
+   */
+  private static isGloballyAllowed(command: string): boolean {
+    const baseCommand = command.trim().split(/\s+/)[0].replace(/^.*\//, '');
+    return ALLOWED_COMMANDS.includes(baseCommand);
+  }
+
   /**
    * Check if an agent is allowed to use a tool
    */
@@ -242,6 +266,27 @@ export class AgentPermissionService {
     }
 
     return permissions.allowedTools.includes(tool);
+  }
+
+  /**
+   * Check if an agent is allowed to execute a specific command (curl, wget, etc.)
+   */
+  static isSpecificCommandAllowed(agentType: string, command: string): boolean {
+    const permissions = AGENT_PERMISSIONS[agentType];
+    if (!permissions) {
+      return true;
+    }
+
+    // If no allowedCommands specified, check against global whitelist
+    if (!permissions.allowedCommands) {
+      return this.isGloballyAllowed(command);
+    }
+
+    // Extract base command (first word)
+    const baseCommand = command.trim().split(/\s+/)[0].replace(/^.*\//, '');
+
+    // Check agent's specific allowed commands
+    return permissions.allowedCommands.includes(baseCommand);
   }
 
   /**
@@ -305,6 +350,47 @@ export class AgentPermissionService {
           agentType,
           'command_blocked',
           `Command blocked for security: ${command}`
+        );
+      }
+
+      // Check if command requires approval
+      if (this.requiresApproval(agentType, command)) {
+        throw new PermissionViolationError(
+          agentType,
+          'approval_required',
+          `Command requires explicit approval: ${command}`
+        );
+      }
+    }
+
+    // Check execute_command tool permission
+    if ((tool === 'execute_command' || tool === 'execute_streaming_command') && input?.command) {
+      const command = input.command;
+
+      // Check if specific command is allowed for this agent
+      if (!this.isSpecificCommandAllowed(agentType, command)) {
+        throw new PermissionViolationError(
+          agentType,
+          'command_blocked',
+          `Command not in allowed list for ${agentType}: ${command}`
+        );
+      }
+
+      // Check if command is globally blocked
+      if (!this.isCommandAllowed(agentType, command)) {
+        throw new PermissionViolationError(
+          agentType,
+          'command_blocked',
+          `Command blocked for security: ${command}`
+        );
+      }
+
+      // Additional global whitelist validation
+      if (!this.isGloballyAllowed(command)) {
+        throw new PermissionViolationError(
+          agentType,
+          'command_blocked',
+          `Command not in global whitelist: ${command}`
         );
       }
 

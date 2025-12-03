@@ -3,10 +3,15 @@
   "version": "2.0.0",
   "description": "Multi-Agent Software Development Platform with Claude Agent SDK",
   "main": "dist/index.js",
+  "bin": {
+    "agents": "./dist/cli/index.js"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "cli": "tsx src/cli/index.ts",
+    "cli:interactive": "tsx src/cli/index.ts interactive",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "test": "jest",
@@ -24,7 +29,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.55",
     "@anthropic-ai/sdk": "^0.32.1",
     "@octokit/rest": "^22.0.0",
     "@types/bcrypt": "^5.0.2",
@@ -43,6 +48,7 @@
     "express-rate-limit": "^7.4.1",
     "express-session": "^1.18.1",
     "helmet": "^8.0.0",
+    "ioredis": "^5.8.2",
     "jsonwebtoken": "^9.0.2",
     "minimatch": "^10.0.3",
     "mongoose": "^8.9.3",
@@ -57,6 +63,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/express-session": "^1.18.0",
+    "@types/ioredis": "^4.28.10",
     "@types/node": "^22.10.5",
     "@types/node-cron": "^3.0.11",
     "@typescript-eslint/eslint-plugin": "^8.19.1",

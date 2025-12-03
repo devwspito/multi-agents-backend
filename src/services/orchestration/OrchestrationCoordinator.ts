@@ -14,17 +14,20 @@ import { QAPhase } from './QAPhase';
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
-import { AgentModelConfig, getModelAlias } from '../../config/ModelConfigurations';
+import { AgentModelConfig } from '../../config/ModelConfigurations';
 import { safeGitExecSync } from '../../utils/safeGitExecution';
 
-// 🔥 NEW: Best practice services
+// 🔥 Best practice services
 import { RetryService } from './RetryService';
-// import { SchemaValidationService } from './SchemaValidation'; // Unused - available for future use
 import { CostBudgetService } from './CostBudgetService';
 
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+
+// 🔧 MCP Tools - Custom tools for enhanced agent capabilities
+import { createCustomToolsServer } from '../../tools/customTools';
+import { createExtraToolsServer } from '../../tools/extraTools';
 
 /**
  * DeveloperProgress - Tracks developer execution in real-time
@@ -466,8 +469,8 @@ export class OrchestrationCoordinator {
             if (task) {
               const configs = await import('../../config/ModelConfigurations');
 
-              // Get current model config
-              let currentModelConfig: AgentModelConfig = configs.STANDARD_CONFIG;
+              // Get current model config (default to RECOMMENDED for optimal quality/cost)
+              let currentModelConfig: AgentModelConfig = configs.RECOMMENDED_CONFIG;
               if (task.orchestration?.modelConfig) {
                 const { preset, customConfig } = task.orchestration.modelConfig;
                 if (preset === 'custom' && customConfig) {
@@ -476,7 +479,9 @@ export class OrchestrationCoordinator {
                   currentModelConfig = configs.MAX_CONFIG;
                 } else if (preset === 'premium') {
                   currentModelConfig = configs.PREMIUM_CONFIG;
-                } else {
+                } else if (preset === 'recommended') {
+                  currentModelConfig = configs.RECOMMENDED_CONFIG;
+                } else if (preset === 'standard') {
                   currentModelConfig = configs.STANDARD_CONFIG;
                 }
               }
@@ -1015,7 +1020,8 @@ export class OrchestrationCoordinator {
       maxIterations?: number;
       timeout?: number;
     },
-    contextOverride?: OrchestrationContext
+    contextOverride?: OrchestrationContext,
+    skipOptimization?: boolean // 🔥 Skip optimizeConfigForBudget (used for retry with forceTopModel)
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
@@ -1063,9 +1069,9 @@ export class OrchestrationCoordinator {
     }
 
     // Get model configuration from task if available
-    // Always default to STANDARD_CONFIG if not specified
+    // Default to RECOMMENDED_CONFIG for optimal quality/cost balance
     const configs = await import('../../config/ModelConfigurations');
-    let modelConfig: AgentModelConfig = configs.STANDARD_CONFIG; // Default to standard
+    let modelConfig: AgentModelConfig = configs.RECOMMENDED_CONFIG; // Default to recommended
 
     if (taskId) {
       const task = await Task.findById(taskId);
@@ -1087,44 +1093,45 @@ export class OrchestrationCoordinator {
               modelConfig = configs.PREMIUM_CONFIG;
               console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
               break;
+            case 'recommended':
+              modelConfig = configs.RECOMMENDED_CONFIG;
+              console.log(`🌟 [ExecuteAgent] Using RECOMMENDED_CONFIG (Opus + Sonnet + Haiku - Optimal Balance)`);
+              break;
             case 'standard':
-            default:
               modelConfig = configs.STANDARD_CONFIG;
               console.log(`⚙️ [ExecuteAgent] Using STANDARD_CONFIG (Sonnet + Haiku)`);
+              break;
+            default:
+              modelConfig = configs.RECOMMENDED_CONFIG;
+              console.log(`🌟 [ExecuteAgent] Using RECOMMENDED_CONFIG (default)`);
               break;
           }
         }
       } else {
-        console.log(`⚠️ [ExecuteAgent] Task ${taskId} has no modelConfig, using STANDARD_CONFIG as default`);
+        console.log(`🌟 [ExecuteAgent] Task ${taskId} has no modelConfig, using RECOMMENDED_CONFIG as default`);
       }
     }
 
     // 🎯 AUTOMATIC OPTIMIZATION: Apply cost-performance optimization
     // This ensures critical agents get top model, executors get bottom model
     // Works with ANY config the user selected (MAX, PREMIUM, STANDARD, BALANCED, ECONOMY, CUSTOM)
-    modelConfig = configs.optimizeConfigForBudget(modelConfig);
-    console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
+    // 🔥 SKIP when forceTopModel is used (retry scenario - developer needs best model)
+    if (!skipOptimization) {
+      modelConfig = configs.optimizeConfigForBudget(modelConfig);
+      console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
+    } else {
+      console.log(`🚀 [ExecuteAgent] SKIPPING optimization (forceTopModel retry) - using topModel for: ${agentType}`);
+    }
 
-    // Get model from optimized config (optimizeConfigForBudget already assigned top/bottom models)
-    const fullModelId = getAgentModel(agentType, modelConfig);
-    const sdkModel = getModelAlias(fullModelId); // e.g., 'sonnet'
+    // Get model alias from config ('sonnet', 'haiku', or 'opus')
+    const modelAlias = getAgentModel(agentType, modelConfig);
+    // Convert to explicit model ID for SDK (ensures we use latest 4.5 versions)
+    const model = configs.getExplicitModelId(modelAlias);
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
     console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);
     console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
-    console.log(`🔧 [ExecuteAgent] Model selection for ${agentType}:`, {
-      preset: taskId ? 'From task' : 'Default STANDARD_CONFIG',
-      fullModelId: fullModelId,           // e.g., 'claude-sonnet-4-5-20250929'
-      sdkAlias: sdkModel,                 // e.g., 'sonnet' (what gets sent to SDK)
-      fromConfig: modelConfig[agentType as keyof AgentModelConfig]  // Show what config says
-    });
-    console.log(`🔧 [ExecuteAgent] Agent config:`, {
-      agentType,
-      fullModelId,
-      hasAgentDef: !!agentDef,
-      promptLength: prompt.length,
-      workspaceExists: require('fs').existsSync(workspacePath),
-    });
+    console.log(`🔧 [ExecuteAgent] Model: ${model} (from alias: ${modelAlias}) for ${agentType}`);
 
     // Build final prompt
     // When images are present, use generator function (required by SDK)
@@ -1166,16 +1173,29 @@ export class OrchestrationCoordinator {
       promptContent = `${agentDef.prompt}\n\n${prompt}`;
     }
 
-    try {
-      // Execute agent using SDK query() with correct API
-      // https://docs.claude.com/en/api/agent-sdk/streaming-vs-single-mode
+    // 🔥 RETRY MECHANISM for SDK errors (JSON parsing, connection issues)
+    const MAX_SDK_RETRIES = 3;
+    let lastError: any = null;
 
-      // NO LIMIT on turns - agents need to explore codebase thoroughly
-      // maxTurns = number of conversation rounds (user→assistant→tools→assistant)
-      // Not "retry attempts" - it's legitimate exploration with tools
+    for (let sdkAttempt = 1; sdkAttempt <= MAX_SDK_RETRIES; sdkAttempt++) {
+      try {
+        if (sdkAttempt > 1) {
+          console.log(`\n🔄 [ExecuteAgent] SDK RETRY attempt ${sdkAttempt}/${MAX_SDK_RETRIES} for ${agentType}`);
+          // Wait before retry (exponential backoff)
+          const delay = Math.min(5000 * Math.pow(2, sdkAttempt - 2), 30000);
+          console.log(`   Waiting ${delay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
 
-      // Let SDK manage everything - tools, turns, iterations
-      console.log(`🤖 [ExecuteAgent] Starting ${agentType} agent with SDK`);
+        // Execute agent using SDK query() with correct API
+        // https://docs.claude.com/en/api/agent-sdk/streaming-vs-single-mode
+
+        // NO LIMIT on turns - agents need to explore codebase thoroughly
+        // maxTurns = number of conversation rounds (user→assistant→tools→assistant)
+        // Not "retry attempts" - it's legitimate exploration with tools
+
+        // Let SDK manage everything - tools, turns, iterations
+        console.log(`🤖 [ExecuteAgent] Starting ${agentType} agent with SDK (attempt ${sdkAttempt}/${MAX_SDK_RETRIES})`);
 
       // 🔑 Get API key from context (project-specific or user default)
       let apiKey: string | undefined = process.env.ANTHROPIC_API_KEY;
@@ -1206,15 +1226,13 @@ export class OrchestrationCoordinator {
         );
       }
 
-      // SDK query - minimal config, let SDK handle env inheritance
-      console.log(`📡 [ExecuteAgent] Calling SDK query() with options:`, {
-        cwd: workspacePath,
-        model: sdkModel,
-        fullModelId: fullModelId,
-        permissionMode: 'bypassPermissions',
-        hasPrompt: !!promptContent,
-        apiKeySource,
-      });
+      // SDK query - with MCP tools for enhanced capabilities
+      console.log(`📡 [ExecuteAgent] Calling SDK with model: ${model}`);
+      console.log(`🔧 [ExecuteAgent] Including MCP tools: custom-dev-tools, extra-tools`);
+
+      // Create MCP servers for custom tools
+      const customToolsServer = createCustomToolsServer();
+      const extraToolsServer = createExtraToolsServer();
 
       let stream;
       try {
@@ -1222,12 +1240,17 @@ export class OrchestrationCoordinator {
           prompt: promptContent as any,
           options: {
             cwd: workspacePath,
-            model: sdkModel, // Use SDK alias ('sonnet', 'haiku', 'opus'), NOT full ID
+            model, // Explicit model ID: claude-haiku-4-5-*, claude-sonnet-4-5-*, claude-opus-4-5-*
             // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
             permissionMode: 'bypassPermissions',
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
+            },
+            // 🔧 MCP Tools - Enhanced agent capabilities
+            mcpServers: {
+              'custom-dev-tools': customToolsServer,
+              'extra-tools': extraToolsServer,
             },
           },
         });
@@ -1404,37 +1427,28 @@ export class OrchestrationCoordinator {
       // Claude 3.5 Haiku (claude-haiku-4-5-20251001) pricing:
       // - Input: $1 per MTok
       // - Output: $5 per MTok
-      // Claude Opus 4.1 (claude-opus-4-1-20250805) pricing:
-      // - Input: $15 per MTok
-      // - Output: $75 per MTok
+      // Claude Opus 4.5 (claude-opus-4-5-20251101) pricing:
+      // - Input: $5 per MTok
+      // - Output: $25 per MTok
 
       const inputTokens = (finalResult as any)?.usage?.input_tokens || 0;
       const outputTokens = (finalResult as any)?.usage?.output_tokens || 0;
 
-      // Determine pricing based on actual model used
-      let inputPricePerMillion = 3;   // Default to Sonnet pricing
-      let outputPricePerMillion = 15;  // Default to Sonnet pricing
-
-      // Get pricing from MODEL_PRICING based on the actual model ID
+      // Determine pricing based on model alias (haiku, sonnet, opus)
+      // MODEL_PRICING uses aliases, not explicit model IDs
       const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
 
-      // Map SDK model to actual model name for pricing lookup
-      let actualModel: string;
-      if (fullModelId.includes('haiku')) {
-        actualModel = 'claude-3-5-haiku-20241022';
-      } else if (fullModelId.includes('opus')) {
-        actualModel = 'claude-3-opus-20240229';
-      } else {
-        actualModel = 'claude-3-5-sonnet-20241022'; // Default
+      const pricing = MODEL_PRICING[modelAlias as keyof typeof MODEL_PRICING];
+      if (!pricing) {
+        throw new Error(
+          `❌ [ExecuteAgent] No pricing found for model alias "${modelAlias}". ` +
+          `Valid aliases: ${Object.keys(MODEL_PRICING).join(', ')}`
+        );
       }
+      const inputPricePerMillion = pricing.inputPerMillion;
+      const outputPricePerMillion = pricing.outputPerMillion;
 
-      if (MODEL_PRICING[actualModel as keyof typeof MODEL_PRICING]) {
-        const pricing = MODEL_PRICING[actualModel as keyof typeof MODEL_PRICING];
-        inputPricePerMillion = pricing.inputPerMillion;
-        outputPricePerMillion = pricing.outputPerMillion;
-      }
-
-      console.log(`   Using model: ${actualModel} (${sdkModel})`)
+      console.log(`   Model: ${model} (alias: ${modelAlias})`)
 
       // Calculate cost: price is per million tokens, so divide by 1,000,000
       const cost = (inputTokens * inputPricePerMillion / 1_000_000) + (outputTokens * outputPricePerMillion / 1_000_000);
@@ -1454,26 +1468,51 @@ export class OrchestrationCoordinator {
         rawResult: finalResult,
         allMessages,
       };
-    } catch (error: any) {
-      console.error(`❌ [ExecuteAgent] ${agentType} failed:`, error.message);
-      console.error(`❌ [ExecuteAgent] Error type:`, error.constructor.name);
-      console.error(`❌ [ExecuteAgent] Error code:`, error.code);
-      console.error(`❌ [ExecuteAgent] Exit code:`, error.exitCode);
-      console.error(`❌ [ExecuteAgent] Signal:`, error.signal);
-      console.error(`❌ [ExecuteAgent] Full error object:`, JSON.stringify(error, null, 2));
-      console.error(`❌ [ExecuteAgent] Stack:`, error.stack);
+      } catch (error: any) {
+        console.error(`❌ [ExecuteAgent] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
+        console.error(`❌ [ExecuteAgent] Error type:`, error.constructor.name);
+        console.error(`❌ [ExecuteAgent] Error code:`, error.code);
+        console.error(`❌ [ExecuteAgent] Exit code:`, error.exitCode);
+        console.error(`❌ [ExecuteAgent] Signal:`, error.signal);
+        console.error(`❌ [ExecuteAgent] Full error object:`, JSON.stringify(error, null, 2));
+        console.error(`❌ [ExecuteAgent] Stack:`, error.stack);
 
-      // Check if workspace still exists
-      const fs = require('fs');
-      const workspaceStillExists = fs.existsSync(workspacePath);
-      console.error(`❌ [ExecuteAgent] Workspace exists after error:`, workspaceStillExists);
+        lastError = error;
 
-      // Check if .env has API key
-      const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
-      console.error(`❌ [ExecuteAgent] ANTHROPIC_API_KEY still set:`, hasEnvKey);
+        // 🔥 Check if this is a retryable error (JSON parsing, connection issues)
+        const isRetryableError = (
+          error.message?.includes('Unterminated string in JSON') ||
+          error.message?.includes('JSON') ||
+          error.message?.includes('ECONNRESET') ||
+          error.message?.includes('ETIMEDOUT') ||
+          error.message?.includes('socket hang up') ||
+          error.constructor.name === 'SyntaxError'
+        );
 
-      throw error;
+        if (isRetryableError && sdkAttempt < MAX_SDK_RETRIES) {
+          console.log(`🔄 [ExecuteAgent] Retryable error detected, will retry...`);
+          console.log(`   Error: ${error.message}`);
+          continue; // Retry
+        }
+
+        // Non-retryable error or max retries reached
+        console.error(`❌ [ExecuteAgent] ${isRetryableError ? 'Max retries reached' : 'Non-retryable error'}`);
+
+        // Check if workspace still exists
+        const fs = require('fs');
+        const workspaceStillExists = fs.existsSync(workspacePath);
+        console.error(`❌ [ExecuteAgent] Workspace exists after error:`, workspaceStillExists);
+
+        // Check if .env has API key
+        const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
+        console.error(`❌ [ExecuteAgent] ANTHROPIC_API_KEY still set:`, hasEnvKey);
+
+        throw error;
+      }
     }
+
+    // This should never be reached (loop always returns or throws)
+    throw lastError || new Error(`${agentType} failed after ${MAX_SDK_RETRIES} attempts`);
   }
 
   /**
@@ -1588,8 +1627,8 @@ export class OrchestrationCoordinator {
     if (forceTopModel && judgeFeedback) {
       const configs = await import('../../config/ModelConfigurations');
 
-      // Get the actual AgentModelConfig from the task
-      let actualConfig: typeof configs.STANDARD_CONFIG = configs.STANDARD_CONFIG;
+      // Get the actual AgentModelConfig from the task (default to RECOMMENDED)
+      let actualConfig: typeof configs.RECOMMENDED_CONFIG = configs.RECOMMENDED_CONFIG;
 
       if (task.orchestration.modelConfig) {
         const { preset, customConfig } = task.orchestration.modelConfig;
@@ -1600,6 +1639,7 @@ export class OrchestrationCoordinator {
           switch (preset) {
             case 'max': actualConfig = configs.MAX_CONFIG; break;
             case 'premium': actualConfig = configs.PREMIUM_CONFIG; break;
+            case 'recommended': actualConfig = configs.RECOMMENDED_CONFIG; break;
             case 'standard': actualConfig = configs.STANDARD_CONFIG; break;
           }
         }
@@ -1613,7 +1653,7 @@ export class OrchestrationCoordinator {
       console.log(`   Reason: Judge rejected code, using best available model for retry`);
 
       // Temporarily override developer model to topModel
-      const updatedConfig: typeof configs.STANDARD_CONFIG = {
+      const updatedConfig: typeof configs.RECOMMENDED_CONFIG = {
         ...actualConfig,
         'developer': topModel
       };
@@ -1718,85 +1758,132 @@ ${judgeFeedback}
 2. Understand what the Judge said was wrong
 3. Fix ONLY the issues mentioned
 4. Write corrected code using Edit() or Write()
-5. NO documentation, NO explanations - JUST FIX THE CODE
+5. Commit your changes to the CURRENT branch
+6. Push to the CURRENT branch
+7. NO documentation, NO explanations - JUST FIX THE CODE
 
-**This is a RETRY attempt. Focus on fixing what was rejected.**
+### ⚠️ CRITICAL - BRANCH RULES FOR RETRY:
+- You are ALREADY on the correct branch: ${story.branchName || 'your story branch'}
+- **DO NOT create a new branch** - work on the existing branch
+- **DO NOT run git checkout -b** - the branch already exists
+- Simply make your changes, commit, and push to the current branch
+- The branch was already pushed in your previous attempt
+
+**This is a RETRY attempt. Focus on fixing what was rejected. DO NOT create new branches.**
 `;
       }
 
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
-      // Generate branch name for this story (flat naming to avoid git ref conflicts)
-      // Git doesn't allow both 'epic/epic-1' and 'epic/epic-1/story-1' to exist
-      // 🔥 UNIQUE BRANCH NAMING: Include taskId + timestamp + random suffix to prevent ANY conflicts
-      const taskShortId = taskId.slice(-8); // Last 8 chars of taskId
-      const timestamp = Date.now();
-      const randomSuffix = Math.random().toString(36).substring(2, 8);
-      const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize story id
-      const branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
+      // 🔥 CRITICAL FIX: REUSE existing branch name if story already has one (retry scenario)
+      // When Judge rejects code and triggers retry, the story already has a branchName
+      // We MUST use the same branch to avoid creating orphan branches
+      let branchName: string;
+      const isRetryWithExistingBranch = !!story.branchName;
+
+      if (story.branchName) {
+        branchName = story.branchName;
+        console.log(`🔄 [Developer ${member.instanceId}] REUSING existing branch: ${branchName} (retry scenario)`);
+      } else {
+        // Generate unique branch name for NEW story (first execution)
+        const taskShortId = taskId.slice(-8); // Last 8 chars of taskId
+        const timestamp = Date.now();
+        const randomSuffix = Math.random().toString(36).substring(2, 8);
+        const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize story id
+        branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
+        console.log(`🌿 [Developer ${member.instanceId}] Creating NEW branch: ${branchName}`);
+      }
 
       // 1️⃣ Create feature branch for this story BEFORE developer starts
-      console.log(`\n🌿 [Developer ${member.instanceId}] Creating story branch: ${branchName}`);
+      console.log(`\n🌿 [Developer ${member.instanceId}] Branch for story: ${branchName}`);
 
       try {
-        const { execSync } = require('child_process');
         const repoPath = `${workspacePath}/${repoName}`;
 
-        // First, ensure we're on the epic base branch WITH LATEST CHANGES
-        // 🔥 CRITICAL FIX: Use the actual epic branch name from TeamOrchestrationPhase
-        // Epic branch names are unique with timestamp (e.g., epic/358cdca9-epic-1-1761118801698-l5tvun)
-        // Find the epic for this story
-        const storyEpic = epicsList.find((e: any) => e.id === story.epicId);
-        const epicBranch = epicBranchName || story.epicBranch || storyEpic?.branchName || `epic/${story.epicId}`;
-        console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
+        // 🔥 CRITICAL: Handle RETRY differently from NEW story
+        if (isRetryWithExistingBranch) {
+          // RETRY SCENARIO: Branch already exists on remote, fetch and checkout
+          console.log(`🔄 [Developer ${member.instanceId}] RETRY: Fetching and checking out existing branch ${branchName}`);
 
-        try {
-          safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
-          console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
-
-          // 🔥 CRITICAL: Pull latest changes from epic branch
-          // This ensures story branches include changes from previously merged stories
           try {
-            // Use safe git pull with timeout to prevent hanging
-            safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+            // Fetch latest from remote
+            safeGitExecSync(`cd "${repoPath}" && git fetch origin`, {
               encoding: 'utf8',
-              timeout: 30000, // 30 seconds timeout
+              timeout: 30000,
             });
-            console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes from ${epicBranch}`);
-            console.log(`   Story will include all previously merged stories`);
-          } catch (pullError: any) {
-            // Pull might fail if branch doesn't exist remotely yet (first story in epic)
-            // Or if timeout is exceeded
-            if (pullError.signal === 'SIGKILL' || pullError.code === 'ETIMEDOUT') {
-              console.warn(`⏰ [Developer ${member.instanceId}] Git pull timed out after 30s - likely branch doesn't exist on remote`);
-            } else {
-              console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed (branch might not be on remote yet): ${pullError.message}`);
-            }
-            // Continue anyway - the branch might not exist remotely yet
-          }
-        } catch (epicCheckoutError) {
-          console.warn(`⚠️  [Developer ${member.instanceId}] Epic branch ${epicBranch} doesn't exist, using current branch`);
-        }
 
-        // Create story branch from epic branch
-        try {
-          safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
-          console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
-        } catch (branchError: any) {
-          // Branch might already exist
-          if (branchError.message.includes('already exists')) {
-            safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
-            console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
-          } else {
-            throw branchError;
+            // Try to checkout the existing branch
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+              console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+            } catch (checkoutError) {
+              // Branch might exist on remote but not locally - create tracking branch
+              safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName} origin/${branchName}`, { encoding: 'utf8' });
+              console.log(`✅ [Developer ${member.instanceId}] Created tracking branch: ${branchName}`);
+            }
+
+            // Pull latest changes
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git pull origin ${branchName}`, {
+                encoding: 'utf8',
+                timeout: 30000,
+              });
+              console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes for retry`);
+            } catch (pullError: any) {
+              console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed: ${pullError.message}`);
+            }
+          } catch (fetchError: any) {
+            console.error(`❌ [Developer ${member.instanceId}] Failed to fetch/checkout existing branch: ${fetchError.message}`);
+            throw fetchError;
+          }
+        } else {
+          // NEW STORY: Create branch from epic
+          // First, ensure we're on the epic base branch WITH LATEST CHANGES
+          const storyEpic = epicsList.find((e: any) => e.id === story.epicId);
+          const epicBranch = epicBranchName || story.epicBranch || storyEpic?.branchName || `epic/${story.epicId}`;
+          console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
+
+          try {
+            safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
+
+            // Pull latest changes from epic branch
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+                encoding: 'utf8',
+                timeout: 30000,
+              });
+              console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes from ${epicBranch}`);
+            } catch (pullError: any) {
+              if (pullError.signal === 'SIGKILL' || pullError.code === 'ETIMEDOUT') {
+                console.warn(`⏰ [Developer ${member.instanceId}] Git pull timed out after 30s`);
+              } else {
+                console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed: ${pullError.message}`);
+              }
+            }
+          } catch (epicCheckoutError) {
+            console.warn(`⚠️  [Developer ${member.instanceId}] Epic branch ${epicBranch} doesn't exist, using current branch`);
+          }
+
+          // Create story branch from epic branch
+          try {
+            safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
+          } catch (branchError: any) {
+            if (branchError.message.includes('already exists')) {
+              safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
+              console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+            } else {
+              throw branchError;
+            }
           }
         }
 
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `🌿 Developer ${member.instanceId}: Working on branch ${branchName}`
+          `🌿 Developer ${member.instanceId}: Working on branch ${branchName}${isRetryWithExistingBranch ? ' (RETRY)' : ''}`
         );
       } catch (gitError: any) {
         console.error(`❌ [Developer ${member.instanceId}] Failed to create branch: ${gitError.message}`);
@@ -1864,6 +1951,8 @@ After writing code, you MUST follow this EXACT sequence:
 
       try {
         // Execute developer agent - SDK uses workspace root
+        // 🔥 When forceTopModel=true (retry after Judge rejection), skip optimization
+        // to ensure developer uses topModel instead of being downgraded to Haiku
         const result = await this.executeAgent(
           'developer',
           prompt,
@@ -1872,7 +1961,10 @@ After writing code, you MUST follow this EXACT sequence:
           `Developer ${member.instanceId}`,
           undefined, // sessionId
           undefined, // fork
-          attachments // Pass images for visual context
+          attachments, // Pass images for visual context
+          undefined, // options
+          undefined, // contextOverride
+          forceTopModel // skipOptimization - when true, keeps topModel for retry
         );
 
         console.log(`✅ [Developer ${member.instanceId}] Completed story: ${story.title}`);
@@ -1881,61 +1973,97 @@ After writing code, you MUST follow this EXACT sequence:
         // Store result for return (isolated pipeline uses single-story execution)
         lastResult = { output: result.output, cost: result.cost };
 
-        // 2️⃣ Verify that code was pushed to the story branch
+        // 2️⃣ 🔥 CRITICAL: Verify developer finished successfully and pushed to remote
+        // If verification fails, this story will be marked as failed (Judge cannot review)
         console.log(`\n🔍 [Developer ${member.instanceId}] Verifying git push to branch ${branchName}...`);
 
+        // Wait for git push to propagate
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        const repoPath = `${workspacePath}/${repoName}`;
+
+        // Check developer output for success marker
+        const developerOutput = result.output || '';
+        const developerFinishedSuccessfully = developerOutput.includes('✅ DEVELOPER_FINISHED_SUCCESSFULLY');
+        const developerFailed = developerOutput.includes('❌ DEVELOPER_FAILED');
+
+        if (developerFailed) {
+          console.error(`❌ [Developer ${member.instanceId}] Developer explicitly reported FAILURE`);
+          throw new Error(`Developer ${member.instanceId} reported failure for story ${story.title}`);
+        }
+
+        if (!developerFinishedSuccessfully) {
+          console.error(`❌ [Developer ${member.instanceId}] Developer did NOT report success marker`);
+          console.error(`   Expected: "✅ DEVELOPER_FINISHED_SUCCESSFULLY"`);
+          throw new Error(`Developer ${member.instanceId} did not report success for story ${story.title}`);
+        }
+
+        // Extract commit SHA
+        const commitMatch = developerOutput.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
+        const commitSHA = commitMatch?.[1];
+
+        if (!commitSHA) {
+          console.error(`❌ [Developer ${member.instanceId}] Developer did NOT report commit SHA`);
+          throw new Error(`Developer ${member.instanceId} did not report commit SHA for story ${story.title}`);
+        }
+
+        console.log(`✅ [Developer ${member.instanceId}] Commit SHA: ${commitSHA}`);
+
+        // 🔥 CRITICAL: Verify branch EXISTS on remote (Judge cannot review non-existent branch)
+        let branchExistsOnRemote = false;
         try {
-          const { execSync } = require('child_process');
-          const repoPath = `${workspacePath}/${repoName}`;
+          const lsRemoteOutput = safeGitExecSync(
+            `git ls-remote --heads origin ${branchName}`,
+            { cwd: repoPath, encoding: 'utf8', timeout: 15000 }
+          );
+          branchExistsOnRemote = lsRemoteOutput.trim().length > 0 && lsRemoteOutput.includes(branchName);
+        } catch (lsError: any) {
+          console.error(`❌ [Developer ${member.instanceId}] git ls-remote failed: ${lsError.message}`);
+        }
 
-          // 🔥 CRITICAL: Add timeout to prevent hanging on git ls-remote
-          // This command can hang waiting for credentials or network issues
-          const GIT_TIMEOUT_MS = 10000; // 10 seconds max for git operations
+        if (!branchExistsOnRemote) {
+          console.error(`❌ [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote!`);
+          console.error(`   Developer reported success but branch is NOT on GitHub`);
+          console.error(`   Judge CANNOT review non-existent branch`);
 
-          // Check if branch exists on remote WITH TIMEOUT
-          const remoteBranches = execSync(
-            `cd "${repoPath}" && timeout 10 git ls-remote --heads origin ${branchName} 2>/dev/null || echo ""`,
-            {
-              encoding: 'utf8',
-              timeout: GIT_TIMEOUT_MS
-            }
+          NotificationService.emitConsoleLog(
+            taskId,
+            'error',
+            `❌ Developer ${member.instanceId}: Branch ${branchName} NOT pushed to remote - story FAILED`
           );
 
-          if (remoteBranches.includes(branchName)) {
-            console.log(`✅ [Developer ${member.instanceId}] Branch ${branchName} found on remote`);
-
-            // Check if there are commits (also with timeout)
-            try {
-              const commitCount = execSync(
-                `cd "${repoPath}" && timeout 5 git rev-list --count ${branchName} 2>/dev/null || echo "0"`,
-                {
-                  encoding: 'utf8',
-                  timeout: 5000
-                }
-              ).trim();
-              console.log(`✅ [Developer ${member.instanceId}] Branch has ${commitCount} commit(s)`);
-            } catch (e) {
-              console.log(`⚠️  [Developer ${member.instanceId}] Could not count commits (timeout or error)`);
-            }
-
-            NotificationService.emitConsoleLog(
-              taskId,
-              'info',
-              `✅ Developer ${member.instanceId}: Code pushed successfully to ${branchName}`
-            );
-          } else {
-            console.warn(`⚠️  [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote - developer may have skipped git push or verification timed out`);
-            NotificationService.emitConsoleLog(
-              taskId,
-              'warn',
-              `⚠️  Developer ${member.instanceId}: Branch ${branchName} not pushed to remote (or verification timed out)`
-            );
-          }
-        } catch (verifyError: any) {
-          // If timeout or other error, log but don't fail
-          console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify git push (timeout after 10s or error): ${verifyError.message}`);
-          console.warn(`⚠️  [Developer ${member.instanceId}] Continuing anyway - push verification is non-critical`);
+          throw new Error(`Branch ${branchName} not found on remote - developer push failed`);
         }
+
+        console.log(`✅ [Developer ${member.instanceId}] Branch ${branchName} verified on remote`);
+
+        // 🔥 ADDITIONAL: Verify commit exists on remote
+        let commitExistsOnRemote = false;
+        try {
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          const containsOutput = safeGitExecSync(
+            `git branch -r --contains ${commitSHA}`,
+            { cwd: repoPath, encoding: 'utf8', timeout: 15000 }
+          );
+          commitExistsOnRemote = containsOutput.includes(`origin/${branchName}`);
+        } catch (commitCheckError: any) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify commit on remote: ${commitCheckError.message}`);
+          // Don't fail if this check fails - branch existing is the critical check
+          commitExistsOnRemote = true; // Assume OK if we can't check
+        }
+
+        if (!commitExistsOnRemote) {
+          console.error(`❌ [Developer ${member.instanceId}] Commit ${commitSHA} NOT found on remote branch!`);
+          throw new Error(`Commit ${commitSHA} not found on remote - developer push incomplete`);
+        }
+
+        console.log(`✅ [Developer ${member.instanceId}] Commit ${commitSHA.substring(0, 8)} verified on remote`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `✅ Developer ${member.instanceId}: Code pushed and verified on remote (${branchName})`
+        );
 
         // 🔥 CRITICAL DEBUG: Show EXACTLY what code Developer wrote
         console.log(`\n${'='.repeat(80)}`);
@@ -1943,7 +2071,6 @@ After writing code, you MUST follow this EXACT sequence:
         console.log(`${'='.repeat(80)}`);
 
         try {
-          const { execSync } = require('child_process');
           const repoPath = `${workspacePath}/${repoName}`;
 
           // 🔥 IMPORTANT: Developer already committed, so we need to see the LAST commit
@@ -2176,7 +2303,25 @@ After writing code, you MUST follow this EXACT sequence:
     task.orchestration.totalTokens = realTotalTokens;
     await task.save();
 
-    // Emit orchestration completed with detailed cost summary
+    // Collect PRs from epics
+    const pullRequests: { epicName: string; prNumber: number; prUrl: string; repository: string }[] = [];
+    const { eventStore } = await import('../EventStore');
+    const currentState = await eventStore.getCurrentState(task._id as any);
+
+    if (currentState.epics && Array.isArray(currentState.epics)) {
+      for (const epic of currentState.epics) {
+        if (epic.pullRequestNumber && epic.pullRequestUrl) {
+          pullRequests.push({
+            epicName: epic.name || `Epic ${epic.id}`,
+            prNumber: epic.pullRequestNumber,
+            prUrl: epic.pullRequestUrl,
+            repository: epic.targetRepository || 'unknown',
+          });
+        }
+      }
+    }
+
+    // Emit orchestration completed with detailed cost summary and PRs
     NotificationService.emitOrchestrationCompleted((task._id as any).toString(), {
       totalCost: realTotalCost,
       totalTokens: realTotalTokens,
@@ -2185,6 +2330,7 @@ After writing code, you MUST follow this EXACT sequence:
       cacheCreationTokens: cacheCreationTokens > 0 ? cacheCreationTokens : undefined,
       cacheReadTokens: cacheReadTokens > 0 ? cacheReadTokens : undefined,
       breakdown,
+      pullRequests: pullRequests.length > 0 ? pullRequests : undefined,
     });
 
     console.log(`\n${'='.repeat(80)}`);
@@ -2195,6 +2341,12 @@ After writing code, you MUST follow this EXACT sequence:
     breakdown.forEach(item => {
       console.log(`   - ${item.phase}: $${item.cost.toFixed(4)}`);
     });
+    if (pullRequests.length > 0) {
+      console.log(`\n📬 Pull Requests Created (click to review and merge):`);
+      pullRequests.forEach(pr => {
+        console.log(`   🔗 ${pr.epicName}: ${pr.prUrl}`);
+      });
+    }
     console.log(`${'='.repeat(80)}\n`);
 
     // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks

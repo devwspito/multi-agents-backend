@@ -83,8 +83,8 @@ export class OutputParser {
     }
 
     if (schema.properties) {
-      for (const [key, prop] of Object.entries(schema.properties as any)) {
-        if (key in data && prop.type) {
+      for (const [key, prop] of Object.entries(schema.properties as Record<string, any>)) {
+        if (key in data && prop?.type) {
           const actualType = Array.isArray(data[key]) ? 'array' : typeof data[key];
           if (actualType !== prop.type && !(prop.type === 'array' && Array.isArray(data[key]))) {
             errors.push(`Field ${key} should be ${prop.type} but is ${actualType}`);
@@ -118,7 +118,7 @@ export class OutputParser {
     confidence: number;
     reasons: string[];
   } {
-    const lowerOutput = output.toLowerCase();
+    void output.toLowerCase(); // Available for pattern matching
 
     // Check for explicit decision
     const goPatterns = [/decision:\s*go/i, /approved/i, /✅/];

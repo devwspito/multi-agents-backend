@@ -112,16 +112,9 @@ export class ProductManagerPhase extends BasePhase {
         console.log(`      ${emoji} ${r.name || r.githubRepoName}: ${r.type.toUpperCase()}`);
       });
 
-      // Build repositories information
-      const _repoInfo = context.repositories.length > 0
-        ? `\n## Available Repositories:\n${context.repositories.map((repo, i) =>
-            `${i + 1}. ${repo.githubRepoName} (branch: ${repo.githubBranch})`
-          ).join('\n')}\n`
-        : '';
-
-      const _workspaceInfo = workspaceStructure
-        ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nAnalyze all repositories to understand the full system.`
-        : '';
+      // Build repositories information (available for prompt customization)
+      void context.repositories; // Repository info used in prompt below
+      void workspaceStructure; // Workspace structure used in prompt below
 
       // Previous output for revision (if any) - ALWAYS include if exists (for continuations)
       const previousOutput = task.orchestration.productManager.output;
@@ -227,15 +220,29 @@ ${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creat
   "complexity": "simple|moderate|complex|epic",
   "successCriteria": ["criterion 1", "criterion 2"],
   "recommendations": "Technical approach",
-  "challenges": ["challenge 1", "challenge 2"]
+  "challenges": ["challenge 1", "challenge 2"],
+  "identifiedFiles": {
+    "backend": {
+      "filesToModify": ["src/path/to/existing/file.ts"],
+      "filesToCreate": ["src/path/to/new/file.ts"],
+      "filesToRead": ["src/path/to/reference.ts"]
+    },
+    "frontend": {
+      "filesToModify": ["src/path/to/existing/file.tsx"],
+      "filesToCreate": ["src/path/to/new/file.tsx"],
+      "filesToRead": ["src/path/to/reference.tsx"]
+    }
+  }
 }
 \`\`\`
 
 **RULES**:
-- Explore FIRST: Use ls, find, Read to understand codebase
-- Be SPECIFIC: "userId" not "consistent naming"
+- Explore FIRST: Use ls, find, Read, Grep to find REAL file paths
+- **MANDATORY**: identifiedFiles MUST contain actual file paths you found
+- Be SPECIFIC: Real paths like "src/hooks/useMaterials.js" not "src/hooks/*"
 - Complete contracts: All fields with types
-- Act quickly: Max 3 min exploration`;
+- Act quickly: Max 3 min exploration
+- **NO EMPTY ARRAYS**: Every repo must have at least 1 file path`;
 
       // 🔥 IMAGES: Convert task attachments to SDK format
       const attachments: any[] = [];
@@ -403,8 +410,9 @@ ${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creat
         },
       });
 
-      // 🔥 NEW: Parse and store Master Epic from Product Manager output
+      // 🔥 NEW: Parse and store Master Epic + identifiedFiles from Product Manager output
       let masterEpic = null;
+      let identifiedFiles: Record<string, { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] }> = {};
       try {
         const jsonMatch = result.output.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
@@ -416,15 +424,29 @@ ${problemAnalysis ? `⚠️ Use Problem Analysis above to inform your epic creat
             console.log(`   Shared Contracts: ${(masterEpic.sharedContracts?.apiEndpoints || []).length} APIs, ${(masterEpic.sharedContracts?.sharedTypes || []).length} types`);
             console.log(`   Affected Repositories: ${masterEpic.affectedRepositories?.join(', ')}`);
           }
+
+          // 🔥 CRITICAL: Extract identifiedFiles for ProjectManager
+          if (parsed.identifiedFiles) {
+            identifiedFiles = parsed.identifiedFiles;
+            console.log(`✅ [ProductManager] Extracted identifiedFiles:`);
+            for (const [repo, files] of Object.entries(identifiedFiles)) {
+              const f = files as { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] };
+              const totalFiles = (f.filesToModify?.length || 0) + (f.filesToCreate?.length || 0) + (f.filesToRead?.length || 0);
+              console.log(`   ${repo}: ${totalFiles} files (modify: ${f.filesToModify?.length || 0}, create: ${f.filesToCreate?.length || 0}, read: ${f.filesToRead?.length || 0})`);
+            }
+          } else {
+            console.warn(`⚠️  [ProductManager] NO identifiedFiles in output - ProjectManager will need to explore codebase`);
+          }
         }
       } catch (error: any) {
-        console.warn(`⚠️  [ProductManager] Failed to parse Master Epic: ${error.message}`);
+        console.warn(`⚠️  [ProductManager] Failed to parse JSON output: ${error.message}`);
       }
 
       // Store phase data for next phases
       context.setData('productManagerOutput', result.output);
       context.setData('taskComplexity', complexityMatch?.[1]?.toLowerCase() || 'medium');
-      context.setData('masterEpic', masterEpic); // 🔥 NEW: Pass Master Epic to Project Manager
+      context.setData('masterEpic', masterEpic); // 🔥 Pass Master Epic to Project Manager
+      context.setData('identifiedFiles', identifiedFiles); // 🔥 CRITICAL: Pass identified files to Project Manager
 
       // 🔥 CRITICAL: Store processed attachments in context for ALL subsequent agents
       // This ensures images/multimedia travel through ALL agents with complete context

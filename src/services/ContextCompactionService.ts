@@ -12,14 +12,11 @@
 export class ContextCompactionService {
   private anthropic: any;
 
-  // Model context limits (conservative estimates)
-  private readonly CONTEXT_LIMITS = {
-    'claude-3-5-sonnet-20241022': 200000,
-    'claude-3-opus-20240229': 200000,
-    'claude-3-sonnet-20240229': 200000,
-    'claude-3-haiku-20240307': 200000,
-    'claude-haiku-4-5-20251001': 200000,
+  // Model context limits (Claude 4.5 models)
+  private readonly CONTEXT_LIMITS: Record<string, number> = {
     'claude-sonnet-4-5-20250929': 200000,
+    'claude-haiku-4-5-20251001': 200000,
+    'claude-opus-4-5-20251101': 200000,
     default: 200000,
   };
 

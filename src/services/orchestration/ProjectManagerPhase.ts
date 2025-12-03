@@ -162,11 +162,28 @@ export class ProjectManagerPhase extends BasePhase {
 `
         : '';
 
-      const _workspaceInfo = workspaceStructure
-        ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nDefine scope and dependencies across all repositories.`
-        : '';
+      // Workspace info for future use (if needed in prompt)
+      void workspaceStructure; // Suppress unused variable warning
 
       const productManagerAnalysis = task.orchestration.productManager.output || 'No product analysis available.';
+
+      // 🔥 CRITICAL: Get identifiedFiles from ProductManager (structured JSON)
+      const identifiedFiles = context.getData<Record<string, { filesToModify: string[]; filesToCreate: string[]; filesToRead: string[] }>>('identifiedFiles') || {};
+      let identifiedFilesSection = '';
+
+      if (Object.keys(identifiedFiles).length > 0) {
+        identifiedFilesSection = `
+## 🔥 IDENTIFIED FILES FROM PRODUCT MANAGER (USE THESE):
+\`\`\`json
+${JSON.stringify(identifiedFiles, null, 2)}
+\`\`\`
+**CRITICAL**: These files were identified by Product Manager. Use them in your epics.
+Each epic MUST include files from this list in filesToModify/filesToCreate/filesToRead.
+`;
+        console.log(`📋 [ProjectManager] Received ${Object.keys(identifiedFiles).length} repo(s) with identified files from ProductManager`);
+      } else {
+        console.warn(`⚠️  [ProjectManager] No identifiedFiles received from ProductManager - will need to explore codebase`);
+      }
 
       // 🔥 VALIDATION FEEDBACK: If this is a retry after validation failure, prepend feedback
       const feedbackHistory = context.getData<string[]>('projectManagerFeedback') || [];
@@ -207,19 +224,20 @@ ${task.description ? `Description: ${task.description}` : ''}
 
 ## Product Analysis:
 ${productManagerAnalysis}
-
+${identifiedFilesSection}
 ## Workspace: ${workspacePath}
 ${repoInfo}
 
 ## 🎯 INSTRUCTIONS (Be efficient):
 
-1. **EXPLORE** (max 2 min): Find real files in repos
+1. ${Object.keys(identifiedFiles).length > 0 ? '**USE IDENTIFIED FILES**: Product Manager already found the files - use them!' : '**EXPLORE** (max 2 min): Find real files in repos'}
 2. **DEFINE EPICS**: Break into 3-5 major features with file paths
 3. **AVOID OVERLAPS**: Each epic must touch different files
 4. **OUTPUT JSON**: Epic plan with dependencies
 
 ## CRITICAL RULES:
 - EVERY epic MUST have real file paths (no placeholders)
+- ${Object.keys(identifiedFiles).length > 0 ? '**USE THE identifiedFiles ABOVE** - they are already validated' : 'Find real file paths using ls, find, Read'}
 - NO two epics can modify the same files
 - Backend repos: APIs, models, logic
 - Frontend repos: UI, components, views
@@ -230,48 +248,25 @@ If epics need same files, either:
 2. SEQUENCE with dependencies
 3. SPLIT into different files
 
-## JSON OUTPUT ONLY:
-\`\`\`json
-{
-  "epics": [
-    {
-      "id": "epic-backend-api",
-      "title": "Create User API Endpoints",
-      "description": "REST API for user CRUD operations",
-      "affectedRepositories": ["v2_backend"],
-      "filesToModify": ["src/routes/users.ts", "src/controllers/UserController.ts"],
-      "filesToCreate": ["src/models/User.ts", "src/services/UserService.ts"],
-      "filesToRead": ["src/config/database.ts"],
-      "estimatedComplexity": "moderate",
-      "dependencies": [],
-      "executionOrder": 1
-    },
-    {
-      "id": "epic-frontend-user-ui",
-      "title": "User Management UI",
-      "description": "React components for user management",
-      "affectedRepositories": ["v2_frontend"],
-      "filesToModify": ["src/App.tsx", "src/routes/index.tsx"],
-      "filesToCreate": ["src/components/UserList.tsx", "src/components/UserForm.tsx"],
-      "filesToRead": ["src/api/client.ts"],
-      "estimatedComplexity": "simple",
-      "dependencies": ["epic-backend-api"],
-      "executionOrder": 2
-    }
-  ],
-  "totalTeamsNeeded": 2,
-  "dependencies": {
-    "cross_repo": ["backend API must exist before frontend"],
-    "external": ["needs database schema"],
-    "sequential": ["epic-2 depends on epic-1"]
-  },
-  "risks": ["risk 1", "risk 2"],
-  "outOfScope": ["excluded feature 1"],
-  "assumptions": ["assumption 1"]
-}
-\`\`\`
+## 🚨🚨🚨 CRITICAL: PURE JSON OUTPUT ONLY 🚨🚨🚨
 
-Explore first, then output JSON.`;
+YOUR ENTIRE RESPONSE MUST BE VALID JSON AND NOTHING ELSE.
+
+⛔ ABSOLUTELY FORBIDDEN:
+- NO markdown (no \`\`\`json blocks)
+- NO text before JSON ("Let me analyze...", "Here's the plan...")
+- NO text after JSON
+- NO comments or explanations
+
+✅ YOUR RESPONSE MUST:
+- START with { (opening brace)
+- END with } (closing brace)
+- Be ONLY valid JSON
+
+EXAMPLE OUTPUT (this is EXACTLY how your response should look):
+{"epics":[{"id":"epic-backend-api","title":"Create User API Endpoints","description":"REST API for user CRUD operations","affectedRepositories":["v2_backend"],"filesToModify":["src/routes/users.ts","src/controllers/UserController.ts"],"filesToCreate":["src/models/User.ts"],"filesToRead":["src/config/database.ts"],"estimatedComplexity":"moderate","dependencies":[],"executionOrder":1},{"id":"epic-frontend-ui","title":"User Management UI","description":"React components for user management","affectedRepositories":["v2_frontend"],"filesToModify":["src/App.tsx"],"filesToCreate":["src/components/UserList.tsx"],"filesToRead":["src/api/client.ts"],"estimatedComplexity":"simple","dependencies":["epic-backend-api"],"executionOrder":2}],"totalTeamsNeeded":2,"dependencies":{"cross_repo":["backend API must exist before frontend"],"external":[],"sequential":["epic-2 depends on epic-1"]},"risks":[],"outOfScope":[],"assumptions":[]}
+
+⚠️ FIRST explore the codebase, THEN output ONLY the JSON (no other text).`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context without re-processing
@@ -300,52 +295,76 @@ Explore first, then output JSON.`;
         attachments.length > 0 ? attachments : undefined // Pass attachments
       );
 
-      // Parse JSON response to extract EPICS (not stories)
+      // Parse JSON response - expecting PURE JSON (no markdown)
       let parsed: any;
+      const trimmedOutput = result.output.trim();
 
-      // Try parsing as pure JSON first (no markdown)
+      // STEP 1: Try parsing as pure JSON (EXPECTED case)
       try {
-        const trimmed = result.output.trim();
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          parsed = JSON.parse(trimmed);
-          if (parsed.epics && Array.isArray(parsed.epics)) {
-            console.log('✅ [ProjectManager] Parsed as pure JSON (no markdown blocks)');
-          } else {
-            parsed = null; // Not the right structure
-          }
+        parsed = JSON.parse(trimmedOutput);
+        if (parsed.epics && Array.isArray(parsed.epics)) {
+          console.log('✅ [ProjectManager] Parsed as pure JSON');
+        } else {
+          console.warn('⚠️  [ProjectManager] JSON parsed but missing epics array');
+          parsed = null;
         }
       } catch (e) {
-        // Not pure JSON, try markdown patterns
+        console.warn('⚠️  [ProjectManager] Output is not pure JSON, trying fallback extraction...');
       }
 
-      // Try multiple extraction patterns if pure JSON failed
-      const patterns = [
-        /```json\s*\n([\s\S]*?)\n```/,
-        /```json\s*\n([\s\S]*?)```/,
-        /```json\s*([\s\S]*?)```/,
-        /```\s*\n([\s\S]*?)\n```/,
-        /```\s*([\s\S]*?)```/
-      ];
-
+      // STEP 2: Fallback - extract JSON from text (if model added text before/after)
       if (!parsed) {
-        for (const pattern of patterns) {
-          const match = result.output.match(pattern);
-          if (match) {
-            try {
-              const jsonText = match[1] || match[0];
-              const trimmed = jsonText.trim();
-              parsed = JSON.parse(trimmed);
+        // Find JSON object starting with {"epics" anywhere in output
+        const jsonPatterns = ['{"epics"', '{ "epics"', '{\n  "epics"', '{\n"epics"'];
+        let jsonStartIndex = -1;
 
-              if (parsed.epics && Array.isArray(parsed.epics)) {
-                console.log(`✅ [ProjectManager] Parsed JSON using pattern: ${pattern.toString().substring(0, 50)}...`);
+        for (const pattern of jsonPatterns) {
+          jsonStartIndex = result.output.indexOf(pattern);
+          if (jsonStartIndex !== -1) break;
+        }
+
+        if (jsonStartIndex !== -1) {
+          try {
+            const jsonSubstring = result.output.substring(jsonStartIndex);
+            // Find matching closing brace by counting braces
+            let braceCount = 0;
+            let endIndex = 0;
+            for (let i = 0; i < jsonSubstring.length; i++) {
+              if (jsonSubstring[i] === '{') braceCount++;
+              if (jsonSubstring[i] === '}') braceCount--;
+              if (braceCount === 0) {
+                endIndex = i + 1;
                 break;
+              }
+            }
+            if (endIndex > 0) {
+              const jsonText = jsonSubstring.substring(0, endIndex);
+              parsed = JSON.parse(jsonText);
+              if (parsed.epics && Array.isArray(parsed.epics)) {
+                console.log('⚠️  [ProjectManager] Extracted JSON from text (model did not output pure JSON)');
               } else {
                 parsed = null;
-                continue;
               }
-            } catch (e) {
-              continue;
             }
+          } catch (e) {
+            // Continue to markdown fallback
+          }
+        }
+      }
+
+      // STEP 3: Last resort - try markdown blocks (deprecated but kept for safety)
+      if (!parsed) {
+        const markdownMatch = result.output.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (markdownMatch) {
+          try {
+            parsed = JSON.parse(markdownMatch[1].trim());
+            if (parsed.epics && Array.isArray(parsed.epics)) {
+              console.warn('⚠️  [ProjectManager] Parsed from markdown block (model should output pure JSON!)');
+            } else {
+              parsed = null;
+            }
+          } catch (e) {
+            // Failed all attempts
           }
         }
       }

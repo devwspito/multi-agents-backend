@@ -144,7 +144,7 @@ router.get('/models', authenticate, async (_req: AuthRequest, res) => {
   const models = [
     { alias: 'haiku', id: 'claude-haiku-4-5-20251001' },
     { alias: 'sonnet', id: 'claude-sonnet-4-5-20250929' },
-    { alias: 'opus', id: 'claude-opus-4-1-20250805' },
+    { alias: 'opus', id: 'claude-opus-4-5-20251101' },
   ];
 
   const results: any[] = [];
@@ -205,6 +205,32 @@ router.get('/models', authenticate, async (_req: AuthRequest, res) => {
       failed: results.filter(r => !r.success).length,
     },
   });
+});
+
+/**
+ * GET /api/diagnostics/health
+ * Quick health check for the service
+ */
+router.get('/health', async (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      healthy: true,
+      timestamp: new Date().toISOString(),
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+        unit: 'MB',
+      },
+      uptime: Math.round(process.uptime()),
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      healthy: false,
+      error: error.message,
+    });
+  }
 });
 
 export default router;

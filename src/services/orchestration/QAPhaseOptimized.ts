@@ -44,7 +44,7 @@ export class QAPhaseOptimized extends BasePhase {
 
     const qaAttempt = context.getData<number>('qaAttempt') || 1;
     const isRetryAfterFixer = qaAttempt === 2;
-    const isContinuation = context.task.orchestration.continuations?.length > 0;
+    const isContinuation = (context.task.orchestration.continuations?.length ?? 0) > 0;
 
     if (isContinuation || isRetryAfterFixer) {
       return false; // Don't skip
@@ -220,7 +220,7 @@ export class QAPhaseOptimized extends BasePhase {
   private async executeQAValidation(
     essentials: any,
     mergeResult: any,
-    hookResults: any[],
+    _hookResults: any[],
     context: OrchestrationContext
   ) {
     const taskId = (context.task._id as any).toString();
@@ -424,7 +424,7 @@ Start immediately. Focus on functionality over style.`;
     return this.prManagementService.createEpicPRs(
       task,
       repositories,
-      workspacePath
+      workspacePath ?? null
     );
   }
 

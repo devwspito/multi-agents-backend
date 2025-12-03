@@ -140,7 +140,8 @@ export class TechLeadPhase extends BasePhase {
 
       // TODO: Add epicsIdentified to IAgentStep if needed
       // For now, extract epics from productManager output manually if needed
-      const epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
+      const _epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
+      void _epicsIdentified; // Marked as intentionally unused
 
       // Build repositories information with TYPE for multi-repo orchestration
       const repoInfo = context.repositories.length > 0
@@ -720,7 +721,7 @@ ${repoInfo}
    * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
    * 🔥 NEW: Includes Master Epic context for contract awareness
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, workspaceInfo: string, workspacePath: string, firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[]): string {
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[]): string {
     // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
     if (!epic.targetRepository) {
       console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository in buildMultiTeamPrompt!`);

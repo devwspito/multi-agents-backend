@@ -228,8 +228,22 @@ export class NotificationService {
       inputTokens: number;
       outputTokens: number;
     }[];
+    pullRequests?: {
+      epicName: string;
+      prNumber: number;
+      prUrl: string;
+      repository: string;
+    }[];
   }): void {
     this.emitNotification(taskId, 'orchestration_completed', costSummary || {});
+
+    // Log PRs for easy access
+    if (costSummary?.pullRequests && costSummary.pullRequests.length > 0) {
+      console.log(`\n📬 Pull Requests Created:`);
+      costSummary.pullRequests.forEach(pr => {
+        console.log(`   - ${pr.epicName}: ${pr.prUrl}`);
+      });
+    }
   }
 
   static emitOrchestrationFailed(taskId: string, error: string): void {
@@ -327,6 +341,36 @@ export class NotificationService {
     console.log(`❌ [WebSocket] Task failed emitted:`, {
       taskId,
       error: data?.error,
+    });
+  }
+
+  /**
+   * Emitir evento de fase iniciada
+   */
+  static emitPhaseStarted(taskId: string, phaseName: string, phaseType?: string): void {
+    this.emitNotification(taskId, 'phase_started', {
+      phaseName,
+      phaseType: phaseType || phaseName,
+    });
+
+    console.log(`📍 [WebSocket] Phase started:`, {
+      taskId,
+      phaseName,
+    });
+  }
+
+  /**
+   * Emitir evento de fase completada
+   */
+  static emitPhaseCompleted(taskId: string, phaseName: string, result?: any): void {
+    this.emitNotification(taskId, 'phase_completed', {
+      phaseName,
+      result,
+    });
+
+    console.log(`✅ [WebSocket] Phase completed:`, {
+      taskId,
+      phaseName,
     });
   }
 

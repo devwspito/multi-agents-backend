@@ -4,10 +4,12 @@
  * Replaces scattered console.log statements with structured, queryable logs
  * Stores logs in MongoDB for frontend consumption and debugging
  * Provides human-readable console output with colors and emojis
+ * Includes automatic secrets sanitization for security
  */
 
 import mongoose from 'mongoose';
 import { TaskLog, LogLevel, LogCategory } from '../../models/TaskLog';
+import { SecretsSanitizer } from '../../utils/secretsSanitizer';
 
 /**
  * Log Context - Everything you might want to include in a log
@@ -16,13 +18,14 @@ export interface LogContext {
   taskId: string | mongoose.Types.ObjectId;
   level?: LogLevel;
   category?: LogCategory;
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'contract-testing' | 'completed' | 'multi-team';
-  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'contract-testing' | 'completed' | 'multi-team' | 'error-resolution';
+  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester' | 'error-detective';
   agentInstanceId?: string;
   epicId?: string;
   epicName?: string;
   storyId?: string;
   storyTitle?: string;
+  multiTeam?: boolean;
   metadata?: Record<string, any>;
   sessionId?: string;
   error?: Error | { message: string; stack?: string; code?: string };
@@ -132,21 +135,31 @@ export class LogService {
   }
 
   /**
-   * Core logging function
+   * Core logging function with automatic secrets sanitization
    */
   private static async log(message: string, context: LogContext & { level: LogLevel; category: LogCategory }): Promise<void> {
     const timestamp = new Date();
 
+    // SECURITY: Sanitize message and context before any output
+    const sanitizedMessage = SecretsSanitizer.sanitize(message);
+    const sanitizedContext = SecretsSanitizer.sanitizeObject(context);
+
+    // Detect if secrets were found (for security audit)
+    const detectedSecrets = SecretsSanitizer.detectSecrets(message);
+    if (detectedSecrets.length > 0) {
+      console.warn(`⚠️  [LogService] Sanitized ${detectedSecrets.length} secret(s) in log: ${detectedSecrets.join(', ')}`);
+    }
+
     // 1. Format and print to console
-    this.logToConsole(message, context, timestamp);
+    this.logToConsole(sanitizedMessage, sanitizedContext, timestamp);
 
     // 2. Store in MongoDB (async, don't block)
-    this.storeInDatabase(message, context, timestamp).catch((err) => {
+    this.storeInDatabase(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
       console.error('[LogService] Failed to store log:', err.message);
     });
 
     // 3. Emit to WebSocket for real-time frontend updates
-    this.emitToWebSocket(message, context, timestamp).catch((err) => {
+    this.emitToWebSocket(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
       // Silent fail - don't disrupt logging if socket fails
       console.error('[LogService] Failed to emit to WebSocket:', err.message);
     });
@@ -253,7 +266,7 @@ export class LogService {
   private static async emitToWebSocket(
     message: string,
     context: LogContext & { level: LogLevel; category: LogCategory },
-    timestamp: Date
+    _timestamp: Date
   ): Promise<void> {
     // Import NotificationService dynamically to avoid circular dependencies
     const { NotificationService } = await import('../NotificationService');

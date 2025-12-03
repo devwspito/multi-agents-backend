@@ -41,6 +41,26 @@ export interface IStory {
 }
 
 /**
+ * Epic - Group of related stories
+ * Created by ProductManager and used throughout orchestration
+ */
+export interface IEpic {
+  id: string;
+  name: string;
+  title?: string; // Alias for name (some code uses title)
+  description: string;
+  branchName: string;
+  stories: string[]; // Story IDs
+  branchesCreated: boolean;
+  prCreated: boolean;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+  targetRepository?: string;
+  dependencies?: string[]; // Epic dependencies for ordering
+  pullRequestState?: 'pending' | 'open' | 'merged' | 'closed'; // PR management state
+}
+
+/**
  * TeamMember - Developer
  * Instancia dinámica de un agente developer
  */
@@ -130,6 +150,7 @@ export interface IOrchestration {
       developers: number;
       reasoning: string;
     };
+    epics?: IEpic[]; // Epics from ProductManager
   };
 
   // Fase 3: Tech Lead (único)
@@ -150,6 +171,7 @@ export interface IOrchestration {
       repositoryName: string;
       branchName: string;
     }[];
+    stories?: IStory[]; // Stories passed from ProjectManager
   };
 
   // Fase 4: Development Team (MÚLTIPLES - dinámico)
@@ -227,7 +249,7 @@ export interface IOrchestration {
   // Fase 7.5: Test Creator (creates comprehensive test suites before QA validation)
   testCreator?: IAgentStep & {
     testsCreated?: number; // Total test files created
-    coveragePercentage?: number; // Code coverage achieved (target: >85%)
+    coveragePercentage?: number | string; // Code coverage achieved (target: >85%) or "N/A" message
     unitTests?: number;
     integrationTests?: number;
     e2eTests?: number;
@@ -294,7 +316,7 @@ export interface IOrchestration {
 
   // Model configuration
   modelConfig?: {
-    preset?: 'max' | 'premium' | 'standard' | 'custom';
+    preset?: 'max' | 'premium' | 'recommended' | 'standard' | 'custom';
     customConfig?: {
       problemAnalyst?: string;
       productManager?: string;
@@ -714,7 +736,7 @@ const taskSchema = new Schema<ITask>(
         },
         cost_usd: Number,
         testsCreated: Number,
-        coveragePercentage: Number,
+        coveragePercentage: Schema.Types.Mixed, // Can be Number or String ("N/A" message)
         unitTests: Number,
         integrationTests: Number,
         e2eTests: Number,
@@ -810,7 +832,7 @@ const taskSchema = new Schema<ITask>(
       modelConfig: {
         preset: {
           type: String,
-          enum: ['max', 'premium', 'standard', 'custom'],
+          enum: ['max', 'premium', 'recommended', 'standard', 'custom'],
           default: 'standard',
         },
         customConfig: {

@@ -5,6 +5,7 @@ import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDepend
 import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
+import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 
 /**
  * Developers Phase
@@ -702,12 +703,21 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      // 🔥 CRITICAL: Validate Developer finished successfully
+      // 🔥 CRITICAL: Validate Developer finished successfully WITH ITERATIVE CYCLE
       const developerOutput = developerResult?.output || '';
-      const developerFinishedSuccessfully = developerOutput.includes('✅ DEVELOPER_FINISHED_SUCCESSFULLY');
-      const developerFailed = developerOutput.includes('❌ DEVELOPER_FAILED');
 
-      if (developerFailed) {
+      // Use centralized marker validation (follows Anthropic SDK best practices)
+      // Plain text markers are more robust than JSON - see PLAIN_TEXT_VS_JSON.md
+      const requiredMarkers = {
+        typecheckPassed: hasMarker(developerOutput, COMMON_MARKERS.TYPECHECK_PASSED),
+        testsPassed: hasMarker(developerOutput, COMMON_MARKERS.TESTS_PASSED),
+        lintPassed: hasMarker(developerOutput, COMMON_MARKERS.LINT_PASSED),
+        finishedSuccessfully: hasMarker(developerOutput, COMMON_MARKERS.FINISHED),
+        failed: hasMarker(developerOutput, COMMON_MARKERS.FAILED),
+      };
+
+      // Check for explicit failure
+      if (requiredMarkers.failed) {
         console.error(`❌ [PIPELINE] Developer explicitly reported FAILURE`);
         console.error(`   Story: ${story.title}`);
         console.error(`   Developer output (last 500 chars):\n${developerOutput.slice(-500)}`);
@@ -719,12 +729,32 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      if (!developerFinishedSuccessfully) {
-        console.error(`❌ [PIPELINE] Developer did NOT report success marker`);
+      // 🔥 NEW: Validate ALL verification steps were completed (iterative cycle)
+      console.log(`\n🔍 [VALIDATION] Checking developer completed iterative cycle...`);
+      console.log(`   ✅ TYPECHECK_PASSED: ${requiredMarkers.typecheckPassed ? '✅' : '❌'}`);
+      console.log(`   ✅ TESTS_PASSED: ${requiredMarkers.testsPassed ? '✅' : '❌'}`);
+      console.log(`   ✅ LINT_PASSED: ${requiredMarkers.lintPassed ? '✅' : '❌'}`);
+      console.log(`   ✅ DEVELOPER_FINISHED_SUCCESSFULLY: ${requiredMarkers.finishedSuccessfully ? '✅' : '❌'}`);
+
+      // Check if ALL markers are present
+      const allMarkersPresent =
+        requiredMarkers.typecheckPassed &&
+        requiredMarkers.testsPassed &&
+        requiredMarkers.lintPassed &&
+        requiredMarkers.finishedSuccessfully;
+
+      if (!allMarkersPresent) {
+        console.error(`\n❌ [PIPELINE] Developer did NOT complete iterative development cycle!`);
         console.error(`   Story: ${story.title}`);
-        console.error(`   Expected: "✅ DEVELOPER_FINISHED_SUCCESSFULLY"`);
-        console.error(`   Developer output (last 1000 chars):\n${developerOutput.slice(-1000)}`);
-        console.error(`   Judge CANNOT review without success confirmation - STOPPING`);
+        console.error(`\n   🔥 REQUIRED WORKFLOW (Claude Code-like):`);
+        console.error(`      1. Write code`);
+        console.error(`      2. ✅ TYPECHECK_PASSED (npm run typecheck)`);
+        console.error(`      3. ✅ TESTS_PASSED (npm test)`);
+        console.error(`      4. ✅ LINT_PASSED (npm run lint)`);
+        console.error(`      5. git commit + git push`);
+        console.error(`      6. ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
+        console.error(`\n   ❌ Missing validation steps - Judge CANNOT review unverified code`);
+        console.error(`   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
         return {
           developerCost,
           judgeCost: 0,
@@ -733,27 +763,24 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      console.log(`✅ [PIPELINE] Developer reported SUCCESS - proceeding to Judge`);
+      console.log(`✅ [PIPELINE] Developer completed FULL iterative cycle - code is verified!`);
+      console.log(`   This matches Claude Code's workflow: write → verify → fix → commit`);
 
       // 🔥 CRITICAL FIX: Extract commit SHA from Developer's output
       // Following Anthropic best practice: "subagents should verify details"
       // Developer REPORTS their commit SHA, we don't guess it
-      let commitSHA: string | null = null;
+      // Using centralized marker extraction (tolerant to markdown formatting)
+      let commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
 
-      if (developerOutput) {
-        // Look for pattern: "📍 Commit SHA: abc123def456..."
-        const commitMatch = developerOutput.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
-        if (commitMatch && commitMatch[1]) {
-          commitSHA = commitMatch[1];
-          console.log(`✅ [PIPELINE] Developer reported commit SHA: ${commitSHA}`);
-          console.log(`   Story: ${story.title}`);
-          console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
-          console.log(`   This is the EXACT code Judge will review`);
-        } else {
-          console.warn(`⚠️  [PIPELINE] Developer did NOT report commit SHA in output`);
-          console.warn(`   Developer output length: ${developerOutput.length} chars`);
-          console.warn(`   Searching output for commit SHA...`);
-        }
+      if (commitSHA) {
+        console.log(`✅ [PIPELINE] Developer reported commit SHA: ${commitSHA}`);
+        console.log(`   Story: ${story.title}`);
+        console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
+        console.log(`   This is the EXACT code Judge will review`);
+      } else {
+        console.warn(`⚠️  [PIPELINE] Developer did NOT report commit SHA in output`);
+        console.warn(`   Developer output length: ${developerOutput.length} chars`);
+        console.warn(`   Looking for marker: ${COMMON_MARKERS.COMMIT_SHA}`);
       }
 
       // 🔥 NO FALLBACK: Developer MUST report commit SHA

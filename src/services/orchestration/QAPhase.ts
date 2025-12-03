@@ -188,11 +188,60 @@ export class QAPhase extends BasePhase {
         console.log(`📂 [QA] Found epic branch in context: ${contextEpicBranch}`);
       }
 
+      // 🔥 FIX: Also try to get from epicBranchMapping (for multi-team mode)
+      const epicBranchMapping = context.getData<Record<string, string>>('epicBranchMapping') || {};
+      if (Object.keys(epicBranchMapping).length > 0) {
+        console.log(`📂 [QA] Found epic branch mapping in context: ${JSON.stringify(epicBranchMapping)}`);
+      }
+
+      // 🔥 FIX: Also check BranchRegistry (if available)
+      let epicBranchesFromRegistry: string[] = [];
+      try {
+        // Try to get branches from context's branch registry
+        const branches = (context as any).branchRegistry;
+        if (branches && branches instanceof Map) {
+          epicBranchesFromRegistry = Array.from(branches.values())
+            .filter((b: any) => b.type === 'epic')
+            .map((b: any) => b.name);
+          if (epicBranchesFromRegistry.length > 0) {
+            console.log(`📂 [QA] Found ${epicBranchesFromRegistry.length} epic branches in BranchRegistry`);
+          }
+        }
+      } catch (e) {
+        // BranchRegistry not available
+      }
+
       const epicBranches = epics.map((epic: any) => {
-        // Priority: 1) epic.branchName from EventStore, 2) context epicBranch, 3) fallback to constructed name
-        const branch = epic.branchName || contextEpicBranch || `epic/${epic.id}`;
-        console.log(`  - Epic ${epic.id}: using branch ${branch}`);
-        return branch;
+        // Priority: 1) epic.branchName from EventStore
+        if (epic.branchName) {
+          console.log(`  - Epic ${epic.id}: using branchName from EventStore: ${epic.branchName}`);
+          return epic.branchName;
+        }
+
+        // 2) epicBranchMapping from context (multi-team mode)
+        if (epicBranchMapping[epic.id]) {
+          console.log(`  - Epic ${epic.id}: using branch from mapping: ${epicBranchMapping[epic.id]}`);
+          return epicBranchMapping[epic.id];
+        }
+
+        // 3) BranchRegistry (look for epic branch containing this epic's id)
+        const registeredBranch = epicBranchesFromRegistry.find(b => b.includes(epic.id));
+        if (registeredBranch) {
+          console.log(`  - Epic ${epic.id}: using branch from registry: ${registeredBranch}`);
+          return registeredBranch;
+        }
+
+        // 4) Context epicBranch (single-team mode fallback)
+        if (contextEpicBranch) {
+          console.log(`  - Epic ${epic.id}: using context epicBranch: ${contextEpicBranch}`);
+          return contextEpicBranch;
+        }
+
+        // 5) 🚨 NO FALLBACK - Log error instead of using constructed name
+        console.error(`  ❌ Epic ${epic.id}: NO branchName found! Cannot use fallback.`);
+        console.error(`     Epic may not have been processed by TeamOrchestration or Developers.`);
+        console.error(`     Skipping this epic from QA testing.`);
+        return null; // Will be filtered out
       }).filter(Boolean) as string[];
 
       // Also check if there are any recent epic branches with timestamps
@@ -370,23 +419,26 @@ npm run lint || npx tsc --noEmit || echo "No lint/type checking"
 3. Critical tests fail (>50% failure rate)
 4. Core functionality is broken
 
-## 📋 OUTPUT FORMAT (MANDATORY):
+## 📋 OUTPUT FORMAT (MANDATORY JSON):
 
+After completing all steps, output ONLY this JSON (no other text after):
+
+\`\`\`json
+{
+  "summary": {
+    "build": { "status": "PASS|FAIL", "reason": "one line" },
+    "tests": { "status": "PASS|FAIL|NONE", "reason": "one line" },
+    "lint": { "status": "PASS|FAIL|NONE", "reason": "one line" },
+    "runtime": { "status": "PASS|FAIL", "reason": "one line" }
+  },
+  "issues": ["issue 1 description", "issue 2 description"],
+  "decision": "GO|NO-GO",
+  "reason": "one sentence explanation",
+  "errorOutput": "full error output if any failures (truncated to 2000 chars)"
+}
 \`\`\`
-TEST SUMMARY
-============
-Build: [PASS/FAIL] - <one line reason>
-Tests: [PASS/FAIL/NONE] - <one line reason>
-Lint: [PASS/FAIL/NONE] - <one line reason>
-Runtime: [PASS/FAIL] - <one line reason>
 
-ISSUES FOUND:
-1. <issue description if any>
-2. <issue description if any>
-
-DECISION: [GO/NO-GO]
-REASON: <one sentence explanation>
-\`\`\`
+**CRITICAL**: Your final output MUST be valid JSON inside \`\`\`json block. No text after the JSON.
 
 ## ⚠️ EDGE CASES:
 - If no package.json exists, check for other build systems (Makefile, gradle, etc)
@@ -640,9 +692,67 @@ Start immediately with STEP 1. Be efficient and decisive.`;
   }
 
   /**
+   * Parse QA JSON output
+   * 🔥 FIX: Try JSON first, fallback to regex if not parseable
+   */
+  private parseQAOutput(qaOutput: string): {
+    parsed: boolean;
+    decision?: string;
+    hasErrors?: boolean;
+    errorType?: string;
+    errorOutput?: string;
+    summary?: any;
+  } {
+    // Try to parse JSON output first
+    try {
+      const { OutputParser } = require('./utils/OutputParser');
+      const result = OutputParser.extractJSON(qaOutput);
+
+      if (result.success && result.data) {
+        const data = result.data;
+        const hasErrors = data.decision === 'NO-GO' ||
+                         data.summary?.build?.status === 'FAIL' ||
+                         data.summary?.tests?.status === 'FAIL' ||
+                         data.summary?.lint?.status === 'FAIL' ||
+                         data.summary?.runtime?.status === 'FAIL';
+
+        // Determine error type from summary
+        let errorType = 'unknown';
+        if (data.summary?.runtime?.status === 'FAIL') errorType = 'startup';
+        else if (data.summary?.lint?.status === 'FAIL') errorType = 'lint';
+        else if (data.summary?.build?.status === 'FAIL') errorType = 'build';
+        else if (data.summary?.tests?.status === 'FAIL') errorType = 'test';
+
+        console.log(`📝 [QA] Parsed JSON output successfully - decision: ${data.decision}, hasErrors: ${hasErrors}`);
+
+        return {
+          parsed: true,
+          decision: data.decision,
+          hasErrors,
+          errorType,
+          errorOutput: data.errorOutput || data.reason || '',
+          summary: data.summary,
+        };
+      }
+    } catch (e) {
+      console.log(`⚠️  [QA] Could not parse JSON output, falling back to regex`);
+    }
+
+    return { parsed: false };
+  }
+
+  /**
    * Detect if QA found errors (lint/build/test/startup failures)
+   * 🔥 FIX: Try JSON parsing first, fallback to regex
    */
   private detectQAErrors(qaOutput: string): boolean {
+    // Try JSON parsing first
+    const parsed = this.parseQAOutput(qaOutput);
+    if (parsed.parsed) {
+      return parsed.hasErrors || false;
+    }
+
+    // Fallback to regex-based detection
     const errorIndicators = [
       // Lint errors
       'eslint',
@@ -659,10 +769,8 @@ Start immediately with STEP 1. Be efficient and decisive.`;
       'syntaxerror',
       'npm err!',
       // JSON output indicators
-      'testsPass": false',
-      'buildSuccess": false',
-      'lintSuccess": false',
-      'serverStartSuccess": false',
+      '"decision": "NO-GO"',
+      '"status": "FAIL"',
       // Startup/Runtime errors (CRITICAL)
       'server failed to start',
       'application failed to start',
@@ -682,11 +790,22 @@ Start immediately with STEP 1. Be efficient and decisive.`;
 
   /**
    * Extract error details from QA output
+   * 🔥 FIX: Try JSON parsing first, fallback to regex
    */
   private extractErrorDetails(qaOutput: string): {
     errorType: string;
     errorOutput: string;
   } {
+    // Try JSON parsing first
+    const parsed = this.parseQAOutput(qaOutput);
+    if (parsed.parsed && parsed.errorType && parsed.errorOutput) {
+      return {
+        errorType: parsed.errorType,
+        errorOutput: parsed.errorOutput,
+      };
+    }
+
+    // Fallback to regex-based extraction
     const lowerOutput = qaOutput.toLowerCase();
 
     // Determine error type (priority order: startup > lint > build > test)
@@ -697,13 +816,15 @@ Start immediately with STEP 1. Be efficient and decisive.`;
         lowerOutput.includes('module not found') ||
         lowerOutput.includes('importerror') ||
         lowerOutput.includes('modulenotfounderror') ||
-        lowerOutput.includes('serverstartsuccess": false')) {
+        lowerOutput.includes('serverstartsuccess": false') ||
+        lowerOutput.includes('"runtime"') && lowerOutput.includes('"fail"')) {
       errorType = 'startup';
-    } else if (lowerOutput.includes('lint')) {
+    } else if (lowerOutput.includes('lint') || (lowerOutput.includes('"lint"') && lowerOutput.includes('"fail"'))) {
       errorType = 'lint';
-    } else if (lowerOutput.includes('build') || lowerOutput.includes('compilation')) {
+    } else if (lowerOutput.includes('build') || lowerOutput.includes('compilation') ||
+               (lowerOutput.includes('"build"') && lowerOutput.includes('"fail"'))) {
       errorType = 'build';
-    } else if (lowerOutput.includes('test')) {
+    } else if (lowerOutput.includes('test') || (lowerOutput.includes('"tests"') && lowerOutput.includes('"fail"'))) {
       errorType = 'test';
     }
 

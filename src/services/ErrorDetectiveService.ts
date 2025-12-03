@@ -268,14 +268,21 @@ Provide ONLY the JSON output, no additional text.`;
    * Calculate API cost based on usage
    */
   private calculateCost(model: string, usage: Anthropic.Messages.Usage): number {
-    // Pricing per million tokens (as of 2025)
+    // Pricing per million tokens (as of Nov 2025)
+    // Source: https://docs.anthropic.com/en/docs/about-claude/models
     const pricing: Record<string, { input: number; output: number }> = {
-      'claude-opus-4-1-20250805': { input: 15, output: 75 },
+      'claude-opus-4-5-20251101': { input: 5, output: 25 },
       'claude-sonnet-4-5-20250929': { input: 3, output: 15 },
-      'claude-haiku-4-5-20251001': { input: 0.25, output: 1.25 },
+      'claude-haiku-4-5-20251001': { input: 1, output: 5 },
     };
 
-    const modelPricing = pricing[model] || pricing['claude-haiku-4-5-20251001'];
+    const modelPricing = pricing[model];
+    if (!modelPricing) {
+      throw new Error(
+        `❌ [ErrorDetective] Unknown model "${model}" for cost calculation. ` +
+        `Valid models: ${Object.keys(pricing).join(', ')}`
+      );
+    }
 
     const inputCost = (usage.input_tokens / 1_000_000) * modelPricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * modelPricing.output;

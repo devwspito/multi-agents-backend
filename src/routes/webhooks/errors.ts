@@ -13,17 +13,18 @@ import { Task } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 // import { Project } from '../../models/Project';
 import { WebhookApiKey } from '../../models/WebhookApiKey';
+// v1 OrchestrationCoordinator - battle-tested with full prompts
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { LogService } from '../../services/logging/LogService';
 import { NotificationService } from '../../services/NotificationService';
 import { ErrorDetectiveService } from '../../services/ErrorDetectiveService';
-import { STANDARD_CONFIG, PREMIUM_CONFIG, MAX_CONFIG } from '../../config/ModelConfigurations';
+import { STANDARD_CONFIG, PREMIUM_CONFIG, RECOMMENDED_CONFIG, MAX_CONFIG } from '../../config/ModelConfigurations';
 // import { WebhookNotificationService } from '../../services/webhooks/WebhookNotificationService'; // DISABLED - requires SMTP setup
 import { z } from 'zod';
 
 const router = Router();
-// 🔥 IMPORTANT: No longer using a shared instance for parallel task safety
-// const orchestrationCoordinator = new OrchestrationCoordinator();
+// v1 shared OrchestrationCoordinator instance
+const orchestrationCoordinator = new OrchestrationCoordinator();
 // const notificationService = new WebhookNotificationService(); // DISABLED - requires SMTP setup
 
 /**
@@ -286,10 +287,11 @@ router.post(
         // Map taskConfig to model configuration
         const configMap = {
           standard: STANDARD_CONFIG,
+          recommended: RECOMMENDED_CONFIG, // 🌟 Best balance
           premium: PREMIUM_CONFIG,
           max: MAX_CONFIG,
         };
-        const taskConfig = apiKeyDoc.taskConfig || 'standard';
+        const taskConfig = apiKeyDoc.taskConfig || 'recommended'; // Default to recommended
         const modelConfig = configMap[taskConfig as keyof typeof configMap];
 
         console.log(`📋 Creating task with config: ${taskConfig}`);
@@ -386,13 +388,11 @@ router.post(
         }
         */
 
-        // Trigger orchestration asynchronously
+        // Trigger v1 orchestration asynchronously
         setImmediate(async () => {
           try {
             console.log(`🚀 Starting orchestration for webhook-generated task: ${taskId}`);
-            // 🔥 NEW: Create a new OrchestrationCoordinator instance per task for complete isolation
-            const taskOrchestrator = new OrchestrationCoordinator();
-            await taskOrchestrator.orchestrateTask(taskId);
+            await orchestrationCoordinator.orchestrateTask(taskId);
 
             NotificationService.emitConsoleLog(
               taskId,
