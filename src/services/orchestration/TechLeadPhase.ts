@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import { RealisticCostEstimator } from '../RealisticCostEstimator';
 
 /**
@@ -281,18 +282,37 @@ ${repoInfo}
         attachments.length > 0 ? attachments : undefined // Pass attachments
       );
 
-      // Parse JSON response with better error handling
-      let parsed: any;
+      // Parse response - now using plain text with markers + optional JSON for structured data
+      let parsed: any = null;
 
-      // Try parsing as pure JSON first (no markdown)
+      // STEP 0: Check for completion marker
+      const architectureComplete = hasMarker(result.output, '✅ ARCHITECTURE_COMPLETE');
+      if (architectureComplete) {
+        console.log('✅ [TechLead] ARCHITECTURE_COMPLETE marker found');
+
+        // Extract metadata from markers
+        const totalStories = extractMarkerValue(result.output, '📍 Total Stories:');
+        const epicId = extractMarkerValue(result.output, '📍 Epic ID:');
+
+        if (totalStories) {
+          console.log(`   Total Stories: ${totalStories}`);
+        }
+        if (epicId) {
+          console.log(`   Epic ID: ${epicId}`);
+        }
+      } else {
+        console.warn('⚠️  [TechLead] No ARCHITECTURE_COMPLETE marker - output may be incomplete');
+      }
+
+      // STEP 1: Try parsing as pure JSON first (backward compatibility)
       try {
         const trimmed = result.output.trim();
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
           parsed = JSON.parse(trimmed);
           if (parsed.epics && Array.isArray(parsed.epics)) {
-            console.log('✅ [TechLead] Parsed as pure JSON (no markdown blocks)');
+            console.log('✅ [TechLead] Parsed as pure JSON (backward compatibility)');
           } else {
-            parsed = null; // Not the right structure
+            parsed = null;
           }
         }
       } catch (e) {
@@ -394,7 +414,7 @@ ${repoInfo}
       if (!parsed || !parsed.epics || !Array.isArray(parsed.epics)) {
         console.log('\n🔍 [TechLead] FULL Agent output:\n', result.output);
         NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead parsing failed. Full output:\n${result.output}`);
-        throw new Error(`Tech Lead did not return valid JSON with epics array. Found ${parsed?.epics ? 'non-array epics' : 'no epics'}`);
+        throw new Error(`Tech Lead did not return valid epics array. Marker: ${architectureComplete ? 'FOUND' : 'MISSING'}`);
       }
 
       if (parsed.epics.length === 0) {

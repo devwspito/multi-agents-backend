@@ -2,6 +2,7 @@ import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { IStory } from '../../models/Task';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 
 /**
  * Judge Phase
@@ -668,101 +669,60 @@ Files to check:
   }
 
   /**
-   * Parse Judge agent output - ROBUST multi-strategy JSON extraction
+   * Parse Judge agent output - Uses plain text markers
+   * Following Anthropic SDK best practices
    */
   private parseJudgeOutput(output: string): { status: string; feedback: string } {
     console.log(`🔍 [Judge] Parsing output (length: ${output.length} chars)...`);
 
-    // STRATEGY 1: Clean JSON (no markdown) - MOST COMMON after prompt fix
-    try {
-      const trimmed = output.trim();
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        const parsed = JSON.parse(trimmed);
-        if (parsed.approved !== undefined && parsed.verdict) {
-          console.log(`✅ [Judge] Strategy 1 SUCCESS: Clean JSON found`);
-          return {
-            status: parsed.approved ? 'approved' : 'changes_requested',
-            feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
-          };
-        }
+    // Check for approval/rejection markers
+    const approved = hasMarker(output, COMMON_MARKERS.APPROVED);
+    const rejected = hasMarker(output, COMMON_MARKERS.REJECTED);
+
+    if (approved && !rejected) {
+      console.log(`✅ [Judge] APPROVED marker found`);
+
+      // Extract feedback if present (even for approved code)
+      const feedback = extractMarkerValue(output, '📍 Feedback:') ||
+                      extractMarkerValue(output, '📍 Notes:') ||
+                      'Code approved - meets all quality standards';
+
+      return {
+        status: 'approved',
+        feedback: feedback,
+      };
+    } else if (rejected || !approved) {
+      console.log(`❌ [Judge] REJECTED marker found or no approval`);
+
+      // Extract detailed feedback
+      const reason = extractMarkerValue(output, '📍 Reason:') || '';
+      const requiredChanges = extractMarkerValue(output, '📍 Required Changes:') || '';
+
+      // Build comprehensive feedback
+      let feedback = '';
+      if (reason) {
+        feedback += `Reason: ${reason}\n`;
       }
-    } catch (e) {
-      console.log(`⚠️  [Judge] Strategy 1 failed: ${e}`);
+      if (requiredChanges) {
+        feedback += `Required Changes: ${requiredChanges}\n`;
+      }
+
+      // If no structured feedback, use full output
+      if (!feedback) {
+        feedback = output;
+      }
+
+      return {
+        status: 'changes_requested',
+        feedback: feedback,
+      };
     }
 
-    // STRATEGY 2: Extract LAST valid JSON object (handles markdown before JSON)
-    try {
-      // Match all potential JSON objects
-      const jsonMatches = output.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
-      if (jsonMatches && jsonMatches.length > 0) {
-        // Try from LAST match backwards (most recent JSON is usually the verdict)
-        for (let i = jsonMatches.length - 1; i >= 0; i--) {
-          try {
-            const parsed = JSON.parse(jsonMatches[i]);
-            if (parsed.approved !== undefined && parsed.verdict) {
-              console.log(`✅ [Judge] Strategy 2 SUCCESS: Found JSON at position ${i + 1}/${jsonMatches.length}`);
-              return {
-                status: parsed.approved ? 'approved' : 'changes_requested',
-                feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
-              };
-            }
-          } catch (e) {
-            continue; // Try next match
-          }
-        }
-      }
-    } catch (e) {
-      console.log(`⚠️  [Judge] Strategy 2 failed: ${e}`);
-    }
-
-    // STRATEGY 3: Extract from code blocks (```json ... ```)
-    try {
-      const codeBlockMatch = output.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (codeBlockMatch && codeBlockMatch[1]) {
-        const parsed = JSON.parse(codeBlockMatch[1]);
-        if (parsed.approved !== undefined) {
-          console.log(`✅ [Judge] Strategy 3 SUCCESS: JSON in code block`);
-          return {
-            status: parsed.approved ? 'approved' : 'changes_requested',
-            feedback: parsed.feedback || parsed.reasoning || 'No specific feedback',
-          };
-        }
-      }
-    } catch (e) {
-      console.log(`⚠️  [Judge] Strategy 3 failed: ${e}`);
-    }
-
-    // STRATEGY 4: Look for JSON-like strings with "approved" field
-    try {
-      const approvedMatch = output.match(/"approved"\s*:\s*(true|false)/);
-      const feedbackMatch = output.match(/"feedback"\s*:\s*"([^"]+)"/);
-      const reasoningMatch = output.match(/"reasoning"\s*:\s*"([^"]+)"/);
-
-      if (approvedMatch) {
-        const approved = approvedMatch[1] === 'true';
-        const feedback = feedbackMatch?.[1] || reasoningMatch?.[1] || 'See review output';
-        console.log(`✅ [Judge] Strategy 4 SUCCESS: Extracted fields from text`);
-        return {
-          status: approved ? 'approved' : 'changes_requested',
-          feedback: feedback,
-        };
-      }
-    } catch (e) {
-      console.log(`⚠️  [Judge] Strategy 4 failed: ${e}`);
-    }
-
-    // FALLBACK: Text analysis
-    console.warn(`⚠️  [Judge] ALL parsing strategies failed, using text analysis fallback`);
-    const hasApprovedTrue = output.includes('"approved": true') || output.includes('"approved":true');
-    const hasApprovedFalse = output.includes('"approved": false') || output.includes('"approved":false');
-    const hasVerdictApproved = output.includes('"verdict": "APPROVED"') || output.includes('"verdict":"APPROVED"');
-    const hasChangesRequested = output.toLowerCase().includes('changes_requested');
-
-    const approved = (hasApprovedTrue || hasVerdictApproved) && !hasApprovedFalse && !hasChangesRequested;
-
+    // Fallback: No clear markers found
+    console.warn(`⚠️  [Judge] No clear approval/rejection markers found`);
     return {
-      status: approved ? 'approved' : 'changes_requested',
-      feedback: output, // Return full output as feedback
+      status: 'changes_requested',
+      feedback: 'Judge output unclear - please review manually:\n\n' + output,
     };
   }
 
@@ -805,28 +765,7 @@ Files to check:
     }
 
     // 🔥 CRITICAL: Format feedback for Developer to understand clearly
-    let formattedFeedback = judgeFeedback;
-    try {
-      // Try to parse as JSON first
-      const feedbackJson = JSON.parse(judgeFeedback);
-      if (feedbackJson.feedback || feedbackJson.reasoning) {
-        formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
-
-${feedbackJson.feedback || feedbackJson.reasoning}
-
-⚠️ CRITICAL INSTRUCTIONS:
-1. Read the feedback above carefully
-2. Make ALL required changes
-3. Test your changes
-4. Commit with descriptive message
-5. Report commit SHA with marker: 📍 Commit SHA: <your-sha-here>
-
-❌ DO NOT mark as complete until ALL feedback items are addressed.`;
-        console.log(`✅ [Judge] Formatted JSON feedback for Developer`);
-      }
-    } catch (e) {
-      // Not JSON - format as structured text
-      formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
+    const formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
 
 ${judgeFeedback}
 
@@ -838,8 +777,7 @@ ${judgeFeedback}
 5. Report commit SHA with marker: 📍 Commit SHA: <your-sha-here>
 
 ❌ DO NOT mark as complete until ALL feedback items are addressed.`;
-      console.log(`✅ [Judge] Formatted text feedback for Developer`);
-    }
+    console.log(`✅ [Judge] Formatted feedback for Developer`);
 
     NotificationService.emitAgentMessage(
       taskId,
