@@ -415,8 +415,36 @@ export class JudgePhase extends BasePhase {
         );
 
         if (attempt < this.MAX_RETRIES) {
+          // 🔥 CRITICAL FIX: Validate retry limit BEFORE attempting retry
+          const nextIteration = attempt + 1;
+
+          console.log(`\n🔍 [Judge] Retry Limit Validation:`);
+          console.log(`   Current iteration: ${attempt}`);
+          console.log(`   Next iteration would be: ${nextIteration}`);
+          console.log(`   Maximum allowed: ${this.MAX_RETRIES}`);
+          console.log(`   Retries remaining: ${this.MAX_RETRIES - attempt}`);
+
+          // Safety check: Prevent infinite loops
+          if (nextIteration > this.MAX_RETRIES) {
+            console.error(`\n❌❌❌ [Judge] RETRY LIMIT EXCEEDED - SAFETY CHECK TRIGGERED!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   Story ID: ${story.id}`);
+            console.error(`   Developer: ${developer.instanceId}`);
+            console.error(`   Iterations completed: ${attempt}`);
+            console.error(`   Maximum allowed: ${this.MAX_RETRIES}`);
+            console.error(`\n   🛑 STOPPING RETRY LOOP - This should NOT happen (for loop should prevent this)`);
+            console.error(`   🛑 If you see this, there's a logic error in the retry mechanism`);
+
+            throw new Error(
+              `HUMAN_REQUIRED: Story ${story.id} exceeded retry limit ` +
+              `(${attempt}/${this.MAX_RETRIES}) - manual intervention needed`
+            );
+          }
+
+          console.log(`✅ [Judge] Retry limit check passed - proceeding with retry ${nextIteration}/${this.MAX_RETRIES}`);
+
           // 🔄 RETRY: Developer gets another attempt with Judge feedback
-          console.log(`🔄 [Judge] Story failed evaluation - Developer will retry (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
+          console.log(`🔄 [Judge] Story failed evaluation - Developer will retry (attempt ${nextIteration}/${this.MAX_RETRIES})`);
 
           // Execute developer retry with Judge feedback
           try {
