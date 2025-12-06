@@ -30,7 +30,8 @@
       "Bash(rm:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(perl -i.bak -pe '\nBEGIN { $in_block = 0; }\nif (/🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨/) {\n    $in_block = 1;\n    $_ = \"\"## OUTPUT FORMAT (Plain Text with Markers)\\n\\n⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.\\n❌ DO NOT output JSON - agents think in text\\n✅ DO use clear structure and completion markers\\n\\nStructure your response clearly and end with:\\n✅ [AGENT]_COMPLETE\\n\"\";\n}\nif ($in_block && /🚨 REMINDER.*FIRST.*\\{.*LAST.*\\}/) {\n    $in_block = 0;\n    $_ = \"\"\"\";\n}\n$_ = \"\"\"\" if $in_block;\n' src/services/orchestration/AgentDefinitions.ts)"
+      "Bash(perl -i.bak -pe '\nBEGIN { $in_block = 0; }\nif (/🚨🚨🚨 CRITICAL OUTPUT FORMAT 🚨🚨🚨/) {\n    $in_block = 1;\n    $_ = \"\"## OUTPUT FORMAT (Plain Text with Markers)\\n\\n⚠️ IMPORTANT: Following Anthropic SDK best practices, communicate in natural language.\\n❌ DO NOT output JSON - agents think in text\\n✅ DO use clear structure and completion markers\\n\\nStructure your response clearly and end with:\\n✅ [AGENT]_COMPLETE\\n\"\";\n}\nif ($in_block && /🚨 REMINDER.*FIRST.*\\{.*LAST.*\\}/) {\n    $in_block = 0;\n    $_ = \"\"\"\";\n}\n$_ = \"\"\"\" if $in_block;\n' src/services/orchestration/AgentDefinitions.ts)",
+      "Bash(git fsck:*)"
     ],
     "deny": [],
     "ask": []

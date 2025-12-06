@@ -799,6 +799,14 @@ export class OrchestrationCoordinator {
       attachments?: any[],
       options?: { maxIterations?: number; timeout?: number }
     ) => {
+      // 🔥 VALIDATION: Ensure workspacePath is a string before passing to executeAgent
+      if (typeof workspacePath !== 'string') {
+        console.error(`❌ [executeAgentWithContext] workspacePath is not a string!`);
+        console.error(`   Type: ${typeof workspacePath}`);
+        console.error(`   Value: ${JSON.stringify(workspacePath)}`);
+        throw new Error(`workspacePath must be a string, received: ${typeof workspacePath}`);
+      }
+
       return this.executeAgent(
         agentType,
         prompt,
@@ -1132,6 +1140,19 @@ export class OrchestrationCoordinator {
     const modelAlias = getAgentModel(agentType, modelConfig);
     // Convert to explicit model ID for SDK (ensures we use latest 4.5 versions)
     const model = configs.getExplicitModelId(modelAlias);
+
+    // 🔥 CRITICAL VALIDATION: workspacePath MUST be a string
+    // The SDK's query() function requires options.cwd to be a string
+    if (typeof workspacePath !== 'string') {
+      console.error(`❌❌❌ [ExecuteAgent] CRITICAL ERROR: workspacePath is NOT a string!`);
+      console.error(`   Type received: ${typeof workspacePath}`);
+      console.error(`   Value: ${JSON.stringify(workspacePath)}`);
+      console.error(`   Agent type: ${agentType}`);
+      console.error(`   This would cause SDK error: "options.cwd property must be of type string"`);
+      throw new Error(
+        `CRITICAL: workspacePath must be a string, received ${typeof workspacePath}: ${JSON.stringify(workspacePath)}`
+      );
+    }
 
     console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
     console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);

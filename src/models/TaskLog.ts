@@ -46,7 +46,7 @@ export interface ITaskLog extends Document {
 
   // Context (optional but recommended)
   phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed' | 'multi-team' | 'error-resolution' | 'contract-testing';
-  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'test-creator' | 'contract-tester' | 'error-detective';
+  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -133,7 +133,7 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     agentType: {
       type: String,
-      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge', 'e2e-tester', 'contract-fixer', 'test-creator', 'contract-tester', 'error-detective'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge', 'e2e-tester', 'contract-fixer', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
     },
     agentInstanceId: String,
     epicId: String,

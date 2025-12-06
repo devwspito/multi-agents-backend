@@ -586,6 +586,15 @@ export class TeamOrchestrationPhase extends BasePhase {
       const branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
       const workspacePath = parentContext.workspacePath;
 
+      // 🔥 DEFENSIVE VALIDATION: Check workspacePath type at team creation
+      if (typeof workspacePath !== 'string' && workspacePath !== null) {
+        console.error(`❌❌❌ [Team ${teamNumber}] CRITICAL: workspacePath is not a string!`);
+        console.error(`   Type: ${typeof workspacePath}`);
+        console.error(`   Value: ${JSON.stringify(workspacePath)}`);
+        console.error(`   parentContext.workspacePath: ${JSON.stringify(parentContext.workspacePath)}`);
+        throw new Error(`CRITICAL: workspacePath must be a string, received ${typeof workspacePath}`);
+      }
+
       // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
       if (!epic.targetRepository) {
         console.error(`\n❌❌❌ [Team ${teamNumber}] CRITICAL ERROR: Epic has NO targetRepository!`);

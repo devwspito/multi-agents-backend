@@ -76,6 +76,8 @@ export interface AgentModelConfig {
   'contract-tester': ClaudeModel;
   'contract-fixer': ClaudeModel;
   'error-detective': ClaudeModel;
+  'story-merge-agent': ClaudeModel;
+  'git-flow-manager': ClaudeModel;
 }
 
 /**
@@ -96,6 +98,8 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
   'auto-merge': 'sonnet',
   'test-creator': 'sonnet',
   'contract-tester': 'sonnet',
+  'story-merge-agent': 'sonnet',
+  'git-flow-manager': 'sonnet',
 };
 
 /**
@@ -116,6 +120,8 @@ export const STANDARD_CONFIG: AgentModelConfig = {
   'auto-merge': 'haiku',
   'test-creator': 'haiku',
   'contract-tester': 'haiku',
+  'story-merge-agent': 'haiku',
+  'git-flow-manager': 'haiku',
 };
 
 /**
@@ -148,6 +154,8 @@ export const RECOMMENDED_CONFIG: AgentModelConfig = {
   'auto-merge': 'haiku',
   'test-creator': 'haiku',
   'contract-tester': 'haiku',
+  'story-merge-agent': 'haiku',
+  'git-flow-manager': 'haiku',
 };
 
 /**
@@ -168,6 +176,8 @@ export const MAX_CONFIG: AgentModelConfig = {
   'contract-tester': 'opus',
   'contract-fixer': 'opus',
   'error-detective': 'opus',
+  'story-merge-agent': 'opus',
+  'git-flow-manager': 'opus',
 };
 
 /**
@@ -201,6 +211,8 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
     'auto-merge': bottomModel,
     'test-creator': bottomModel,
     'contract-tester': bottomModel,
+    'story-merge-agent': bottomModel,
+    'git-flow-manager': bottomModel,
   };
 }
 
@@ -223,6 +235,8 @@ export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
     'contract-tester': dbConfig.contractTester || dbConfig['contract-tester'] || RECOMMENDED_CONFIG['contract-tester'],
     'contract-fixer': dbConfig.contractFixer || dbConfig['contract-fixer'] || RECOMMENDED_CONFIG['contract-fixer'],
     'error-detective': dbConfig.errorDetective || dbConfig['error-detective'] || RECOMMENDED_CONFIG['error-detective'],
+    'story-merge-agent': dbConfig.storyMergeAgent || dbConfig['story-merge-agent'] || RECOMMENDED_CONFIG['story-merge-agent'],
+    'git-flow-manager': dbConfig.gitFlowManager || dbConfig['git-flow-manager'] || RECOMMENDED_CONFIG['git-flow-manager'],
   };
 }
 

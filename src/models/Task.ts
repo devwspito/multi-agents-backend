@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective';
+export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -463,7 +463,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective'],
+      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
       required: true,
     },
     status: {
@@ -826,7 +826,7 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective'],
+        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
