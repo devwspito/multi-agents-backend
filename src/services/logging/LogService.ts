@@ -19,7 +19,7 @@ export interface LogContext {
   level?: LogLevel;
   category?: LogCategory;
   phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'contract-testing' | 'completed' | 'multi-team' | 'error-resolution';
-  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester' | 'error-detective';
+  agentType?: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
   agentInstanceId?: string;
   epicId?: string;
   epicName?: string;
