@@ -38,6 +38,86 @@ export class DevelopersPhase extends BasePhase {
   }
 
   /**
+   * 🔥 SMART RECOVERY: Verify developer work from Git when markers are missing
+   *
+   * This handles the case where:
+   * - Developer completed the work and made commits
+   * - But forgot to output the marker in their response
+   *
+   * We verify by checking git log for recent commits on the story branch.
+   * If commits exist, we extract the SHA and continue - don't fail just because
+   * the agent forgot to say the magic words!
+   *
+   * @returns { commitSHA: string, hasCommits: boolean, commitCount: number } or null if error
+   */
+  private async verifyDeveloperWorkFromGit(
+    workspacePath: string | null,
+    repoName: string,
+    branchName: string,
+    storyId: string
+  ): Promise<{ commitSHA: string | null; hasCommits: boolean; commitCount: number; commitMessage?: string } | null> {
+    if (!workspacePath) {
+      console.warn(`⚠️ [GIT_VERIFY] No workspacePath - cannot verify git work`);
+      return null;
+    }
+
+    const repoPath = `${workspacePath}/${repoName}`;
+
+    try {
+      // First, make sure we're on the right branch or it exists
+      const checkBranch = safeGitExecSync(`git branch --list "${branchName}"`, { cwd: repoPath });
+
+      if (!checkBranch || checkBranch.trim() === '') {
+        // Branch doesn't exist locally, try to fetch it
+        console.log(`🔍 [GIT_VERIFY] Branch ${branchName} not found locally, fetching...`);
+        safeGitExecSync(`git fetch origin ${branchName}:${branchName} 2>/dev/null || true`, { cwd: repoPath });
+      }
+
+      // Get the latest commit on the branch
+      // Using --no-walk to just get the HEAD commit
+      const gitLogResult = safeGitExecSync(
+        `git log ${branchName} --oneline -n 5 2>/dev/null || git log origin/${branchName} --oneline -n 5 2>/dev/null || echo ""`,
+        { cwd: repoPath }
+      );
+
+      if (!gitLogResult || gitLogResult.trim() === '') {
+        console.log(`📭 [GIT_VERIFY] No commits found on branch ${branchName}`);
+        return { commitSHA: null, hasCommits: false, commitCount: 0 };
+      }
+
+      const commits = gitLogResult.trim().split('\n').filter(Boolean);
+      const commitCount = commits.length;
+
+      // Get the full SHA of the latest commit
+      const latestCommitLine = commits[0];
+      const shortSHA = latestCommitLine.split(' ')[0];
+
+      // Get full SHA
+      const fullSHA = safeGitExecSync(
+        `git rev-parse ${shortSHA} 2>/dev/null || git rev-parse origin/${branchName} 2>/dev/null`,
+        { cwd: repoPath }
+      )?.trim();
+
+      // Get commit message
+      const commitMessage = latestCommitLine.substring(shortSHA.length + 1).trim();
+
+      console.log(`✅ [GIT_VERIFY] Found ${commitCount} commits on branch ${branchName}`);
+      console.log(`   Latest commit: ${fullSHA?.substring(0, 8)} - ${commitMessage}`);
+      console.log(`   Story: ${storyId}`);
+
+      return {
+        commitSHA: fullSHA || shortSHA,
+        hasCommits: true,
+        commitCount,
+        commitMessage
+      };
+    } catch (error: any) {
+      console.error(`❌ [GIT_VERIFY] Error verifying git work:`, error.message);
+      return null;
+    }
+  }
+
+  /**
    * Skip if developers already completed all stories (ONLY for recovery, NOT for continuations)
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
@@ -794,73 +874,117 @@ export class DevelopersPhase extends BasePhase {
         requiredMarkers.lintPassed &&
         requiredMarkers.finishedSuccessfully;
 
+      // 🔥 SMART RECOVERY: Extract commit SHA from Developer's output first
+      let commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
+      let recoveredFromGit = false;
+
       if (!allMarkersPresent) {
-        console.error(`\n❌ [PIPELINE] Developer did NOT complete iterative development cycle!`);
+        console.warn(`\n⚠️ [PIPELINE] Developer missing some markers - attempting SMART RECOVERY...`);
+        console.warn(`   Story: ${story.title}`);
+        console.warn(`   Missing markers detected - checking git for actual work...`);
+
+        // 🔥 SMART RECOVERY: Check git to see if developer actually committed
+        const storyBranch = story.branchName || updatedStory?.branchName;
+        if (storyBranch && workspacePath && epic.targetRepository) {
+          const gitVerification = await this.verifyDeveloperWorkFromGit(
+            workspacePath,
+            epic.targetRepository,
+            storyBranch,
+            story.id
+          );
+
+          if (gitVerification?.hasCommits && gitVerification.commitSHA) {
+            console.log(`\n🎉 [SMART RECOVERY] Developer DID make commits! Recovering...`);
+            console.log(`   Found ${gitVerification.commitCount} commits on branch ${storyBranch}`);
+            console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
+            console.log(`   Message: ${gitVerification.commitMessage || 'N/A'}`);
+            console.log(`   ✅ Proceeding to Judge despite missing markers`);
+
+            // Use the commit SHA from git if developer didn't report it
+            if (!commitSHA) {
+              commitSHA = gitVerification.commitSHA;
+              console.log(`   📍 Using git-recovered commit SHA: ${commitSHA}`);
+            }
+            recoveredFromGit = true;
+          } else {
+            // No commits found - this is a real failure
+            console.error(`\n❌ [PIPELINE] Developer did NOT complete work!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   NO commits found on branch ${storyBranch}`);
+            console.error(`\n   🔥 REQUIRED WORKFLOW (Claude Code-like):`);
+            console.error(`      1. Write code`);
+            console.error(`      2. ✅ TYPECHECK_PASSED (npm run typecheck)`);
+            console.error(`      3. ✅ TESTS_PASSED (npm test)`);
+            console.error(`      4. ✅ LINT_PASSED (npm run lint)`);
+            console.error(`      5. git commit + git push`);
+            console.error(`      6. ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
+            console.error(`\n   ❌ No commits AND no markers - Judge CANNOT review`);
+            console.error(`   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
+            return {
+              developerCost,
+              judgeCost: 0,
+              developerTokens,
+              judgeTokens: { input: 0, output: 0 }
+            };
+          }
+        } else {
+          // Can't verify git - fall back to strict mode
+          console.error(`\n❌ [PIPELINE] Cannot verify git work (missing branch/workspace/repo)`);
+          console.error(`   storyBranch: ${storyBranch || 'missing'}`);
+          console.error(`   workspacePath: ${workspacePath || 'missing'}`);
+          console.error(`   targetRepository: ${epic.targetRepository || 'missing'}`);
+          console.error(`\n   ❌ Missing validation steps - Judge CANNOT review unverified code`);
+          return {
+            developerCost,
+            judgeCost: 0,
+            developerTokens,
+            judgeTokens: { input: 0, output: 0 }
+          };
+        }
+      }
+
+      if (recoveredFromGit) {
+        console.log(`✅ [PIPELINE] Smart recovery successful - proceeding with git-verified work`);
+      } else {
+        console.log(`✅ [PIPELINE] Developer completed FULL iterative cycle - code is verified!`);
+        console.log(`   This matches Claude Code's workflow: write → verify → fix → commit`);
+      }
+
+      if (commitSHA) {
+        console.log(`✅ [PIPELINE] Commit SHA: ${commitSHA}`);
+        console.log(`   Story: ${story.title}`);
+        console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
+        console.log(`   Source: ${recoveredFromGit ? 'git log (recovered)' : 'developer output'}`);
+      } else {
+        // Last resort: try to get from git even if markers were present
+        console.warn(`⚠️  [PIPELINE] No commit SHA in output - attempting git fallback...`);
+        const storyBranch = story.branchName || updatedStory?.branchName;
+        if (storyBranch && workspacePath && epic.targetRepository) {
+          const gitFallback = await this.verifyDeveloperWorkFromGit(
+            workspacePath,
+            epic.targetRepository,
+            storyBranch,
+            story.id
+          );
+          if (gitFallback?.commitSHA) {
+            commitSHA = gitFallback.commitSHA;
+            console.log(`✅ [PIPELINE] Recovered commit SHA from git: ${commitSHA}`);
+          }
+        }
+      }
+
+      // Final check - if still no commit SHA, we really can't proceed
+      if (!commitSHA) {
+        console.error(`\n❌❌❌ [PIPELINE] CRITICAL: Could not determine commit SHA!`);
         console.error(`   Story: ${story.title}`);
-        console.error(`\n   🔥 REQUIRED WORKFLOW (Claude Code-like):`);
-        console.error(`      1. Write code`);
-        console.error(`      2. ✅ TYPECHECK_PASSED (npm run typecheck)`);
-        console.error(`      3. ✅ TESTS_PASSED (npm test)`);
-        console.error(`      4. ✅ LINT_PASSED (npm run lint)`);
-        console.error(`      5. git commit + git push`);
-        console.error(`      6. ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
-        console.error(`\n   ❌ Missing validation steps - Judge CANNOT review unverified code`);
-        console.error(`   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
+        console.error(`   Tried: developer output AND git log`);
+        console.error(`   Without a commit SHA, Judge cannot review the code`);
         return {
           developerCost,
           judgeCost: 0,
           developerTokens,
           judgeTokens: { input: 0, output: 0 }
         };
-      }
-
-      console.log(`✅ [PIPELINE] Developer completed FULL iterative cycle - code is verified!`);
-      console.log(`   This matches Claude Code's workflow: write → verify → fix → commit`);
-
-      // 🔥 CRITICAL FIX: Extract commit SHA from Developer's output
-      // Following Anthropic best practice: "subagents should verify details"
-      // Developer REPORTS their commit SHA, we don't guess it
-      // Using centralized marker extraction (tolerant to markdown formatting)
-      let commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
-
-      if (commitSHA) {
-        console.log(`✅ [PIPELINE] Developer reported commit SHA: ${commitSHA}`);
-        console.log(`   Story: ${story.title}`);
-        console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
-        console.log(`   This is the EXACT code Judge will review`);
-      } else {
-        console.warn(`⚠️  [PIPELINE] Developer did NOT report commit SHA in output`);
-        console.warn(`   Developer output length: ${developerOutput.length} chars`);
-        console.warn(`   Looking for marker: ${COMMON_MARKERS.COMMIT_SHA}`);
-      }
-
-      // 🔥 NO FALLBACK: Developer MUST report commit SHA
-      if (!commitSHA) {
-        console.error(`\n❌❌❌ [PIPELINE] CRITICAL ERROR: Developer did NOT report commit SHA!`);
-        console.error(`   Story: ${story.title}`);
-        console.error(`   Story ID: ${story.id}`);
-        console.error(`   Developer: ${developer.instanceId}`);
-        console.error(`\n   🔥 THIS IS UNACCEPTABLE - Developer MUST report:`);
-        console.error(`      📍 Commit SHA: [40-character SHA]`);
-        console.error(`      ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
-        console.error(`\n   💀 WITHOUT COMMIT SHA, WE DON'T KNOW WHAT CODE TO REVIEW`);
-        console.error(`   💀 CONTINUING WOULD BE ARBITRARY AND DANGEROUS`);
-        console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
-
-        // Mark task as FAILED
-        const Task = require('../../models/Task').Task;
-        const dbTask = await Task.findById(task._id);
-        if (dbTask) {
-          dbTask.status = 'failed';
-          dbTask.orchestration.developers = {
-            status: 'failed',
-            error: `Developer ${developer.instanceId} did not report commit SHA for story ${story.id}`,
-            humanRequired: true,
-          };
-          await dbTask.save();
-        }
-
-        throw new Error(`HUMAN_REQUIRED: Developer did not report commit SHA - cannot determine what code to review`);
       }
 
       // 🔥 CRITICAL: Verify commit exists on remote BEFORE Judge evaluation
