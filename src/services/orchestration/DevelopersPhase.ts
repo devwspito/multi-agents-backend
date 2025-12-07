@@ -693,8 +693,17 @@ export class DevelopersPhase extends BasePhase {
   }
 
   /**
-   * Execute isolated story pipeline: 1 Story = 1 Dev + 1 Judge + 1 QA + 1 Fixer
-   * Each story works in the SAME workspace (no checkout conflicts)
+   * Execute isolated story pipeline: 1 Story = 1 Dev + 1 Judge
+   * 🔥🔥🔥 CRITICAL: Each DEV+JUDGE pair works in its OWN ISOLATED WORKSPACE 🔥🔥🔥
+   * This prevents git conflicts between parallel story executions.
+   *
+   * Workspace structure:
+   *   team-1/
+   *     story-ABC123/
+   *       v2_backend/    ← Developer works here
+   *                      ← Judge reviews here (same isolated copy)
+   *     story-DEF456/
+   *       v2_backend/    ← Different DEV+JUDGE pair (no conflicts!)
    */
   private async executeIsolatedStoryPipeline(
     task: any,
@@ -714,6 +723,60 @@ export class DevelopersPhase extends BasePhase {
     judgeTokens: { input: number; output: number };
   }> {
     const taskId = (task._id as any).toString();
+    const fs = require('fs');
+    const { execSync } = require('child_process');
+
+    // 🔥🔥🔥 ISOLATED STORY WORKSPACE 🔥🔥🔥
+    // Each DEV+JUDGE pair gets its own copy of the repository
+    // This prevents git conflicts when multiple stories are worked on in parallel
+    const storyWorkspacePath = workspacePath ? `${workspacePath}/story-${story.id}` : null;
+
+    if (storyWorkspacePath && epic.targetRepository) {
+      const isolatedRepoPath = `${storyWorkspacePath}/${epic.targetRepository}`;
+      const sourceRepoPath = `${workspacePath}/${epic.targetRepository}`;
+
+      console.log(`\n🔒🔒🔒 [Story ${story.id}] CREATING ISOLATED WORKSPACE 🔒🔒🔒`);
+      console.log(`   📁 Source repo: ${sourceRepoPath}`);
+      console.log(`   📁 Story workspace: ${storyWorkspacePath}`);
+      console.log(`   📁 Isolated repo: ${isolatedRepoPath}`);
+      console.log(`   👨‍💻 Developer: ${developer.instanceId}`);
+      console.log(`   ⚖️  Judge will review in SAME isolated workspace`);
+
+      // Create story workspace directory
+      if (!fs.existsSync(storyWorkspacePath)) {
+        fs.mkdirSync(storyWorkspacePath, { recursive: true });
+        console.log(`   ✅ Created story workspace directory`);
+      }
+
+      // Copy repository to isolated workspace (if not already copied)
+      if (!fs.existsSync(isolatedRepoPath)) {
+        if (!fs.existsSync(sourceRepoPath)) {
+          console.error(`   ❌ Source repository not found: ${sourceRepoPath}`);
+          throw new Error(`Source repository not found for story ${story.id}: ${sourceRepoPath}`);
+        }
+
+        console.log(`   📋 Copying repository to isolated workspace...`);
+        execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+        console.log(`   ✅ Repository copied to isolated workspace`);
+
+        // 🔥 CRITICAL: Ensure isolated repo has proper git remote
+        // The copied repo should have the same remote as source
+        try {
+          const remoteUrl = execSync(`git -C "${sourceRepoPath}" remote get-url origin`, { encoding: 'utf8' }).trim();
+          execSync(`git -C "${isolatedRepoPath}" remote set-url origin "${remoteUrl}"`, { encoding: 'utf8' });
+          console.log(`   ✅ Git remote configured in isolated workspace`);
+        } catch (remoteError: any) {
+          console.warn(`   ⚠️ Could not set git remote: ${remoteError.message}`);
+        }
+      } else {
+        console.log(`   ℹ️  Isolated workspace already exists`);
+      }
+
+      console.log(`🔒🔒🔒 [Story ${story.id}] ISOLATED WORKSPACE READY 🔒🔒🔒\n`);
+    }
+
+    // 🔥 Use isolated story workspace for ALL operations in this pipeline
+    const effectiveWorkspacePath = storyWorkspacePath || workspacePath;
 
     // 🔥 CRITICAL VALIDATION: Epic MUST have targetRepository
     if (!epic.targetRepository) {
@@ -779,21 +842,24 @@ export class DevelopersPhase extends BasePhase {
       const epicBranchName = context.getData<string>('epicBranch');
       console.log(`📂 [DevelopersPhase] Passing epic branch to developer: ${epicBranchName || 'not specified'}`);
 
-      // 🔥 DEFENSIVE VALIDATION: Check workspacePath type before calling executeDeveloperFn
-      if (typeof workspacePath !== 'string' && workspacePath !== null) {
-        console.error(`❌❌❌ [DevelopersPhase.executeIsolatedStoryPipeline] CRITICAL: workspacePath is not a string!`);
-        console.error(`   Type: ${typeof workspacePath}`);
-        console.error(`   Value: ${JSON.stringify(workspacePath)}`);
+      // 🔥 DEFENSIVE VALIDATION: Check effectiveWorkspacePath type before calling executeDeveloperFn
+      if (typeof effectiveWorkspacePath !== 'string' && effectiveWorkspacePath !== null) {
+        console.error(`❌❌❌ [DevelopersPhase.executeIsolatedStoryPipeline] CRITICAL: effectiveWorkspacePath is not a string!`);
+        console.error(`   Type: ${typeof effectiveWorkspacePath}`);
+        console.error(`   Value: ${JSON.stringify(effectiveWorkspacePath)}`);
         console.error(`   Story: ${story.title}`);
         console.error(`   Developer: ${developer.instanceId}`);
-        throw new Error(`CRITICAL: workspacePath must be a string, received ${typeof workspacePath}: ${JSON.stringify(workspacePath)}`);
+        throw new Error(`CRITICAL: effectiveWorkspacePath must be a string, received ${typeof effectiveWorkspacePath}: ${JSON.stringify(effectiveWorkspacePath)}`);
       }
+
+      // 🔥🔥🔥 ISOLATED WORKSPACE: Developer works in story-specific workspace 🔥🔥🔥
+      console.log(`   📂 Developer workspace: ${effectiveWorkspacePath}/${epic.targetRepository}`);
 
       const developerResult = await this.executeDeveloperFn(
         task,
         developer,
         repositories,
-        workspacePath,
+        effectiveWorkspacePath,  // 🔥 ISOLATED per story!
         workspaceStructure,
         attachments,
         state.stories,
@@ -832,23 +898,15 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      // 🔥 CRITICAL: Validate Developer finished successfully WITH ITERATIVE CYCLE
+      // 🔥🔥🔥 DEFINITIVE FIX: GIT IS THE SOURCE OF TRUTH, NOT MARKERS 🔥🔥🔥
+      // Developer output can be truncated (50k char limit) which cuts off markers
+      // Instead: Check git FIRST - if commits exist, ACCEPT the work
       const developerOutput = developerResult?.output || '';
 
-      // Use centralized marker validation (follows Anthropic SDK best practices)
-      // Plain text markers are more robust than JSON - see PLAIN_TEXT_VS_JSON.md
-      const requiredMarkers = {
-        typecheckPassed: hasMarker(developerOutput, COMMON_MARKERS.TYPECHECK_PASSED),
-        testsPassed: hasMarker(developerOutput, COMMON_MARKERS.TESTS_PASSED),
-        lintPassed: hasMarker(developerOutput, COMMON_MARKERS.LINT_PASSED),
-        // 🔥 FIX: Developer outputs "DEVELOPER_FINISHED_SUCCESSFULLY" not "FINISHED_SUCCESSFULLY"
-        finishedSuccessfully: hasMarker(developerOutput, COMMON_MARKERS.DEVELOPER_FINISHED) ||
-                               hasMarker(developerOutput, COMMON_MARKERS.FINISHED), // Also accept generic marker
-        failed: hasMarker(developerOutput, COMMON_MARKERS.FAILED),
-      };
+      // Check for explicit failure marker (this is the ONLY marker we strictly require)
+      const explicitlyFailed = hasMarker(developerOutput, COMMON_MARKERS.FAILED);
 
-      // Check for explicit failure
-      if (requiredMarkers.failed) {
+      if (explicitlyFailed) {
         console.error(`❌ [PIPELINE] Developer explicitly reported FAILURE`);
         console.error(`   Story: ${story.title}`);
         console.error(`   Developer output (last 500 chars):\n${developerOutput.slice(-500)}`);
@@ -860,80 +918,125 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
-      // 🔥 NEW: Validate ALL verification steps were completed (iterative cycle)
-      console.log(`\n🔍 [VALIDATION] Checking developer completed iterative cycle...`);
-      console.log(`   ✅ TYPECHECK_PASSED: ${requiredMarkers.typecheckPassed ? '✅' : '❌'}`);
-      console.log(`   ✅ TESTS_PASSED: ${requiredMarkers.testsPassed ? '✅' : '❌'}`);
-      console.log(`   ✅ LINT_PASSED: ${requiredMarkers.lintPassed ? '✅' : '❌'}`);
-      console.log(`   ✅ DEVELOPER_FINISHED_SUCCESSFULLY: ${requiredMarkers.finishedSuccessfully ? '✅' : '❌'}`);
+      // 🔥🔥🔥 GIT-FIRST VALIDATION: Git commits are the SOURCE OF TRUTH 🔥🔥🔥
+      // If developer made commits → they worked, regardless of markers
+      // Markers are ONLY a fallback when git verification fails
+      const storyBranch = story.branchName || updatedStory?.branchName;
+      let commitSHA: string | null = null;
+      let gitValidationPassed = false;
 
-      // Check if ALL markers are present
-      const allMarkersPresent =
-        requiredMarkers.typecheckPassed &&
-        requiredMarkers.testsPassed &&
-        requiredMarkers.lintPassed &&
-        requiredMarkers.finishedSuccessfully;
+      console.log(`\n🔍 [GIT-FIRST VALIDATION] Checking git for actual work...`);
+      console.log(`   Story: ${story.title}`);
+      console.log(`   Branch: ${storyBranch || 'unknown'}`);
 
-      // 🔥 SMART RECOVERY: Extract commit SHA from Developer's output first
-      let commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
-      let recoveredFromGit = false;
+      // 🔥 Use ISOLATED workspace for git verification (where developer actually worked)
+      if (storyBranch && effectiveWorkspacePath && epic.targetRepository) {
+        // 🔥🔥🔥 CRITICAL: Fetch from remote FIRST to ensure we see all commits
+        // Developer may have pushed but local doesn't know about it yet
+        const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+        try {
+          console.log(`   📡 Fetching from remote to ensure all commits visible...`);
+          safeGitExecSync(`git fetch origin --prune`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+        } catch (fetchErr: any) {
+          console.warn(`   ⚠️ Fetch failed (continuing anyway): ${fetchErr.message}`);
+        }
 
-      if (!allMarkersPresent) {
-        console.warn(`\n⚠️ [PIPELINE] Developer missing some markers - attempting SMART RECOVERY...`);
-        console.warn(`   Story: ${story.title}`);
-        console.warn(`   Missing markers detected - checking git for actual work...`);
+        const gitVerification = await this.verifyDeveloperWorkFromGit(
+          effectiveWorkspacePath,  // 🔥 ISOLATED workspace where dev worked
+          epic.targetRepository,
+          storyBranch,
+          story.id
+        );
 
-        // 🔥 SMART RECOVERY: Check git to see if developer actually committed
-        const storyBranch = story.branchName || updatedStory?.branchName;
-        if (storyBranch && workspacePath && epic.targetRepository) {
-          const gitVerification = await this.verifyDeveloperWorkFromGit(
-            workspacePath,
-            epic.targetRepository,
-            storyBranch,
-            story.id
-          );
+        if (gitVerification?.hasCommits && gitVerification.commitSHA) {
+          console.log(`✅ [GIT-FIRST] Developer made ${gitVerification.commitCount} commits!`);
+          console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
+          console.log(`   Message: ${gitVerification.commitMessage || 'N/A'}`);
+          console.log(`   🎯 GIT VALIDATION PASSED - Developer DID work (markers ignored)`);
 
-          if (gitVerification?.hasCommits && gitVerification.commitSHA) {
-            console.log(`\n🎉 [SMART RECOVERY] Developer DID make commits! Recovering...`);
-            console.log(`   Found ${gitVerification.commitCount} commits on branch ${storyBranch}`);
-            console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
-            console.log(`   Message: ${gitVerification.commitMessage || 'N/A'}`);
-            console.log(`   ✅ Proceeding to Judge despite missing markers`);
+          commitSHA = gitVerification.commitSHA;
+          gitValidationPassed = true;
 
-            // Use the commit SHA from git if developer didn't report it
-            if (!commitSHA) {
-              commitSHA = gitVerification.commitSHA;
-              console.log(`   📍 Using git-recovered commit SHA: ${commitSHA}`);
+          // 🔥🔥🔥 FORCE PUSH VERIFICATION: Ensure commit is on remote 🔥🔥🔥
+          // Developer MUST push their work - this is mandatory, not optional
+          console.log(`\n📤 [FORCE PUSH CHECK] Verifying commit ${commitSHA.substring(0, 8)} is on remote...`);
+          try {
+            const branchOnRemote = safeGitExecSync(
+              `git ls-remote origin refs/heads/${storyBranch}`,
+              { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+            );
+
+            if (!branchOnRemote || branchOnRemote.trim() === '') {
+              // Branch not on remote - FORCE PUSH IT
+              console.log(`   ⚠️ Branch ${storyBranch} NOT on remote - pushing now...`);
+              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Branch pushed to remote`);
+            } else {
+              // Branch on remote - verify commit is there
+              const remoteCommit = branchOnRemote.split('\t')[0];
+              if (remoteCommit === commitSHA) {
+                console.log(`   ✅ Commit ${commitSHA.substring(0, 8)} confirmed on remote`);
+              } else {
+                console.log(`   ⚠️ Remote has different commit (${remoteCommit.substring(0, 8)}) - pushing latest...`);
+                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+                console.log(`   ✅ Latest commit pushed to remote`);
+              }
             }
-            recoveredFromGit = true;
-          } else {
-            // No commits found - this is a real failure
-            console.error(`\n❌ [PIPELINE] Developer did NOT complete work!`);
-            console.error(`   Story: ${story.title}`);
-            console.error(`   NO commits found on branch ${storyBranch}`);
-            console.error(`\n   🔥 REQUIRED WORKFLOW (Claude Code-like):`);
-            console.error(`      1. Write code`);
-            console.error(`      2. ✅ TYPECHECK_PASSED (npm run typecheck)`);
-            console.error(`      3. ✅ TESTS_PASSED (npm test)`);
-            console.error(`      4. ✅ LINT_PASSED (npm run lint)`);
-            console.error(`      5. git commit + git push`);
-            console.error(`      6. ✅ DEVELOPER_FINISHED_SUCCESSFULLY`);
-            console.error(`\n   ❌ No commits AND no markers - Judge CANNOT review`);
-            console.error(`   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
-            return {
-              developerCost,
-              judgeCost: 0,
-              developerTokens,
-              judgeTokens: { input: 0, output: 0 }
-            };
+          } catch (pushCheckErr: any) {
+            console.warn(`   ⚠️ Push verification failed: ${pushCheckErr.message}`);
+            console.warn(`   Attempting force push...`);
+            try {
+              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Force push succeeded`);
+            } catch (forcePushErr: any) {
+              console.error(`   ❌ Force push failed: ${forcePushErr.message}`);
+              // Continue anyway - Judge will try to fetch
+            }
           }
         } else {
-          // Can't verify git - fall back to strict mode
-          console.error(`\n❌ [PIPELINE] Cannot verify git work (missing branch/workspace/repo)`);
-          console.error(`   storyBranch: ${storyBranch || 'missing'}`);
-          console.error(`   workspacePath: ${workspacePath || 'missing'}`);
-          console.error(`   targetRepository: ${epic.targetRepository || 'missing'}`);
-          console.error(`\n   ❌ Missing validation steps - Judge CANNOT review unverified code`);
+          console.warn(`⚠️ [GIT-FIRST] No commits found on branch ${storyBranch}`);
+          console.warn(`   Falling back to marker validation...`);
+        }
+      } else {
+        console.warn(`⚠️ [GIT-FIRST] Cannot verify git (missing branch/workspace/repo)`);
+        console.warn(`   storyBranch: ${storyBranch || 'missing'}`);
+        console.warn(`   effectiveWorkspacePath: ${effectiveWorkspacePath || 'missing'}`);
+        console.warn(`   targetRepository: ${epic.targetRepository || 'missing'}`);
+        console.warn(`   Falling back to marker validation...`);
+      }
+
+      // 🔥 FALLBACK: Only check markers if git validation failed
+      // This handles edge cases where git check doesn't work
+      const requiredMarkers = {
+        typecheckPassed: hasMarker(developerOutput, COMMON_MARKERS.TYPECHECK_PASSED),
+        testsPassed: hasMarker(developerOutput, COMMON_MARKERS.TESTS_PASSED),
+        lintPassed: hasMarker(developerOutput, COMMON_MARKERS.LINT_PASSED),
+        finishedSuccessfully: hasMarker(developerOutput, COMMON_MARKERS.DEVELOPER_FINISHED) ||
+                               hasMarker(developerOutput, COMMON_MARKERS.FINISHED),
+        failed: false, // Already checked above
+      };
+
+      // 🔥🔥🔥 SIMPLIFIED VALIDATION LOGIC 🔥🔥🔥
+      // Git validation already happened above. If gitValidationPassed is true, we're good!
+      // Only fail if git shows NO commits AND no success markers
+
+      if (!gitValidationPassed) {
+        // Git validation failed - check markers as fallback
+        console.log(`\n🔍 [MARKER FALLBACK] Git validation failed, checking markers...`);
+        console.log(`   ✅ TYPECHECK_PASSED: ${requiredMarkers.typecheckPassed ? '✅' : '⚠️'}`);
+        console.log(`   ✅ TESTS_PASSED: ${requiredMarkers.testsPassed ? '✅' : '⚠️'}`);
+        console.log(`   ✅ LINT_PASSED: ${requiredMarkers.lintPassed ? '✅' : '⚠️'}`);
+        console.log(`   ✅ DEVELOPER_FINISHED_SUCCESSFULLY: ${requiredMarkers.finishedSuccessfully ? '✅' : '❌'}`);
+
+        // Only require the finish marker - let Judge decide code quality
+        if (!requiredMarkers.finishedSuccessfully) {
+          console.error(`\n❌ [PIPELINE] Developer did NOT complete work!`);
+          console.error(`   Story: ${story.title}`);
+          console.error(`   NO commits found on git AND no FINISHED marker in output`);
+          console.error(`\n   Developer must either:`);
+          console.error(`   1. Make commits (git commit + git push) - detected automatically`);
+          console.error(`   2. Output ✅ DEVELOPER_FINISHED_SUCCESSFULLY marker`);
+          console.error(`\n   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
           return {
             developerCost,
             judgeCost: 0,
@@ -941,43 +1044,17 @@ export class DevelopersPhase extends BasePhase {
             judgeTokens: { input: 0, output: 0 }
           };
         }
+
+        // Marker validation passed - try to get commit SHA from output
+        commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
+        console.log(`✅ [MARKER FALLBACK] Developer finished (marker present)`);
       }
 
-      if (recoveredFromGit) {
-        console.log(`✅ [PIPELINE] Smart recovery successful - proceeding with git-verified work`);
-      } else {
-        console.log(`✅ [PIPELINE] Developer completed FULL iterative cycle - code is verified!`);
-        console.log(`   This matches Claude Code's workflow: write → verify → fix → commit`);
-      }
-
-      if (commitSHA) {
-        console.log(`✅ [PIPELINE] Commit SHA: ${commitSHA}`);
-        console.log(`   Story: ${story.title}`);
-        console.log(`   Branch: ${story.branchName || updatedStory?.branchName || 'unknown'}`);
-        console.log(`   Source: ${recoveredFromGit ? 'git log (recovered)' : 'developer output'}`);
-      } else {
-        // Last resort: try to get from git even if markers were present
-        console.warn(`⚠️  [PIPELINE] No commit SHA in output - attempting git fallback...`);
-        const storyBranch = story.branchName || updatedStory?.branchName;
-        if (storyBranch && workspacePath && epic.targetRepository) {
-          const gitFallback = await this.verifyDeveloperWorkFromGit(
-            workspacePath,
-            epic.targetRepository,
-            storyBranch,
-            story.id
-          );
-          if (gitFallback?.commitSHA) {
-            commitSHA = gitFallback.commitSHA;
-            console.log(`✅ [PIPELINE] Recovered commit SHA from git: ${commitSHA}`);
-          }
-        }
-      }
-
-      // Final check - if still no commit SHA, we really can't proceed
+      // Final validation - we need a commit SHA to proceed
       if (!commitSHA) {
         console.error(`\n❌❌❌ [PIPELINE] CRITICAL: Could not determine commit SHA!`);
         console.error(`   Story: ${story.title}`);
-        console.error(`   Tried: developer output AND git log`);
+        console.error(`   Git validation: ${gitValidationPassed ? 'PASSED but no SHA?' : 'FAILED'}`);
         console.error(`   Without a commit SHA, Judge cannot review the code`);
         return {
           developerCost,
@@ -987,9 +1064,15 @@ export class DevelopersPhase extends BasePhase {
         };
       }
 
+      console.log(`✅ [PIPELINE] Developer work validated!`);
+      console.log(`   Commit SHA: ${commitSHA}`);
+      console.log(`   Story: ${story.title}`);
+      console.log(`   Branch: ${storyBranch || 'unknown'}`);
+      console.log(`   Validation: ${gitValidationPassed ? 'GIT (commits found)' : 'MARKER (finished marker)'}`)
+
       // 🔥 CRITICAL: Verify commit exists on remote BEFORE Judge evaluation
       console.log(`\n🔍 [PRE-JUDGE] Verifying commit ${commitSHA} exists on remote...`);
-      if (workspacePath && repositories.length > 0) {
+      if (effectiveWorkspacePath && repositories.length > 0) {
         // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
         if (!epic.targetRepository) {
           throw new Error(`Epic ${epic.id} has no targetRepository - cannot verify commit`);
@@ -1005,7 +1088,8 @@ export class DevelopersPhase extends BasePhase {
           throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
         }
 
-        const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+        // 🔥 ISOLATED workspace path for git operations
+        const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
 
         try {
           // Check if commit exists on remote by grepping ls-remote output
@@ -1043,16 +1127,16 @@ export class DevelopersPhase extends BasePhase {
         }
       }
 
-      // STEP 2: Judge reviews code (in SAME workspace, SAME branch, EXACT commit)
+      // STEP 2: Judge reviews code (in SAME ISOLATED workspace, SAME branch, EXACT commit)
       console.log(`\n⚖️  [STEP 2/3] Judge reviewing EXACT commit:`);
       console.log(`   Commit SHA: ${commitSHA}`);
       console.log(`   Branch: ${updatedStory.branchName}`);
-      console.log(`   Workspace: ${workspacePath}`);
+      console.log(`   🔒 ISOLATED Workspace: ${effectiveWorkspacePath}`);  // 🔥 Same isolated workspace as Developer
       console.log(`   If Judge fails to access this commit → Pipeline STOPS`);
 
-      // 🔥 CRITICAL: Sync workspace with remote BEFORE Judge reviews
+      // 🔥 CRITICAL: Sync ISOLATED workspace with remote BEFORE Judge reviews
       // Developer pushed changes to remote, Judge needs to pull them
-      if (workspacePath && repositories.length > 0) {
+      if (effectiveWorkspacePath && repositories.length > 0) {
         try {
           console.log(`\n🔄 [PRE-JUDGE SYNC] Syncing workspace with remote...`);
 
@@ -1071,7 +1155,8 @@ export class DevelopersPhase extends BasePhase {
             throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
           }
 
-          const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+          // 🔥 ISOLATED workspace path for Judge sync
+          const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
 
           // Fetch all branches from remote
           console.log(`   [1/3] Fetching from remote...`);
@@ -1246,14 +1331,16 @@ export class DevelopersPhase extends BasePhase {
         }
       }
 
-      // Create isolated context for Judge
-      const judgeContext = new OrchestrationContext(task, repositories, workspacePath);
+      // Create isolated context for Judge - SAME ISOLATED WORKSPACE as Developer
+      // 🔥🔥🔥 CRITICAL: Judge uses SAME isolated workspace as Developer 🔥🔥🔥
+      const judgeContext = new OrchestrationContext(task, repositories, effectiveWorkspacePath);
       judgeContext.setData('storyToReview', updatedStory);
       judgeContext.setData('reviewMode', 'single-story');
       judgeContext.setData('developmentTeam', [developer]); // Only this developer
       judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
       judgeContext.setData('commitSHA', commitSHA); // 🔥 CRITICAL: Exact commit to review
       judgeContext.setData('storyBranchName', updatedStory.branchName); // 🔥 CRITICAL: LITERAL branch name from Developer
+      judgeContext.setData('isolatedWorkspacePath', effectiveWorkspacePath); // 🔥 Pass isolated path explicitly
 
       const { JudgePhase } = await import('./JudgePhase');
 
@@ -1295,14 +1382,14 @@ export class DevelopersPhase extends BasePhase {
       if (isApproved) {
         console.log(`✅ [STEP 2/3] Judge APPROVED story: ${story.title}`);
 
-        // STEP 3: Merge to epic branch
+        // STEP 3: Merge to epic branch (from ISOLATED workspace)
         console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
-        await this.mergeStoryToEpic(updatedStory, epic, workspacePath, repositories, taskId);
+        await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
 
         // 🧹 CLEANUP: Delete story branch after successful merge
         // ✅ ONLY if Judge APPROVED - rejected stories keep their branches for investigation
         // Story is now part of epic branch, no need to keep individual story branch
-        if (workspacePath && repositories.length > 0) {
+        if (effectiveWorkspacePath && repositories.length > 0) {
           try {
             // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
             if (!epic.targetRepository) {
@@ -1319,7 +1406,8 @@ export class DevelopersPhase extends BasePhase {
               throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
             }
 
-            const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+            // 🔥 ISOLATED workspace for cleanup operations
+            const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
             const storyBranch = updatedStory.branchName;
 
             // 🗑️ Delete LOCAL branch

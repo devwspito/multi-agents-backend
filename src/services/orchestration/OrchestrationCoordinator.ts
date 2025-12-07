@@ -1,7 +1,7 @@
 import { Task, ITask } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
-import { PRManagementService } from '../github/PRManagementService';
+// PRManagementService REMOVED - AutoMergePhase creates its own instance
 import { ContextCompactionService } from '../ContextCompactionService';
 import { NotificationService } from '../NotificationService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
@@ -10,7 +10,7 @@ import { ProjectManagerPhase } from './ProjectManagerPhase';
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
 import { JudgePhase } from './JudgePhase';
-import { QAPhase } from './QAPhase';
+// QAPhase REMOVED - Judge handles all quality validation per-story
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
@@ -78,7 +78,7 @@ interface DeveloperProgress {
 export class OrchestrationCoordinator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
-  private readonly prManagementService: PRManagementService;
+  // prManagementService REMOVED - AutoMergePhase creates its own instance
   private readonly _compactionService: ContextCompactionService;
 
   /**
@@ -92,23 +92,19 @@ export class OrchestrationCoordinator {
    * - Human approval gates (must wait for approval before next phase)
    */
   private readonly PHASE_ORDER = [
-    'ProblemAnalyst',      // 0. Deep problem analysis and architecture
-    'ProductManager',      // 1. Analyze requirements (Sonnet 4.5 orchestrator)
-    'Approval',            // 1.5 Human approval gate
-    'ProjectManager',      // 2. Break into epics (Sonnet 4.5 orchestrator)
-    'Approval',            // 2.5 Human approval gate
-    'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers → Judge → QA per epic)
-    'TestCreator',         // 3.5 Create comprehensive test suites (unit, integration, E2E)
-    'contract-testing',    // 4. API contract verification (static analysis - no server startup)
-    'contract-fixer',      // 4.5 Fix contract issues if contract testing detected errors (loop: contract-testing → contract-fixer → contract-testing)
-    'Approval',            // 5. Human approval gate (final approval - all teams done + contracts verified)
-    'AutoMerge',           // 6. Automatically merge PRs to main
+    'ProblemAnalyst',      // 1. Deep problem analysis and architecture
+    'ProductManager',      // 2. Analyze requirements → Create Epics
+    'Approval',            // 3. Human approval gate (epics)
+    'ProjectManager',      // 4. Validate epics, detect conflicts
+    'Approval',            // 5. Human approval gate (validated epics)
+    'TeamOrchestration',   // 6. Multi-team parallel execution (TechLead → Developers+Judge per epic)
+    'AutoMerge',           // 7. Merge approved PRs to main
   ];
 
   constructor() {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
-    this.prManagementService = new PRManagementService(this.githubService);
+    // prManagementService REMOVED - AutoMergePhase creates its own instance
     this._compactionService = new ContextCompactionService();
     void this._compactionService; // Available for future use
   }
@@ -548,143 +544,8 @@ export class OrchestrationCoordinator {
           }
         }
 
-        // 🔥 SPECIAL HANDLING: QA → Fixer → QA retry loop
-        if (phaseName === 'QA' && result.success && result.data?.hasErrors) {
-          console.log(`🔧 [QA] QA detected errors - executing Fixer phase`);
-          console.log(`   Error type: ${result.data?.errorType}`);
-          console.log(`   QA Attempt: ${result.data?.qaAttempt}`);
-          NotificationService.emitConsoleLog(taskId, 'info', `🔧 QA detected errors - executing Fixer to resolve`);
-
-          // Execute Fixer
-          const fixerPhase = this.createPhase('Fixer', context);
-          console.log(`   Fixer phase created: ${fixerPhase ? 'YES' : 'NO'}`);
-
-          if (fixerPhase) {
-            console.log(`🔧 [Fixer] Starting Fixer execution...`);
-            NotificationService.emitConsoleLog(taskId, 'info', `🔧 Starting Fixer agent to fix ${result.data?.errorType || 'detected'} errors...`);
-
-            const fixerResult = await fixerPhase.execute(context);
-            console.log(`🔧 [Fixer] Execution completed:`, {
-              success: fixerResult.success,
-              fixed: fixerResult.data?.fixed,
-              filesModified: fixerResult.data?.filesModified
-            });
-
-            if (fixerResult.success && fixerResult.data?.fixed) {
-              // Fixer succeeded - re-execute QA (attempt 2)
-              console.log(`✅ [Fixer] Fixed errors - re-running QA (attempt 2)`);
-              NotificationService.emitConsoleLog(taskId, 'info', `✅ Fixer completed - re-running QA tests`);
-
-              const qaPhase2 = this.createPhase('QA', context);
-              if (qaPhase2) {
-                const qaResult2 = await qaPhase2.execute(context);
-
-                if (!qaResult2.success) {
-                  // QA attempt 2 failed
-                  NotificationService.emitConsoleLog(taskId, 'error', `❌ QA attempt 2 failed: ${qaResult2.error}`);
-                  await this.handlePhaseFailed(task, 'QA', qaResult2);
-                  return;
-                }
-
-                // QA attempt 2 succeeded - continue
-                console.log(`✅ [QA] Attempt 2 completed successfully`);
-                NotificationService.emitConsoleLog(taskId, 'info', `✅ QA attempt 2 passed - PRs created`);
-              }
-            } else {
-              // Fixer failed - QA already created PRs with error docs
-              console.log(`⚠️  [Fixer] Could not fix errors - PRs created with error documentation`);
-              NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Fixer could not resolve all errors - PRs created with error documentation`);
-            }
-          }
-        }
-
-        // 🔥 SPECIAL HANDLING: contract-testing → contract-fixer → contract-testing smart retry loop
-        if (phaseName === 'contract-testing' && result.success && result.data?.hasErrors) {
-          console.log(`🔧 [ContractTesting] Contract testing detected API contract errors - executing Contract Fixer phase`);
-          console.log(`   Error type: ${result.data?.errorType}`);
-          NotificationService.emitConsoleLog(taskId, 'info', `🔧 Contract testing detected API contract errors - executing Contract Fixer to resolve`);
-
-          // Mark that Contract Fixer should run
-          context.setData('shouldRunContractFixer', true);
-
-          // Loop: Execute Fixer → Test → Fixer... until fixed or max retries
-          let retryCount = 0;
-          const maxRetries = 3;
-          let fixed = false;
-
-          while (retryCount < maxRetries && !fixed) {
-            console.log(`\n🔄 [Contract Loop] Iteration ${retryCount + 1}/${maxRetries}`);
-
-            // Execute Contract Fixer
-            const contractFixerPhase = this.createPhase('contract-fixer', context);
-            if (!contractFixerPhase) {
-              console.log(`❌ [Contract Loop] Could not create Contract Fixer phase - breaking loop`);
-              break;
-            }
-
-            const contractFixerResult = await contractFixerPhase.execute(context);
-            console.log(`🔧 [ContractFixer] Execution completed:`, {
-              success: contractFixerResult.success,
-              fixed: contractFixerResult.data?.fixed,
-              maxRetriesReached: contractFixerResult.data?.maxRetriesReached,
-            });
-
-            // Check if max retries reached for same error
-            if (contractFixerResult.data?.maxRetriesReached) {
-              console.log(`⚠️  [Contract Loop] Max retries reached for same error - allowing continuation with documented errors`);
-              NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Contract Fixer tried ${maxRetries} times but couldn't fix the same error - allowing continuation`);
-              break;
-            }
-
-            // Check if fixer succeeded
-            if (contractFixerResult.success && contractFixerResult.data?.fixed) {
-              console.log(`✅ [ContractFixer] Fixed contract errors - re-running Contract Testing`);
-              NotificationService.emitConsoleLog(taskId, 'info', `✅ Contract Fixer completed - re-running contract tests`);
-
-              // Re-run Contract Testing
-              const contractTestingPhaseRetry = this.createPhase('contract-testing', context);
-              if (contractTestingPhaseRetry) {
-                const contractTestingResultRetry = await contractTestingPhaseRetry.execute(context);
-
-                if (contractTestingResultRetry.success) {
-                  if (contractTestingResultRetry.data?.hasErrors) {
-                    // Still has errors - check if error changed
-                    console.log(`⚠️  [Contract Loop] Contract testing still reports errors - may be different error, continuing loop`);
-                    context.setData('shouldRunContractFixer', true);
-                    retryCount++;
-                  } else {
-                    // No errors - success!
-                    console.log(`✅ [Contract Loop] Contract testing passed - integration verified`);
-                    NotificationService.emitConsoleLog(taskId, 'info', `✅ Contract testing passed - frontend-backend contracts verified`);
-                    fixed = true;
-                    break;
-                  }
-                } else {
-                  console.log(`❌ [Contract Loop] Contract testing failed critically: ${contractTestingResultRetry.error}`);
-                  break;
-                }
-              }
-            } else {
-              // Fixer failed this iteration
-              console.log(`⚠️  [ContractFixer] Could not fix on this attempt (${retryCount + 1}/${maxRetries})`);
-
-              if (contractFixerResult.data?.shouldRetryContractTesting) {
-                // Can retry Contract Testing to see if error changed
-                console.log(`🔄 [Contract Loop] Will retry contract testing to detect if error changed`);
-                retryCount++;
-              } else {
-                // Don't retry
-                console.log(`⏹️  [Contract Loop] Stopping retry loop`);
-                break;
-              }
-            }
-          }
-
-          if (!fixed && retryCount >= maxRetries) {
-            console.log(`⚠️  [Contract Loop] Completed ${maxRetries} iterations without full fix - allowing continuation with documented errors`);
-            NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Contract testing completed with remaining contract issues - documented for review`);
-          }
-        }
+        // QA, Fixer, contract-testing, contract-fixer loops REMOVED
+        // Judge handles all quality validation per-story inside DevelopersPhase
 
         // Check if phase failed
         if (!result.success) {
@@ -833,10 +694,8 @@ export class OrchestrationCoordinator {
       case 'TeamOrchestration':
         return new TeamOrchestrationPhase(
           executeAgentWithContext,
-          this.executeDeveloper.bind(this),
-          this.githubService,
-          this.prManagementService,
-          this.workspaceDir
+          this.executeDeveloper.bind(this)
+          // githubService, prManagementService, workspaceDir REMOVED - were only used by QAPhase
         );
 
       case 'TechLead':
@@ -851,25 +710,8 @@ export class OrchestrationCoordinator {
       case 'Judge':
         return new JudgePhase(executeAgentWithContext);
 
-      case 'QA':
-        return new QAPhase(
-          executeAgentWithContext,
-          this.githubService,
-          this.prManagementService,
-          this.workspaceDir
-        );
-
-      case 'Fixer':
-        return new (require('./FixerPhase').FixerPhase)(executeAgentWithContext);
-
-      case 'TestCreator':
-        return new (require('./TestCreatorPhase').TestCreatorPhase)(executeAgentWithContext);
-
-      case 'contract-testing':
-        return new (require('./ContractTestingPhase').ContractTestingPhase)(executeAgentWithContext);
-
-      case 'contract-fixer':
-        return new (require('./ContractFixerPhase').ContractFixerPhase)(executeAgentWithContext);
+      // QA, Fixer, TestCreator, contract-testing, contract-fixer REMOVED
+      // Judge handles all quality validation per-story inside DevelopersPhase
 
       case 'Approval':
         return new ApprovalPhase();
@@ -1896,10 +1738,52 @@ ${judgeFeedback}
           try {
             safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
             console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
+
+            // 🔥🔥🔥 CRITICAL FIX: Push story branch to remote IMMEDIATELY after creation
+            // This ensures the branch exists on remote for:
+            // 1. Judge to review
+            // 2. Developer retries to access (different workspace may need to fetch)
+            // 3. Recovery from crashes/failures
+            // Without this, branch only exists locally and retries FAIL!
+            try {
+              console.log(`📤 [Developer ${member.instanceId}] Pushing story branch to remote...`);
+              safeGitExecSync(`cd "${repoPath}" && git push -u origin ${branchName}`, {
+                encoding: 'utf8',
+                timeout: 30000 // 30 seconds
+              });
+              console.log(`✅ [Developer ${member.instanceId}] Story branch pushed to remote: ${branchName}`);
+            } catch (pushError: any) {
+              console.error(`❌ [Developer ${member.instanceId}] Failed to push story branch: ${pushError.message}`);
+              console.error(`   Branch ${branchName} only exists locally - retries may fail!`);
+              // Don't throw - let Developer try to push later
+              // But this is a warning sign that retries might break
+            }
           } catch (branchError: any) {
             if (branchError.message.includes('already exists')) {
               safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
               console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+
+              // 🔥 Also ensure existing branch is on remote
+              try {
+                // Check if branch exists on remote
+                const remoteCheck = safeGitExecSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, {
+                  encoding: 'utf8',
+                  timeout: 10000
+                });
+                if (!remoteCheck.trim()) {
+                  // Branch doesn't exist on remote, push it
+                  console.log(`📤 [Developer ${member.instanceId}] Existing branch not on remote, pushing...`);
+                  safeGitExecSync(`cd "${repoPath}" && git push -u origin ${branchName}`, {
+                    encoding: 'utf8',
+                    timeout: 30000
+                  });
+                  console.log(`✅ [Developer ${member.instanceId}] Pushed existing branch to remote`);
+                } else {
+                  console.log(`✅ [Developer ${member.instanceId}] Branch already exists on remote`);
+                }
+              } catch (remotePushError: any) {
+                console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify/push branch to remote: ${remotePushError.message}`);
+              }
             } else {
               throw branchError;
             }

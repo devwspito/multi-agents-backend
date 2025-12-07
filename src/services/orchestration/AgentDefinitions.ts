@@ -482,6 +482,45 @@ Remove overlapping files from one epic to eliminate conflict.
 - NOT too broad (don't create "Entire application" as one epic)
 - Keep epics INDEPENDENT when possible - each epic = 1 team working in parallel!
 
+## 🔌 INTEGRATION TASK PATTERN (MANDATORY FOR MULTI-REPO PROJECTS)
+
+When a project involves BOTH backend AND frontend repositories, you MUST follow this pattern:
+
+### The Problem Without Integration Task
+If you create 2 epics (Backend API + Frontend UI) that run in parallel:
+- Backend creates: routes, controllers, models
+- Frontend creates: components, pages, styles
+- ❌ NOBODY creates: API services to connect frontend to backend!
+
+### The Solution: Generate Integration Task Definition
+After creating your epics, if you have backend + frontend repos, ADD this section to your output:
+
+📋 INTEGRATION_TASK_DEFINITION:
+Title: [Feature Name] - Frontend-Backend Integration
+Description: Connect frontend components to backend APIs. Create services, API clients, hooks, and integration tests.
+Target Repository: [frontend repo name]
+Integration Points:
+- [API endpoint] → [Frontend component that needs it]
+- [API endpoint] → [Frontend component that needs it]
+Files to Create:
+- src/services/api.ts (base API client)
+- src/services/[Feature]Service.ts (feature-specific API calls)
+- src/hooks/use[Feature].ts (React hooks for data fetching)
+- src/types/api.ts (API response types)
+
+### Why Separate Task?
+✅ Integration task runs AFTER backend + frontend are merged to main
+✅ Fresh clone means developers SEE the actual merged code
+✅ No conflicts - integration works on top of completed code
+✅ Cleaner separation of concerns
+
+### Validation Checklist
+Before completing, verify:
+- [ ] Backend epic creates all API endpoints
+- [ ] Frontend epic creates UI components with mock/placeholder data
+- [ ] If multi-repo: INTEGRATION_TASK_DEFINITION is included
+- [ ] Integration points list ALL frontend-backend connections
+
 ## ⚠️ OUTPUT RULES
 
 - Each epic = ONE team will work on it
@@ -749,6 +788,46 @@ You will receive epic assignments with a **Target Repository** field indicating 
    - Backend epics execute FIRST (executionOrder: 1)
    - Frontend epics execute SECOND (executionOrder: 2)
    - Your stories will only execute after dependency epics complete
+
+## 🔌 INTEGRATION VALIDATION (MANDATORY FOR MULTI-REPO)
+
+When working on a frontend epic in a multi-repo project:
+
+### DO NOT Create Integration Stories in This Task
+- Integration (connecting frontend to backend APIs) runs as a SEPARATE TASK
+- Your frontend epic should create UI components with **mock/placeholder data**
+- Let the ProductManager's INTEGRATION_TASK_DEFINITION handle API connections later
+
+### What You SHOULD Create
+✅ UI components with hardcoded/mock data
+✅ Page layouts and navigation
+✅ State management structure
+✅ Form validation (client-side)
+✅ Styling and responsive design
+
+### What You Should NOT Create (Leave for Integration Task)
+❌ API service files (src/services/api.ts)
+❌ Data fetching hooks that call real APIs
+❌ API response type definitions
+❌ Integration tests with backend
+
+### Why?
+The Integration Task runs AFTER this task's code is merged to main. The integration developer will:
+1. Clone fresh repos (sees actual merged code)
+2. Create services that call REAL backend endpoints
+3. Connect components to REAL data
+4. Write integration tests
+
+This is cleaner and prevents conflicts.
+
+### Example: Frontend Epic Story
+\`\`\`
+Story: Create Study Plan Dashboard UI
+Files: src/components/Dashboard.tsx, src/pages/StudyPlan.tsx
+Implementation: Use mock data array for now
+// const mockPlans = [{ id: 1, title: "Math Study" }]
+// Integration Task will replace with usePlans() hook later
+\`\`\`
 
 ### Example: Correct Multi-Repo Story with Master Epic Contracts
 
