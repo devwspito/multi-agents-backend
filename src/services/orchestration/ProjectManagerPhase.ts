@@ -555,6 +555,30 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
       task.orchestration.projectManager.usage = result.usage;
       task.orchestration.projectManager.cost_usd = result.cost;
 
+      // 🔌 INTEGRATION TASK PATTERN: Parse if multi-repo project
+      // If PJM output contains 📋 INTEGRATION_TASK_DEFINITION:, parse and store it
+      const integrationTaskDef = this.parseIntegrationTaskDefinition(result.output, context);
+      if (integrationTaskDef) {
+        console.log(`\n🔌 [ProjectManager] INTEGRATION TASK DEFINITION detected!`);
+        console.log(`   Title: ${integrationTaskDef.title}`);
+        console.log(`   Target Repository: ${integrationTaskDef.targetRepository}`);
+        console.log(`   Integration Points: ${integrationTaskDef.integrationPoints.length}`);
+        console.log(`   Files to Create: ${integrationTaskDef.filesToCreate.length}`);
+
+        (task.orchestration as any).pendingIntegrationTask = {
+          ...integrationTaskDef,
+          status: 'pending',
+          userNotified: false,
+        };
+        (task.orchestration as any).isMultiRepo = true;
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔌 Integration Task Definition saved. Will be created after successful merge.`
+        );
+      }
+
       // if (result.todos) {
       //   task.orchestration.projectManager.todos = result.todos;
       //   task.orchestration.projectManager.lastTodoUpdate = new Date();
@@ -912,6 +936,10 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
 
         // 🔥 NEW: Check for overlapping epics (use updated primaryRepository)
         const finalRepoName = affinity.primaryRepository; // Use updated value after inference
+
+        // 🔥 FIX: Calculate execution order index for single-repo epics (same as multi-repo logic)
+        const finalRepoExecIndex = executionOrder.indexOf(finalRepoName);
+
         const existingEpics = epicRegistry.get(finalRepoName) || [];
         const overlap = this.detectEpicOverlap(epic, existingEpics, allFiles);
 
@@ -939,7 +967,9 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
           ...epic,
           targetRepository: finalRepoName,
           affectedRepositories: affinity.affectedRepositories,
-          executionOrder: repositories.find(r => r.name === finalRepoName)?.executionOrder || 1,
+          // 🔥 FIX: Use calculated index as fallback (like multi-repo logic at line 873)
+          // This ensures backend=1, frontend=2 based on executionOrder array
+          executionOrder: repositories.find(r => r.name === finalRepoName)?.executionOrder || (finalRepoExecIndex + 1),
           // 🔥 NEW: Master Epic metadata
           masterEpicId: masterEpic?.id,
           globalNamingConventions: masterEpic?.globalNamingConventions,
@@ -947,6 +977,9 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
         };
 
         result.push(enrichedEpic);
+
+        // 🔍 DEBUG: Log execution order assignment for single-repo epics
+        console.log(`📊 [ProjectManager] Single-repo epic "${epic.id}" → repo: ${finalRepoName}, executionOrder: ${enrichedEpic.executionOrder} (index: ${finalRepoExecIndex})`);
 
         // 🔥 FIX: Use finalRepoName (updated after inference) instead of repoName
         if (!epicRegistry.has(finalRepoName)) {
@@ -1174,6 +1207,85 @@ EXAMPLE OUTPUT (this is EXACTLY how your response should look):
     feedback += `If overlapping epics appear again, the task will FAIL.\n`;
 
     return feedback;
+  }
+
+  /**
+   * 🔌 Parse INTEGRATION_TASK_DEFINITION from PJM output
+   *
+   * When ProductManager outputs the 📋 INTEGRATION_TASK_DEFINITION: marker,
+   * this method extracts the definition for later use in AutoMergePhase.
+   *
+   * @param output - The raw PJM agent output text
+   * @param _context - Orchestration context (unused but available for future)
+   * @returns Parsed integration task definition or null if not found
+   */
+  private parseIntegrationTaskDefinition(
+    output: string,
+    _context: OrchestrationContext
+  ): { title: string; description: string; targetRepository: string; integrationPoints: string[]; filesToCreate: string[] } | null {
+    // Look for the 📋 INTEGRATION_TASK_DEFINITION: marker
+    const marker = '📋 INTEGRATION_TASK_DEFINITION:';
+    const markerIndex = output.indexOf(marker);
+
+    if (markerIndex === -1) {
+      // No integration task definition found - this is normal for single-repo projects
+      return null;
+    }
+
+    console.log(`\n🔌 [ProjectManager] Found INTEGRATION_TASK_DEFINITION marker, parsing...`);
+
+    // Extract the section after the marker until the next section or end
+    const afterMarker = output.substring(markerIndex + marker.length);
+
+    // Parse each field
+    const extractField = (fieldName: string): string => {
+      const regex = new RegExp(`${fieldName}:\\s*(.+?)(?:\\n|$)`, 'i');
+      const match = afterMarker.match(regex);
+      return match ? match[1].trim() : '';
+    };
+
+    const extractListField = (fieldName: string): string[] => {
+      // Find the section starting with fieldName:
+      const regex = new RegExp(`${fieldName}:\\s*\\n([\\s\\S]*?)(?=\\n[A-Z]|\\n\\n|$)`, 'i');
+      const match = afterMarker.match(regex);
+      if (!match) return [];
+
+      // Extract list items (lines starting with -)
+      return match[1]
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.startsWith('-'))
+        .map(line => line.replace(/^-\s*/, '').trim())
+        .filter(line => line.length > 0);
+    };
+
+    const title = extractField('Title');
+    const description = extractField('Description');
+    const targetRepository = extractField('Target Repository');
+    const integrationPoints = extractListField('Integration Points');
+    const filesToCreate = extractListField('Files to Create');
+
+    // Validate required fields
+    if (!title || !targetRepository) {
+      console.warn(`⚠️ [ProjectManager] INTEGRATION_TASK_DEFINITION found but incomplete:`);
+      console.warn(`   Title: ${title || 'MISSING'}`);
+      console.warn(`   Target Repository: ${targetRepository || 'MISSING'}`);
+      return null;
+    }
+
+    console.log(`✅ [ProjectManager] Successfully parsed INTEGRATION_TASK_DEFINITION:`);
+    console.log(`   Title: ${title}`);
+    console.log(`   Target Repository: ${targetRepository}`);
+    console.log(`   Integration Points: ${integrationPoints.length}`);
+    console.log(`   Files to Create: ${filesToCreate.length}`);
+
+    return {
+      title,
+      description: description || `Connect frontend components to backend APIs for: ${title}`,
+      targetRepository,
+      integrationPoints,
+      filesToCreate,
+    };
   }
 
   /**

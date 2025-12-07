@@ -4,9 +4,7 @@ import { LogService } from '../logging/LogService';
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
 // JudgePhase runs per-story inside DevelopersPhase, not as separate batch in multi-team mode
-import { QAPhase } from './QAPhase';
-import { GitHubService } from '../GitHubService';
-import { PRManagementService } from '../github/PRManagementService';
+// QAPhase, FixerPhase, GitHubService, PRManagementService REMOVED - Judge handles quality validation per-story
 import { safeGitExecSync, fixGitRemoteAuth, normalizeRepoName } from '../../utils/safeGitExecution';
 import {
   validateRetryLimit,
@@ -39,10 +37,8 @@ export class TeamOrchestrationPhase extends BasePhase {
 
   constructor(
     private executeAgentFn: Function,
-    private executeDeveloperFn: Function,
-    private githubService: GitHubService,
-    private prManagementService: PRManagementService,
-    private workspaceDir: string
+    private executeDeveloperFn: Function
+    // githubService, prManagementService, workspaceDir REMOVED - were only used by QAPhase
   ) {
     super();
   }
@@ -552,12 +548,10 @@ export class TeamOrchestrationPhase extends BasePhase {
       techLead: number;
       developers: number;
       judge: number;
-      qa: number;
       total: number;
       techLeadUsage?: { input: number; output: number };
       developersUsage?: { input: number; output: number };
       judgeUsage?: { input: number; output: number };
-      qaUsage?: { input: number; output: number };
     };
     epicId?: string;
   }> {
@@ -609,12 +603,46 @@ export class TeamOrchestrationPhase extends BasePhase {
       const targetRepository = normalizeRepoName(epic.targetRepository);
       let pushSuccessful = false;
 
+      // 🔥🔥🔥 ISOLATED WORKSPACE: Each team gets its own copy of the repository
+      // This prevents git conflicts when multiple teams work in parallel on the same repo
+      const fs = require('fs');
+
+      const teamWorkspacePath = `${workspacePath}/team-${teamNumber}`;
+      const isolatedRepoPath = `${teamWorkspacePath}/${targetRepository}`;
+      const sourceRepoPath = `${workspacePath}/${targetRepository}`;
+
+      console.log(`\n🔒 [Team ${teamNumber}] Creating ISOLATED workspace...`);
+      console.log(`   Source repo: ${sourceRepoPath}`);
+      console.log(`   Isolated workspace: ${teamWorkspacePath}`);
+
+      // Create team directory
+      if (!fs.existsSync(teamWorkspacePath)) {
+        fs.mkdirSync(teamWorkspacePath, { recursive: true });
+        console.log(`✅ [Team ${teamNumber}] Created team directory: ${teamWorkspacePath}`);
+      }
+
+      // Copy repository to isolated workspace (if not already copied)
+      if (!fs.existsSync(isolatedRepoPath)) {
+        if (!fs.existsSync(sourceRepoPath)) {
+          throw new Error(`Source repository not found: ${sourceRepoPath}`);
+        }
+
+        console.log(`📋 [Team ${teamNumber}] Copying repository to isolated workspace...`);
+        // Use cp -r to copy the entire repository including .git
+        const { execSync } = require('child_process');
+        execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+        console.log(`✅ [Team ${teamNumber}] Repository copied to: ${isolatedRepoPath}`);
+      } else {
+        console.log(`✅ [Team ${teamNumber}] Isolated repository already exists: ${isolatedRepoPath}`);
+      }
+
       if (workspacePath && targetRepository) {
         console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
         console.log(`   Repository: ${targetRepository}`);
+        console.log(`   Isolated path: ${isolatedRepoPath}`);
 
-        // 🔥 FIX: Navigate into the actual repository directory
-        const repoPath = `${workspacePath}/${targetRepository}`;
+        // 🔥 USE ISOLATED REPO PATH instead of shared workspace
+        const repoPath = isolatedRepoPath;
 
         // 🔥 CRITICAL: Verify repository directory exists
         const fs = require('fs');
@@ -714,10 +742,11 @@ export class TeamOrchestrationPhase extends BasePhase {
       }
 
       // 2️⃣ Create isolated context for this team
+      // 🔥🔥🔥 USE ISOLATED WORKSPACE PATH - each team has its own copy of the repo
       const teamContext = new OrchestrationContext(
         parentContext.task,
         parentContext.repositories,
-        parentContext.workspacePath
+        teamWorkspacePath  // 🔥 ISOLATED workspace, not shared!
       );
 
       // Share workspace structure and attachments
@@ -730,6 +759,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamContext.setData('teamEpic', epicWithBranch);
       teamContext.setData('epicBranch', branchName);
       teamContext.setData('targetRepository', targetRepository); // 🔥 Pass repository name to team
+      teamContext.setData('isolatedWorkspacePath', teamWorkspacePath); // 🔥 Store isolated path for reference
 
       // 🌿 REGISTER EPIC BRANCH IN CENTRAL REGISTRY
       teamContext.registerBranch({
@@ -759,17 +789,12 @@ export class TeamOrchestrationPhase extends BasePhase {
       console.log(`📝 [Team ${teamNumber}] Stored epic branch in EventStore: ${branchName}`);
 
       // Execute team pipeline
+      // SIMPLIFIED: TechLead → Developers (includes Judge per-story) → PR
+      // QA and Fixer phases REMOVED - Judge handles quality validation per-story
       const techLeadPhase = new TechLeadPhase(this.executeAgentFn);
       const developersPhase = new DevelopersPhase(
         this.executeDeveloperFn,
         this.executeAgentFn // For Judge execution inside DevelopersPhase
-      );
-      // Note: Judge phase runs per-story inside DevelopersPhase, not as a separate batch
-      const qaPhase = new QAPhase(
-        this.executeAgentFn,
-        this.githubService,
-        this.prManagementService,
-        this.workspaceDir
       );
 
       // Initialize cost tracking for this team
@@ -777,7 +802,6 @@ export class TeamOrchestrationPhase extends BasePhase {
         techLead: 0,
         developers: 0,
         judge: 0,
-        qa: 0,
         total: 0
       };
 
@@ -824,71 +848,13 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`💰 [Team ${teamNumber}] Judge cost: $${developersResult.metadata.judgeCost.toFixed(4)}`);
       }
 
-      // 🔥 SKIP Judge batch review - already done per-story in DevelopersPhase
+      // ✅ Judge review already done per-story in DevelopersPhase
       // Each story was reviewed by Judge immediately after developer completed it
       // Only approved stories were merged to epic branch
-      console.log(`\n[Team ${teamNumber}] Phase 3: Judge (Code Review) - SKIPPED (already done per-story)`);
-
-      // QA: Test integration
-      console.log(`\n[Team ${teamNumber}] Phase 4: QA (Testing)`);
-      const qaResult = await qaPhase.execute(teamContext);
-      if (!qaResult.success) {
-        throw new Error(`QA failed: ${qaResult.error}`);
-      }
-      // Track QA cost and tokens (check both metadata and metrics)
-      const qaCost = Number(qaResult.metadata?.cost || qaResult.metrics?.cost_usd || 0);
-      const qaUsage = {
-        input: Number(qaResult.metadata?.input_tokens || qaResult.metrics?.input_tokens || 0),
-        output: Number(qaResult.metadata?.output_tokens || qaResult.metrics?.output_tokens || 0),
-      };
-      if (qaCost > 0) {
-        (teamCosts as any).qa = qaCost;
-        (teamCosts as any).qaUsage = qaUsage;
-        console.log(`💰 [Team ${teamNumber}] QA cost: $${qaCost.toFixed(4)} (${qaUsage.input + qaUsage.output} tokens)`);
-      }
-
-      // 🔧 Fixer: Fix QA errors if detected
-      const hasQAErrors = teamContext.getData<boolean>('qaErrors');
-      if (hasQAErrors) {
-        console.log(`\n[Team ${teamNumber}] Phase 5: Fixer (Error Resolution)`);
-        const { FixerPhase } = await import('./FixerPhase');
-        const fixerPhase = new FixerPhase(this.executeAgentFn);
-
-        const fixerResult = await fixerPhase.execute(teamContext);
-        if (!fixerResult.success) {
-          console.warn(`⚠️ [Team ${teamNumber}] Fixer could not resolve all errors: ${fixerResult.error}`);
-        }
-
-        // Track Fixer cost and tokens if available
-        const fixerCost = Number(fixerResult.metadata?.cost || fixerResult.metrics?.cost_usd || 0);
-        if (fixerCost > 0) {
-          (teamCosts as any).fixer = fixerCost;
-          (teamCosts as any).fixerUsage = {
-            input: Number(fixerResult.metadata?.input_tokens || 0),
-            output: Number(fixerResult.metadata?.output_tokens || 0),
-          };
-          console.log(`💰 [Team ${teamNumber}] Fixer cost: $${fixerCost.toFixed(4)}`);
-        }
-
-        // 🔄 Re-run QA after Fixer
-        console.log(`\n[Team ${teamNumber}] Phase 6: QA (Re-test after Fixer)`);
-        teamContext.setData('qaAttempt', 2); // Mark as second attempt
-
-        const qaRetryResult = await qaPhase.execute(teamContext);
-        if (!qaRetryResult.success) {
-          throw new Error(`QA failed after Fixer: ${qaRetryResult.error}`);
-        }
-
-        // Track QA retry cost
-        const qaRetryCost = Number(qaRetryResult.metadata?.cost || qaRetryResult.metrics?.cost_usd || 0);
-        if (qaRetryCost > 0) {
-          (teamCosts as any).qa += qaRetryCost; // Add to existing QA cost
-          console.log(`💰 [Team ${teamNumber}] QA retry cost: $${qaRetryCost.toFixed(4)}`);
-        }
-      }
+      // QA and Fixer phases REMOVED - Judge handles all quality validation
 
       // Calculate total team cost
-      teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge + teamCosts.qa + ((teamCosts as any).fixer || 0);
+      teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge;
       console.log(`💰 [Team ${teamNumber}] Total team cost: $${teamCosts.total.toFixed(4)}`);
 
       console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);

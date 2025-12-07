@@ -61,6 +61,12 @@ export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
   },
 };
 
+/**
+ * Agent Model Configuration Interface
+ *
+ * Only includes agents that EXIST in the current system:
+ * - Removed: qa-engineer, fixer, test-creator, contract-tester, contract-fixer
+ */
 export interface AgentModelConfig {
   'problem-analyst': ClaudeModel;
   'product-manager': ClaudeModel;
@@ -68,13 +74,8 @@ export interface AgentModelConfig {
   'tech-lead': ClaudeModel;
   'developer': ClaudeModel;
   'judge': ClaudeModel;
-  'qa-engineer': ClaudeModel;
-  'fixer': ClaudeModel;
   'merge-coordinator': ClaudeModel;
   'auto-merge': ClaudeModel;
-  'test-creator': ClaudeModel;
-  'contract-tester': ClaudeModel;
-  'contract-fixer': ClaudeModel;
   'error-detective': ClaudeModel;
   'story-merge-agent': ClaudeModel;
   'git-flow-manager': ClaudeModel;
@@ -89,21 +90,17 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
   'project-manager': 'opus',
   'tech-lead': 'opus',
   'judge': 'opus',
-  'qa-engineer': 'opus',
-  'fixer': 'opus',
-  'contract-fixer': 'opus',
   'error-detective': 'opus',
   'developer': 'sonnet',
   'merge-coordinator': 'sonnet',
   'auto-merge': 'sonnet',
-  'test-creator': 'sonnet',
-  'contract-tester': 'sonnet',
   'story-merge-agent': 'sonnet',
   'git-flow-manager': 'sonnet',
 };
 
 /**
  * Standard Configuration (Sonnet + Haiku)
+ * Note: Developer ALWAYS uses Sonnet for code quality
  */
 export const STANDARD_CONFIG: AgentModelConfig = {
   'problem-analyst': 'sonnet',
@@ -111,15 +108,10 @@ export const STANDARD_CONFIG: AgentModelConfig = {
   'project-manager': 'sonnet',
   'tech-lead': 'sonnet',
   'judge': 'sonnet',
-  'qa-engineer': 'sonnet',
-  'fixer': 'sonnet',
-  'contract-fixer': 'sonnet',
   'error-detective': 'sonnet',
-  'developer': 'haiku',
+  'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - code quality matters
   'merge-coordinator': 'haiku',
   'auto-merge': 'haiku',
-  'test-creator': 'haiku',
-  'contract-tester': 'haiku',
   'story-merge-agent': 'haiku',
   'git-flow-manager': 'haiku',
 };
@@ -131,8 +123,8 @@ export const STANDARD_CONFIG: AgentModelConfig = {
  *
  * Strategy:
  * - Opus: Strategic decisions (Problem Analyst, PM, PjM, TL, Error Detective)
- * - Sonnet: Quality control (Judge, QA, Fixers)
- * - Haiku: Execution (Developer, Merge, Tests)
+ * - Sonnet: Code execution (Developer, Judge) - 🔒 Developer ALWAYS Sonnet
+ * - Haiku: Merge operations
  */
 export const RECOMMENDED_CONFIG: AgentModelConfig = {
   // 🧠 STRATEGIC - Opus
@@ -142,39 +134,30 @@ export const RECOMMENDED_CONFIG: AgentModelConfig = {
   'tech-lead': 'opus',
   'error-detective': 'opus',
 
-  // ⚡ QUALITY CONTROL - Sonnet
+  // ⚡ CODE QUALITY - Sonnet (Developer ALWAYS Sonnet)
   'judge': 'sonnet',
-  'qa-engineer': 'sonnet',
-  'fixer': 'sonnet',
-  'contract-fixer': 'sonnet',
+  'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - code quality matters
 
-  // 💨 EXECUTION - Haiku
-  'developer': 'haiku',
+  // 💨 MERGE OPERATIONS - Haiku
   'merge-coordinator': 'haiku',
   'auto-merge': 'haiku',
-  'test-creator': 'haiku',
-  'contract-tester': 'haiku',
   'story-merge-agent': 'haiku',
   'git-flow-manager': 'haiku',
 };
 
 /**
- * Max Configuration (All Opus)
+ * Max Configuration (All Opus, except Developer = Sonnet)
+ * Note: Developer ALWAYS uses Sonnet for optimal code generation
  */
 export const MAX_CONFIG: AgentModelConfig = {
   'problem-analyst': 'opus',
   'product-manager': 'opus',
   'project-manager': 'opus',
   'tech-lead': 'opus',
-  'developer': 'opus',
+  'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - optimized for code generation
   'judge': 'opus',
-  'qa-engineer': 'opus',
-  'fixer': 'opus',
   'merge-coordinator': 'opus',
   'auto-merge': 'opus',
-  'test-creator': 'opus',
-  'contract-tester': 'opus',
-  'contract-fixer': 'opus',
   'error-detective': 'opus',
   'story-merge-agent': 'opus',
   'git-flow-manager': 'opus',
@@ -182,6 +165,7 @@ export const MAX_CONFIG: AgentModelConfig = {
 
 /**
  * Optimize a configuration for best cost-performance ratio
+ * Note: Developer ALWAYS uses Sonnet regardless of optimization
  */
 export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentModelConfig {
   const models = Array.from(new Set(Object.values(userConfig))) as ClaudeModel[];
@@ -200,17 +184,14 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
     'project-manager': topModel,
     'tech-lead': topModel,
     'judge': topModel,
-    'qa-engineer': topModel,
-    'fixer': topModel,
-    'contract-fixer': topModel,
     'error-detective': topModel,
 
-    // 💨 EXECUTION - Use BOTTOM MODEL
-    'developer': bottomModel,
+    // 👨‍💻 DEVELOPER - 🔒 ALWAYS Sonnet (never downgrade)
+    'developer': 'sonnet',
+
+    // 💨 MERGE OPERATIONS - Use BOTTOM MODEL
     'merge-coordinator': bottomModel,
     'auto-merge': bottomModel,
-    'test-creator': bottomModel,
-    'contract-tester': bottomModel,
     'story-merge-agent': bottomModel,
     'git-flow-manager': bottomModel,
   };
@@ -218,6 +199,7 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
 
 /**
  * Convert DB config to AgentModelConfig
+ * Note: Developer ALWAYS uses Sonnet regardless of DB config
  */
 export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
   return {
@@ -225,15 +207,10 @@ export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
     'product-manager': dbConfig.productManager || dbConfig['product-manager'] || RECOMMENDED_CONFIG['product-manager'],
     'project-manager': dbConfig.projectManager || dbConfig['project-manager'] || RECOMMENDED_CONFIG['project-manager'],
     'tech-lead': dbConfig.techLead || dbConfig['tech-lead'] || RECOMMENDED_CONFIG['tech-lead'],
-    'developer': dbConfig.developer || RECOMMENDED_CONFIG['developer'],
+    'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - ignore DB config
     'judge': dbConfig.judge || RECOMMENDED_CONFIG['judge'],
-    'qa-engineer': dbConfig.qaEngineer || dbConfig['qa-engineer'] || RECOMMENDED_CONFIG['qa-engineer'],
-    'fixer': dbConfig.fixer || RECOMMENDED_CONFIG['fixer'],
     'merge-coordinator': dbConfig.mergeCoordinator || dbConfig['merge-coordinator'] || RECOMMENDED_CONFIG['merge-coordinator'],
     'auto-merge': dbConfig.autoMerge || dbConfig['auto-merge'] || RECOMMENDED_CONFIG['auto-merge'],
-    'test-creator': dbConfig.testCreator || dbConfig['test-creator'] || RECOMMENDED_CONFIG['test-creator'],
-    'contract-tester': dbConfig.contractTester || dbConfig['contract-tester'] || RECOMMENDED_CONFIG['contract-tester'],
-    'contract-fixer': dbConfig.contractFixer || dbConfig['contract-fixer'] || RECOMMENDED_CONFIG['contract-fixer'],
     'error-detective': dbConfig.errorDetective || dbConfig['error-detective'] || RECOMMENDED_CONFIG['error-detective'],
     'story-merge-agent': dbConfig.storyMergeAgent || dbConfig['story-merge-agent'] || RECOMMENDED_CONFIG['story-merge-agent'],
     'git-flow-manager': dbConfig.gitFlowManager || dbConfig['git-flow-manager'] || RECOMMENDED_CONFIG['git-flow-manager'],

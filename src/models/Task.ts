@@ -350,6 +350,22 @@ export interface IOrchestration {
     additionalRequirements: string;
     previousStatus: string;
   }[];
+
+  // Integration Task Pattern: For multi-repo projects (backend + frontend)
+  // Stores the definition for the follow-up Integration Task
+  pendingIntegrationTask?: {
+    title: string;
+    description: string;
+    targetRepository: string;
+    integrationPoints: string[];
+    filesToCreate: string[];
+    status: 'pending' | 'created' | 'completed' | 'skipped';
+    createdTaskId?: mongoose.Types.ObjectId;
+    userNotified?: boolean;
+  };
+
+  // Flag indicating this is a multi-repo project
+  isMultiRepo?: boolean;
 }
 
 /**
@@ -867,6 +883,23 @@ const taskSchema = new Schema<ITask>(
         additionalRequirements: String,
         previousStatus: String,
       }],
+
+      // Integration Task Pattern
+      pendingIntegrationTask: {
+        title: String,
+        description: String,
+        targetRepository: String,
+        integrationPoints: [String],
+        filesToCreate: [String],
+        status: {
+          type: String,
+          enum: ['pending', 'created', 'completed', 'skipped'],
+          default: 'pending',
+        },
+        createdTaskId: { type: Schema.Types.ObjectId, ref: 'Task' },
+        userNotified: Boolean,
+      },
+      isMultiRepo: Boolean,
     },
     attachments: [String],
     tags: [String],

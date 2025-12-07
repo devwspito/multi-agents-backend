@@ -61,10 +61,11 @@ export class AutoMergePhase extends BasePhase {
       return true;
     }
 
-    // Check if QA completed successfully
-    const qaStatus = context.task.orchestration.qaEngineer?.status;
-    if (qaStatus !== 'completed') {
-      console.log(`[SKIP] QA must complete before auto-merge`);
+    // Check if TeamOrchestration completed (where Developers + Judge run)
+    // Note: QA Phase was removed - Judge now validates code quality per story
+    const teamOrchStatus = (context.task.orchestration as any).teamOrchestration?.status;
+    if (teamOrchStatus !== 'completed' && teamOrchStatus !== 'partial') {
+      console.log(`[SKIP] TeamOrchestration must complete before auto-merge (current: ${teamOrchStatus || 'not started'})`);
       return true;
     }
 
@@ -178,6 +179,120 @@ export class AutoMergePhase extends BasePhase {
             })),
           },
         });
+      }
+
+      // 🔌 INTEGRATION TASK PATTERN: Create follow-up task if needed
+      const pendingIntegration = (task.orchestration as any).pendingIntegrationTask;
+      if (pendingIntegration && pendingIntegration.status === 'pending') {
+        const allMergedSuccessfully = successfulMerges.length === mergeResults.length && failed.length === 0;
+
+        if (allMergedSuccessfully) {
+          // ✅ All PRs merged - Create Integration Task automatically
+          console.log(`\n${'🔌'.repeat(40)}`);
+          console.log(`🔌 INTEGRATION TASK PATTERN: All PRs merged successfully!`);
+          console.log(`🔌 Creating follow-up Integration Task...`);
+          console.log(`${'🔌'.repeat(40)}\n`);
+
+          try {
+            const { Task: TaskModel } = await import('../../models/Task');
+
+            // Get the target repository ObjectId
+            const targetRepoName = pendingIntegration.targetRepository;
+            const repos = context.getData<any[]>('repositories') || [];
+            const targetRepo = repos.find(r =>
+              r.name === targetRepoName ||
+              r.githubRepoName === targetRepoName ||
+              r.full_name?.includes(targetRepoName)
+            );
+
+            const integrationTask = await TaskModel.create({
+              title: `[AUTO] ${pendingIntegration.title}`,
+              description: pendingIntegration.description +
+                `\n\n---\n**Auto-generated Integration Task**\n\n` +
+                `**Integration Points:**\n${pendingIntegration.integrationPoints.map((p: string) => `- ${p}`).join('\n')}\n\n` +
+                `**Files to Create:**\n${pendingIntegration.filesToCreate.map((f: string) => `- ${f}`).join('\n')}`,
+              userId: task.userId,
+              projectId: task.projectId,
+              repositoryIds: targetRepo ? [targetRepo._id] : task.repositoryIds,
+              status: 'pending',
+              priority: 'high',
+              orchestration: {
+                totalCost: 0,
+                totalTokens: 0,
+              },
+              tags: ['auto-generated', 'integration'],
+            });
+
+            // Update pending integration status
+            (task.orchestration as any).pendingIntegrationTask.status = 'created';
+            (task.orchestration as any).pendingIntegrationTask.createdTaskId = integrationTask._id;
+            await task.save();
+
+            console.log(`✅ Integration Task created: ${integrationTask._id}`);
+            console.log(`   Title: ${integrationTask.title}`);
+            console.log(`   Target Repo: ${targetRepoName}`);
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `🔌 Integration Task created automatically!\n` +
+              `   ID: ${integrationTask._id}\n` +
+              `   Title: ${integrationTask.title}\n` +
+              `   Status: Ready to start`
+            );
+
+            // Emit special event for frontend
+            NotificationService.emitNotification(taskId, 'integration_task_created', {
+              integrationTaskId: integrationTask._id.toString(),
+              title: integrationTask.title,
+              message: 'Integration task created and ready to start',
+            });
+
+          } catch (createError: any) {
+            console.error(`❌ Failed to create Integration Task: ${createError.message}`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `Failed to create Integration Task: ${createError.message}`
+            );
+          }
+        } else {
+          // ❌ Some PRs failed or need review - Notify user
+          console.log(`\n⚠️ [AutoMerge] Not all PRs merged. Integration Task NOT created.`);
+          console.log(`   Merged: ${successfulMerges.length}/${mergeResults.length}`);
+          console.log(`   Failed: ${failed.length}`);
+          console.log(`   Needs Review: ${needsReview.length}`);
+
+          // Mark as notified but not created
+          (task.orchestration as any).pendingIntegrationTask.userNotified = true;
+          await task.save();
+
+          const integrationTaskDefinition = `
+📋 INTEGRATION TASK (Create manually after resolving PRs):
+Title: ${pendingIntegration.title}
+Description: ${pendingIntegration.description}
+Target Repository: ${pendingIntegration.targetRepository}
+
+Integration Points:
+${pendingIntegration.integrationPoints.map((p: string) => `- ${p}`).join('\n')}
+
+Files to Create:
+${pendingIntegration.filesToCreate.map((f: string) => `- ${f}`).join('\n')}
+`;
+
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️ PRs need manual resolution before Integration Task can be created.\n\n` +
+            `After merging PRs manually, create a new task with:\n${integrationTaskDefinition}`
+          );
+
+          // Emit special event for frontend
+          NotificationService.emitNotification(taskId, 'integration_task_pending', {
+            message: 'Integration task pending - manual merge required',
+            taskDefinition: pendingIntegration,
+          });
+        }
       }
 
       return {
