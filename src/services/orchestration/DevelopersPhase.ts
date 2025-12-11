@@ -191,6 +191,12 @@ export class DevelopersPhase extends BasePhase {
       );
     }
 
+    // 🔐 Retrieve devAuth from context (for testing authenticated endpoints)
+    const devAuth = context.getData<any>('devAuth');
+    if (devAuth && devAuth.method !== 'none') {
+      console.log(`🔐 [Developers] DevAuth configured: method=${devAuth.method}`);
+    }
+
     await LogService.info('Development Team phase started - Spawning team members', {
       taskId,
       category: 'orchestration',
@@ -842,6 +848,9 @@ export class DevelopersPhase extends BasePhase {
       const epicBranchName = context.getData<string>('epicBranch');
       console.log(`📂 [DevelopersPhase] Passing epic branch to developer: ${epicBranchName || 'not specified'}`);
 
+      // 🔐 Get devAuth from context (for testing authenticated endpoints)
+      const devAuth = context.getData<any>('devAuth');
+
       // 🔥 DEFENSIVE VALIDATION: Check effectiveWorkspacePath type before calling executeDeveloperFn
       if (typeof effectiveWorkspacePath !== 'string' && effectiveWorkspacePath !== null) {
         console.error(`❌❌❌ [DevelopersPhase.executeIsolatedStoryPipeline] CRITICAL: effectiveWorkspacePath is not a string!`);
@@ -862,6 +871,14 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   📍 Story ID: ${story.id}`);
       console.log(`   ⚠️  Passing 1 story (NOT ${state.stories.length} stories)`);
 
+      // 🔔 Emit to frontend so user sees developer starting work
+      const { NotificationService } = await import('../NotificationService');
+      NotificationService.emitConsoleLog(
+        (task._id as any).toString(),
+        'info',
+        `👨‍💻 Developer ${developer.instanceId} starting: "${story.title}"`
+      );
+
       const developerResult = await this.executeDeveloperFn(
         task,
         developer,
@@ -872,7 +889,9 @@ export class DevelopersPhase extends BasePhase {
         [story],  // 🔥🔥🔥 CRITICAL: ONLY this story, NOT state.stories (1 Dev = 1 Story)
         state.epics,
         undefined, // judgeFeedback
-        epicBranchName // Epic branch name from TeamOrchestrationPhase
+        epicBranchName, // Epic branch name from TeamOrchestrationPhase
+        undefined, // forceTopModel
+        devAuth // 🔐 Developer authentication for testing endpoints
       );
 
       // Track developer cost and tokens
@@ -883,6 +902,11 @@ export class DevelopersPhase extends BasePhase {
       };
       if (developerCost > 0) {
         console.log(`💰 [Developer ${developer.instanceId}] Cost: $${developerCost.toFixed(4)} (${developerTokens.input + developerTokens.output} tokens)`);
+        NotificationService.emitConsoleLog(
+          (task._id as any).toString(),
+          'info',
+          `✅ Developer ${developer.instanceId} finished: "${story.title}" ($${developerCost.toFixed(4)})`
+        );
       }
 
       // 🔥 CRITICAL: Wait for git push to fully complete on remote
@@ -943,7 +967,7 @@ export class DevelopersPhase extends BasePhase {
         const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
         try {
           console.log(`   📡 Fetching from remote to ensure all commits visible...`);
-          safeGitExecSync(`git fetch origin --prune`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git fetch origin --prune`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
         } catch (fetchErr: any) {
           console.warn(`   ⚠️ Fetch failed (continuing anyway): ${fetchErr.message}`);
         }
@@ -1167,7 +1191,7 @@ export class DevelopersPhase extends BasePhase {
 
           // Fetch all branches from remote
           console.log(`   [1/3] Fetching from remote...`);
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
           console.log(`   ✅ Fetched latest refs from remote`);
 
           // 🔥 NEW: Verify branch exists on remote BEFORE attempting checkout
@@ -1271,7 +1295,7 @@ export class DevelopersPhase extends BasePhase {
                 console.log(`   ⏳ Waiting ${delay}ms before retry...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 // Re-fetch to get latest refs
-                safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
               }
             }
           }
@@ -1284,16 +1308,11 @@ export class DevelopersPhase extends BasePhase {
           }
 
           // 🔥 FIX: Use reset instead of pull to avoid rebase conflicts
-          console.log(`   [3/3] Syncing with remote ${updatedStory.branchName}...`);
+          // NOTE: No additional fetch needed - we already fetched ALL refs at [1/3]
+          console.log(`   [3/3] Resetting to remote HEAD...`);
           try {
-            // Fetch latest
-            safeGitExecSync(`git fetch origin ${updatedStory.branchName}`, {
-              cwd: repoPath,
-              encoding: 'utf8',
-              timeout: 30000
-            });
-
             // Reset to remote branch (avoids merge/rebase conflicts)
+            // This ensures we're at origin/branch even if local branch was outdated
             safeGitExecSync(`git reset --hard origin/${updatedStory.branchName}`, {
               cwd: repoPath,
               encoding: 'utf8'
@@ -1643,12 +1662,19 @@ export class DevelopersPhase extends BasePhase {
       try {
         const pullOutput = safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
           encoding: 'utf8',
-          timeout: 30000, // 30 seconds for pull
+          timeout: 90000, // 90 seconds for pull (network operation)
         });
         console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
         console.log(`   Git output: ${pullOutput.substring(0, 100)}`);
       } catch (pullError: any) {
-        console.warn(`⚠️  [Merge] Pull failed (branch might not exist on remote yet): ${pullError.message}`);
+        console.warn(`⚠️  [Merge] Pull failed: ${pullError.message}`);
+        if (pullError.message?.includes('TIMEOUT') || pullError.message?.includes('timed out')) {
+          console.warn(`   ℹ️  CAUSE: Network timeout - try increasing timeout or check connection`);
+        } else if (pullError.message?.includes('not found') || pullError.message?.includes('couldn\'t find remote ref')) {
+          console.warn(`   ℹ️  CAUSE: Branch does not exist on remote yet`);
+        } else {
+          console.warn(`   ℹ️  CAUSE: Unknown - check network/auth/remote status`);
+        }
       }
 
       // 3. Merge story branch with timeout protection
@@ -1696,7 +1722,7 @@ export class DevelopersPhase extends BasePhase {
             {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 30000 // 30 seconds max
+              timeout: 90000 // 90 seconds (network operation)
             }
           );
           console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);

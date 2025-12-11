@@ -14,6 +14,7 @@ describe('WebhookApiKey Model', () => {
       username: 'testuser',
       email: 'test@example.com',
       githubId: 'test123',
+      accessToken: 'test-access-token-12345',
     });
     userId = user._id as mongoose.Types.ObjectId;
 

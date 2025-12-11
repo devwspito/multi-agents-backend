@@ -706,7 +706,7 @@ export class TeamOrchestrationPhase extends BasePhase {
             safeGitExecSync(`git push -u origin ${branchName}`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 30000
+              timeout: 90000
             });
             console.log(`✅ [Team ${teamNumber}] Epic branch pushed to remote with initial commit`);
             pushSuccessful = true;
@@ -738,7 +738,7 @@ export class TeamOrchestrationPhase extends BasePhase {
               safeGitExecSync(`git push -u origin ${branchName}`, {
                 cwd: repoPath,
                 encoding: 'utf8',
-                timeout: 30000
+                timeout: 90000
               });
               console.log(`✅ [Team ${teamNumber}] Epic branch confirmed on remote: ${branchName}`);
             } catch (pushError: any) {
@@ -851,26 +851,29 @@ export class TeamOrchestrationPhase extends BasePhase {
             const matchedRepo = parentContext.repositories.find((r: any) =>
               r.name === teamRepoName || r.githubRepoName === teamRepoName
             );
-            const repoPath = matchedRepo?.localPath || (workspacePath ? path.join(workspacePath, teamRepoName) : teamRepoName);
+            const repoPath = matchedRepo?.localPath || (workspacePath ? path.join(workspacePath, teamRepoName) : null);
 
-            console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language}/${teamRepoConfig.framework}`);
+            // 🔥 Validate repoPath before attempting file operations
+            if (!repoPath || !path.isAbsolute(repoPath)) {
+              console.warn(`   ⚠️  [Team ${teamNumber}] Cannot create Docker files: invalid path (${repoPath})`);
+            } else {
+              console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language}/${teamRepoConfig.framework}`);
 
-            const fs = await import('fs');
+              // Create Dockerfile if provided
+              if (teamRepoConfig.dockerfile) {
+                const dockerfilePath = path.join(repoPath, 'Dockerfile');
+                const dockerfileContent = teamRepoConfig.dockerfile.replace(/\\n/g, '\n');
+                fs.writeFileSync(dockerfilePath, dockerfileContent);
+                console.log(`   ✅ Created Dockerfile for ${teamRepoName}`);
+              }
 
-            // Create Dockerfile if provided
-            if (teamRepoConfig.dockerfile) {
-              const dockerfilePath = path.join(repoPath, 'Dockerfile');
-              const dockerfileContent = teamRepoConfig.dockerfile.replace(/\\n/g, '\n');
-              fs.writeFileSync(dockerfilePath, dockerfileContent);
-              console.log(`   ✅ Created Dockerfile for ${teamRepoName}`);
-            }
-
-            // Create docker-compose.yml if provided
-            if (teamRepoConfig.dockerCompose) {
-              const composePath = path.join(repoPath, 'docker-compose.yml');
-              const composeContent = teamRepoConfig.dockerCompose.replace(/\\n/g, '\n');
-              fs.writeFileSync(composePath, composeContent);
-              console.log(`   ✅ Created docker-compose.yml for ${teamRepoName}`);
+              // Create docker-compose.yml if provided
+              if (teamRepoConfig.dockerCompose) {
+                const composePath = path.join(repoPath, 'docker-compose.yml');
+                const composeContent = teamRepoConfig.dockerCompose.replace(/\\n/g, '\n');
+                fs.writeFileSync(composePath, composeContent);
+                console.log(`   ✅ Created docker-compose.yml for ${teamRepoName}`);
+              }
             }
 
             // Store run/test commands in context for developers
@@ -1066,7 +1069,7 @@ ${epic.description || 'No description provided'}
         // Check if epic branch exists on remote
         let epicBranchExistsRemote = false;
         try {
-          safeGitExecSync('git fetch origin', { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync('git fetch origin', { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
           execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
           epicBranchExistsRemote = true;
           console.log(`   ✅ Epic branch exists on remote: origin/${epicBranch}`);

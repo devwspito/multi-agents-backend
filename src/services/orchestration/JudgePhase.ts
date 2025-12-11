@@ -1010,9 +1010,11 @@ ${judgeFeedback}
     if (storyFromEventStore?.branchName) {
       console.log(`✅ [Judge] Story has branchName for retry: ${storyFromEventStore.branchName}`);
     } else {
-      console.warn(`⚠️  [Judge] Story does NOT have branchName - retry may create new branch!`);
-      console.warn(`   Story ID: ${story.id}`);
-      console.warn(`   Stories in EventStore: ${state.stories.length}`);
+      console.error(`❌ [Judge] Story does NOT have branchName - CANNOT RETRY!`);
+      console.error(`   Story ID: ${story.id}`);
+      console.error(`   Stories in EventStore: ${state.stories.length}`);
+      console.error(`   💡 TechLead should have created the branch. This is a bug.`);
+      throw new Error(`Story ${story.id} has no branchName - TechLead failed to create branch`);
     }
 
     // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
@@ -1040,7 +1042,7 @@ ${judgeFeedback}
           safeGitExecSync(`git fetch origin --prune`, {
             cwd: repoPath,
             encoding: 'utf8',
-            timeout: 30000
+            timeout: 90000
           });
           console.log(`✅ [Judge PRE-RETRY] Fetched all remote branches`);
 
@@ -1192,7 +1194,7 @@ ${judgeFeedback}
 
           // Fetch and pull latest commits
           const { safeGitExecSync } = await import('../../utils/safeGitExecution');
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
 
           // 🔥 FIX: Stash any unstaged changes before checkout
           // Developer might have left uncommitted changes
