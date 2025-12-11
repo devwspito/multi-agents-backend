@@ -38,7 +38,12 @@
       "Bash(gh auth status:*)",
       "Bash(gh repo create:*)",
       "Bash(git push:*)",
-      "Bash(gh repo delete:*)"
+      "Bash(gh repo delete:*)",
+      "Bash(npm test:*)",
+      "Bash(npx jest:*)",
+      "Bash(npx tsx:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(mongosh:*)"
     ],
     "deny": [],
     "ask": []

@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { CryptoService } from '../services/CryptoService';
 
 export interface IEnvVariable {
   key: string;
@@ -124,5 +125,21 @@ const repositorySchema = new Schema<IRepository>(
 
 // Indexes for efficient queries
 repositorySchema.index({ projectId: 1, isActive: 1 });
+
+// ============================================
+// Pre-save Hook: Encrypt secret environment variables
+// ============================================
+repositorySchema.pre('save', function (next) {
+  // Encrypt envVariables that are marked as secret
+  if (this.isModified('envVariables') && this.envVariables && this.envVariables.length > 0) {
+    for (const envVar of this.envVariables) {
+      // Only encrypt if isSecret is true and value is not already encrypted
+      if (envVar.isSecret && envVar.value && !CryptoService.isEncrypted(envVar.value)) {
+        envVar.value = CryptoService.encrypt(envVar.value);
+      }
+    }
+  }
+  next();
+});
 
 export const Repository = mongoose.model<IRepository>('Repository', repositorySchema);

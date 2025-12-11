@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
-import crypto from 'crypto';
 import { IEnvVariable } from '../models/Repository';
+import { CryptoService } from './CryptoService';
 
 /**
  * Environment Variables Management Service
@@ -16,67 +16,20 @@ import { IEnvVariable } from '../models/Repository';
  * - Encryption uses AES-256-GCM with environment-specific secret key
  */
 export class EnvService {
-  private static readonly ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-  private static readonly ENCRYPTION_KEY = EnvService.getEncryptionKey();
-
-  /**
-   * Get encryption key from environment or generate a default one
-   * IMPORTANT: In production, use a strong random key from env variable
-   */
-  private static getEncryptionKey(): Buffer {
-    const keyFromEnv = process.env.ENV_ENCRYPTION_KEY;
-
-    if (keyFromEnv) {
-      // Use key from environment (base64 encoded)
-      return Buffer.from(keyFromEnv, 'base64');
-    }
-
-    // Development fallback (NOT FOR PRODUCTION)
-    console.warn('⚠️  ENV_ENCRYPTION_KEY not set, using default key (NOT SECURE FOR PRODUCTION)');
-    return crypto.scryptSync('default-encryption-key-change-in-production', 'salt', 32);
-  }
-
   /**
    * Encrypt a secret value for storage in MongoDB
+   * Delegates to CryptoService for centralized encryption
    */
   static encryptValue(plaintext: string): string {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv(this.ENCRYPTION_ALGORITHM, this.ENCRYPTION_KEY, iv);
-
-    let encrypted = cipher.update(plaintext, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-
-    const authTag = cipher.getAuthTag();
-
-    // Return: iv:authTag:encrypted
-    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
+    return CryptoService.encrypt(plaintext);
   }
 
   /**
    * Decrypt a secret value from MongoDB
+   * Delegates to CryptoService which handles both new (enc:) and legacy formats
    */
   static decryptValue(encrypted: string): string {
-    try {
-      const parts = encrypted.split(':');
-      if (parts.length !== 3) {
-        throw new Error('Invalid encrypted format');
-      }
-
-      const [ivHex, authTagHex, encryptedText] = parts;
-      const iv = Buffer.from(ivHex, 'hex');
-      const authTag = Buffer.from(authTagHex, 'hex');
-
-      const decipher = crypto.createDecipheriv(this.ENCRYPTION_ALGORITHM, this.ENCRYPTION_KEY, iv);
-      decipher.setAuthTag(authTag);
-
-      let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-
-      return decrypted;
-    } catch (error) {
-      console.error('❌ Decryption failed:', error);
-      throw new Error('Failed to decrypt environment variable');
-    }
+    return CryptoService.decrypt(encrypted);
   }
 
   /**

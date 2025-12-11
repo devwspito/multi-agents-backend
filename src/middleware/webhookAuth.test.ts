@@ -32,6 +32,7 @@ describe('authenticateWebhook Middleware', () => {
       username: 'webhooktest',
       email: 'webhook@example.com',
       githubId: 'webhook123',
+      accessToken: 'test-webhook-access-token-12345',
     });
     userId = user._id as mongoose.Types.ObjectId;
 

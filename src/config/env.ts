@@ -18,6 +18,10 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32),
   SESSION_SECRET: z.string().min(32),
 
+  // Data Encryption (OPTIONAL in dev, REQUIRED in production)
+  // Generate with: openssl rand -base64 32
+  ENV_ENCRYPTION_KEY: z.string().min(32).optional(),
+
   // Frontend
   FRONTEND_URL: z.string().url(),
 

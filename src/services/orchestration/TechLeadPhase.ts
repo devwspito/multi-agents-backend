@@ -3,6 +3,7 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import { RealisticCostEstimator } from '../RealisticCostEstimator';
+import { CryptoService } from '../CryptoService';
 
 /**
  * Tech Lead Phase
@@ -144,15 +145,35 @@ export class TechLeadPhase extends BasePhase {
       const _epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
       void _epicsIdentified; // Marked as intentionally unused
 
-      // Build repositories information with TYPE for multi-repo orchestration
+      // Build repositories information with TYPE and ENVIRONMENT VARIABLES for multi-repo orchestration
       const repoInfo = context.repositories.length > 0
         ? `\n## Available Repositories:\n${context.repositories.map((repo, i) => {
             const typeEmoji = repo.type === 'backend' ? '🔧' : repo.type === 'frontend' ? '🎨' : '📦';
             const isDefault = i === 0 ? ' (default workspace)' : '';
+
+            // 🔐 Extract environment variable NAMES (not values) for tech stack inference
+            let envVarsSection = '';
+            if (repo.envVariables && repo.envVariables.length > 0) {
+              const envVarNames = repo.envVariables.map((env: any) => {
+                // For secrets, only show the key name (value is encrypted)
+                // For non-secrets, show key=value for context
+                if (env.isSecret) {
+                  return `   - ${env.key}=****** (configured)`;
+                } else {
+                  // Decrypt if encrypted, otherwise use as-is
+                  const value = CryptoService.isEncrypted(env.value)
+                    ? CryptoService.decrypt(env.value)
+                    : env.value;
+                  return `   - ${env.key}=${value}`;
+                }
+              }).join('\n');
+              envVarsSection = `\n   **Environment Variables (platform-configured)**:\n${envVarNames}`;
+            }
+
             return `${i + 1}. **${repo.name}** (${typeEmoji} ${repo.type.toUpperCase()})${isDefault}
    - GitHub: ${repo.githubRepoName}
    - Branch: ${repo.githubBranch}
-   - Execution Order: ${repo.executionOrder || 'not set'}`;
+   - Execution Order: ${repo.executionOrder || 'not set'}${envVarsSection}`;
           }).join('\n')}\n`
         : '';
 
@@ -526,6 +547,101 @@ ${repoInfo}
         }
       }
 
+      // 🔥🔥🔥 CREATE STORY BRANCHES - TechLead creates all branches upfront
+      // This ensures branches exist on remote BEFORE developers start
+      console.log(`\n🌿🌿🌿 [TechLead] CREATING STORY BRANCHES 🌿🌿🌿`);
+      const { safeGitExecSync } = await import('../../utils/safeGitExecution');
+
+      for (const epic of parsed.epics) {
+        if (!epic.targetRepository || !workspacePath) {
+          console.warn(`⚠️  [TechLead] Skipping branch creation for epic ${epic.id} - missing targetRepository or workspacePath`);
+          continue;
+        }
+
+        const repoPath = `${workspacePath}/${epic.targetRepository}`;
+        const epicBranch = epic.branchName || `epic/${epic.id}`;
+
+        console.log(`\n📦 [TechLead] Creating story branches for epic: ${epic.id}`);
+        console.log(`   📂 Repository: ${epic.targetRepository}`);
+        console.log(`   🌿 Epic branch: ${epicBranch}`);
+
+        // Checkout epic branch first
+        try {
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+          safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`   ✅ Checked out epic branch: ${epicBranch}`);
+        } catch (epicCheckoutError: any) {
+          console.error(`   ❌ Failed to checkout epic branch ${epicBranch}: ${epicCheckoutError.message}`);
+          continue;
+        }
+
+        for (const story of epic.stories) {
+          // Generate unique branch name
+          const taskShortId = taskId.slice(-8);
+          const timestamp = Date.now();
+          const randomSuffix = Math.random().toString(36).substring(2, 8);
+          const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+          const storyBranchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
+
+          console.log(`   🌿 Creating branch: ${storyBranchName} for story: ${story.id}`);
+
+          try {
+            // Create story branch from epic branch
+            safeGitExecSync(`git checkout -b ${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`      ✅ Created local branch: ${storyBranchName}`);
+
+            // Push to remote immediately
+            safeGitExecSync(`git push -u origin ${storyBranchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 90000, // 90s for network operations
+            });
+            console.log(`      ✅ Pushed to remote: ${storyBranchName}`);
+
+            // Go back to epic branch for next story
+            safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8' });
+
+            // 🔥 CRITICAL: Store branchName in storiesMap
+            if (storiesMap[story.id]) {
+              storiesMap[story.id].branchName = storyBranchName;
+            }
+
+            // 🔥 CRITICAL: Update story object for later use
+            story.branchName = storyBranchName;
+
+            // Emit StoryBranchCreated event
+            await eventStore.append({
+              taskId: task._id as any,
+              eventType: 'StoryBranchCreated',
+              agentName: 'tech-lead',
+              payload: {
+                storyId: story.id,
+                epicId: epic.id,
+                branchName: storyBranchName,
+                repository: epic.targetRepository,
+              },
+            });
+
+          } catch (branchError: any) {
+            console.error(`      ❌ Failed to create story branch ${storyBranchName}`);
+            if (branchError.message?.includes('TIMEOUT') || branchError.message?.includes('timed out')) {
+              console.error(`         CAUSE: Network timeout (90s) - git push to remote failed`);
+              console.error(`         ACTION: Check network connection`);
+            } else if (branchError.message?.includes('already exists')) {
+              console.error(`         CAUSE: Branch already exists (might be a retry)`);
+            } else if (branchError.message?.includes('authentication') || branchError.message?.includes('auth')) {
+              console.error(`         CAUSE: Authentication failure - check GitHub credentials`);
+            } else {
+              console.error(`         Details: ${branchError.message}`);
+            }
+            // Continue with other stories even if one fails
+          }
+        }
+      }
+
+      console.log(`\n✅ [TechLead] Story branch creation completed`);
+      console.log(`🌿🌿🌿 END STORY BRANCH CREATION 🌿🌿🌿\n`);
+
       // Emit team composition event
       await eventStore.append({
         taskId: task._id as any,
@@ -533,29 +649,6 @@ ${repoInfo}
         agentName: 'tech-lead',
         payload: parsed.teamComposition,
       });
-
-      // 🐳 Emit environment configuration event (for Docker setup)
-      if (parsed.environmentConfig && Object.keys(parsed.environmentConfig).length > 0) {
-        console.log(`\n🐳 [TechLead] Environment configuration detected for ${Object.keys(parsed.environmentConfig).length} repository(ies)`);
-
-        await eventStore.append({
-          taskId: task._id as any,
-          eventType: 'EnvironmentConfigDefined',
-          agentName: 'tech-lead',
-          payload: parsed.environmentConfig,
-        });
-
-        // Log each repository config
-        for (const [repoName, config] of Object.entries(parsed.environmentConfig)) {
-          const cfg = config as any;
-          console.log(`   📦 ${repoName}: ${cfg.language}/${cfg.framework} (port ${cfg.defaultPort})`);
-          if (cfg.requiredServices && cfg.requiredServices.length > 0) {
-            console.log(`      Services: ${cfg.requiredServices.join(', ')}`);
-          }
-        }
-      } else {
-        console.log(`\n⚠️  [TechLead] No environmentConfig in output - WorkspaceEnvironmentService will use auto-detection`);
-      }
 
       // ✅ BACKWARD COMPATIBILITY: Also store in Task model (will remove later)
       const epicsWithStringIds = parsed.epics.map((epic: any) => ({

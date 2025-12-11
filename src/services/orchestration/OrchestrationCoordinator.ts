@@ -305,9 +305,9 @@ export class OrchestrationCoordinator {
         );
       }
 
-      // Get user's GitHub token for cloning
+      // Get user's GitHub token for cloning (GitHub tokens NOT encrypted)
       const User = (await import('../../models/User')).User;
-      const user = await User.findById(task.userId).select('accessToken defaultApiKey');
+      const user = await User.findById(task.userId).select('+accessToken +defaultApiKey');
       if (!user || !user.accessToken) {
         throw new Error(
           `User GitHub token not found. User must connect their GitHub account before starting orchestration.`
@@ -317,7 +317,7 @@ export class OrchestrationCoordinator {
       console.log(`✅ Found ${repositories.length} repositories for task`);
       NotificationService.emitConsoleLog(taskId, 'info', `✅ Found ${repositories.length} repositories for task`);
 
-      // Setup workspace (pass user token for cloning)
+      // Setup workspace (pass user token for cloning - NOT encrypted)
       const workspacePath = await this.setupWorkspace(taskId, repositories, user.accessToken);
       const workspaceStructure = await this.getWorkspaceStructure(workspacePath);
 
@@ -326,28 +326,8 @@ export class OrchestrationCoordinator {
         repo.localPath = path.join(workspacePath, repo.name);
       });
 
-      // 🚀 NEW: Setup development environment (npm install, .env, etc.)
-      const { workspaceEnvironmentService } = await import('../WorkspaceEnvironmentService');
-      const devEnvironment = await workspaceEnvironmentService.setupEnvironment(
-        taskId,
-        workspacePath,
-        repositories.map((r: any) => ({
-          name: r.name,
-          type: r.type || (r.name.toLowerCase().includes('backend') ? 'backend' :
-                          r.name.toLowerCase().includes('frontend') ? 'frontend' : undefined),
-          localPath: r.localPath,
-        }))
-      );
-      console.log(`✅ Development environment ready. Ports: ${JSON.stringify(Object.fromEntries(devEnvironment.ports))}`);
-
       // Create orchestration context (shared state for all phases)
       const context = new OrchestrationContext(task, repositories, workspacePath);
-
-      // 🚀 Store environment info in context for developers to use
-      context.setData('devEnvironment', {
-        ports: Object.fromEntries(devEnvironment.ports),
-        ready: devEnvironment.ready,
-      });
 
       // 🔑 Get project-specific API key with fallback chain:
       // 1. Project API key (if set)
@@ -356,20 +336,53 @@ export class OrchestrationCoordinator {
       let anthropicApiKey = process.env.ANTHROPIC_API_KEY;
       let apiKeySource = 'environment';
 
-      // Get project to check for project-specific API key
+      // Get project to check for project-specific API key and dev auth config
+      // Note: Sensitive fields are encrypted - use decryption methods
       const ProjectModel = (await import('../../models/Project')).Project;
-      const project = userProjects.length > 0 ? await ProjectModel.findById(userProjects[0]._id).select('+apiKey') : null;
+      const project = userProjects.length > 0
+        ? await ProjectModel.findById(userProjects[0]._id).select('+apiKey +devAuth.token +devAuth.credentials.password')
+        : null;
 
       if (project?.apiKey) {
-        anthropicApiKey = project.apiKey;
+        // Use decryption method to get the actual API key
+        anthropicApiKey = project.getDecryptedApiKey() || project.apiKey;
         apiKeySource = 'project';
         console.log(`🔑 Using project-specific API key (project: ${project.name})`);
       } else if (user.defaultApiKey) {
-        anthropicApiKey = user.defaultApiKey;
+        // User model also has encryption - use decryption method
+        anthropicApiKey = user.getDecryptedApiKey ? user.getDecryptedApiKey() : user.defaultApiKey;
         apiKeySource = 'user_default';
         console.log(`🔑 Using user's default API key`);
       } else {
         console.log(`🔑 Using environment API key (no project or user default set)`);
+      }
+
+      // 🔐 Store developer authentication config (if configured)
+      // IMPORTANT: DELETE method is ALWAYS BLOCKED - developers can only use GET, PUT, POST
+      // Uses decryption method to get decrypted tokens and credentials
+      if (project?.devAuth && project.devAuth.method !== 'none') {
+        const decryptedDevAuth = project.getDecryptedDevAuth();
+        if (decryptedDevAuth) {
+          context.setData('devAuth', {
+            method: decryptedDevAuth.method,
+            // For 'token' method
+            token: decryptedDevAuth.token,
+            tokenType: decryptedDevAuth.tokenType || 'bearer',
+            tokenHeader: decryptedDevAuth.tokenHeader || 'Authorization',
+            tokenPrefix: decryptedDevAuth.tokenPrefix || 'Bearer ',
+            // For 'credentials' method
+            loginEndpoint: decryptedDevAuth.loginEndpoint,
+            loginMethod: decryptedDevAuth.loginMethod || 'POST',
+            credentials: decryptedDevAuth.credentials,
+            loginContentType: decryptedDevAuth.loginContentType || 'application/json',
+            tokenResponsePath: decryptedDevAuth.tokenResponsePath || 'token',
+          });
+          console.log(`🔐 Developer authentication configured (method: ${decryptedDevAuth.method})`);
+          if (decryptedDevAuth.method === 'credentials') {
+            console.log(`   📝 Login endpoint: ${decryptedDevAuth.loginEndpoint}`);
+          }
+          console.log(`   ⚠️  DELETE method is BLOCKED for safety - only GET, PUT, POST allowed`);
+        }
       }
 
       if (!anthropicApiKey) {
@@ -1506,8 +1519,9 @@ export class OrchestrationCoordinator {
     stories?: any[], // Receive stories from event store
     epics?: any[], // Receive epics from event store
     judgeFeedback?: string, // Judge feedback for retry attempts
-    epicBranchName?: string, // Epic branch name from TeamOrchestrationPhase
-    forceTopModel?: boolean // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
+    _epicBranchName?: string, // Epic branch name from TeamOrchestrationPhase (unused - branches come from story.branchName)
+    forceTopModel?: boolean, // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
+    devAuth?: any // 🔐 Developer authentication config (token or credentials for testing endpoints)
   ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
 
@@ -1661,163 +1675,189 @@ ${judgeFeedback}
 `;
       }
 
+      // 🔐 Add devAuth section - either configured or not
+      if (devAuth && devAuth.method !== 'none') {
+        // ✅ DevAuth IS configured - developer can test authenticated endpoints
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔐 [Developer ${member.instanceId}] DevAuth configured: method=${devAuth.method} - Can test authenticated endpoints`
+        );
+
+        prompt += `\n\n## 🔐 API AUTHENTICATION (for testing endpoints)
+
+**Method**: ${devAuth.method}
+**Status**: ✅ CONFIGURED - You can test authenticated endpoints
+`;
+        if (devAuth.method === 'token') {
+          prompt += `
+**Token**: \`${devAuth.token}\`
+**Type**: ${devAuth.tokenType || 'bearer'}
+**Header**: ${devAuth.tokenHeader || 'Authorization'}
+**Prefix**: "${devAuth.tokenPrefix || 'Bearer '}"
+
+**Usage in curl**:
+\`\`\`bash
+curl -H "${devAuth.tokenHeader || 'Authorization'}: ${devAuth.tokenPrefix || 'Bearer '}${devAuth.token}" http://localhost:PORT/api/endpoint
+\`\`\`
+
+**Usage in code**:
+\`\`\`javascript
+const headers = { "${devAuth.tokenHeader || 'Authorization'}": "${devAuth.tokenPrefix || 'Bearer '}${devAuth.token}" };
+fetch('/api/endpoint', { headers });
+\`\`\`
+`;
+        } else if (devAuth.method === 'credentials') {
+          prompt += `
+**Login Endpoint**: ${devAuth.loginEndpoint}
+**Login Method**: ${devAuth.loginMethod || 'POST'}
+**Username**: ${devAuth.credentials?.username || ''}
+**Password**: ${devAuth.credentials?.password || ''}
+**Token Response Path**: ${devAuth.tokenResponsePath || 'token'}
+
+**Step 1 - Login to get token**:
+\`\`\`bash
+TOKEN=$(curl -s -X ${devAuth.loginMethod || 'POST'} ${devAuth.loginEndpoint} \\
+  -H "Content-Type: ${devAuth.loginContentType || 'application/json'}" \\
+  -d '{"username":"${devAuth.credentials?.username}","password":"${devAuth.credentials?.password}"}' \\
+  | jq -r '.${devAuth.tokenResponsePath || 'token'}')
+\`\`\`
+
+**Step 2 - Use token**:
+\`\`\`bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:PORT/api/endpoint
+\`\`\`
+`;
+        }
+        prompt += `
+⚠️ **CRITICAL**: DELETE method is ALWAYS FORBIDDEN - only use GET, POST, PUT, PATCH!
+
+🔍 **If authentication fails**: Log the error clearly so we can debug the devAuth configuration.
+`;
+      } else {
+        // ❌ DevAuth NOT configured - developer should continue but expect 401 errors
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `⚠️ [Developer ${member.instanceId}] DevAuth NOT configured - Authenticated endpoints will return 401. Developer will continue without auth testing.`
+        );
+
+        prompt += `\n\n## ⚠️ NO API AUTHENTICATION CONFIGURED
+
+**Status**: ❌ NOT CONFIGURED - No authentication credentials provided
+
+**What this means**:
+- If you try to access protected endpoints, you will get **401 Unauthorized** errors
+- This is EXPECTED - the project owner has not provided authentication credentials
+- **DO NOT** let 401 errors block your work
+
+**How to proceed**:
+1. Write the code as if auth works (implement the logic correctly)
+2. If you get 401 when testing → Log it and continue
+3. Focus on code correctness, not on passing authentication
+4. The auth testing will be done later when credentials are provided
+
+**Example handling**:
+\`\`\`javascript
+// When testing and you get 401, log and continue
+try {
+  const response = await fetch('/api/protected');
+  if (response.status === 401) {
+    console.log('⚠️ 401 Unauthorized - No devAuth configured, skipping auth test');
+    // Continue with your work
+  }
+} catch (error) {
+  console.log('⚠️ Auth test skipped - no credentials configured');
+}
+\`\`\`
+
+⚠️ **IMPORTANT**: Don't waste time trying to fix auth errors - just log them and move on!
+`;
+      }
+
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
-      // 🔥 CRITICAL FIX: REUSE existing branch name if story already has one (retry scenario)
-      // When Judge rejects code and triggers retry, the story already has a branchName
-      // We MUST use the same branch to avoid creating orphan branches
-      let branchName: string;
-      const isRetryWithExistingBranch = !!story.branchName;
-
-      if (story.branchName) {
-        branchName = story.branchName;
-        console.log(`🔄 [Developer ${member.instanceId}] REUSING existing branch: ${branchName} (retry scenario)`);
-      } else {
-        // Generate unique branch name for NEW story (first execution)
-        const taskShortId = taskId.slice(-8); // Last 8 chars of taskId
-        const timestamp = Date.now();
-        const randomSuffix = Math.random().toString(36).substring(2, 8);
-        const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize story id
-        branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
-        console.log(`🌿 [Developer ${member.instanceId}] Creating NEW branch: ${branchName}`);
+      // 🔥🔥🔥 STORY BRANCH ALREADY EXISTS - TechLead created it
+      // Developer only needs to checkout the existing branch
+      if (!story.branchName) {
+        console.error(`❌ [Developer ${member.instanceId}] Story ${story.id} has NO branchName!`);
+        console.error(`   TechLead should have created the story branch. This is a bug.`);
+        throw new Error(`Story ${story.id} missing branchName - TechLead failed to create story branch`);
       }
 
-      // 1️⃣ Create feature branch for this story BEFORE developer starts
-      console.log(`\n🌿 [Developer ${member.instanceId}] Branch for story: ${branchName}`);
+      const branchName = story.branchName;
+      console.log(`\n🌿 [Developer ${member.instanceId}] Checking out story branch: ${branchName}`);
+      console.log(`   (Branch was created by TechLead)`);
 
       try {
         const repoPath = `${workspacePath}/${repoName}`;
 
-        // 🔥 CRITICAL: Handle RETRY differently from NEW story
-        if (isRetryWithExistingBranch) {
-          // RETRY SCENARIO: Branch already exists on remote, fetch and checkout
-          console.log(`🔄 [Developer ${member.instanceId}] RETRY: Fetching and checking out existing branch ${branchName}`);
+        // 🔥 SIMPLIFIED: TechLead already created and pushed the branch
+        // Developer just needs to fetch and checkout
+        console.log(`🔄 [Developer ${member.instanceId}] Fetching from remote...`);
 
-          try {
-            // Fetch latest from remote
-            safeGitExecSync(`cd "${repoPath}" && git fetch origin`, {
-              encoding: 'utf8',
-              timeout: 30000,
-            });
-
-            // Try to checkout the existing branch
-            try {
-              safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
-              console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
-            } catch (checkoutError) {
-              // Branch might exist on remote but not locally - create tracking branch
-              safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName} origin/${branchName}`, { encoding: 'utf8' });
-              console.log(`✅ [Developer ${member.instanceId}] Created tracking branch: ${branchName}`);
-            }
-
-            // Pull latest changes
-            try {
-              safeGitExecSync(`cd "${repoPath}" && git pull origin ${branchName}`, {
-                encoding: 'utf8',
-                timeout: 30000,
-              });
-              console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes for retry`);
-            } catch (pullError: any) {
-              console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed: ${pullError.message}`);
-            }
-          } catch (fetchError: any) {
-            console.error(`❌ [Developer ${member.instanceId}] Failed to fetch/checkout existing branch: ${fetchError.message}`);
-            throw fetchError;
+        try {
+          // Fetch latest from remote (timeout: 90s - increased for reliability)
+          safeGitExecSync(`git fetch origin`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: 90000,
+          });
+          console.log(`✅ [Developer ${member.instanceId}] Fetched from remote`);
+        } catch (fetchError: any) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Fetch failed (will try checkout anyway)`);
+          if (fetchError.message?.includes('TIMEOUT') || fetchError.message?.includes('timed out')) {
+            console.warn(`   CAUSE: Network timeout (90s) - check network connection`);
+          } else if (fetchError.message?.includes('authentication') || fetchError.message?.includes('auth')) {
+            console.warn(`   CAUSE: Authentication issue - check credentials`);
+          } else {
+            console.warn(`   Details: ${fetchError.message}`);
           }
-        } else {
-          // NEW STORY: Create branch from epic
-          // First, ensure we're on the epic base branch WITH LATEST CHANGES
-          const storyEpic = epicsList.find((e: any) => e.id === story.epicId);
-          const epicBranch = epicBranchName || story.epicBranch || storyEpic?.branchName || `epic/${story.epicId}`;
-          console.log(`📂 [Developer ${member.instanceId}] Epic branch to use: ${epicBranch}`);
+        }
 
+        // Try to checkout the existing branch
+        try {
+          safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`✅ [Developer ${member.instanceId}] Checked out branch: ${branchName}`);
+        } catch (checkoutError: any) {
+          // Branch might exist on remote but not locally - create tracking branch
+          console.log(`   Branch not local, creating tracking branch from origin/${branchName}...`);
           try {
-            safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
-            console.log(`✅ [Developer ${member.instanceId}] Checked out epic branch: ${epicBranch}`);
-
-            // Pull latest changes from epic branch
-            try {
-              safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
-                encoding: 'utf8',
-                timeout: 30000,
-              });
-              console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes from ${epicBranch}`);
-            } catch (pullError: any) {
-              if (pullError.signal === 'SIGKILL' || pullError.code === 'ETIMEDOUT') {
-                console.warn(`⏰ [Developer ${member.instanceId}] Git pull timed out after 30s`);
-              } else {
-                console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed: ${pullError.message}`);
-              }
-            }
-          } catch (epicCheckoutError) {
-            console.warn(`⚠️  [Developer ${member.instanceId}] Epic branch ${epicBranch} doesn't exist, using current branch`);
+            safeGitExecSync(`git checkout -b ${branchName} origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Created tracking branch: ${branchName}`);
+          } catch (trackingError: any) {
+            console.error(`❌ [Developer ${member.instanceId}] Failed to checkout/track branch: ${trackingError.message}`);
+            console.error(`   Branch ${branchName} may not exist on remote. Did TechLead create it?`);
+            throw new Error(`Branch ${branchName} not found - TechLead may have failed to create it`);
           }
+        }
 
-          // Create story branch from epic branch
-          try {
-            safeGitExecSync(`cd "${repoPath}" && git checkout -b ${branchName}`, { encoding: 'utf8' });
-            console.log(`✅ [Developer ${member.instanceId}] Created story branch: ${branchName}`);
-
-            // 🔥🔥🔥 CRITICAL FIX: Push story branch to remote IMMEDIATELY after creation
-            // This ensures the branch exists on remote for:
-            // 1. Judge to review
-            // 2. Developer retries to access (different workspace may need to fetch)
-            // 3. Recovery from crashes/failures
-            // Without this, branch only exists locally and retries FAIL!
-            try {
-              console.log(`📤 [Developer ${member.instanceId}] Pushing story branch to remote...`);
-              safeGitExecSync(`cd "${repoPath}" && git push -u origin ${branchName}`, {
-                encoding: 'utf8',
-                timeout: 30000 // 30 seconds
-              });
-              console.log(`✅ [Developer ${member.instanceId}] Story branch pushed to remote: ${branchName}`);
-            } catch (pushError: any) {
-              console.error(`❌ [Developer ${member.instanceId}] Failed to push story branch: ${pushError.message}`);
-              console.error(`   Branch ${branchName} only exists locally - retries may fail!`);
-              // Don't throw - let Developer try to push later
-              // But this is a warning sign that retries might break
-            }
-          } catch (branchError: any) {
-            if (branchError.message.includes('already exists')) {
-              safeGitExecSync(`cd "${repoPath}" && git checkout ${branchName}`, { encoding: 'utf8' });
-              console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
-
-              // 🔥 Also ensure existing branch is on remote
-              try {
-                // Check if branch exists on remote
-                const remoteCheck = safeGitExecSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, {
-                  encoding: 'utf8',
-                  timeout: 10000
-                });
-                if (!remoteCheck.trim()) {
-                  // Branch doesn't exist on remote, push it
-                  console.log(`📤 [Developer ${member.instanceId}] Existing branch not on remote, pushing...`);
-                  safeGitExecSync(`cd "${repoPath}" && git push -u origin ${branchName}`, {
-                    encoding: 'utf8',
-                    timeout: 30000
-                  });
-                  console.log(`✅ [Developer ${member.instanceId}] Pushed existing branch to remote`);
-                } else {
-                  console.log(`✅ [Developer ${member.instanceId}] Branch already exists on remote`);
-                }
-              } catch (remotePushError: any) {
-                console.warn(`⚠️  [Developer ${member.instanceId}] Could not verify/push branch to remote: ${remotePushError.message}`);
-              }
-            } else {
-              throw branchError;
-            }
+        // Pull latest changes (in case of retry scenario)
+        try {
+          safeGitExecSync(`git pull origin ${branchName}`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: 90000,
+          });
+          console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes`);
+        } catch (pullError: any) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed (continuing anyway)`);
+          if (pullError.message?.includes('TIMEOUT') || pullError.message?.includes('timed out')) {
+            console.warn(`   CAUSE: Network timeout (90s) - slow connection or large repo`);
+          } else {
+            console.warn(`   Details: ${pullError.message}`);
           }
         }
 
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `🌿 Developer ${member.instanceId}: Working on branch ${branchName}${isRetryWithExistingBranch ? ' (RETRY)' : ''}`
+          `🌿 Developer ${member.instanceId}: Working on branch ${branchName}`
         );
       } catch (gitError: any) {
-        console.error(`❌ [Developer ${member.instanceId}] Failed to create branch: ${gitError.message}`);
-        throw new Error(`Git branch creation failed: ${gitError.message}`);
+        console.error(`❌ [Developer ${member.instanceId}] Git operation failed: ${gitError.message}`);
+        throw new Error(`Git checkout failed for branch ${branchName}: ${gitError.message}`);
       }
 
       prompt += `
@@ -1970,7 +2010,7 @@ After writing code, you MUST follow this EXACT sequence:
         // 🔥 ADDITIONAL: Verify commit exists on remote
         let commitExistsOnRemote = false;
         try {
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
           const containsOutput = safeGitExecSync(
             `git branch -r --contains ${commitSHA}`,
             { cwd: repoPath, encoding: 'utf8', timeout: 15000 }
@@ -2045,9 +2085,10 @@ After writing code, you MUST follow this EXACT sequence:
         story.completedAt = new Date();
         story.branchName = branchName; // Save branch name for QA
 
-        console.log(`🌿 [Developer ${member.instanceId}] Story branch saved: ${branchName}`);
+        console.log(`🌿 [Developer ${member.instanceId}] Story branch confirmed: ${branchName}`);
 
-        // 🔥 EVENT SOURCING: Update story with branch name
+        // 🔥 EVENT SOURCING: Confirm story branch (TechLead created it, Developer confirms it was used)
+        // This is idempotent - if TechLead already emitted this event, it just updates with same value
         const { eventStore } = await import('../EventStore');
         await eventStore.append({
           taskId: task._id as any,
@@ -2057,10 +2098,11 @@ After writing code, you MUST follow this EXACT sequence:
             storyId: story.id,
             branchName: branchName,
             developerId: member.instanceId,
+            confirmedBy: 'developer', // Flag that this is confirmation, not creation
           },
         });
 
-        console.log(`📝 [EventStore] StoryBranchCreated event emitted for ${branchName}`);
+        console.log(`📝 [EventStore] Story branch confirmed in EventStore: ${branchName}`);
 
       } catch (error: any) {
         console.error(`❌ [Developer ${member.instanceId}] Failed on story ${story.title}:`, error.message);
@@ -2281,15 +2323,6 @@ After writing code, you MUST follow this EXACT sequence:
 
     // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks
     const taskId = (task._id as any).toString();
-
-    // Clean up development environment (stop services, free ports)
-    try {
-      const { workspaceEnvironmentService } = await import('../WorkspaceEnvironmentService');
-      await workspaceEnvironmentService.cleanup(taskId);
-      console.log(`🧹 Cleaned up development environment for task ${taskId}`);
-    } catch (cleanupError: any) {
-      console.warn(`⚠️  Environment cleanup warning: ${cleanupError.message}`);
-    }
 
     // Clean up cost budget config
     CostBudgetService.cleanupTaskConfig(taskId);

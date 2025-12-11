@@ -37,6 +37,27 @@ const updateProjectSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+// DevAuth validation schema - simplified 2-method system
+const devAuthSchema = z.object({
+  method: z.enum(['none', 'token', 'credentials']),
+
+  // For 'token' method - user provides a pre-generated token
+  token: z.string().optional(),
+  tokenType: z.enum(['bearer', 'api-key', 'basic', 'custom']).optional(),
+  tokenHeader: z.string().optional(),
+  tokenPrefix: z.string().optional(),
+
+  // For 'credentials' method - system curls login endpoint
+  loginEndpoint: z.string().url().optional(),
+  loginMethod: z.enum(['POST', 'GET']).optional(),
+  credentials: z.object({
+    username: z.string().optional(),
+    password: z.string().optional(),
+  }).optional(),
+  loginContentType: z.string().optional(),
+  tokenResponsePath: z.string().optional(),
+});
+
 /**
  * Generate default pathPatterns and executionOrder based on repository type
  */
@@ -542,6 +563,121 @@ router.put('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<
     res.status(500).json({
       success: false,
       message: 'Failed to update API key',
+    });
+  }
+});
+
+/**
+ * PUT /api/projects/:id/dev-auth
+ * Update project's developer authentication configuration
+ * SIMPLIFIED: 2 methods only (token OR credentials)
+ */
+router.put('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const validatedData = devAuthSchema.parse(req.body);
+
+    const project = await Project.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    // Update devAuth configuration
+    project.devAuth = {
+      method: validatedData.method,
+      // Token method fields
+      token: validatedData.token,
+      tokenType: validatedData.tokenType || 'bearer',
+      tokenHeader: validatedData.tokenHeader || 'Authorization',
+      tokenPrefix: validatedData.tokenPrefix || 'Bearer ',
+      // Credentials method fields
+      loginEndpoint: validatedData.loginEndpoint,
+      loginMethod: validatedData.loginMethod || 'POST',
+      credentials: validatedData.credentials,
+      loginContentType: validatedData.loginContentType || 'application/json',
+      tokenResponsePath: validatedData.tokenResponsePath || 'token',
+    };
+
+    await project.save();
+
+    console.log(`✅ Updated devAuth for project ${project.name}: method=${validatedData.method}`);
+
+    res.json({
+      success: true,
+      message: 'Developer authentication updated successfully',
+      data: {
+        method: validatedData.method,
+        // Don't return sensitive data
+        hasToken: !!validatedData.token,
+        hasCredentials: !!(validatedData.credentials?.username && validatedData.credentials?.password),
+      },
+    });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid devAuth configuration',
+        errors: error.errors,
+      });
+    }
+
+    console.error('Error updating project devAuth:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update developer authentication',
+    });
+  }
+});
+
+/**
+ * GET /api/projects/:id/dev-auth
+ * Get project's developer authentication configuration (without sensitive data)
+ */
+router.get('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const project = await Project.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    }).select('+devAuth.token +devAuth.credentials.password');
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    const devAuth = project.devAuth || { method: 'none' };
+
+    res.json({
+      success: true,
+      data: {
+        method: devAuth.method,
+        // Token method - mask the token
+        hasToken: !!devAuth.token,
+        tokenType: devAuth.tokenType,
+        tokenHeader: devAuth.tokenHeader,
+        tokenPrefix: devAuth.tokenPrefix,
+        // Credentials method - show username, mask password
+        loginEndpoint: devAuth.loginEndpoint,
+        loginMethod: devAuth.loginMethod,
+        hasCredentials: !!(devAuth.credentials?.username && devAuth.credentials?.password),
+        credentialsUsername: devAuth.credentials?.username,
+        loginContentType: devAuth.loginContentType,
+        tokenResponsePath: devAuth.tokenResponsePath,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting project devAuth:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get developer authentication',
     });
   }
 });
