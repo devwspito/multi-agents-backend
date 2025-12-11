@@ -1065,9 +1065,21 @@ ${judgeFeedback}
     }
 
     try {
+      // 🔥🔥🔥 CRITICAL FIX: Pass ONLY the rejected story, NOT all stories! 🔥🔥🔥
+      // Bug: When Judge rejects story-4 and requests retry, Developer was receiving ALL stories
+      // (e.g., 22 stories) instead of just story-4. This caused Developer to get confused
+      // and try to use the branch from a different story (e.g., story-2's branch).
+      //
+      // Root cause: state.stories contains ALL stories in the task
+      // Fix: Pass [storyFromEventStore || story] - array with ONLY the rejected story
+      const rejectedStory = storyFromEventStore || story;
+
       console.log(`🚀 [Judge] Executing developer retry with topModel upgrade`);
-      console.log(`   Stories passed to developer: ${state.stories.length}`);
-      console.log(`   Story "${story.id}" branchName: ${storyFromEventStore?.branchName || 'NOT SET'}`);
+      console.log(`   🎯 RETRY FOR SINGLE STORY: "${rejectedStory.title}"`);
+      console.log(`   🔀 Branch: ${rejectedStory.branchName || 'NOT SET'}`);
+      console.log(`   📍 Story ID: ${rejectedStory.id}`);
+      console.log(`   ⚠️  Passing 1 story (NOT ${state.stories.length} stories)`);
+
       await executeDeveloperFn(
         task,
         developer,
@@ -1075,7 +1087,7 @@ ${judgeFeedback}
         workspacePath,
         workspaceStructure,
         attachments,
-        state.stories,
+        [rejectedStory],  // 🔥🔥🔥 CRITICAL: ONLY the rejected story, NOT state.stories
         state.epics,
         formattedFeedback, // Pass FORMATTED Judge feedback for retry (structured and clear)
         epicBranchName, // Epic branch name from TeamOrchestrationPhase
@@ -1146,15 +1158,32 @@ ${judgeFeedback}
 
       if (story.branchName) {
         try {
-          // 🔥 SIMPLIFIED: context.workspacePath is ALWAYS the repo path now
-          // - Worktree mode: judgeWorktreePath (IS the repo directly)
-          // - Fallback mode: judgeRepoPath (also the repo - ${workspacePath}/${repoName})
-          // Both point to the actual git repository, not the parent workspace
-          const repoPath = context.workspacePath!;
+          // 🔥 FIX: Build correct repo path from workspace + targetRepository
+          // context.workspacePath is the STORY WORKSPACE (e.g., /tmp/task/story-ABC/)
+          // The git repo is INSIDE at (e.g., /tmp/task/story-ABC/v2_backend/)
+          // We MUST build the full path, not assume workspacePath IS the repo
+          const targetRepository = story.targetRepository ||
+            (await (async () => {
+              const { eventStore } = await import('../EventStore');
+              const state = await eventStore.getCurrentState(task._id as any);
+              const epic = state.epics?.find((e: any) => e.stories?.includes(story.id));
+              return epic?.targetRepository;
+            })());
 
-          if (!repoPath) {
+          if (!targetRepository) {
+            throw new Error(`POST-RETRY SYNC: No targetRepository for story ${story.id}`);
+          }
+
+          const repoPath = `${context.workspacePath}/${targetRepository}`;
+
+          if (!repoPath || !context.workspacePath) {
             throw new Error('POST-RETRY SYNC: context.workspacePath is null');
           }
+
+          console.log(`🔧 [POST-RETRY SYNC] Building repo path:`);
+          console.log(`   Workspace: ${context.workspacePath}`);
+          console.log(`   Target repo: ${targetRepository}`);
+          console.log(`   Full path: ${repoPath}`);
 
           console.log(`\n🔄 [POST-RETRY SYNC] Syncing Judge workspace with developer's latest commits...`);
           console.log(`   Mode: ${judgeUsingWorktree ? 'ISOLATED WORKTREE' : 'FALLBACK (main repo)'}`);
