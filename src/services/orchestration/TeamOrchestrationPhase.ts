@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
@@ -830,6 +831,61 @@ export class TeamOrchestrationPhase extends BasePhase {
         (teamCosts as any).techLead = techLeadCost;
         (teamCosts as any).techLeadUsage = techLeadUsage;
         console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
+      }
+
+      // 🐳 Apply TechLead environment configuration if available
+      try {
+        const { eventStore } = await import('../EventStore');
+        const allEvents = await eventStore.getEvents(parentContext.task._id as any);
+        const envConfigEvents = allEvents.filter((e: any) => e.eventType === 'EnvironmentConfigDefined');
+
+        if (envConfigEvents.length > 0) {
+          const latestEnvConfig = envConfigEvents[envConfigEvents.length - 1].payload;
+          console.log(`\n🐳 [Team ${teamNumber}] Applying TechLead environment configuration...`);
+
+          // Get repository info for this team's epic
+          const teamRepoName = epic.targetRepository;
+          const teamRepoConfig = latestEnvConfig[teamRepoName];
+
+          if (teamRepoConfig) {
+            const matchedRepo = parentContext.repositories.find((r: any) =>
+              r.name === teamRepoName || r.githubRepoName === teamRepoName
+            );
+            const repoPath = matchedRepo?.localPath || (workspacePath ? path.join(workspacePath, teamRepoName) : teamRepoName);
+
+            console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language}/${teamRepoConfig.framework}`);
+
+            const fs = await import('fs');
+
+            // Create Dockerfile if provided
+            if (teamRepoConfig.dockerfile) {
+              const dockerfilePath = path.join(repoPath, 'Dockerfile');
+              const dockerfileContent = teamRepoConfig.dockerfile.replace(/\\n/g, '\n');
+              fs.writeFileSync(dockerfilePath, dockerfileContent);
+              console.log(`   ✅ Created Dockerfile for ${teamRepoName}`);
+            }
+
+            // Create docker-compose.yml if provided
+            if (teamRepoConfig.dockerCompose) {
+              const composePath = path.join(repoPath, 'docker-compose.yml');
+              const composeContent = teamRepoConfig.dockerCompose.replace(/\\n/g, '\n');
+              fs.writeFileSync(composePath, composeContent);
+              console.log(`   ✅ Created docker-compose.yml for ${teamRepoName}`);
+            }
+
+            // Store run/test commands in context for developers
+            teamContext.setData('environmentCommands', {
+              install: teamRepoConfig.installCommand,
+              run: teamRepoConfig.runCommand,
+              build: teamRepoConfig.buildCommand,
+              test: teamRepoConfig.testCommand,
+              port: teamRepoConfig.defaultPort,
+            });
+            console.log(`   🏃 Run command: ${teamRepoConfig.runCommand}`);
+          }
+        }
+      } catch (envError: any) {
+        console.warn(`⚠️  [Team ${teamNumber}] Could not apply environment config: ${envError.message}`);
       }
 
       // Developers: Implement the epic

@@ -534,6 +534,29 @@ ${repoInfo}
         payload: parsed.teamComposition,
       });
 
+      // 🐳 Emit environment configuration event (for Docker setup)
+      if (parsed.environmentConfig && Object.keys(parsed.environmentConfig).length > 0) {
+        console.log(`\n🐳 [TechLead] Environment configuration detected for ${Object.keys(parsed.environmentConfig).length} repository(ies)`);
+
+        await eventStore.append({
+          taskId: task._id as any,
+          eventType: 'EnvironmentConfigDefined',
+          agentName: 'tech-lead',
+          payload: parsed.environmentConfig,
+        });
+
+        // Log each repository config
+        for (const [repoName, config] of Object.entries(parsed.environmentConfig)) {
+          const cfg = config as any;
+          console.log(`   📦 ${repoName}: ${cfg.language}/${cfg.framework} (port ${cfg.defaultPort})`);
+          if (cfg.requiredServices && cfg.requiredServices.length > 0) {
+            console.log(`      Services: ${cfg.requiredServices.join(', ')}`);
+          }
+        }
+      } else {
+        console.log(`\n⚠️  [TechLead] No environmentConfig in output - WorkspaceEnvironmentService will use auto-detection`);
+      }
+
       // ✅ BACKWARD COMPATIBILITY: Also store in Task model (will remove later)
       const epicsWithStringIds = parsed.epics.map((epic: any) => ({
         ...epic,

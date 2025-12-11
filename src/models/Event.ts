@@ -37,6 +37,7 @@ export type EventType =
   | 'EpicCreated'
   | 'StoryCreated'
   | 'TeamCompositionDefined'
+  | 'EnvironmentConfigDefined'
 
   // Branch setup events (DEPRECATED - BranchSetupPhase removed, incompatible with IStory)
   // | 'BranchSetupStarted'
