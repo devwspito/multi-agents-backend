@@ -251,6 +251,23 @@ interface WorkspaceEnvironment {
   ready: boolean;
 }
 
+/**
+ * TechLead-provided environment configuration
+ * This is the PREFERRED way to configure environments (explicit over auto-detection)
+ */
+interface TechLeadEnvironmentConfig {
+  language: string;
+  framework: string;
+  installCommand: string;
+  runCommand: string;
+  buildCommand?: string;
+  testCommand?: string;
+  defaultPort: number;
+  requiredServices?: string[];
+  dockerfile?: string;
+  dockerCompose?: string;
+}
+
 class WorkspaceEnvironmentService {
   private environments: Map<string, WorkspaceEnvironment> = new Map();
   private basePort = 27000; // Start from high port to avoid conflicts
@@ -270,7 +287,134 @@ class WorkspaceEnvironmentService {
   }
 
   /**
-   * Setup complete development environment with Docker
+   * Setup environment using TechLead-provided configuration (PREFERRED METHOD)
+   *
+   * This method uses explicit configuration from TechLead instead of auto-detection.
+   * TechLead knows the exact technology stack and provides:
+   * - Dockerfile content
+   * - docker-compose.yml content
+   * - Install/run/build/test commands
+   * - Required services (mongodb, redis, etc.)
+   */
+  async setupEnvironmentWithTechLeadConfig(
+    taskId: string,
+    workspacePath: string,
+    repositories: Array<{ name: string; type?: string; localPath?: string }>,
+    techLeadConfig: Record<string, TechLeadEnvironmentConfig>
+  ): Promise<WorkspaceEnvironment> {
+    console.log(`\n🐳 [WorkspaceEnv] Setting up environment with TechLead configuration for task ${taskId}`);
+
+    const env: WorkspaceEnvironment = {
+      taskId,
+      workspacePath,
+      containers: [],
+      ports: new Map(),
+      envUrls: new Map(),
+      ready: false,
+    };
+
+    // Check Docker availability
+    const dockerAvailable = await this.isDockerAvailable();
+
+    try {
+      for (const repo of repositories) {
+        const repoPath = repo.localPath || path.join(workspacePath, repo.name);
+        const repoConfig = techLeadConfig[repo.name] || techLeadConfig[repo.type || ''];
+
+        if (!repoConfig) {
+          console.log(`   ⚠️  [WorkspaceEnv] No TechLead config for ${repo.name}, using auto-detection`);
+          continue;
+        }
+
+        console.log(`   📦 [WorkspaceEnv] Configuring ${repo.name}: ${repoConfig.language}/${repoConfig.framework}`);
+
+        // 1. Create Dockerfile if provided
+        if (repoConfig.dockerfile && dockerAvailable) {
+          const dockerfilePath = path.join(repoPath, 'Dockerfile');
+          const dockerfileContent = repoConfig.dockerfile.replace(/\\n/g, '\n');
+          fs.writeFileSync(dockerfilePath, dockerfileContent);
+          console.log(`      ✅ Created Dockerfile`);
+        }
+
+        // 2. Create docker-compose.yml if provided
+        if (repoConfig.dockerCompose && dockerAvailable) {
+          const composePath = path.join(repoPath, 'docker-compose.yml');
+          const composeContent = repoConfig.dockerCompose.replace(/\\n/g, '\n');
+          fs.writeFileSync(composePath, composeContent);
+          env.dockerComposeFile = composePath;
+          console.log(`      ✅ Created docker-compose.yml`);
+        }
+
+        // 3. Start required services if Docker available
+        if (dockerAvailable && repoConfig.requiredServices && repoConfig.requiredServices.length > 0) {
+          console.log(`      🚀 Starting required services: ${repoConfig.requiredServices.join(', ')}`);
+
+          // Generate and start services
+          const services = new Set(repoConfig.requiredServices);
+          const composeFile = await this.generateDockerCompose(taskId, repoPath, services);
+          await this.startContainers(taskId, repoPath, composeFile);
+          await this.waitForServices(taskId, services);
+
+          // Set up URLs
+          for (const service of services) {
+            const config = SERVICE_DEFINITIONS[service];
+            if (config) {
+              const port = this.getAssignedPort(taskId, service);
+              const url = config.urlTemplate
+                .replace('{port}', String(port))
+                .replace('{dbName}', `task_${taskId.slice(-8)}`);
+              env.envUrls.set(config.envVar, url);
+              env.ports.set(service, port);
+            }
+          }
+        }
+
+        // 4. Install dependencies using TechLead command
+        if (repoConfig.installCommand) {
+          console.log(`      📦 Installing: ${repoConfig.installCommand}`);
+          try {
+            execSync(repoConfig.installCommand, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 300000,
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            console.log(`      ✅ Dependencies installed`);
+          } catch (error: any) {
+            console.error(`      ❌ Install failed: ${error.message}`);
+          }
+        }
+
+        // 5. Setup .env file with container URLs
+        await this.setupEnvFile(repoPath, repo.name, repo.type, env.envUrls);
+
+        // 6. Assign app port
+        const appPort = repoConfig.defaultPort || await this.findAvailablePort();
+        env.ports.set(repo.name, appPort);
+        console.log(`      📍 App port: ${appPort}`);
+
+        // Store run command for later use
+        console.log(`      🏃 Run command: ${repoConfig.runCommand}`);
+      }
+
+      env.ready = true;
+      this.environments.set(taskId, env);
+
+      console.log(`\n✅ [WorkspaceEnv] Environment ready with TechLead configuration`);
+      this.printEnvironmentSummary(env);
+
+      return env;
+
+    } catch (error: any) {
+      console.error(`❌ [WorkspaceEnv] Failed to setup environment: ${error.message}`);
+      await this.cleanup(taskId);
+      throw error;
+    }
+  }
+
+  /**
+   * Setup complete development environment with Docker (auto-detection mode)
+   * Falls back to this when TechLead doesn't provide explicit configuration
    */
   async setupEnvironment(
     taskId: string,

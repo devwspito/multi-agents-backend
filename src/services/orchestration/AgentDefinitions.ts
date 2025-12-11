@@ -998,7 +998,32 @@ RUNTIME TEST REQUIRED:
   },
   "storyAssignments": [
     { "storyId": "story-id", "assignedTo": "dev-1" }
-  ]
+  ],
+  "environmentConfig": {
+    "backend": {
+      "language": "nodejs",
+      "framework": "express",
+      "installCommand": "npm install",
+      "runCommand": "npm run dev",
+      "buildCommand": "npm run build",
+      "testCommand": "npm test",
+      "defaultPort": 3001,
+      "requiredServices": ["mongodb", "redis"],
+      "dockerfile": "FROM node:18-alpine\\nWORKDIR /app\\nCOPY package*.json ./\\nRUN npm install\\nCOPY . .\\nEXPOSE 3001\\nCMD [\"npm\", \"run\", \"dev\"]",
+      "dockerCompose": "version: '3.8'\\nservices:\\n  app:\\n    build: .\\n    ports:\\n      - '3001:3001'\\n    depends_on:\\n      - mongodb\\n  mongodb:\\n    image: mongo:6\\n    ports:\\n      - '27017:27017'"
+    },
+    "frontend": {
+      "language": "nodejs",
+      "framework": "react",
+      "installCommand": "npm install",
+      "runCommand": "npm run dev",
+      "buildCommand": "npm run build",
+      "testCommand": "npm test",
+      "defaultPort": 3000,
+      "requiredServices": [],
+      "dockerfile": "FROM node:18-alpine\\nWORKDIR /app\\nCOPY package*.json ./\\nRUN npm install\\nCOPY . .\\nEXPOSE 3000\\nCMD [\"npm\", \"run\", \"dev\"]"
+    }
+  }
 }
 \`\`\`
 
