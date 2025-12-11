@@ -326,8 +326,28 @@ export class OrchestrationCoordinator {
         repo.localPath = path.join(workspacePath, repo.name);
       });
 
+      // 🚀 NEW: Setup development environment (npm install, .env, etc.)
+      const { workspaceEnvironmentService } = await import('../WorkspaceEnvironmentService');
+      const devEnvironment = await workspaceEnvironmentService.setupEnvironment(
+        taskId,
+        workspacePath,
+        repositories.map((r: any) => ({
+          name: r.name,
+          type: r.type || (r.name.toLowerCase().includes('backend') ? 'backend' :
+                          r.name.toLowerCase().includes('frontend') ? 'frontend' : undefined),
+          localPath: r.localPath,
+        }))
+      );
+      console.log(`✅ Development environment ready. Ports: ${JSON.stringify(Object.fromEntries(devEnvironment.ports))}`);
+
       // Create orchestration context (shared state for all phases)
       const context = new OrchestrationContext(task, repositories, workspacePath);
+
+      // 🚀 Store environment info in context for developers to use
+      context.setData('devEnvironment', {
+        ports: Object.fromEntries(devEnvironment.ports),
+        ready: devEnvironment.ready,
+      });
 
       // 🔑 Get project-specific API key with fallback chain:
       // 1. Project API key (if set)
@@ -2261,6 +2281,15 @@ After writing code, you MUST follow this EXACT sequence:
 
     // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks
     const taskId = (task._id as any).toString();
+
+    // Clean up development environment (stop services, free ports)
+    try {
+      const { workspaceEnvironmentService } = await import('../WorkspaceEnvironmentService');
+      await workspaceEnvironmentService.cleanup(taskId);
+      console.log(`🧹 Cleaned up development environment for task ${taskId}`);
+    } catch (cleanupError: any) {
+      console.warn(`⚠️  Environment cleanup warning: ${cleanupError.message}`);
+    }
 
     // Clean up cost budget config
     CostBudgetService.cleanupTaskConfig(taskId);

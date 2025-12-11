@@ -571,13 +571,22 @@ export class TeamOrchestrationPhase extends BasePhase {
     );
 
     try {
-      // 1️⃣ Create branch for this epic
-      // 🔥 UNIQUE BRANCH NAMING: Include taskId + timestamp + random suffix to prevent ANY conflicts
-      const taskShortId = (parentContext.task._id as any).toString().slice(-8); // Last 8 chars of taskId
-      const timestamp = Date.now();
-      const randomSuffix = Math.random().toString(36).substring(2, 8);
-      const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase(); // Sanitize epic id
-      const branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
+      // 1️⃣ Get or create branch for this epic
+      // Priority: epic.branchName (if already set) > generate unique name
+      let branchName: string;
+      if (epic.branchName) {
+        // Use existing branch name from EventStore/context
+        branchName = epic.branchName;
+        console.log(`   📌 [Team ${teamNumber}] Using EXISTING epic branch: ${branchName}`);
+      } else {
+        // Generate unique branch name (first time creating this epic's branch)
+        const taskShortId = (parentContext.task._id as any).toString().slice(-8);
+        const timestamp = Date.now();
+        const randomSuffix = Math.random().toString(36).substring(2, 8);
+        const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+        branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
+        console.log(`   📌 [Team ${teamNumber}] Creating NEW epic branch: ${branchName}`);
+      }
       const workspacePath = parentContext.workspacePath;
 
       // 🔥 DEFENSIVE VALIDATION: Check workspacePath type at team creation
@@ -907,7 +916,6 @@ export class TeamOrchestrationPhase extends BasePhase {
     }
 
     try {
-      const { execSync } = require('child_process');
       const { NotificationService } = await import('../NotificationService');
 
       // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
@@ -950,84 +958,302 @@ export class TeamOrchestrationPhase extends BasePhase {
         return;
       }
 
-      // Push epic branch to remote WITH TIMEOUT
+      // 🔥 TWO-STEP APPROACH: Normal push first, then agent recovery if failed
+      const prTitle = `Epic: ${epicTitle}`;
+      const prBody = `## 🎯 Epic Summary
+
+${epic.description || 'No description provided'}
+
+## 📊 Details
+
+- **Complexity**: ${epic.estimatedComplexity || 'Unknown'}
+- **Stories**: ${epic.stories?.length || 0}
+- **Affected Repositories**: ${epic.affectedRepositories?.join(', ') || targetRepo}
+
+## ✅ Validation
+
+- ✅ Code reviewed by Judge (per story)
+- ✅ Integration tested by QA Engineer
+- ✅ All stories merged to epic branch
+
+## 📝 Instructions
+
+1. Review the changes
+2. Approve and merge this PR
+3. Epic will be deployed to production
+
+---
+🤖 Generated with Multi-Agent Platform`;
+
+      let prUrl: string | null = null;
+      let prNumber: number | null = null;
+      let firstAttemptError: string | null = null;
+
+      // ═══════════════════════════════════════════════════════════════════
+      // STEP 0: Ensure epic branch exists and has story branches merged
+      // ═══════════════════════════════════════════════════════════════════
+      console.log(`\n🔧 [PR] STEP 0: Ensuring epic branch exists with merged stories...`);
       try {
-        console.log(`📤 [PR] Pushing ${epicBranch} to remote...`);
+        const { execSync } = require('child_process');
+        const { safeGitExecSync } = await import('../../utils/safeGitExecution');
 
-        // 🔥 CRITICAL: Fix remote auth before pushing
+        // Check if epic branch exists locally
+        let epicBranchExists = false;
+        try {
+          execSync(`git rev-parse --verify ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+          epicBranchExists = true;
+          console.log(`   ✅ Epic branch exists locally: ${epicBranch}`);
+        } catch {
+          console.log(`   ⚠️  Epic branch does NOT exist locally: ${epicBranch}`);
+        }
+
+        // Check if epic branch exists on remote
+        let epicBranchExistsRemote = false;
+        try {
+          safeGitExecSync('git fetch origin', { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+          epicBranchExistsRemote = true;
+          console.log(`   ✅ Epic branch exists on remote: origin/${epicBranch}`);
+        } catch {
+          console.log(`   ⚠️  Epic branch does NOT exist on remote`);
+        }
+
+        if (!epicBranchExists && !epicBranchExistsRemote) {
+          // Create epic branch from main
+          console.log(`   🔨 Creating epic branch from main...`);
+          safeGitExecSync('git checkout main', { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync('git pull origin main', { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+          safeGitExecSync(`git checkout -b ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          console.log(`   ✅ Created epic branch: ${epicBranch}`);
+        } else if (epicBranchExistsRemote && !epicBranchExists) {
+          // Checkout existing remote epic branch
+          console.log(`   🔨 Checking out remote epic branch...`);
+          safeGitExecSync(`git checkout -b ${epicBranch} origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          console.log(`   ✅ Checked out epic branch from remote`);
+        } else {
+          // Epic branch exists locally, just checkout
+          safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          console.log(`   ✅ Checked out existing epic branch`);
+        }
+
+        // Get story branches that belong to this epic and merge them
+        const storyBranches = epic.stories?.map((s: any) => s.branchName || `story/${epic.id}-${s.id}`) || [];
+        console.log(`   📋 Story branches to merge: ${storyBranches.length}`);
+
+        for (const storyBranch of storyBranches) {
+          if (!storyBranch) continue;
+          try {
+            // Check if story branch exists
+            execSync(`git rev-parse --verify origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+            console.log(`   🔀 Merging ${storyBranch}...`);
+            safeGitExecSync(`git merge origin/${storyBranch} --no-edit -m "Merge ${storyBranch} into epic"`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 60000
+            });
+            console.log(`      ✅ Merged ${storyBranch}`);
+          } catch (mergeError: any) {
+            if (mergeError.message?.includes('Already up to date')) {
+              console.log(`      ℹ️  ${storyBranch} already merged`);
+            } else if (mergeError.message?.includes('does not match any')) {
+              console.log(`      ⚠️  ${storyBranch} not found on remote, skipping`);
+            } else {
+              console.warn(`      ⚠️  Could not merge ${storyBranch}: ${mergeError.message}`);
+            }
+          }
+        }
+
+        console.log(`   ✅ Epic branch ready: ${epicBranch}`);
+
+      } catch (step0Error: any) {
+        console.error(`   ❌ STEP 0 failed: ${step0Error.message}`);
+        // Continue anyway - ATTEMPT 1 or 2 might still work
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // ATTEMPT 1: Normal push + PR creation (fast, no agent cost)
+      // ═══════════════════════════════════════════════════════════════════
+      console.log(`\n📤 [PR] ATTEMPT 1: Normal push + PR creation...`);
+      try {
+        const { execSync } = require('child_process');
+        const { fixGitRemoteAuth, safeGitExecSync } = await import('../../utils/safeGitExecution');
+
+        // Fix auth and push
         fixGitRemoteAuth(repoPath);
-
-        // Push using safe git execution
         safeGitExecSync(`git push -u origin ${epicBranch}`, {
           cwd: repoPath,
           encoding: 'utf8',
-          timeout: 30000 // 30 seconds max
+          timeout: 60000 // 60 seconds
         });
-        console.log(`✅ [PR] Pushed ${epicBranch} to remote`);
-      } catch (pushError: any) {
-        console.error(`❌ [PR] Failed to push branch: ${pushError.message}`);
+        console.log(`✅ [PR] Push succeeded`);
+
+        // Create PR
+        const prOutput = execSync(
+          `gh pr create --base main --head "${epicBranch}" --title "${prTitle.replace(/"/g, '\\"')}" --body "${prBody.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`,
+          { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
+        );
+
+        // Extract PR URL
+        const prUrlMatch = prOutput.match(/https:\/\/github\.com\/[^\s]+/);
+        prUrl = prUrlMatch ? prUrlMatch[0] : null;
+        const prNumberMatch = prUrl?.match(/\/pull\/(\d+)/);
+        prNumber = prNumberMatch ? parseInt(prNumberMatch[1]) : null;
+
+        console.log(`✅ [PR] PR created: ${prUrl}`);
+
+      } catch (attempt1Error: any) {
+        firstAttemptError = attempt1Error.message;
+        console.warn(`⚠️  [PR] Attempt 1 failed: ${firstAttemptError}`);
+
+        // Check if PR already exists
+        if (firstAttemptError && firstAttemptError.includes('already exists')) {
+          try {
+            const { execSync } = require('child_process');
+            const existingPR = execSync(`gh pr view ${epicBranch} --json url,number`, {
+              cwd: repoPath,
+              encoding: 'utf8'
+            });
+            const prData = JSON.parse(existingPR);
+            prUrl = prData.url;
+            prNumber = prData.number;
+            console.log(`✅ [PR] PR already exists: ${prUrl}`);
+          } catch {
+            // Continue to agent recovery
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // ATTEMPT 2: Spawn git-flow-manager agent for recovery
+      // ═══════════════════════════════════════════════════════════════════
+      if (!prUrl && firstAttemptError) {
+        console.log(`\n🤖 [PR] ATTEMPT 2: Spawning git-flow-manager agent for recovery...`);
+        console.log(`   Error from attempt 1: ${firstAttemptError}`);
+
+        try {
+          const { getAgentDefinition } = await import('./AgentDefinitions');
+
+          const agentDef = getAgentDefinition('git-flow-manager');
+          if (!agentDef) {
+            throw new Error('git-flow-manager agent not found in AgentDefinitions');
+          }
+
+          const recoveryPrompt = `## 🚨 GIT FLOW RECOVERY REQUIRED
+
+A normal push + PR creation FAILED. Your job is to diagnose and fix the issue.
+
+### Context
+- **Repository Path**: ${repoPath}
+- **Branch to Push**: ${epicBranch}
+- **Target Branch**: main
+- **PR Title**: ${prTitle}
+- **Error Message**: ${firstAttemptError}
+
+### PR Body (use this when creating PR):
+${prBody}
+
+### What Failed
+The normal \`git push\` or \`gh pr create\` failed with the error above.
+
+### Your Task
+1. Diagnose why it failed (auth? branch exists? network?)
+2. Apply the appropriate fix
+3. Push the branch to origin
+4. Create the Pull Request
+5. Report the PR URL
+
+### Expected Output
+End your response with:
+\`\`\`
+✅ GIT_FLOW_SUCCESS
+📍 PR URL: <the PR URL>
+📍 PR Number: <the PR number>
+📍 Diagnosis: <what was wrong>
+📍 Fix Applied: <what you did>
+\`\`\`
+
+Or if you cannot fix it:
+\`\`\`
+❌ GIT_FLOW_FAILED
+📍 Error: <description>
+📍 Action Required: <what human needs to do>
+\`\`\``;
+
+          // Use the executeAgentFn passed to this phase
+          // Signature: (agentType, prompt, workspacePath, taskId, agentName, sessionId, fork, attachments, options)
+          const agentResult = await this.executeAgentFn(
+            'git-flow-manager',
+            recoveryPrompt,
+            repoPath,        // workspacePath as STRING (3rd param)
+            taskId,          // taskId
+            'git-flow-manager', // agentName
+            undefined,       // sessionId
+            undefined,       // fork
+            undefined,       // attachments
+            { maxIterations: 20 } // options
+          );
+
+          // Parse agent output for PR URL
+          const output = agentResult?.output || '';
+          if (output.includes('GIT_FLOW_SUCCESS')) {
+            const urlMatch = output.match(/📍 PR URL:\s*(https:\/\/github\.com\/[^\s]+)/);
+            const numMatch = output.match(/📍 PR Number:\s*(\d+)/);
+            prUrl = urlMatch ? urlMatch[1] : null;
+            prNumber = numMatch ? parseInt(numMatch[1]) : null;
+            console.log(`✅ [PR] Agent recovery succeeded: ${prUrl}`);
+          } else if (output.includes('GIT_FLOW_FAILED')) {
+            console.error(`❌ [PR] Agent recovery failed`);
+            const actionMatch = output.match(/📍 Action Required:\s*(.+)/);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `❌ Git flow recovery failed. ${actionMatch ? actionMatch[1] : 'Manual intervention required.'}`
+            );
+          }
+
+        } catch (agentError: any) {
+          console.error(`❌ [PR] Agent recovery error: ${agentError.message}`);
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // FINAL: Report result
+      // ═══════════════════════════════════════════════════════════════════
+      if (!prUrl) {
         NotificationService.emitConsoleLog(
           taskId,
           'warn',
-          `⚠️  Could not push ${epicBranch} - PR creation skipped. Push manually and create PR.`
+          `⚠️  Could not create PR for ${epicBranch}. Push manually and create PR.`
         );
         return;
       }
 
-      // Create PR using GitHub CLI
-      // 🔥 FIX: Use epicTitle (already defined above with fallback)
-      const prTitle = `Epic: ${epicTitle}`;
-      const prBody = `## 🎯 Epic Summary\n\n${epic.description || 'No description provided'}\n\n## 📊 Details\n\n- **Complexity**: ${epic.estimatedComplexity || 'Unknown'}\n- **Stories**: ${epic.stories?.length || 0}\n- **Affected Repositories**: ${epic.affectedRepositories?.join(', ') || targetRepo}\n\n## ✅ Validation\n\n- ✅ Code reviewed by Judge (per story)\n- ✅ Integration tested by QA Engineer\n- ✅ All stories merged to epic branch\n\n## 📝 Instructions\n\n1. Review the changes\n2. Approve and merge this PR\n3. Epic will be deployed to production\n\n---\n🤖 Generated with Multi-Agent Platform`;
+      // ✅ Success - PR was created
 
-      try {
-        const prOutput = execSync(
-          `cd "${repoPath}" && gh pr create --base main --head ${epicBranch} --title "${prTitle}" --body "${prBody}"`,
-          { encoding: 'utf8' }
-        );
+      console.log(`✅ [PR] Pull Request created successfully!`);
+      console.log(`   URL: ${prUrl}`);
 
-        // Extract PR URL from output
-        const prUrlMatch = prOutput.match(/https:\/\/github\.com\/[^\s]+/);
-        const prUrl = prUrlMatch ? prUrlMatch[0] : 'PR created (URL not found)';
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `📬 Pull Request created: ${prUrl}`
+      );
 
-        console.log(`✅ [PR] Pull Request created successfully!`);
-        console.log(`   URL: ${prUrl}`);
-
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `📬 Pull Request created: ${prUrl}`
-        );
-
-        // Store PR URL in epic metadata
-        const { eventStore } = await import('../EventStore');
-        await eventStore.append({
-          taskId: taskId as any,
-          eventType: 'TeamCompleted' as any, // Store PR info in TeamCompleted event
-          agentName: 'team-orchestration',
-          payload: {
-            epicId: epic.id,
-            epicTitle: epic.title,
-            prUrl: prUrl,
-            epicBranch: epicBranch,
-            prCreated: true
-          }
-        });
-
-      } catch (ghError: any) {
-        // GitHub CLI not available or other error
-        console.warn(`⚠️  [PR] Could not create PR automatically: ${ghError.message}`);
-        console.log(`\n📋 [PR] Manual PR instructions:`);
-        console.log(`   1. Go to your repository`);
-        console.log(`   2. Create a new Pull Request`);
-        console.log(`   3. Base: main ← Compare: ${epicBranch}`);
-        console.log(`   4. Title: ${prTitle}`);
-
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `📋 Epic completed! Create PR manually: ${epicBranch} → main`
-        );
-      }
+      // Store PR in EventStore so AutoMerge can find it
+      // MUST use 'PRCreated' event type - EventStore.getCurrentState() looks for this
+      const { eventStore } = await import('../EventStore');
+      await eventStore.append({
+        taskId: taskId as any,
+        eventType: 'PRCreated' as any,  // <-- EventStore expects this, NOT 'TeamCompleted'
+        agentName: 'team-orchestration',
+        payload: {
+          epicId: epic.id,
+          epicTitle: epic.title,
+          prUrl: prUrl,
+          prNumber: prNumber,
+          epicBranch: epicBranch
+        }
+      });
 
     } catch (error: any) {
       console.error(`❌ [PR] Unexpected error creating PR: ${error.message}`);

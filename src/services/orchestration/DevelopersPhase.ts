@@ -855,6 +855,13 @@ export class DevelopersPhase extends BasePhase {
       // 🔥🔥🔥 ISOLATED WORKSPACE: Developer works in story-specific workspace 🔥🔥🔥
       console.log(`   📂 Developer workspace: ${effectiveWorkspacePath}/${epic.targetRepository}`);
 
+      // 🔥🔥🔥 CRITICAL: 1 Developer = 1 Story 🔥🔥🔥
+      // Developer should NEVER receive multiple stories!
+      // Pass ONLY the story this Developer is assigned to work on.
+      console.log(`   🎯 Developer ${developer.instanceId} working on SINGLE story: "${story.title}"`);
+      console.log(`   📍 Story ID: ${story.id}`);
+      console.log(`   ⚠️  Passing 1 story (NOT ${state.stories.length} stories)`);
+
       const developerResult = await this.executeDeveloperFn(
         task,
         developer,
@@ -862,7 +869,7 @@ export class DevelopersPhase extends BasePhase {
         effectiveWorkspacePath,  // 🔥 ISOLATED per story!
         workspaceStructure,
         attachments,
-        state.stories,
+        [story],  // 🔥🔥🔥 CRITICAL: ONLY this story, NOT state.stories (1 Dev = 1 Story)
         state.epics,
         undefined, // judgeFeedback
         epicBranchName // Epic branch name from TeamOrchestrationPhase
