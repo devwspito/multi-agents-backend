@@ -469,9 +469,52 @@ ${repoInfo}
             estimatedComplexity: story.estimatedComplexity,
             status: 'pending',
             dependencies: story.dependencies || [],
+            filesToModify: story.filesToModify || [],
+            filesToCreate: story.filesToCreate || [],
+            filesToRead: story.filesToRead || [],
           };
         });
       });
+
+      // 🚨🚨🚨 CRITICAL: VALIDATE NO FILE OVERLAPS BETWEEN STORIES 🚨🚨🚨
+      // If two stories modify the same file, it will cause merge conflicts
+      console.log(`\n🔍 [TechLead] Validating story file overlaps...`);
+      const { validateStoryOverlap, logOverlapValidation } = await import('./utils/StoryOverlapValidator');
+
+      // Collect all stories from all epics for validation
+      const allStories = parsed.epics.flatMap((epic: any) =>
+        epic.stories.map((story: any) => ({
+          id: story.id,
+          title: story.title,
+          filesToModify: story.filesToModify || [],
+          filesToCreate: story.filesToCreate || [],
+          filesToRead: story.filesToRead || [],
+        }))
+      );
+
+      const overlapResult = validateStoryOverlap(allStories);
+      logOverlapValidation(overlapResult, taskId);
+
+      if (overlapResult.hasOverlap) {
+        console.error(`\n❌❌❌ [TechLead] CRITICAL: FILE OVERLAP DETECTED! ❌❌❌`);
+        console.error(`   This WILL cause merge conflicts when developers work in parallel!`);
+        console.error(`\n   Conflicts found:`);
+        for (const conflict of overlapResult.conflicts) {
+          console.error(`   📄 ${conflict.file}`);
+          console.error(`      → Modified by: ${conflict.stories.join(', ')}`);
+        }
+        console.error(`\n   ⚠️  TechLead must redesign stories to avoid file overlaps!`);
+        console.error(`   💡 Options: 1) One file per story, 2) Sequential dependencies, 3) Vertical slicing`);
+
+        // 🔥 FAIL THE TASK - We cannot proceed with overlapping stories
+        throw new Error(
+          `FILE_OVERLAP_DETECTED: ${overlapResult.conflicts.length} file(s) are modified by multiple stories. ` +
+          `This will cause merge conflicts. TechLead must redesign stories. ` +
+          `Conflicts: ${overlapResult.conflicts.map(c => c.file).join(', ')}`
+        );
+      }
+
+      console.log(`✅ [TechLead] No file overlaps detected - parallel execution is safe`);
 
       // 🔥 CRITICAL: VALIDATE and INHERIT targetRepository for multi-team mode
       if (multiTeamMode && teamEpic) {
@@ -546,101 +589,6 @@ ${repoInfo}
           });
         }
       }
-
-      // 🔥🔥🔥 CREATE STORY BRANCHES - TechLead creates all branches upfront
-      // This ensures branches exist on remote BEFORE developers start
-      console.log(`\n🌿🌿🌿 [TechLead] CREATING STORY BRANCHES 🌿🌿🌿`);
-      const { safeGitExecSync } = await import('../../utils/safeGitExecution');
-
-      for (const epic of parsed.epics) {
-        if (!epic.targetRepository || !workspacePath) {
-          console.warn(`⚠️  [TechLead] Skipping branch creation for epic ${epic.id} - missing targetRepository or workspacePath`);
-          continue;
-        }
-
-        const repoPath = `${workspacePath}/${epic.targetRepository}`;
-        const epicBranch = epic.branchName || `epic/${epic.id}`;
-
-        console.log(`\n📦 [TechLead] Creating story branches for epic: ${epic.id}`);
-        console.log(`   📂 Repository: ${epic.targetRepository}`);
-        console.log(`   🌿 Epic branch: ${epicBranch}`);
-
-        // Checkout epic branch first
-        try {
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
-          safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8' });
-          console.log(`   ✅ Checked out epic branch: ${epicBranch}`);
-        } catch (epicCheckoutError: any) {
-          console.error(`   ❌ Failed to checkout epic branch ${epicBranch}: ${epicCheckoutError.message}`);
-          continue;
-        }
-
-        for (const story of epic.stories) {
-          // Generate unique branch name
-          const taskShortId = taskId.slice(-8);
-          const timestamp = Date.now();
-          const randomSuffix = Math.random().toString(36).substring(2, 8);
-          const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-          const storyBranchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
-
-          console.log(`   🌿 Creating branch: ${storyBranchName} for story: ${story.id}`);
-
-          try {
-            // Create story branch from epic branch
-            safeGitExecSync(`git checkout -b ${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`      ✅ Created local branch: ${storyBranchName}`);
-
-            // Push to remote immediately
-            safeGitExecSync(`git push -u origin ${storyBranchName}`, {
-              cwd: repoPath,
-              encoding: 'utf8',
-              timeout: 90000, // 90s for network operations
-            });
-            console.log(`      ✅ Pushed to remote: ${storyBranchName}`);
-
-            // Go back to epic branch for next story
-            safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8' });
-
-            // 🔥 CRITICAL: Store branchName in storiesMap
-            if (storiesMap[story.id]) {
-              storiesMap[story.id].branchName = storyBranchName;
-            }
-
-            // 🔥 CRITICAL: Update story object for later use
-            story.branchName = storyBranchName;
-
-            // Emit StoryBranchCreated event
-            await eventStore.append({
-              taskId: task._id as any,
-              eventType: 'StoryBranchCreated',
-              agentName: 'tech-lead',
-              payload: {
-                storyId: story.id,
-                epicId: epic.id,
-                branchName: storyBranchName,
-                repository: epic.targetRepository,
-              },
-            });
-
-          } catch (branchError: any) {
-            console.error(`      ❌ Failed to create story branch ${storyBranchName}`);
-            if (branchError.message?.includes('TIMEOUT') || branchError.message?.includes('timed out')) {
-              console.error(`         CAUSE: Network timeout (90s) - git push to remote failed`);
-              console.error(`         ACTION: Check network connection`);
-            } else if (branchError.message?.includes('already exists')) {
-              console.error(`         CAUSE: Branch already exists (might be a retry)`);
-            } else if (branchError.message?.includes('authentication') || branchError.message?.includes('auth')) {
-              console.error(`         CAUSE: Authentication failure - check GitHub credentials`);
-            } else {
-              console.error(`         Details: ${branchError.message}`);
-            }
-            // Continue with other stories even if one fails
-          }
-        }
-      }
-
-      console.log(`\n✅ [TechLead] Story branch creation completed`);
-      console.log(`🌿🌿🌿 END STORY BRANCH CREATION 🌿🌿🌿\n`);
 
       // Emit team composition event
       await eventStore.append({

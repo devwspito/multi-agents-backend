@@ -79,6 +79,7 @@ export interface AgentModelConfig {
   'error-detective': ClaudeModel;
   'story-merge-agent': ClaudeModel;
   'git-flow-manager': ClaudeModel;
+  'conflict-resolver': ClaudeModel;  // Resolves git merge conflicts with AI
 }
 
 /**
@@ -96,6 +97,7 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
   'auto-merge': 'sonnet',
   'story-merge-agent': 'sonnet',
   'git-flow-manager': 'sonnet',
+  'conflict-resolver': 'sonnet',
 };
 
 /**
@@ -114,6 +116,7 @@ export const STANDARD_CONFIG: AgentModelConfig = {
   'auto-merge': 'haiku',
   'story-merge-agent': 'haiku',
   'git-flow-manager': 'haiku',
+  'conflict-resolver': 'haiku',  // 💨 Fast conflict resolution
 };
 
 /**
@@ -143,6 +146,7 @@ export const RECOMMENDED_CONFIG: AgentModelConfig = {
   'auto-merge': 'haiku',
   'story-merge-agent': 'haiku',
   'git-flow-manager': 'haiku',
+  'conflict-resolver': 'haiku',  // 💨 Fast conflict resolution
 };
 
 /**
@@ -161,6 +165,7 @@ export const MAX_CONFIG: AgentModelConfig = {
   'error-detective': 'opus',
   'story-merge-agent': 'opus',
   'git-flow-manager': 'opus',
+  'conflict-resolver': 'opus',
 };
 
 /**
@@ -194,6 +199,7 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
     'auto-merge': bottomModel,
     'story-merge-agent': bottomModel,
     'git-flow-manager': bottomModel,
+    'conflict-resolver': bottomModel,
   };
 }
 
@@ -214,6 +220,7 @@ export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
     'error-detective': dbConfig.errorDetective || dbConfig['error-detective'] || RECOMMENDED_CONFIG['error-detective'],
     'story-merge-agent': dbConfig.storyMergeAgent || dbConfig['story-merge-agent'] || RECOMMENDED_CONFIG['story-merge-agent'],
     'git-flow-manager': dbConfig.gitFlowManager || dbConfig['git-flow-manager'] || RECOMMENDED_CONFIG['git-flow-manager'],
+    'conflict-resolver': dbConfig.conflictResolver || dbConfig['conflict-resolver'] || RECOMMENDED_CONFIG['conflict-resolver'],
   };
 }
 
