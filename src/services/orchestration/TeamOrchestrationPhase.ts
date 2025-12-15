@@ -759,9 +759,16 @@ export class TeamOrchestrationPhase extends BasePhase {
         teamWorkspacePath  // 🔥 ISOLATED workspace, not shared!
       );
 
-      // Share workspace structure and attachments
+      // Share workspace structure, attachments, and devAuth
       teamContext.setData('workspaceStructure', parentContext.getData('workspaceStructure'));
       teamContext.setData('attachments', parentContext.getData('attachments'));
+
+      // 🔐 CRITICAL: Pass devAuth to team context (for testing authenticated endpoints)
+      const devAuth = parentContext.getData<any>('devAuth');
+      if (devAuth) {
+        teamContext.setData('devAuth', devAuth);
+        console.log(`🔐 [Team ${teamNumber}] DevAuth passed to team context: method=${devAuth.method}`);
+      }
 
       // Store epic for this team to work on (Tech Lead will divide into stories)
       // 🔥 CRITICAL: Add the unique branchName to the epic object

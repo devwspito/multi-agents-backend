@@ -176,8 +176,10 @@ export class DevelopersPhase extends BasePhase {
     // Initialize cost tracking
     let totalDeveloperCost = 0;
     let totalJudgeCost = 0;
+    let totalConflictResolutionCost = 0;
     let totalDeveloperTokens = { input: 0, output: 0 };
     let totalJudgeTokens = { input: 0, output: 0 };
+    let totalConflictResolutionTokens = { input: 0, output: 0 };
 
     // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
     const attachments = context.getData<any[]>('attachments') || [];
@@ -589,10 +591,22 @@ export class DevelopersPhase extends BasePhase {
             if (costs) {
               totalDeveloperCost += costs.developerCost;
               totalJudgeCost += costs.judgeCost;
+              totalConflictResolutionCost += costs.conflictResolutionCost || 0;
               totalDeveloperTokens.input += costs.developerTokens?.input || 0;
               totalDeveloperTokens.output += costs.developerTokens?.output || 0;
               totalJudgeTokens.input += costs.judgeTokens?.input || 0;
               totalJudgeTokens.output += costs.judgeTokens?.output || 0;
+              totalConflictResolutionTokens.input += costs.conflictResolutionUsage?.input_tokens || 0;
+              totalConflictResolutionTokens.output += costs.conflictResolutionUsage?.output_tokens || 0;
+
+              // 🔥 COST TRACKING: Update member with accumulated costs
+              // This ensures task.orchestration.team[] has accurate cost data
+              member.cost_usd = (member.cost_usd || 0) + (costs.developerCost || 0);
+              if (!member.usage) {
+                member.usage = { input_tokens: 0, output_tokens: 0 };
+              }
+              member.usage.input_tokens += costs.developerTokens?.input || 0;
+              member.usage.output_tokens += costs.developerTokens?.output || 0;
             }
           }
         }
@@ -641,7 +655,36 @@ export class DevelopersPhase extends BasePhase {
       console.log(`\n💰 Development Phase Cost Summary:`);
       console.log(`   Developers total: $${totalDeveloperCost.toFixed(4)} (${totalDeveloperTokens.input + totalDeveloperTokens.output} tokens)`);
       console.log(`   Judge total: $${totalJudgeCost.toFixed(4)} (${totalJudgeTokens.input + totalJudgeTokens.output} tokens)`);
-      console.log(`   Phase total: $${(totalDeveloperCost + totalJudgeCost).toFixed(4)}`);
+      if (totalConflictResolutionCost > 0) {
+        console.log(`   Conflict Resolution: $${totalConflictResolutionCost.toFixed(4)} (${totalConflictResolutionTokens.input + totalConflictResolutionTokens.output} tokens)`);
+      }
+      console.log(`   Phase total: $${(totalDeveloperCost + totalJudgeCost + totalConflictResolutionCost).toFixed(4)}`);
+
+      // 🔥 COST TRACKING: Save costs to task.orchestration (for handleOrchestrationComplete)
+      if (!multiTeamMode) {
+        // Update team with costs (members already have cost_usd/usage from loop above)
+        task.orchestration.team = team;
+
+        // Initialize judge if not exists
+        if (!task.orchestration.judge) {
+          task.orchestration.judge = {
+            agent: 'judge',
+            status: 'completed',
+            evaluations: [],
+          } as any;
+        }
+        task.orchestration.judge!.cost_usd = totalJudgeCost;
+        task.orchestration.judge!.usage = {
+          input_tokens: totalJudgeTokens.input,
+          output_tokens: totalJudgeTokens.output,
+        };
+
+        // Accumulate to total cost (includes conflict resolution)
+        task.orchestration.totalCost = (task.orchestration.totalCost || 0) + totalDeveloperCost + totalJudgeCost + totalConflictResolutionCost;
+
+        await task.save();
+        console.log(`✅ [Developers] Costs saved to task.orchestration`);
+      }
 
       return {
         success: true,
@@ -725,8 +768,10 @@ export class DevelopersPhase extends BasePhase {
   ): Promise<{
     developerCost: number;
     judgeCost: number;
+    conflictResolutionCost: number;
     developerTokens: { input: number; output: number };
     judgeTokens: { input: number; output: number };
+    conflictResolutionUsage: { input_tokens: number; output_tokens: number };
   }> {
     const taskId = (task._id as any).toString();
     const fs = require('fs');
@@ -924,8 +969,10 @@ export class DevelopersPhase extends BasePhase {
         return {
           developerCost: 0,
           judgeCost: 0,
+          conflictResolutionCost: 0,
           developerTokens: { input: 0, output: 0 },
-          judgeTokens: { input: 0, output: 0 }
+          judgeTokens: { input: 0, output: 0 },
+          conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
         };
       }
 
@@ -944,8 +991,10 @@ export class DevelopersPhase extends BasePhase {
         return {
           developerCost,
           judgeCost: 0,
+          conflictResolutionCost: 0,
           developerTokens,
-          judgeTokens: { input: 0, output: 0 }
+          judgeTokens: { input: 0, output: 0 },
+          conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
         };
       }
 
@@ -1071,8 +1120,10 @@ export class DevelopersPhase extends BasePhase {
           return {
             developerCost,
             judgeCost: 0,
+            conflictResolutionCost: 0,
             developerTokens,
-            judgeTokens: { input: 0, output: 0 }
+            judgeTokens: { input: 0, output: 0 },
+            conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
           };
         }
 
@@ -1090,8 +1141,10 @@ export class DevelopersPhase extends BasePhase {
         return {
           developerCost,
           judgeCost: 0,
+          conflictResolutionCost: 0,
           developerTokens,
-          judgeTokens: { input: 0, output: 0 }
+          judgeTokens: { input: 0, output: 0 },
+          conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
         };
       }
 
@@ -1146,8 +1199,10 @@ export class DevelopersPhase extends BasePhase {
             return {
               developerCost,
               judgeCost: 0,
+              conflictResolutionCost: 0,
               developerTokens,
-              judgeTokens: { input: 0, output: 0 }
+              judgeTokens: { input: 0, output: 0 },
+              conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
             };
           }
 
@@ -1346,8 +1401,10 @@ export class DevelopersPhase extends BasePhase {
             return {
               developerCost,
               judgeCost: 0,
+              conflictResolutionCost: 0,
               developerTokens,
-              judgeTokens: { input: 0, output: 0 }
+              judgeTokens: { input: 0, output: 0 },
+              conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
             };
           }
         } catch (outerSyncError: any) {
@@ -1486,11 +1543,18 @@ export class DevelopersPhase extends BasePhase {
         );
       }
 
+      // 🔥 COST TRACKING: Include conflict resolution cost from merge operation
+      // Cast to any since conflictResolutionCost is dynamically added in mergeStoryToEpic
+      const conflictResolutionCost = (updatedStory as any).conflictResolutionCost || 0;
+      const conflictResolutionUsage = (updatedStory as any).conflictResolutionUsage || { input_tokens: 0, output_tokens: 0 };
+
       return {
         developerCost,
         judgeCost,
+        conflictResolutionCost,
         developerTokens,
-        judgeTokens
+        judgeTokens,
+        conflictResolutionUsage
       };
 
     } catch (error: any) {
@@ -1498,8 +1562,10 @@ export class DevelopersPhase extends BasePhase {
       return {
         developerCost: 0,
         judgeCost: 0,
+        conflictResolutionCost: 0,
         developerTokens: { input: 0, output: 0 },
-        judgeTokens: { input: 0, output: 0 }
+        judgeTokens: { input: 0, output: 0 },
+        conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
       };
     }
   }
@@ -1784,50 +1850,379 @@ export class DevelopersPhase extends BasePhase {
         console.error(`   Story: ${story.title}`);
         console.error(`   Branch: ${story.branchName}`);
         console.error(`   Epic: epic/${epic.id}`);
-        console.error(`\n   📋 ACTION REQUIRED:`);
-        console.error(`   1. This story modifies files that were changed in another story`);
-        console.error(`   2. Aborting merge and marking story for manual resolution`);
-        console.error(`   3. Story will NOT block other stories in the epic`);
 
-        // Abort the conflicted merge
+        // 🔥 ATTEMPT TO RESOLVE CONFLICT AUTOMATICALLY
+        console.log(`\n🤖 [Merge] Attempting automatic conflict resolution...`);
+
+        // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
+        if (!epic.targetRepository) {
+          throw new Error(`Epic ${epic.id} has no targetRepository - cannot resolve conflict`);
+        }
+
+        const targetRepoObj = repositories.find(r =>
+          r.name === epic.targetRepository ||
+          r.full_name === epic.targetRepository ||
+          r.githubRepoName === epic.targetRepository
+        );
+
+        if (!targetRepoObj) {
+          throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+        }
+
+        const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
+
+        // Get list of conflicted files
+        let conflictedFiles: string[] = [];
         try {
-          // 🔥 CRITICAL: epic MUST have targetRepository (no fallback)
-          if (!epic.targetRepository) {
-            throw new Error(`Epic ${epic.id} has no targetRepository - cannot abort merge`);
+          const diffOutput = safeGitExecSync(`cd "${repoPath}" && git diff --name-only --diff-filter=U`, {
+            encoding: 'utf8',
+          });
+          conflictedFiles = diffOutput.trim().split('\n').filter(f => f);
+          console.log(`   📄 Conflicted files: ${conflictedFiles.join(', ')}`);
+        } catch (diffError) {
+          console.error(`   ⚠️ Could not get conflicted files: ${diffError}`);
+        }
+
+        if (conflictedFiles.length > 0) {
+          try {
+            // Try simple auto-resolution strategies
+            console.log(`   🤖 Attempting simple conflict resolution...`);
+
+            let allResolved = true;
+            for (const file of conflictedFiles) {
+              try {
+                // Read the conflicted file
+                const fileContent = safeGitExecSync(`cd "${repoPath}" && cat "${file}"`, {
+                  encoding: 'utf8',
+                });
+
+                // Check if conflict markers exist
+                if (fileContent.includes('<<<<<<<') && fileContent.includes('>>>>>>>')) {
+                  // Try to resolve by keeping both changes (for additive conflicts)
+                  // This works for imports, new functions, etc.
+                  let resolved = fileContent;
+
+                  // Simple resolution: remove conflict markers and keep both versions
+                  // This is a basic strategy that works for additive changes
+                  const conflictPattern = /<<<<<<< HEAD\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> [^\n]+/g;
+
+                  resolved = resolved.replace(conflictPattern, (_match, head, incoming) => {
+                    // Keep both versions (head first, then incoming)
+                    // Remove exact duplicates
+                    const headLines = head.split('\n').filter((l: string) => l.trim());
+                    const incomingLines = incoming.split('\n').filter((l: string) => l.trim());
+
+                    // Combine unique lines
+                    const combined = [...headLines];
+                    for (const line of incomingLines) {
+                      if (!combined.includes(line)) {
+                        combined.push(line);
+                      }
+                    }
+                    return combined.join('\n');
+                  });
+
+                  // Check if all conflicts were resolved
+                  if (!resolved.includes('<<<<<<<') && !resolved.includes('>>>>>>>')) {
+                    // Write resolved file
+                    const fs = require('fs');
+                    fs.writeFileSync(`${repoPath}/${file}`, resolved, 'utf8');
+                    console.log(`   ✅ Resolved: ${file}`);
+                  } else {
+                    console.log(`   ❌ Could not fully resolve: ${file}`);
+                    allResolved = false;
+                  }
+                }
+              } catch (fileError: any) {
+                console.error(`   ❌ Error resolving ${file}: ${fileError.message}`);
+                allResolved = false;
+              }
+            }
+
+            if (allResolved) {
+              console.log(`   ✅ All conflicts resolved automatically!`);
+
+              // Stage resolved files and continue merge
+              safeGitExecSync(`cd "${repoPath}" && git add .`, { encoding: 'utf8' });
+              safeGitExecSync(
+                `cd "${repoPath}" && git commit -m "Merge story: ${story.title} (auto-resolved conflicts)"`,
+                { encoding: 'utf8' }
+              );
+
+              console.log(`   ✅ Merge completed with auto-resolved conflicts`);
+
+              // Update story status
+              story.status = 'completed';
+              story.mergedToEpic = true;
+              story.mergeConflict = false;
+              story.mergeConflictAutoResolved = true;
+
+              const { NotificationService } = await import('../NotificationService');
+              NotificationService.emitConsoleLog(
+                'system',
+                'info',
+                `✅ Story "${story.title}" merged with auto-resolved conflicts`
+              );
+
+              return; // Success!
+            } else {
+              console.log(`   ❌ Some conflicts could not be auto-resolved with regex`);
+              console.log(`   🤖 Attempting AI-powered conflict resolution...`);
+
+              // 🔥 CALL CONFLICT-RESOLVER AGENT
+              if (this.executeAgentFn) {
+                try {
+                  const aiResolved = await this.resolveConflictsWithAI(
+                    taskId,
+                    story,
+                    epic,
+                    repoPath,
+                    conflictedFiles
+                  );
+
+                  if (aiResolved.success) {
+                    console.log(`   ✅ AI resolved all conflicts!`);
+
+                    // Stage and commit
+                    safeGitExecSync(`cd "${repoPath}" && git add .`, { encoding: 'utf8' });
+                    safeGitExecSync(
+                      `cd "${repoPath}" && git commit -m "Merge story: ${story.title} (AI-resolved conflicts)"`,
+                      { encoding: 'utf8' }
+                    );
+
+                    console.log(`   ✅ Merge completed with AI-resolved conflicts`);
+
+                    story.status = 'completed';
+                    story.mergedToEpic = true;
+                    story.mergeConflict = false;
+                    story.mergeConflictAutoResolved = true;
+                    story.mergeConflictResolvedByAI = true;
+
+                    // 🔥 COST TRACKING: Store conflict resolution cost on story
+                    story.conflictResolutionCost = aiResolved.cost || 0;
+                    story.conflictResolutionUsage = aiResolved.usage || {};
+
+                    const { NotificationService } = await import('../NotificationService');
+                    NotificationService.emitConsoleLog(
+                      'system',
+                      'info',
+                      `✅ Story "${story.title}" merged with AI-resolved conflicts (cost: $${aiResolved.cost?.toFixed(4) || 0})`
+                    );
+
+                    return; // Success!
+                  } else {
+                    console.log(`   ❌ AI could not resolve conflicts: ${aiResolved.error}`);
+                    // Still track cost even on failure
+                    story.conflictResolutionCost = (story.conflictResolutionCost || 0) + (aiResolved.cost || 0);
+                  }
+                } catch (aiError: any) {
+                  console.error(`   ❌ AI resolution failed: ${aiError.message}`);
+                }
+              } else {
+                console.log(`   ⚠️ executeAgentFn not available - cannot use AI resolution`);
+              }
+            }
+          } catch (resolveError: any) {
+            console.error(`   ❌ Auto-resolution failed: ${resolveError.message}`);
           }
+        }
 
-          const targetRepoObj = repositories.find(r =>
-            r.name === epic.targetRepository ||
-            r.full_name === epic.targetRepository ||
-            r.githubRepoName === epic.targetRepository
-          );
-
-          if (!targetRepoObj) {
-            throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
-          }
-
-          const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
+        // If ALL resolution methods failed, abort merge and mark for manual resolution
+        console.log(`   📋 All automatic resolution methods failed - marking for manual resolution...`);
+        try {
           safeGitExecSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
-          console.log(`✅ [Merge] Aborted conflicted merge`);
+          console.log(`   ✅ Aborted conflicted merge`);
         } catch (abortError) {
-          console.error(`⚠️  Could not abort merge: ${abortError}`);
+          console.error(`   ⚠️ Could not abort merge: ${abortError}`);
         }
 
         // Mark story as having conflict (don't throw - let other stories continue)
         story.mergeConflict = true;
         story.mergeConflictDetails = error.message;
+        story.mergeConflictFiles = conflictedFiles;
 
         const { NotificationService } = await import('../NotificationService');
         NotificationService.emitConsoleLog(
           'system',
           'warn',
-          `⚠️  Story "${story.title}" has merge conflicts - marked for manual resolution`
+          `⚠️  Story "${story.title}" has merge conflicts that require manual resolution`
         );
 
         return; // Don't throw - let pipeline continue with other stories
       }
 
       throw error; // Re-throw non-conflict errors
+    }
+  }
+
+  /**
+   * 🤖 Resolve merge conflicts using AI agent
+   *
+   * Called when simple regex resolution fails. Uses the conflict-resolver agent
+   * to intelligently merge conflicting code changes.
+   *
+   * @returns { success: boolean, cost?: number, usage?: any, error?: string }
+   */
+  private async resolveConflictsWithAI(
+    taskId: string,
+    story: any,
+    epic: any,
+    repoPath: string,
+    conflictedFiles: string[]
+  ): Promise<{ success: boolean; cost?: number; usage?: any; error?: string }> {
+    console.log(`\n🤖 [ConflictResolver] Starting AI-powered conflict resolution`);
+    console.log(`   Story: ${story.title}`);
+    console.log(`   Epic: ${epic.title || epic.id}`);
+    console.log(`   Repository: ${repoPath}`);
+    console.log(`   Conflicted files: ${conflictedFiles.join(', ')}`);
+
+    if (!this.executeAgentFn) {
+      return { success: false, error: 'executeAgentFn not available' };
+    }
+
+    // Read the conflicted files to show the agent
+    const fs = require('fs');
+    const conflictDetails: string[] = [];
+
+    for (const file of conflictedFiles) {
+      try {
+        const filePath = `${repoPath}/${file}`;
+        const content = fs.readFileSync(filePath, 'utf8');
+        conflictDetails.push(`\n### File: ${file}\n\`\`\`\n${content}\n\`\`\``);
+      } catch (readError: any) {
+        conflictDetails.push(`\n### File: ${file}\nError reading: ${readError.message}`);
+      }
+    }
+
+    // Build prompt for conflict-resolver agent
+    const prompt = `# Git Merge Conflict Resolution Required
+
+## Context
+- **Story**: ${story.title}
+- **Story Branch**: ${story.branchName}
+- **Epic**: ${epic.title || epic.id}
+- **Epic Branch**: ${epic.branchName}
+- **Repository Path**: ${repoPath}
+
+## Conflicted Files (${conflictedFiles.length})
+${conflictedFiles.map(f => `- ${f}`).join('\n')}
+
+## Current File Contents (with conflict markers)
+${conflictDetails.join('\n')}
+
+## Your Task
+1. Read each conflicted file carefully
+2. Understand what each side (HEAD vs incoming) is trying to do
+3. Merge the changes intelligently - keep BOTH sides' functionality when possible
+4. Use Edit tool to remove ALL conflict markers (<<<<<<<, =======, >>>>>>>)
+5. Ensure the merged code compiles and makes sense
+
+## Important Rules
+- KEEP functionality from BOTH sides when possible
+- For imports: combine all imports
+- For functions: keep both if they have different names, merge if same name
+- For types/interfaces: combine fields from both versions
+- NEVER leave conflict markers in the file
+- Test that the file is valid syntax after resolution
+
+## Output
+After resolving ALL conflicts, output:
+✅ CONFLICT_RESOLVED
+
+If you cannot resolve a conflict, output:
+❌ CONFLICT_UNRESOLVABLE: <reason>`;
+
+    try {
+      console.log(`   📝 Calling conflict-resolver agent...`);
+
+      const result = await this.executeAgentFn(
+        'conflict-resolver',
+        prompt,
+        repoPath,  // workspacePath
+        taskId,
+        'ConflictResolver',
+        undefined,  // sessionId
+        undefined,  // fork
+        undefined,  // attachments
+        {
+          maxIterations: 10,  // Give it enough iterations to resolve conflicts
+          timeout: 180000,    // 3 minutes
+        }
+      );
+
+      console.log(`   ✅ Agent completed`);
+      console.log(`   💰 Cost: $${result.cost?.toFixed(4) || 0}`);
+      console.log(`   📊 Tokens: ${(result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0)}`);
+
+      // Check if agent reported success
+      const output = result.output || '';
+      if (output.includes('CONFLICT_RESOLVED') || output.includes('✅')) {
+        // Verify no conflict markers remain in any file
+        let allResolved = true;
+        for (const file of conflictedFiles) {
+          try {
+            const filePath = `${repoPath}/${file}`;
+            const content = fs.readFileSync(filePath, 'utf8');
+            if (content.includes('<<<<<<<') || content.includes('>>>>>>>')) {
+              console.log(`   ⚠️ File ${file} still has conflict markers`);
+              allResolved = false;
+            }
+          } catch (verifyError) {
+            // File might have been deleted/moved, that's OK
+          }
+        }
+
+        if (allResolved) {
+          return {
+            success: true,
+            cost: result.cost,
+            usage: result.usage,
+          };
+        } else {
+          return {
+            success: false,
+            cost: result.cost,
+            usage: result.usage,
+            error: 'Agent reported success but conflict markers remain',
+          };
+        }
+      } else if (output.includes('CONFLICT_UNRESOLVABLE') || output.includes('❌')) {
+        const reason = output.match(/CONFLICT_UNRESOLVABLE:\s*(.+)/)?.[1] || 'Unknown reason';
+        return {
+          success: false,
+          cost: result.cost,
+          usage: result.usage,
+          error: reason,
+        };
+      } else {
+        // Ambiguous output - check files directly
+        let allResolved = true;
+        for (const file of conflictedFiles) {
+          try {
+            const filePath = `${repoPath}/${file}`;
+            const content = fs.readFileSync(filePath, 'utf8');
+            if (content.includes('<<<<<<<') || content.includes('>>>>>>>')) {
+              allResolved = false;
+              break;
+            }
+          } catch (verifyError) {
+            // Continue checking other files
+          }
+        }
+
+        return {
+          success: allResolved,
+          cost: result.cost,
+          usage: result.usage,
+          error: allResolved ? undefined : 'Conflict markers still present',
+        };
+      }
+    } catch (agentError: any) {
+      console.error(`   ❌ Agent error: ${agentError.message}`);
+      return {
+        success: false,
+        error: agentError.message,
+      };
     }
   }
 }

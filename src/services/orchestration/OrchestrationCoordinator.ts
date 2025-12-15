@@ -1322,21 +1322,24 @@ export class OrchestrationCoordinator {
       console.log(`📝 [ExecuteAgent] Output preview: ${output.substring(0, 200)}...`);
 
       // Calculate cost with ACTUAL pricing for Claude models (from official docs)
-      // Claude 3.5 Sonnet (claude-sonnet-4-5-20250929) pricing:
-      // - Input: $3 per MTok (million tokens)
-      // - Output: $15 per MTok
-      // Claude 3.5 Haiku (claude-haiku-4-5-20251001) pricing:
-      // - Input: $1 per MTok
-      // - Output: $5 per MTok
-      // Claude Opus 4.5 (claude-opus-4-5-20251101) pricing:
-      // - Input: $5 per MTok
-      // - Output: $25 per MTok
+      // Source: https://docs.anthropic.com/en/docs/about-claude/pricing
+      //
+      // Claude 4.5 Models (per million tokens):
+      // - Haiku 4.5:  Input $1, Output $5
+      // - Sonnet 4.5: Input $3, Output $15
+      // - Opus 4.5:   Input $5, Output $25
+      //
+      // Prompt Caching (multipliers on input price):
+      // - cache_creation_input_tokens: 1.25x input price
+      // - cache_read_input_tokens: 0.1x input price
 
-      const inputTokens = (finalResult as any)?.usage?.input_tokens || 0;
-      const outputTokens = (finalResult as any)?.usage?.output_tokens || 0;
+      const usage = (finalResult as any)?.usage || {};
+      const inputTokens = usage.input_tokens || 0;
+      const outputTokens = usage.output_tokens || 0;
+      const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+      const cacheReadTokens = usage.cache_read_input_tokens || 0;
 
       // Determine pricing based on model alias (haiku, sonnet, opus)
-      // MODEL_PRICING uses aliases, not explicit model IDs
       const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
 
       const pricing = MODEL_PRICING[modelAlias as keyof typeof MODEL_PRICING];
@@ -1349,14 +1352,27 @@ export class OrchestrationCoordinator {
       const inputPricePerMillion = pricing.inputPerMillion;
       const outputPricePerMillion = pricing.outputPerMillion;
 
-      console.log(`   Model: ${model} (alias: ${modelAlias})`)
+      console.log(`   Model: ${model} (alias: ${modelAlias})`);
 
-      // Calculate cost: price is per million tokens, so divide by 1,000,000
-      const cost = (inputTokens * inputPricePerMillion / 1_000_000) + (outputTokens * outputPricePerMillion / 1_000_000);
+      // Calculate cost including cache tokens
+      // - Regular input: inputPrice
+      // - Cache creation: 1.25x inputPrice
+      // - Cache read: 0.1x inputPrice (big discount for reusing cache)
+      const inputCost = (inputTokens * inputPricePerMillion) / 1_000_000;
+      const outputCost = (outputTokens * outputPricePerMillion) / 1_000_000;
+      const cacheCreationCost = (cacheCreationTokens * inputPricePerMillion * 1.25) / 1_000_000;
+      const cacheReadCost = (cacheReadTokens * inputPricePerMillion * 0.1) / 1_000_000;
+      const cost = inputCost + outputCost + cacheCreationCost + cacheReadCost;
 
       console.log(`💰 [ExecuteAgent] ${agentType} cost calculation:`);
-      console.log(`   Input tokens: ${inputTokens} @ $${inputPricePerMillion}/MTok = $${(inputTokens * inputPricePerMillion / 1_000_000).toFixed(4)}`);
-      console.log(`   Output tokens: ${outputTokens} @ $${outputPricePerMillion}/MTok = $${(outputTokens * outputPricePerMillion / 1_000_000).toFixed(4)}`);
+      console.log(`   Input tokens: ${inputTokens} @ $${inputPricePerMillion}/MTok = $${inputCost.toFixed(4)}`);
+      console.log(`   Output tokens: ${outputTokens} @ $${outputPricePerMillion}/MTok = $${outputCost.toFixed(4)}`);
+      if (cacheCreationTokens > 0) {
+        console.log(`   Cache creation: ${cacheCreationTokens} @ $${(inputPricePerMillion * 1.25).toFixed(2)}/MTok = $${cacheCreationCost.toFixed(4)}`);
+      }
+      if (cacheReadTokens > 0) {
+        console.log(`   Cache read: ${cacheReadTokens} @ $${(inputPricePerMillion * 0.1).toFixed(2)}/MTok = $${cacheReadCost.toFixed(4)}`);
+      }
       console.log(`   Total cost: $${cost.toFixed(4)}`);
 
       return {
@@ -1778,77 +1794,48 @@ try {
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
-      // 🔥🔥🔥 STORY BRANCH ALREADY EXISTS - TechLead created it
-      // Developer only needs to checkout the existing branch
-      if (!story.branchName) {
-        console.error(`❌ [Developer ${member.instanceId}] Story ${story.id} has NO branchName!`);
-        console.error(`   TechLead should have created the story branch. This is a bug.`);
-        throw new Error(`Story ${story.id} missing branchName - TechLead failed to create story branch`);
+      // 🔥🔥🔥 DEVELOPER CREATES STORY BRANCH (simplified - no fetch/pull needed)
+      // Developer creates a new branch locally and will push it after working
+      const repoPath = `${workspacePath}/${repoName}`;
+
+      // Generate unique branch name if not already set
+      let branchName = story.branchName;
+      const isRetry = !!branchName; // If branchName exists, this is a retry
+
+      if (!branchName) {
+        // First attempt - create new branch
+        const taskShortId = taskId.slice(-8);
+        const timestamp = Date.now();
+        const randomSuffix = Math.random().toString(36).substring(2, 8);
+        const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+        branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
       }
 
-      const branchName = story.branchName;
-      console.log(`\n🌿 [Developer ${member.instanceId}] Checking out story branch: ${branchName}`);
-      console.log(`   (Branch was created by TechLead)`);
+      console.log(`\n🌿 [Developer ${member.instanceId}] ${isRetry ? 'Resuming' : 'Creating'} story branch: ${branchName}`);
 
       try {
-        const repoPath = `${workspacePath}/${repoName}`;
-
-        // 🔥 SIMPLIFIED: TechLead already created and pushed the branch
-        // Developer just needs to fetch and checkout
-        console.log(`🔄 [Developer ${member.instanceId}] Fetching from remote...`);
-
-        try {
-          // Fetch latest from remote (timeout: 90s - increased for reliability)
-          safeGitExecSync(`git fetch origin`, {
-            cwd: repoPath,
-            encoding: 'utf8',
-            timeout: 90000,
-          });
-          console.log(`✅ [Developer ${member.instanceId}] Fetched from remote`);
-        } catch (fetchError: any) {
-          console.warn(`⚠️  [Developer ${member.instanceId}] Fetch failed (will try checkout anyway)`);
-          if (fetchError.message?.includes('TIMEOUT') || fetchError.message?.includes('timed out')) {
-            console.warn(`   CAUSE: Network timeout (90s) - check network connection`);
-          } else if (fetchError.message?.includes('authentication') || fetchError.message?.includes('auth')) {
-            console.warn(`   CAUSE: Authentication issue - check credentials`);
-          } else {
-            console.warn(`   Details: ${fetchError.message}`);
-          }
-        }
-
-        // Try to checkout the existing branch
-        try {
-          safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
-          console.log(`✅ [Developer ${member.instanceId}] Checked out branch: ${branchName}`);
-        } catch (checkoutError: any) {
-          // Branch might exist on remote but not locally - create tracking branch
-          console.log(`   Branch not local, creating tracking branch from origin/${branchName}...`);
+        if (isRetry) {
+          // RETRY: Branch already exists, just checkout
+          console.log(`   (Retry - branch already exists)`);
           try {
-            safeGitExecSync(`git checkout -b ${branchName} origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`✅ [Developer ${member.instanceId}] Created tracking branch: ${branchName}`);
-          } catch (trackingError: any) {
-            console.error(`❌ [Developer ${member.instanceId}] Failed to checkout/track branch: ${trackingError.message}`);
-            console.error(`   Branch ${branchName} may not exist on remote. Did TechLead create it?`);
-            throw new Error(`Branch ${branchName} not found - TechLead may have failed to create it`);
+            safeGitExecSync(`git fetch origin ${branchName}`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+          } catch (fetchErr: any) {
+            console.warn(`   ⚠️ Fetch failed (continuing): ${fetchErr.message}`);
           }
+          try {
+            safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          } catch {
+            safeGitExecSync(`git checkout -b ${branchName} origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          }
+          console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+        } else {
+          // FIRST ATTEMPT: Create new branch (no fetch/pull needed - branch doesn't exist yet!)
+          safeGitExecSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`✅ [Developer ${member.instanceId}] Created new branch: ${branchName}`);
         }
 
-        // Pull latest changes (in case of retry scenario)
-        try {
-          safeGitExecSync(`git pull origin ${branchName}`, {
-            cwd: repoPath,
-            encoding: 'utf8',
-            timeout: 90000,
-          });
-          console.log(`✅ [Developer ${member.instanceId}] Pulled latest changes`);
-        } catch (pullError: any) {
-          console.warn(`⚠️  [Developer ${member.instanceId}] Pull failed (continuing anyway)`);
-          if (pullError.message?.includes('TIMEOUT') || pullError.message?.includes('timed out')) {
-            console.warn(`   CAUSE: Network timeout (90s) - slow connection or large repo`);
-          } else {
-            console.warn(`   Details: ${pullError.message}`);
-          }
-        }
+        // Save branchName to story for later phases
+        story.branchName = branchName;
 
         NotificationService.emitConsoleLog(
           taskId,
@@ -1856,8 +1843,8 @@ try {
           `🌿 Developer ${member.instanceId}: Working on branch ${branchName}`
         );
       } catch (gitError: any) {
-        console.error(`❌ [Developer ${member.instanceId}] Git operation failed: ${gitError.message}`);
-        throw new Error(`Git checkout failed for branch ${branchName}: ${gitError.message}`);
+        console.error(`❌ [Developer ${member.instanceId}] Git branch operation failed: ${gitError.message}`);
+        throw new Error(`Git branch failed for ${branchName}: ${gitError.message}`);
       }
 
       prompt += `
@@ -2266,11 +2253,26 @@ After writing code, you MUST follow this EXACT sequence:
       cacheReadTokens += qa.usage?.cache_read_input_tokens || 0;
     }
 
-    // Calculate REAL total cost by summing all agent costs
-    const realTotalCost = breakdown.reduce((sum, item) => sum + item.cost, 0);
-    const realTotalTokens = totalInputTokens + totalOutputTokens;
+    // Calculate breakdown total cost
+    const breakdownTotalCost = breakdown.reduce((sum, item) => sum + item.cost, 0);
+    const breakdownTotalTokens = totalInputTokens + totalOutputTokens;
 
-    // Update task with REAL totals
+    // 🔥 COST TRACKING FIX: Use MAX of accumulated vs breakdown
+    // The accumulated totalCost is more accurate because it's tracked during execution
+    // The breakdown may be incomplete if some phases didn't save cost_usd
+    const accumulatedCost = task.orchestration.totalCost || 0;
+    const realTotalCost = Math.max(accumulatedCost, breakdownTotalCost);
+    const realTotalTokens = breakdownTotalTokens; // Use breakdown for tokens (has all the details)
+
+    // Log if there's a discrepancy
+    if (accumulatedCost > 0 && Math.abs(accumulatedCost - breakdownTotalCost) > 0.001) {
+      console.log(`\n⚠️  [CostTracking] Cost discrepancy detected:`);
+      console.log(`   Accumulated during execution: $${accumulatedCost.toFixed(4)}`);
+      console.log(`   Breakdown reconstruction:     $${breakdownTotalCost.toFixed(4)}`);
+      console.log(`   Using higher value:           $${realTotalCost.toFixed(4)}`);
+    }
+
+    // Update task with final totals
     task.orchestration.totalCost = realTotalCost;
     task.orchestration.totalTokens = realTotalTokens;
     await task.save();

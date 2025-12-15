@@ -32,7 +32,7 @@ export class BranchCleanupService {
 
   /**
    * Track which story branches belong to an epic
-   * Called by DevelopersPhase when creating story branches
+   * Note: Story branches are created by TechLead (not Developer)
    */
   static trackStoryBranch(
     _taskId: string,

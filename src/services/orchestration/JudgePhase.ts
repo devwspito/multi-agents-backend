@@ -188,6 +188,12 @@ export class JudgePhase extends BasePhase {
     let lastFeedback: string | undefined;
     let lastIteration: number | undefined;
 
+    // 🔥 COST TRACKING: Accumulate costs across all stories
+    let grandTotalJudgeCost = 0;
+    let grandTotalJudgeUsage = { input: 0, output: 0 };
+    let grandTotalDeveloperRetryCost = 0;
+    let grandTotalDeveloperRetryUsage = { input: 0, output: 0 };
+
     for (const story of stories) {
       console.log(`\n📋 [Judge] Evaluating story: ${story.title}`);
 
@@ -199,6 +205,14 @@ export class JudgePhase extends BasePhase {
         multiTeamMode
       );
 
+      // 🔥 COST TRACKING: Accumulate costs from this story
+      grandTotalJudgeCost += result.totalJudgeCost || 0;
+      grandTotalJudgeUsage.input += result.totalJudgeUsage?.input || 0;
+      grandTotalJudgeUsage.output += result.totalJudgeUsage?.output || 0;
+      grandTotalDeveloperRetryCost += result.totalDeveloperRetryCost || 0;
+      grandTotalDeveloperRetryUsage.input += result.totalDeveloperRetryUsage?.input || 0;
+      grandTotalDeveloperRetryUsage.output += result.totalDeveloperRetryUsage?.output || 0;
+
       if (result.status === 'approved') {
         totalApproved++;
         console.log(`✅ [Judge] Story "${story.title}" APPROVED`);
@@ -209,6 +223,13 @@ export class JudgePhase extends BasePhase {
         console.error(`❌ [Judge] Story "${story.title}" FAILED after ${this.MAX_RETRIES} attempts`);
       }
     }
+
+    // Log final cost summary
+    const totalPhaseCost = grandTotalJudgeCost + grandTotalDeveloperRetryCost;
+    console.log(`\n💰 [Judge] Phase Cost Summary:`);
+    console.log(`   Judge evaluations: $${grandTotalJudgeCost.toFixed(4)} (${grandTotalJudgeUsage.input + grandTotalJudgeUsage.output} tokens)`);
+    console.log(`   Developer retries: $${grandTotalDeveloperRetryCost.toFixed(4)} (${grandTotalDeveloperRetryUsage.input + grandTotalDeveloperRetryUsage.output} tokens)`);
+    console.log(`   Total phase cost:  $${totalPhaseCost.toFixed(4)}`);
 
     // === JUDGE VERDICT ===
     const allPassed = totalFailed === 0;
@@ -241,6 +262,16 @@ export class JudgePhase extends BasePhase {
           iteration: lastIteration, // Include iteration number
           maxRetries: this.MAX_RETRIES, // Include max retries
         },
+        // 🔥 COST TRACKING: Include costs in metadata
+        metadata: {
+          cost: grandTotalJudgeCost,
+          developerRetryCost: grandTotalDeveloperRetryCost,
+          totalCost: totalPhaseCost,
+          input_tokens: grandTotalJudgeUsage.input,
+          output_tokens: grandTotalJudgeUsage.output,
+          developer_retry_input_tokens: grandTotalDeveloperRetryUsage.input,
+          developer_retry_output_tokens: grandTotalDeveloperRetryUsage.output,
+        },
       };
     }
 
@@ -270,6 +301,16 @@ export class JudgePhase extends BasePhase {
           totalStories: stories.length,
           approvalRate: (totalApproved / stories.length) * 100,
         },
+        // 🔥 COST TRACKING: Include costs in metadata
+        metadata: {
+          cost: grandTotalJudgeCost,
+          developerRetryCost: grandTotalDeveloperRetryCost,
+          totalCost: totalPhaseCost,
+          input_tokens: grandTotalJudgeUsage.input,
+          output_tokens: grandTotalJudgeUsage.output,
+          developer_retry_input_tokens: grandTotalDeveloperRetryUsage.input,
+          developer_retry_output_tokens: grandTotalDeveloperRetryUsage.output,
+        },
       };
     } else {
       NotificationService.emitAgentMessage(
@@ -293,6 +334,16 @@ export class JudgePhase extends BasePhase {
           approved: totalApproved,
           failed: totalFailed,
         },
+        // 🔥 COST TRACKING: Include costs in metadata (even on failure)
+        metadata: {
+          cost: grandTotalJudgeCost,
+          developerRetryCost: grandTotalDeveloperRetryCost,
+          totalCost: totalPhaseCost,
+          input_tokens: grandTotalJudgeUsage.input,
+          output_tokens: grandTotalJudgeUsage.output,
+          developer_retry_input_tokens: grandTotalDeveloperRetryUsage.input,
+          developer_retry_output_tokens: grandTotalDeveloperRetryUsage.output,
+        },
       };
     }
   }
@@ -315,7 +366,21 @@ export class JudgePhase extends BasePhase {
     workspacePath: string | null,
     context: OrchestrationContext,
     multiTeamMode: boolean
-  ): Promise<{ status: 'approved' | 'failed'; feedback?: string; iteration?: number }> {
+  ): Promise<{
+    status: 'approved' | 'failed';
+    feedback?: string;
+    iteration?: number;
+    // 🔥 COST TRACKING: Accumulated costs from all Judge evaluations + Developer retries
+    totalJudgeCost: number;
+    totalJudgeUsage: { input: number; output: number };
+    totalDeveloperRetryCost: number;
+    totalDeveloperRetryUsage: { input: number; output: number };
+  }> {
+    // 🔥 COST TRACKING: Initialize accumulators
+    let totalJudgeCost = 0;
+    let totalJudgeUsage = { input: 0, output: 0 };
+    let totalDeveloperRetryCost = 0;
+    let totalDeveloperRetryUsage = { input: 0, output: 0 };
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       console.log(`🔍 [Judge] Story "${story.title}" - Evaluation attempt ${attempt}/${this.MAX_RETRIES}`);
@@ -347,6 +412,12 @@ export class JudgePhase extends BasePhase {
         workspacePath,
         context
       );
+
+      // 🔥 COST TRACKING: Accumulate Judge costs from this evaluation
+      totalJudgeCost += evaluation.cost || 0;
+      totalJudgeUsage.input += evaluation.usage?.input_tokens || 0;
+      totalJudgeUsage.output += evaluation.usage?.output_tokens || 0;
+      console.log(`💰 [Judge] Evaluation cost: $${(evaluation.cost || 0).toFixed(4)} (accumulated: $${totalJudgeCost.toFixed(4)})`);
 
       // 🔥 ATOMIC FIX: Store evaluation atomically to prevent race conditions
       // Use addOrUpdateJudgeEvaluation instead of direct array manipulation
@@ -399,7 +470,14 @@ export class JudgePhase extends BasePhase {
           `✅ Story **"${story.title}"** approved by Judge`
         );
 
-        return { status: 'approved', iteration: attempt };
+        return {
+          status: 'approved',
+          iteration: attempt,
+          totalJudgeCost,
+          totalJudgeUsage,
+          totalDeveloperRetryCost,
+          totalDeveloperRetryUsage,
+        };
       } else {
         // ❌ CODE NEEDS CHANGES
         story.judgeStatus = 'changes_requested';
@@ -449,6 +527,15 @@ export class JudgePhase extends BasePhase {
           // Execute developer retry with Judge feedback
           try {
             await this.retryDeveloperWork(task, developer, story, context, evaluation.feedback);
+
+            // 🔥 COST TRACKING: Capture developer retry costs from context
+            const devRetryCost = context.getData<number>('lastDeveloperRetryCost') || 0;
+            const devRetryUsage = context.getData<any>('lastDeveloperRetryUsage') || {};
+            totalDeveloperRetryCost += devRetryCost;
+            totalDeveloperRetryUsage.input += devRetryUsage.input_tokens || 0;
+            totalDeveloperRetryUsage.output += devRetryUsage.output_tokens || 0;
+            console.log(`💰 [Judge] Developer retry cost accumulated: $${totalDeveloperRetryCost.toFixed(4)}`);
+
             // Continue to next iteration (Judge will re-evaluate)
             continue;
           } catch (retryError: any) {
@@ -463,6 +550,10 @@ export class JudgePhase extends BasePhase {
               status: 'failed',
               feedback: `Retry failed: ${retryError.message}`,
               iteration: attempt,
+              totalJudgeCost,
+              totalJudgeUsage,
+              totalDeveloperRetryCost,
+              totalDeveloperRetryUsage,
             };
           }
         } else {
@@ -483,12 +574,24 @@ export class JudgePhase extends BasePhase {
             status: 'failed',
             feedback: `Failed after ${this.MAX_RETRIES} attempts. Last feedback: ${evaluation.feedback}`,
             iteration: attempt,
+            totalJudgeCost,
+            totalJudgeUsage,
+            totalDeveloperRetryCost,
+            totalDeveloperRetryUsage,
           };
         }
       }
     }
 
-    return { status: 'failed', feedback: 'Max retries exceeded', iteration: this.MAX_RETRIES };
+    return {
+      status: 'failed',
+      feedback: 'Max retries exceeded',
+      iteration: this.MAX_RETRIES,
+      totalJudgeCost,
+      totalJudgeUsage,
+      totalDeveloperRetryCost,
+      totalDeveloperRetryUsage,
+    };
   }
 
   /**
@@ -502,7 +605,7 @@ export class JudgePhase extends BasePhase {
     developer: any,
     workspacePath: string | null,
     context: OrchestrationContext
-  ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string }> {
+  ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string; cost: number; usage: any }> {
 
     // 🔍 DETAILED LOGGING: Show exactly what Judge is about to review
     console.log(`\n${'='.repeat(80)}`);
@@ -726,6 +829,9 @@ export class JudgePhase extends BasePhase {
       return {
         status: parsed.status === 'approved' ? 'approved' : 'changes_requested',
         feedback: parsed.feedback,
+        // 🔥 COST TRACKING: Return cost and usage from Judge execution
+        cost: result.cost || 0,
+        usage: result.usage || {},
       };
 
     } catch (error: any) {
@@ -734,6 +840,8 @@ export class JudgePhase extends BasePhase {
       return {
         status: 'changes_requested',
         feedback: `Evaluation failed: ${error.message}. Please review the code manually.`,
+        cost: 0,
+        usage: {},
       };
     }
   }
@@ -1010,11 +1118,9 @@ ${judgeFeedback}
     if (storyFromEventStore?.branchName) {
       console.log(`✅ [Judge] Story has branchName for retry: ${storyFromEventStore.branchName}`);
     } else {
-      console.error(`❌ [Judge] Story does NOT have branchName - CANNOT RETRY!`);
-      console.error(`   Story ID: ${story.id}`);
-      console.error(`   Stories in EventStore: ${state.stories.length}`);
-      console.error(`   💡 TechLead should have created the branch. This is a bug.`);
-      throw new Error(`Story ${story.id} has no branchName - TechLead failed to create branch`);
+      console.warn(`⚠️  [Judge] Story does NOT have branchName yet`);
+      console.warn(`   Story ID: ${story.id}`);
+      console.warn(`   Developer will create the branch on retry`);
     }
 
     // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
@@ -1082,7 +1188,7 @@ ${judgeFeedback}
       console.log(`   📍 Story ID: ${rejectedStory.id}`);
       console.log(`   ⚠️  Passing 1 story (NOT ${state.stories.length} stories)`);
 
-      await executeDeveloperFn(
+      const devResult = await executeDeveloperFn(
         task,
         developer,
         repositories,
@@ -1095,6 +1201,15 @@ ${judgeFeedback}
         epicBranchName, // Epic branch name from TeamOrchestrationPhase
         true // 🚀 forceTopModel: Use best model for retry (Judge rejected the code)
       );
+
+      // 🔥 COST TRACKING: Store developer retry cost for accumulation
+      const retryCost = devResult?.cost || 0;
+      const retryUsage = devResult?.usage || {};
+      console.log(`💰 [Judge] Developer retry cost: $${retryCost.toFixed(4)}`);
+
+      // Store in context for caller to retrieve
+      context.setData('lastDeveloperRetryCost', retryCost);
+      context.setData('lastDeveloperRetryUsage', retryUsage);
 
       console.log(`✅ [Judge] Developer ${developer.instanceId} completed retry for story "${story.title}"`);
 
