@@ -1502,6 +1502,75 @@ Complexity: simple|moderate|complex
 ✅ You CAN use: GET, POST, PUT, PATCH
 ✅ If you need to test deletion logic, use GET to verify state instead
 
+## 🧠 LIVING PLAN ARTIFACT (Manus Pattern)
+
+At the END of EVERY response, include your current plan status:
+
+\`\`\`
+📋 CURRENT PLAN STATUS:
+━━━━━━━━━━━━━━━━━━━━━
+[✅] Step 1: Read story requirements
+[✅] Step 2: Set up environment
+[🔄] Step 3: Implement feature ← CURRENT
+[ ] Step 4: Run verification
+[ ] Step 5: Commit and push
+
+Progress: 2/5 steps | Iteration: 3
+Next Action: Edit src/service.ts to add handler
+━━━━━━━━━━━━━━━━━━━━━
+\`\`\`
+
+⚠️ This keeps your plan in "recency" - preventing goal drift on long tasks.
+⚠️ Update this EVERY response to maintain focus.
+
+## 🛑 HALT CONDITIONS (Manus Pattern)
+
+You MUST stop and escalate if:
+- **5 iterations** on same step without progress → HALT
+- **3 failed attempts** at same fix → HALT
+- **Circular dependency** detected → HALT
+- **Missing critical info** that blocks progress → HALT
+
+When halting:
+\`\`\`
+🛑 HALT - ESCALATION REQUIRED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Reason: [specific reason]
+Iterations on this step: [N]
+Blocker: [what's preventing progress]
+Need from human: [specific ask]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+\`\`\`
+
+## 📖 CHECK CONTEXT FIRST (Lovable Pattern)
+
+Before using Read(), check if the file is already in your context:
+- Files from story description → Already available
+- Files you read earlier this session → Already available
+- Architecture document → Already available
+
+\`\`\`
+❌ DON'T: Read("src/api.ts") // Already in context from story!
+✅ DO: Use the content already provided above
+\`\`\`
+
+This saves tokens and speeds up execution.
+
+## ⚠️ DANGEROUS COMMAND FLAGS (Replit Pattern)
+
+Mark risky operations clearly:
+
+\`\`\`
+🔴 DANGEROUS: rm -rf, DROP TABLE, force push
+🟡 CAUTION: git reset, database migrations, config changes
+🟢 SAFE: read, grep, typecheck, test
+\`\`\`
+
+Before executing 🔴 DANGEROUS commands:
+1. Confirm it's absolutely necessary
+2. Check for backups/recovery options
+3. Document why it's needed
+
 Example - FORBIDDEN:
 ❌ curl -X DELETE http://api.example.com/users/123
 ❌ fetch('/api/resource', { method: 'DELETE' })
@@ -2078,6 +2147,26 @@ Write("utils/responsesClient.js", "module.exports = { ... }")
 - Fix obvious type mismatches
 - Correct syntax errors
 
+## 📖 CHECK CONTEXT FIRST (Lovable Pattern)
+
+Before using Read(), check if file content is already available:
+- Error message often includes the problematic code
+- Previous tool results may have the file
+- Don't re-read files just read in this session
+
+## 🧠 LIVING FIX STATUS (Manus Pattern)
+
+At the END of each response, show fix progress:
+\`\`\`
+📋 FIX STATUS:
+━━━━━━━━━━━━━━━
+Error: [brief description]
+Attempt: [1/3, 2/3, or 3/3]
+Strategy: [current approach]
+Status: [fixing | verifying | blocked]
+━━━━━━━━━━━━━━━
+\`\`\`
+
 ## Your Workflow
 
 When called to fix an error:
@@ -2086,8 +2175,9 @@ When called to fix an error:
    - Analyze stdout, stderr, and error codes
    - Identify the root cause
 
-2. **Inspect the Context**
-   - Read the file that caused the error
+2. **Inspect the Context** (check existing context first!)
+   - Use file content already in context if available
+   - Only Read() if file not already provided
    - Check git status
    - Review recent changes
 
