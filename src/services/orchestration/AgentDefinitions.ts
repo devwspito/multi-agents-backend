@@ -48,13 +48,32 @@ Use: Read, Grep, Glob, Bash (for ls, find, cat, etc.)
 
 ## WORKFLOW
 
-### Step 1: Explore Codebase (2-3 min)
+### Step 1: Explore Codebase (USE PARALLEL TOOLS)
+
+⚡ **CRITICAL: Execute multiple tools in ONE turn for speed!**
+
 \`\`\`
-Glob("**/*.ts")           # Find TypeScript files
-Grep("pattern", "src/")   # Search for patterns
-Read("src/index.ts")      # Read specific files
-Bash("ls -la src/")       # List directories
+// DO THIS - All execute in parallel (fast):
+Glob("**/*.ts")
+Glob("**/*.json")
+Grep("import.*from", "src/")
+Read("package.json")
+Read("tsconfig.json")
+Bash("ls -la src/")
+// Result: 6 operations complete in ~1 second!
+
+// DON'T DO THIS - One per turn (slow):
+Turn 1: Glob("**/*.ts")
+Turn 2: Read("package.json")
+Turn 3: Grep("import", "src/")
+// Result: Takes 3x longer
 \`\`\`
+
+**Parallel-safe operations** (combine freely):
+- Multiple Glob() patterns
+- Multiple Grep() searches
+- Multiple Read() calls
+- Read() + Grep() + Glob() together
 
 ### Step 2: Analyze Problem
 - What is the REAL problem being solved?
@@ -706,6 +725,27 @@ Dependencies: [list or none]
 - Establish testing strategies and quality gates
 - Monitor technical debt and plan refactoring initiatives
 - Drive adoption of industry best practices
+
+## ⚡ PARALLEL TOOL EXECUTION (FOR SPEED)
+
+When exploring the codebase, execute multiple tools in ONE turn:
+
+\`\`\`
+// DO THIS - All execute in parallel:
+Read("package.json")
+Read("tsconfig.json")
+Glob("src/**/*.ts")
+Grep("export.*class", "src/")
+// Result: 4 operations in ~1 second
+
+// DON'T DO THIS - One per turn (slow):
+Turn 1: Read("package.json")
+Turn 2: Glob("src/**/*.ts")
+// Result: Takes 2x longer
+\`\`\`
+
+**Parallel-safe**: Read, Grep, Glob can all run together
+**Sequential-only**: Write/Edit must wait for Read results
 
 ## 🔍 ENVIRONMENT ANALYSIS (CRITICAL - DO THIS FIRST)
 
@@ -1499,9 +1539,49 @@ You run: Bash("npm install")
 You output: ✅ ENVIRONMENT_READY
 \`\`\`
 
-**Phase 1: Understand**
-1. Read() files mentioned in story
+**Phase 1: Understand** (USE PARALLEL READS)
+1. Read() ALL files mentioned in story IN PARALLEL:
+   \`\`\`
+   // ✅ DO THIS: Read multiple files in ONE turn
+   Read("src/file1.ts")
+   Read("src/file2.ts")
+   Read("src/file3.ts")
+   // All 3 execute simultaneously!
+
+   // ❌ DON'T DO THIS: One file per turn (slow!)
+   Turn 1: Read("src/file1.ts")
+   Turn 2: Read("src/file2.ts")
+   Turn 3: Read("src/file3.ts")
+   \`\`\`
+
 2. Understand existing patterns and structure
+
+## ⚡ PARALLEL TOOL EXECUTION (CRITICAL FOR SPEED)
+
+When operations are INDEPENDENT, execute them in the SAME turn:
+
+\`\`\`
+PARALLEL-SAFE (do together):
+✅ Multiple Read() calls
+✅ Multiple Grep() searches
+✅ Read() + Grep() together
+✅ Multiple Glob() patterns
+
+SEQUENTIAL-ONLY (must wait for result):
+❌ Edit() then Read() the same file
+❌ Write() then Bash() that uses the file
+❌ Bash(install) then Bash(run)
+\`\`\`
+
+Example parallel exploration:
+\`\`\`
+// ONE turn - executes in parallel:
+Read("src/routes/api.ts")
+Read("src/models/User.ts")
+Grep("authentication", "src/")
+Glob("**/*.test.ts")
+// Result: 4 operations complete in ~1 second instead of ~4 seconds
+\`\`\`
 
 **Phase 2: Implement**
 3. Edit() or Write() ACTUAL CODE with your changes
