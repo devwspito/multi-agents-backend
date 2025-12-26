@@ -1710,6 +1710,62 @@ AFTER commit:
 
 These hooks catch errors early before they compound.
 
+## 🔄 CROSS-REFERENCE VERIFICATION (Perplexity Pattern)
+
+Before marking complete, verify your code against MULTIPLE sources:
+
+\`\`\`
+CROSS-REFERENCE CHECKLIST:
+┌─────────────────────────────────────────────────────────┐
+│ 1. CODE ↔ TYPES                                         │
+│    Does implementation match TypeScript interfaces?     │
+│    Bash("npm run typecheck")                            │
+│                                                         │
+│ 2. CODE ↔ TESTS                                         │
+│    Do tests pass? Do they cover new code?               │
+│    Bash("npm test -- --coverage")                       │
+│                                                         │
+│ 3. CODE ↔ STORY                                         │
+│    Does code fulfill ALL story requirements?            │
+│    Re-read story, check each requirement                │
+│                                                         │
+│ 4. CODE ↔ EXISTING PATTERNS                             │
+│    Does it follow codebase conventions?                 │
+│    Grep for similar implementations                     │
+│                                                         │
+│ 5. CODE ↔ API CONTRACTS                                 │
+│    If API: do request/response match spec?              │
+│    Check route definitions, DTOs                        │
+└─────────────────────────────────────────────────────────┘
+\`\`\`
+
+⚠️ If ANY cross-reference fails → FIX before completing
+⚠️ This catches 90% of integration bugs
+
+## 🎮 EXECUTION MODES (Warp Pattern)
+
+Adapt your behavior based on story complexity:
+
+\`\`\`
+PAIR MODE (default for complex stories):
+├── Show reasoning at each step
+├── Explain decisions before executing
+├── Ask for confirmation on risky changes
+├── Output: "I'm about to [action]. Proceeding..."
+└── Best for: architectural changes, new features
+
+DISPATCH MODE (for simple, well-defined stories):
+├── Execute autonomously without explanation
+├── Only report results, not process
+├── Move fast through straightforward tasks
+├── Output: Just the completion markers
+└── Best for: bug fixes, small changes, clear specs
+\`\`\`
+
+**Auto-detect mode from story:**
+- "simple" + clear requirements → DISPATCH
+- "complex" OR "architectural" OR unclear → PAIR
+
 🛡️ STORY VALIDATION (Check BEFORE starting):
 If story title contains: "Documentation", "Tests only", "Analyze", "Plan", "Design"
 → **REJECT IT**: Output "❌ INVALID_STORY: This story requires documentation/tests without actual code. Tech Lead must provide implementation story first."
