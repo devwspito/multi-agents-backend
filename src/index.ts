@@ -27,6 +27,7 @@ import errorWebhookRoutes from './routes/webhooks/errors';
 import commandRoutes from './routes/commands';
 import diagnosticsRoutes from './routes/diagnostics';
 import sdkHealthRoutes from './routes/sdk-health';
+import healthRoutes from './routes/health';
 
 /**
  * Multi-Agent Software Development Platform
@@ -161,15 +162,9 @@ class AgentPlatformApp {
    * Inicializa rutas
    */
   private initializeRoutes(): void {
-    // Health check
-    this.app.get('/health', (_req: Request, res: Response) => {
-      res.json({
-        success: true,
-        message: 'Multi-Agent Platform is running',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-      });
-    });
+    // Health check endpoints (production-grade)
+    this.app.use('/health', healthRoutes);
+    this.app.use('/api/health', healthRoutes); // Also mount at /api/health for consistency
 
     // GitHub OAuth URL endpoint (compatibilidad con frontend)
     this.app.get('/api/github-auth/url', (req: Request, res: Response) => {
@@ -200,7 +195,22 @@ class AgentPlatformApp {
       });
     });
 
-    // API routes
+    // API v1 routes (production-ready, versioned)
+    this.app.use('/api/v1/auth', authRoutes);
+    this.app.use('/api/v1/tasks', taskRoutes);
+    this.app.use('/api/v1/projects', projectRoutes);
+    this.app.use('/api/v1/repositories', repositoryRoutes);
+    this.app.use('/api/v1/conversations', conversationRoutes);
+    this.app.use('/api/v1/code', codeRoutes);
+    this.app.use('/api/v1/analytics', analyticsRoutes);
+    this.app.use('/api/v1/cleanup', cleanupRoutes);
+    this.app.use('/api/v1/webhooks/github', githubWebhookRoutes);
+    this.app.use('/api/v1/webhooks/errors', errorWebhookRoutes);
+    this.app.use('/api/v1/commands', commandRoutes);
+    this.app.use('/api/v1/diagnostics', diagnosticsRoutes);
+    this.app.use('/api/v1/sdk-health', sdkHealthRoutes);
+
+    // Legacy API routes (backward compatibility - will be deprecated)
     this.app.use('/api/auth', authRoutes);
     this.app.use('/api/tasks', taskRoutes);
     this.app.use('/api/projects', projectRoutes);

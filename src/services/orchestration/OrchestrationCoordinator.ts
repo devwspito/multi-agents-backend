@@ -5,6 +5,7 @@ import { GitHubService } from '../GitHubService';
 import { ContextCompactionService } from '../ContextCompactionService';
 import { NotificationService } from '../NotificationService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
+import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
 import { ProductManagerPhase } from './ProductManagerPhase';
 import { ProjectManagerPhase } from './ProjectManagerPhase';
@@ -251,11 +252,14 @@ export class OrchestrationCoordinator {
    * @param taskId - Task ID to orchestrate
    */
   async orchestrateTask(taskId: string): Promise<void> {
-    console.log(`\n${'='.repeat(80)}`);
-    console.log(`🎯 Starting orchestration for task: ${taskId}`);
-    console.log(`${'='.repeat(80)}\n`);
+    // Create structured logger for this task
+    const log = createTaskLogger(taskId, 'analysis', 'planning-agent');
 
-    // Emitir log al frontend
+    log.info(`${'='.repeat(60)}`);
+    log.info(`Starting orchestration for task: ${taskId}`);
+    log.info(`${'='.repeat(60)}`);
+
+    // Also emit to frontend
     NotificationService.emitConsoleLog(taskId, 'info', `🎯 Starting orchestration for task: ${taskId}`);
 
     try {
@@ -274,10 +278,11 @@ export class OrchestrationCoordinator {
       });
 
       if (repositories.length === 0) {
-        console.error(`❌ Repository lookup failed:`);
-        console.error(`   Task ID: ${taskId}`);
-        console.error(`   Task repositoryIds: ${JSON.stringify(task.repositoryIds)}`);
-        console.error(`   Task userId: ${task.userId}`);
+        log.error(`Repository lookup failed`, {
+          taskId,
+          repositoryIds: task.repositoryIds,
+          userId: task.userId?.toString(),
+        });
 
         throw new Error(
           `No repositories found for this task. ` +
@@ -312,7 +317,9 @@ export class OrchestrationCoordinator {
         );
       }
 
-      console.log(`✅ Found ${repositories.length} repositories for task`);
+      log.success(`Found ${repositories.length} repositories for task`, {
+        repositories: repositories.map(r => r.name),
+      });
       NotificationService.emitConsoleLog(taskId, 'info', `✅ Found ${repositories.length} repositories for task`);
 
       // Setup workspace (pass user token for cloning - NOT encrypted)
@@ -1733,6 +1740,8 @@ export class OrchestrationCoordinator {
       console.log(`📂 [Developer ${member.instanceId}] Workspace: ${workspacePath}`);
 
       // Build developer prompt - Rich context per SDK philosophy
+      const projectId = task.projectId?.toString() || '';
+
       let prompt = `# Story: ${story.title}
 
 ${story.description}
@@ -1741,7 +1750,14 @@ ${story.description}
 **CRITICAL**: You MUST work ONLY in the "${targetRepository}" directory.
 - All file paths must start with: ${targetRepository}/
 - Navigate to this repository first: cd ${workspacePath}/${targetRepository}
-- DO NOT modify files in other repositories`;
+- DO NOT modify files in other repositories
+
+## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
+- **Project ID**: \`${projectId}\`
+- **Task ID**: \`${taskId}\`
+- **Story ID**: \`${story.id}\`
+
+Use these when calling \`recall()\` and \`remember()\` tools.`;
 
       // Add Judge feedback if this is a retry
       if (judgeFeedback) {

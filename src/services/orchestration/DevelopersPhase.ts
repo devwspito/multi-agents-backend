@@ -458,6 +458,18 @@ export class DevelopersPhase extends BasePhase {
           .filter((a) => a.assignedTo === instanceId)
           .map((a) => a.storyId);
 
+        // 🔥🔥🔥 STRICT VALIDATION: 1 DEVELOPER = 1 STORY (NEVER MORE) 🔥🔥🔥
+        if (assignedStories.length > 1) {
+          console.error(`❌❌❌ [CRITICAL VIOLATION] Developer ${instanceId} has ${assignedStories.length} stories assigned!`);
+          console.error(`   Stories: ${assignedStories.join(', ')}`);
+          console.error(`   RULE: 1 Developer = 1 Story. ALWAYS.`);
+          console.error(`   This is a TechLead bug - fix storyAssignments to have 1 story per dev.`);
+          throw new Error(
+            `CRITICAL: Developer ${instanceId} assigned ${assignedStories.length} stories. ` +
+            `Rule violation: 1 Developer = 1 Story. TechLead must create more developers.`
+          );
+        }
+
         team.push({
           agentType,
           instanceId,
@@ -465,6 +477,13 @@ export class DevelopersPhase extends BasePhase {
           status: 'idle',
           pullRequests: [],
         });
+      }
+
+      // 🔥 Additional validation: Total developers must equal total stories
+      const totalStoriesAssigned = team.reduce((sum, dev) => sum + dev.assignedStories.length, 0);
+      const expectedStories = assignments.length;
+      if (totalStoriesAssigned !== expectedStories) {
+        console.warn(`⚠️  [DevelopersPhase] Story count mismatch: ${totalStoriesAssigned} assigned vs ${expectedStories} expected`);
       }
 
       // Save team to task (skip in multi-team mode to avoid version conflicts)
@@ -923,6 +942,27 @@ export class DevelopersPhase extends BasePhase {
         'info',
         `👨‍💻 Developer ${developer.instanceId} starting: "${story.title}"`
       );
+
+      // 🔄 CHECKPOINT: Create rollback point before developer execution
+      const { rollbackService } = await import('../RollbackService');
+      const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+      const checkpoint = await rollbackService.createCheckpoint(
+        repoPath,
+        (task._id as any).toString(),
+        `Before ${developer.instanceId}: ${story.title}`,
+        {
+          phase: 'development',
+          agentType: 'developer',
+          agentInstanceId: developer.instanceId,
+          storyId: story.id,
+          storyTitle: story.title,
+          epicId: epic.id,
+          epicName: epic.name,
+        }
+      );
+      if (checkpoint) {
+        console.log(`🔄 [CHECKPOINT] Created: ${checkpoint.id} (${checkpoint.commitHash.substring(0, 7)})`);
+      }
 
       const developerResult = await this.executeDeveloperFn(
         task,
