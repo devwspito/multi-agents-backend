@@ -557,22 +557,62 @@ export class JudgePhase extends BasePhase {
             };
           }
         } else {
-          // MAX RETRIES REACHED
+          // MAX RETRIES REACHED - ESCALATE TO HUMAN
+          console.log(`\n${'🆘'.repeat(20)}`);
+          console.log(`🆘 [Judge] HUMAN INTERVENTION REQUIRED`);
+          console.log(`🆘 Story "${story.title}" failed after ${this.MAX_RETRIES} attempts`);
+          console.log(`🆘 Developer could not satisfy Judge requirements`);
+          console.log(`${'🆘'.repeat(20)}\n`);
+
           story.status = 'failed';
           story.judgeStatus = 'changes_requested';
+
+          // 🆘 SET HUMAN INTERVENTION FLAG
+          task.orchestration.humanIntervention = {
+            required: true,
+            requestedAt: new Date(),
+            phase: 'Judge',
+            storyId: story.id,
+            agentType: 'judge' as const,
+            reason: `Story "${story.title}" failed code review after ${this.MAX_RETRIES} developer attempts. The developer could not satisfy the Judge's requirements.`,
+            attempts: this.MAX_RETRIES,
+            lastFeedback: evaluation.feedback,
+            filesInvolved: story.branchName ? [story.branchName] : [],
+            resolved: false,
+          };
+
+          // Pause orchestration until human responds
+          task.orchestration.paused = true;
+          task.orchestration.pausedAt = new Date();
+
           if (!multiTeamMode) {
             await task.save();
           }
 
+          // Emit notification to UI
           NotificationService.emitAgentMessage(
             (task._id as any).toString(),
             'Judge',
-            `❌ Story **"${story.title}"** FAILED after ${this.MAX_RETRIES} attempts. Last feedback:\n\n${evaluation.feedback}`
+            `🆘 **HUMAN INTERVENTION REQUIRED**\n\n` +
+            `Story **"${story.title}"** failed after ${this.MAX_RETRIES} attempts.\n\n` +
+            `**Last feedback:**\n${evaluation.feedback}\n\n` +
+            `**Options:**\n` +
+            `- Fix the code manually and select "fixed_manually"\n` +
+            `- Skip this story and continue with "skip_story"\n` +
+            `- Abort the entire task with "abort_task"\n` +
+            `- Provide guidance and retry with "retry_with_guidance"`
+          );
+
+          // Also emit a special "human_intervention_required" event
+          NotificationService.emitConsoleLog(
+            (task._id as any).toString(),
+            'error',
+            `🆘 HUMAN INTERVENTION REQUIRED: Story "${story.title}" needs manual review`
           );
 
           return {
-            status: 'failed',
-            feedback: `Failed after ${this.MAX_RETRIES} attempts. Last feedback: ${evaluation.feedback}`,
+            status: 'failed' as const,
+            feedback: `HUMAN INTERVENTION REQUIRED: Failed after ${this.MAX_RETRIES} attempts. Last feedback: ${evaluation.feedback}`,
             iteration: attempt,
             totalJudgeCost,
             totalJudgeUsage,

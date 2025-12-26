@@ -5,6 +5,7 @@ import { GitHubService } from '../GitHubService';
 import { ContextCompactionService } from '../ContextCompactionService';
 import { NotificationService } from '../NotificationService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
+import { PlanningPhase } from './PlanningPhase';
 import { ProductManagerPhase } from './ProductManagerPhase';
 import { ProjectManagerPhase } from './ProjectManagerPhase';
 import { TechLeadPhase } from './TechLeadPhase';
@@ -92,13 +93,10 @@ export class OrchestrationCoordinator {
    * - Human approval gates (must wait for approval before next phase)
    */
   private readonly PHASE_ORDER = [
-    'ProblemAnalyst',      // 1. Deep problem analysis and architecture
-    'ProductManager',      // 2. Analyze requirements → Create Epics
-    'Approval',            // 3. Human approval gate (epics)
-    'ProjectManager',      // 4. Validate epics, detect conflicts
-    'Approval',            // 5. Human approval gate (validated epics)
-    'TeamOrchestration',   // 6. Multi-team parallel execution (TechLead → Developers+Judge per epic)
-    'AutoMerge',           // 7. Merge approved PRs to main
+    'Planning',            // 1. Unified planning (Problem + Product + Project in one pass)
+    'Approval',            // 2. Human approval gate (epics + stories)
+    'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers+Judge per epic)
+    'AutoMerge',           // 4. Merge approved PRs to main
   ];
 
   constructor() {
@@ -716,11 +714,14 @@ export class OrchestrationCoordinator {
     };
 
     switch (phaseName) {
+      case 'Planning':
+        return new PlanningPhase(executeAgentWithContext);
+
+      // Legacy phases (kept for backward compatibility, but not in PHASE_ORDER)
       case 'ProblemAnalyst':
         return new (require('./ProblemAnalystPhase').ProblemAnalystPhase)(executeAgentWithContext);
       case 'ProductManager':
         return new ProductManagerPhase(executeAgentWithContext);
-
       case 'ProjectManager':
         return new ProjectManagerPhase(executeAgentWithContext);
 
@@ -909,7 +910,8 @@ export class OrchestrationCoordinator {
       timeout?: number;
     },
     contextOverride?: OrchestrationContext,
-    skipOptimization?: boolean // 🔥 Skip optimizeConfigForBudget (used for retry with forceTopModel)
+    skipOptimization?: boolean, // 🔥 Skip optimizeConfigForBudget (used for retry with forceTopModel)
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' // 🔥 SDK permission mode
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
@@ -1131,6 +1133,13 @@ export class OrchestrationCoordinator {
       console.log(`📡 [ExecuteAgent] Calling SDK with model: ${model}`);
       console.log(`🔧 [ExecuteAgent] Including MCP tools: custom-dev-tools, extra-tools`);
 
+      // 🔥 PERMISSION MODE: All agents use 'bypassPermissions' for autonomous execution
+      // NOTE: 'plan' mode causes INTERACTIVE behavior (asks questions) - NOT suitable for autonomous agents
+      // We rely on prompts to restrict agents to appropriate operations (read-only for planning, etc.)
+      const effectivePermissionMode = permissionMode || 'bypassPermissions';
+
+      console.log(`🔐 [ExecuteAgent] Permission mode: ${effectivePermissionMode}`);
+
       // Create MCP servers for custom tools
       const customToolsServer = createCustomToolsServer();
       const extraToolsServer = createExtraToolsServer();
@@ -1143,7 +1152,7 @@ export class OrchestrationCoordinator {
             cwd: workspacePath,
             model, // Explicit model ID: claude-haiku-4-5-*, claude-sonnet-4-5-*, claude-opus-4-5-*
             // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
-            permissionMode: 'bypassPermissions',
+            permissionMode: effectivePermissionMode,
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
@@ -1173,13 +1182,58 @@ export class OrchestrationCoordinator {
       const allMessages: any[] = [];
       let turnCount = 0;
 
+      // 🔥 LOOP DETECTION: Count consecutive messages without progress
+      // If we get too many assistant/user messages without tool_use, tool_result, or result = stuck
+      let messagesWithoutProgress = 0;
+      const MAX_MESSAGES_WITHOUT_PROGRESS = 50; // Threshold before we consider agent stuck
+
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
       console.log(`   SDK will handle timeouts and error recovery automatically`);
+      console.log(`   Loop detection enabled: will abort after ${MAX_MESSAGES_WITHOUT_PROGRESS} messages without progress`);
 
       try {
         // Simple stream consumption - SDK handles everything
         for await (const message of stream) {
           allMessages.push(message);
+
+          // 🔥 LOOP DETECTION: Check if this message represents progress
+          const messageType = (message as any).type;
+          const isProgressMessage = ['tool_use', 'tool_result', 'result', 'turn_start'].includes(messageType);
+
+          if (isProgressMessage) {
+            // Reset counter on progress
+            messagesWithoutProgress = 0;
+          } else {
+            // Increment counter for non-progress messages (assistant, user, system, text without action)
+            messagesWithoutProgress++;
+
+            // Check if stuck
+            if (messagesWithoutProgress >= MAX_MESSAGES_WITHOUT_PROGRESS) {
+              const lastFewTypes = allMessages.slice(-10).map(m => (m as any).type).join(', ');
+              console.error(`\n${'='.repeat(80)}`);
+              console.error(`🚨 LOOP DETECTED: ${messagesWithoutProgress} consecutive messages without progress`);
+              console.error(`   Agent: ${agentType}`);
+              console.error(`   Turn count: ${turnCount}`);
+              console.error(`   Last 10 message types: ${lastFewTypes}`);
+              console.error(`${'='.repeat(80)}\n`);
+
+              if (taskId) {
+                NotificationService.emitConsoleLog(
+                  taskId,
+                  'error',
+                  `🚨 Agent ${agentType} stuck in loop - aborting after ${messagesWithoutProgress} messages without progress`
+                );
+              }
+
+              // Throw error to break out of the stream
+              const loopError = new Error(
+                `Agent ${agentType} stuck in loop: ${messagesWithoutProgress} consecutive messages without progress. ` +
+                `Last message types: ${lastFewTypes}`
+              );
+              (loopError as any).isLoopDetection = true;
+              throw loopError;
+            }
+          }
 
           // 🔥 CRITICAL: Log FULL message if it has an error flag
           if ((message as any).is_error === true) {
@@ -1296,7 +1350,15 @@ export class OrchestrationCoordinator {
           code: streamError.code,
           turnCount,
           lastMessages: allMessages.slice(-3),
+          isLoopDetection: streamError.isLoopDetection || false,
         });
+
+        // 🔥 LOOP DETECTION: Don't retry loop errors - they won't magically fix themselves
+        if (streamError.isLoopDetection) {
+          console.error(`🚨 [ExecuteAgent] Loop detected - NOT retrying (would just loop again)`);
+          // Mark as non-retryable by adding specific flag
+          streamError.isNonRetryable = true;
+        }
 
         // Re-throw - SDK already provides detailed error info
         throw streamError;
@@ -1395,6 +1457,12 @@ export class OrchestrationCoordinator {
         console.error(`❌ [ExecuteAgent] Stack:`, error.stack);
 
         lastError = error;
+
+        // 🔥 LOOP DETECTION: Never retry loop errors - they won't fix themselves
+        if (error.isNonRetryable || error.isLoopDetection) {
+          console.error(`🚨 [ExecuteAgent] Non-retryable error (loop detection or explicit flag) - failing immediately`);
+          throw error;
+        }
 
         // 🔥 Check if this is a retryable error (JSON parsing, connection issues)
         const isRetryableError = (
@@ -1583,10 +1651,20 @@ export class OrchestrationCoordinator {
       };
     }
 
-    // Get all stories for this developer
+    // 🔥🔥🔥 STRICT VALIDATION: 1 DEVELOPER = 1 STORY (NEVER MORE) 🔥🔥🔥
     if (!stories || stories.length === 0) {
       console.warn(`⚠️  [Developer ${member.instanceId}] No stories provided, skipping`);
       return;
+    }
+
+    if (stories.length > 1) {
+      console.error(`❌❌❌ [CRITICAL VIOLATION] Developer ${member.instanceId} received ${stories.length} stories!`);
+      console.error(`   Stories: ${stories.map((s: any) => s.id || s.title).join(', ')}`);
+      console.error(`   RULE: 1 Developer = 1 Story. ALWAYS. NO EXCEPTIONS.`);
+      throw new Error(
+        `CRITICAL: Developer ${member.instanceId} received ${stories.length} stories. ` +
+        `Rule violation: 1 Developer = 1 Story. Fix the calling code.`
+      );
     }
 
     // Get epics from EventStore or fallback to techLead
@@ -1596,18 +1674,19 @@ export class OrchestrationCoordinator {
       throw new Error('No epics available - cannot determine target repositories');
     }
 
-    const assignedStories = member.assignedStories || [];
+    // 🔥 CRITICAL FIX: Use the `stories` parameter directly!
+    // DevelopersPhase passes exactly the stories this developer should work on.
+    // member.assignedStories is stale (has ALL stories from TechLead, not filtered).
+    // When using isolated story pipeline, only 1 story is passed.
+    const storiesToProcess = stories; // Use parameter directly, NOT member.assignedStories
 
-    console.log(`👨‍💻 [Developer ${member.instanceId}] Starting work on ${assignedStories.length} stories`);
+    console.log(`👨‍💻 [Developer ${member.instanceId}] Starting work on ${storiesToProcess.length} stories`);
 
-    // 🔥 IMPORTANT: When called from isolated story pipeline, only process ONE story
-    // assignedStories will contain exactly 1 story ID
     let lastResult: { output?: string; cost?: number } | undefined;
 
-    for (const storyId of assignedStories) {
-      const story = stories.find((s: any) => s.id === storyId);
-      if (!story) {
-        console.warn(`⚠️  [Developer ${member.instanceId}] Story ${storyId} not found, skipping`);
+    for (const story of storiesToProcess) {
+      if (!story || !story.id) {
+        console.warn(`⚠️  [Developer ${member.instanceId}] Invalid story object, skipping`);
         continue;
       }
 
@@ -1619,7 +1698,7 @@ export class OrchestrationCoordinator {
 
       // 🔥 VALIDATION: targetRepository MUST exist (set by TechLeadPhase)
       if (!targetRepository) {
-        console.error(`❌ [Developer ${member.instanceId}] Story ${storyId} has NO targetRepository!`);
+        console.error(`❌ [Developer ${member.instanceId}] Story ${story.id} has NO targetRepository!`);
         console.error(`   Story: ${story.title}`);
         console.error(`   Epic: ${story.epicId}`);
         console.error(`   Available repositories: ${repositories.map(r => r.name || r.githubRepoName).join(', ')}`);
@@ -1632,12 +1711,12 @@ export class OrchestrationCoordinator {
           dbTask.status = 'failed';
           dbTask.orchestration.developers = {
             status: 'failed',
-            error: `Story ${storyId} missing targetRepository - data integrity issue`,
+            error: `Story ${story.id} missing targetRepository - data integrity issue`,
           };
           await dbTask.save();
         }
 
-        throw new Error(`Story ${storyId} has no targetRepository - cannot execute developer. Task marked as FAILED.`);
+        throw new Error(`Story ${story.id} has no targetRepository - cannot execute developer. Task marked as FAILED.`);
       }
 
       // 🔥 CRITICAL FIX: Extract repo name from full path (e.g., "devwspito/v2_frontend" → "v2_frontend")
