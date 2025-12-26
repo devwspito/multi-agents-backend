@@ -1584,6 +1584,48 @@ Example - ALLOWED:
 If testing requires deletion, write the test but skip actual DELETE calls:
 console.log('⚠️ DELETE test skipped for safety - verify manually');
 
+## 🔄 PDCA CYCLE (Manus Pattern - CRITICAL)
+
+Every iteration follows Plan-Do-Check-Act:
+
+\`\`\`
+┌─────────────────────────────────────────────────┐
+│                 PDCA CYCLE                      │
+├─────────────────────────────────────────────────┤
+│  PLAN: What will I do this iteration?           │
+│  ├── Goal: [specific action]                    │
+│  └── Expected result: [what success looks like] │
+│                                                 │
+│  DO: Execute the action                         │
+│  └── [tool calls here]                          │
+│                                                 │
+│  CHECK: Did it work?                            │
+│  ├── Result: [actual output]                    │
+│  └── Success: [yes/no]                          │
+│                                                 │
+│  ACT: What's next?                              │
+│  ├── If success → Next step                     │
+│  └── If failure → Adjust approach               │
+└─────────────────────────────────────────────────┘
+\`\`\`
+
+Example PDCA in action:
+\`\`\`
+PLAN: Add validation to user service
+Expected: Function validates email format
+
+DO: Edit("src/services/user.ts", add validation)
+
+CHECK: Bash("npm run typecheck")
+Result: ✅ No errors
+Success: Yes
+
+ACT: Move to next step (run tests)
+\`\`\`
+
+⚠️ NEVER skip CHECK phase - always verify before moving on
+⚠️ Each response = one complete PDCA cycle
+
 🛡️ STORY VALIDATION (Check BEFORE starting):
 If story title contains: "Documentation", "Tests only", "Analyze", "Plan", "Design"
 → **REJECT IT**: Output "❌ INVALID_STORY: This story requires documentation/tests without actual code. Tech Lead must provide implementation story first."
