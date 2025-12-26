@@ -450,6 +450,216 @@ export const validateSecurityComplianceTool = tool(
   }
 );
 
+// ============================================================================
+// MEMORY TOOLS - Persistent memory for agents
+// ============================================================================
+
+import { memoryService } from '../services/MemoryService';
+import { MemoryType, MemoryImportance } from '../models/Memory';
+
+/**
+ * Custom Tool: Remember
+ * Store a memory for future sessions
+ */
+export const rememberTool = tool(
+  'remember',
+  'Store a memory/insight for future sessions. Use this liberally to remember patterns, decisions, and learnings.',
+  {
+    projectId: z.string().describe('Project ID to associate this memory with'),
+    type: z.enum([
+      'codebase_pattern',
+      'error_resolution',
+      'user_preference',
+      'architecture_decision',
+      'api_contract',
+      'test_pattern',
+      'dependency_info',
+      'workflow_learned',
+      'agent_insight',
+    ]).describe('Type of memory'),
+    title: z.string().max(200).describe('Short title for the memory'),
+    content: z.string().max(10000).describe('Full content of the memory'),
+    context: z.string().optional().describe('Additional context (file paths, error messages, etc.)'),
+    importance: z.enum(['low', 'medium', 'high', 'critical']).default('medium').describe('How important is this memory'),
+    taskId: z.string().optional().describe('Task ID that created this memory'),
+    agentType: z.string().optional().describe('Agent type that created this memory'),
+  },
+  async (args) => {
+    try {
+      const memory = await memoryService.remember({
+        projectId: args.projectId,
+        type: args.type as MemoryType,
+        title: args.title,
+        content: args.content,
+        context: args.context,
+        importance: args.importance as MemoryImportance,
+        source: {
+          taskId: args.taskId,
+          agentType: args.agentType,
+        },
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              memoryId: memory._id.toString(),
+              title: memory.title,
+              type: memory.type,
+              message: `Memory stored successfully: "${memory.title}"`,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
+/**
+ * Custom Tool: Recall
+ * Search for relevant memories using semantic search
+ */
+export const recallTool = tool(
+  'recall',
+  'Search for relevant memories from past sessions. Use this before starting work to recall patterns and learnings.',
+  {
+    projectId: z.string().describe('Project ID to search memories for'),
+    query: z.string().describe('What are you looking for? Describe the topic or problem.'),
+    types: z.array(z.enum([
+      'codebase_pattern',
+      'error_resolution',
+      'user_preference',
+      'architecture_decision',
+      'api_contract',
+      'test_pattern',
+      'dependency_info',
+      'workflow_learned',
+      'agent_insight',
+    ])).optional().describe('Filter by memory types'),
+    minImportance: z.enum(['low', 'medium', 'high', 'critical']).optional().describe('Minimum importance level'),
+    limit: z.number().default(5).describe('Maximum number of memories to return'),
+  },
+  async (args) => {
+    try {
+      const results = await memoryService.recall({
+        projectId: args.projectId,
+        query: args.query,
+        types: args.types as MemoryType[] | undefined,
+        minImportance: args.minImportance as MemoryImportance | undefined,
+        limit: args.limit,
+      });
+
+      if (results.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                memories: [],
+                message: 'No relevant memories found for this query.',
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      const formattedMemories = results.map(r => ({
+        id: r.memory._id?.toString(),
+        title: r.memory.title,
+        type: r.memory.type,
+        importance: r.memory.importance,
+        content: r.memory.content,
+        context: r.memory.context,
+        relevanceScore: Math.round(r.score * 100) / 100,
+        createdAt: r.memory.createdAt,
+      }));
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              memories: formattedMemories,
+              count: formattedMemories.length,
+              message: `Found ${formattedMemories.length} relevant memories.`,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
+/**
+ * Custom Tool: Memory Feedback
+ * Mark a memory as useful or not useful
+ */
+export const memoryFeedbackTool = tool(
+  'memory_feedback',
+  'Provide feedback on whether a memory was useful. This helps improve future memory retrieval.',
+  {
+    memoryId: z.string().describe('ID of the memory'),
+    wasUseful: z.boolean().describe('Was this memory useful for your task?'),
+  },
+  async (args) => {
+    try {
+      await memoryService.feedback(args.memoryId, args.wasUseful);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              message: `Feedback recorded: memory was ${args.wasUseful ? 'useful' : 'not useful'}`,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
 /**
  * Create custom MCP server with all tools
  */
@@ -464,6 +674,10 @@ export function createCustomToolsServer() {
       validateSecurityComplianceTool,
       executeCommandTool,
       executeStreamingCommandTool,
+      // Memory tools
+      rememberTool,
+      recallTool,
+      memoryFeedbackTool,
     ],
   });
 }
@@ -479,5 +693,9 @@ export function getCustomTools() {
     validateSecurityComplianceTool,
     executeCommandTool,
     executeStreamingCommandTool,
+    // Memory tools
+    rememberTool,
+    recallTool,
+    memoryFeedbackTool,
   ];
 }
