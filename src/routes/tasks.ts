@@ -41,7 +41,7 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer'])
+    z.enum(['planning', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer'])
   ).optional(),
 });
 
@@ -694,6 +694,10 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     let phaseName = '';
 
     switch (phase) {
+      case 'planning':
+        agentStep = task.orchestration.planning;
+        phaseName = 'Planning (Unified)';
+        break;
       case 'product-manager':
         agentStep = task.orchestration.productManager;
         phaseName = 'Product Manager';
@@ -835,7 +839,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer`,
+          message: `Invalid phase: ${phase}. Valid phases: planning, product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer`,
         });
         return;
     }
@@ -1609,6 +1613,181 @@ router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to update model configuration',
+    });
+  }
+});
+
+// Schema for human intervention response
+const humanInterventionSchema = z.object({
+  resolution: z.enum(['fixed_manually', 'skip_story', 'abort_task', 'retry_with_guidance']),
+  guidance: z.string().optional(), // Required if resolution is 'retry_with_guidance'
+});
+
+/**
+ * GET /api/tasks/:id/intervention
+ * Get current human intervention status for a task
+ */
+router.get('/:id/intervention', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      res.status(400).json({ success: false, message: 'Invalid task ID' });
+      return;
+    }
+
+    const task = await Task.findById(taskId);
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Task not found' });
+      return;
+    }
+
+    const intervention = task.orchestration.humanIntervention;
+
+    res.json({
+      success: true,
+      data: {
+        interventionRequired: intervention?.required || false,
+        intervention: intervention || null,
+      },
+    });
+  } catch (error) {
+    console.error('Error getting intervention status:', error);
+    res.status(500).json({ success: false, message: 'Failed to get intervention status' });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/intervention/resolve
+ * Resolve a human intervention request
+ *
+ * Resolutions:
+ * - fixed_manually: User fixed the code manually, continue from where we left off
+ * - skip_story: Skip this story and continue with the rest
+ * - abort_task: Cancel the entire task
+ * - retry_with_guidance: Retry with additional guidance from the user
+ */
+router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    const validatedData = humanInterventionSchema.parse(req.body);
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      res.status(400).json({ success: false, message: 'Invalid task ID' });
+      return;
+    }
+
+    const task = await Task.findById(taskId);
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Task not found' });
+      return;
+    }
+
+    const intervention = task.orchestration.humanIntervention;
+    if (!intervention?.required) {
+      res.status(400).json({
+        success: false,
+        message: 'No human intervention is currently required for this task',
+      });
+      return;
+    }
+
+    // Validate that guidance is provided for retry_with_guidance
+    if (validatedData.resolution === 'retry_with_guidance' && !validatedData.guidance) {
+      res.status(400).json({
+        success: false,
+        message: 'Guidance is required when resolution is "retry_with_guidance"',
+      });
+      return;
+    }
+
+    console.log(`\n${'✅'.repeat(20)}`);
+    console.log(`✅ [Human Intervention] Resolution received for task ${taskId}`);
+    console.log(`✅ Resolution: ${validatedData.resolution}`);
+    if (validatedData.guidance) {
+      console.log(`✅ Guidance: ${validatedData.guidance.substring(0, 100)}...`);
+    }
+    console.log(`${'✅'.repeat(20)}\n`);
+
+    // Update intervention status
+    task.orchestration.humanIntervention = {
+      ...intervention,
+      resolved: true,
+      resolvedAt: new Date(),
+      resolution: validatedData.resolution,
+      humanGuidance: validatedData.guidance,
+      resolvedBy: req.user?.id ? new mongoose.Types.ObjectId(req.user.id) : undefined,
+    };
+
+    // Handle different resolutions
+    switch (validatedData.resolution) {
+      case 'abort_task':
+        task.status = 'cancelled';
+        task.orchestration.cancelRequested = true;
+        task.orchestration.cancelRequestedAt = new Date();
+        task.orchestration.paused = false;
+        break;
+
+      case 'skip_story':
+        // Mark the story as skipped and unpause
+        // Note: The story status will be handled when orchestration resumes
+        // We just need to mark the intervention as resolved and unpause
+        task.orchestration.paused = false;
+        task.orchestration.humanIntervention!.required = false;
+        console.log(`⏭️  [Human Intervention] Story ${intervention.storyId} will be skipped`);
+        break;
+
+      case 'fixed_manually':
+      case 'retry_with_guidance':
+        // Unpause and let orchestration continue
+        task.orchestration.paused = false;
+        task.orchestration.humanIntervention!.required = false;
+        break;
+    }
+
+    await task.save();
+
+    // Emit notification
+    const { NotificationService } = await import('../services/NotificationService');
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `✅ Human intervention resolved: ${validatedData.resolution}`
+    );
+
+    // If retry_with_guidance or fixed_manually, trigger orchestration to continue
+    if (validatedData.resolution === 'retry_with_guidance' || validatedData.resolution === 'fixed_manually') {
+      // Trigger continuation in background
+      orchestrationCoordinator.orchestrateTask(taskId).catch((error) => {
+        console.error(`❌ [Human Intervention] Failed to resume orchestration:`, error);
+      });
+      console.log(`🔄 [Human Intervention] Resuming orchestration for task ${taskId}`);
+    }
+
+    res.json({
+      success: true,
+      message: `Human intervention resolved with: ${validatedData.resolution}`,
+      data: {
+        resolution: validatedData.resolution,
+        taskStatus: task.status,
+        paused: task.orchestration.paused,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error resolving intervention:', error);
+
+    if (error.name === 'ZodError') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid intervention resolution data',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to resolve human intervention',
     });
   }
 });

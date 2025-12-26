@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
-export type AgentType = 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
+export type AgentType = 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -131,18 +131,28 @@ export interface IPRConflict {
  * Orchestration - Nueva estructura con team dinámico
  */
 export interface IOrchestration {
+  // UNIFIED PLANNING PHASE (replaces problemAnalyst + productManager + projectManager)
+  planning?: IAgentStep & {
+    analysis?: any;           // Structured problem analysis
+    epics?: IEpic[];          // Epics with stories
+    stories?: IStory[];       // All stories flattened
+    overlapValidation?: any;  // File overlap detection results
+    contextSummary?: string;  // Codebase exploration summary
+  };
+
+  // Legacy phases (kept for backward compatibility)
   // Fase 0: Problem Analyst (único) - Deep problem analysis
   problemAnalyst?: IAgentStep & {
     analysis?: any; // Structured analysis data
   };
 
-  // Fase 1: Product Manager (único)
+  // Fase 1: Product Manager (único) - Legacy, but required for TeamOrchestrationPhase
   productManager: IAgentStep & {
     taskComplexity?: 'small' | 'medium' | 'large' | 'epic';
     recommendedApproach?: string;
   };
 
-  // Fase 2: Project Manager (único)
+  // Fase 2: Project Manager (único) - Legacy, but required for compatibility
   projectManager: IAgentStep & {
     stories?: IStory[]; // Stories creadas dinámicamente
     totalStories?: number;
@@ -153,7 +163,7 @@ export interface IOrchestration {
     epics?: IEpic[]; // Epics from ProductManager
   };
 
-  // Fase 3: Tech Lead (único)
+  // Fase 3: Tech Lead (único) - Used by TeamOrchestrationPhase
   techLead: IAgentStep & {
     architectureDesign?: string;
     teamComposition?: {
@@ -312,7 +322,7 @@ export interface IOrchestration {
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'contract-testing' | 'contract-fixer')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('planning' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'contract-testing' | 'contract-fixer')[]; // Fases que se auto-aprueban
 
   // Model configuration
   modelConfig?: {
@@ -366,6 +376,31 @@ export interface IOrchestration {
 
   // Flag indicating this is a multi-repo project
   isMultiRepo?: boolean;
+
+  // 🆘 HUMAN INTERVENTION SYSTEM
+  // When agents exhaust retries, they escalate to humans instead of silently failing
+  humanIntervention?: {
+    required: boolean;
+    requestedAt?: Date;
+    resolvedAt?: Date;
+
+    // Context for the human
+    phase: string;           // Which phase needs help
+    storyId?: string;        // Which story (if applicable)
+    agentType: AgentType;    // Which agent is stuck
+
+    // Problem description
+    reason: string;          // Why human intervention is needed
+    attempts: number;        // How many times the agent tried
+    lastFeedback: string;    // Last feedback/error from the agent
+    filesInvolved?: string[]; // Files that were being worked on
+
+    // Human response
+    resolved?: boolean;
+    resolution?: 'fixed_manually' | 'skip_story' | 'abort_task' | 'retry_with_guidance';
+    humanGuidance?: string;  // Additional instructions from human
+    resolvedBy?: mongoose.Types.ObjectId;
+  };
 }
 
 /**
@@ -479,7 +514,7 @@ const agentStepSchema = new Schema<IAgentStep>(
   {
     agent: {
       type: String,
-      enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
+      enum: ['planning-agent', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
       required: true,
     },
     status: {
@@ -842,7 +877,7 @@ const taskSchema = new Schema<ITask>(
       },
       autoApprovalPhases: {
         type: [String],
-        enum: ['problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
+        enum: ['planning', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
@@ -900,6 +935,27 @@ const taskSchema = new Schema<ITask>(
         userNotified: Boolean,
       },
       isMultiRepo: Boolean,
+
+      // 🆘 HUMAN INTERVENTION SYSTEM
+      humanIntervention: {
+        required: { type: Boolean, default: false },
+        requestedAt: Date,
+        resolvedAt: Date,
+        phase: String,
+        storyId: String,
+        agentType: String,
+        reason: String,
+        attempts: Number,
+        lastFeedback: String,
+        filesInvolved: [String],
+        resolved: Boolean,
+        resolution: {
+          type: String,
+          enum: ['fixed_manually', 'skip_story', 'abort_task', 'retry_with_guidance'],
+        },
+        humanGuidance: String,
+        resolvedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      },
     },
     attachments: [String],
     tags: [String],
