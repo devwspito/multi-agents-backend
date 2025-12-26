@@ -17,7 +17,8 @@
     "test": "jest",
     "cleanup-workspaces": "tsx scripts/cleanup-workspaces.ts",
     "verify-branches": "tsx scripts/verify-branches.ts",
-    "fix-branches": "tsx scripts/verify-branches.ts --fix"
+    "fix-branches": "tsx scripts/verify-branches.ts --fix",
+    "setup:vector-index": "tsx scripts/setup-vector-index.ts"
   },
   "keywords": [
     "claude",
