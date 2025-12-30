@@ -30,7 +30,28 @@ export interface AgentPermissions {
  */
 export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
   /**
-   * Problem Analyst
+   * Planning Agent (Unified)
+   * Combines: Problem Analyst + Product Manager + Project Manager
+   * Needs: Read-only exploration (permissionMode: 'plan')
+   */
+  'planning-agent': {
+    allowedTools: ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Bash', 'execute_command'],
+    allowedCommands: ['curl', 'wget', 'npm', 'node', 'git', 'cat', 'ls', 'grep', 'find', 'tree'],
+    deniedCommands: [
+      'rm -rf',
+      'sudo',
+      'git push',
+      'git merge',
+      'git commit',
+      'npm publish',
+      'docker rm',
+      'kubectl delete',
+    ],
+    requiresApproval: [],
+  },
+
+  /**
+   * Problem Analyst (Legacy)
    * Needs: Research and analysis (read-only)
    */
   'problem-analyst': {
@@ -180,6 +201,60 @@ export const AGENT_PERMISSIONS: Record<string, AgentPermissions> = {
       'git reset --hard',
     ],
     requiresApproval: [], // Phase-level approval, not command-level
+  },
+
+  /**
+   * Verification Fixer
+   * Needs: Full file operations to fix verification issues (completeness/coherence)
+   * Enhanced with WebFetch for documentation lookup and validation commands
+   * APPROVAL: Phase-level (not command-level)
+   */
+  'verification-fixer': {
+    allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash', 'WebFetch', 'WebSearch'],
+    allowedCommands: [
+      // File operations
+      'curl', 'wget', 'cat', 'ls', 'grep', 'find', 'mkdir', 'cp', 'mv',
+      // Package managers
+      'npm', 'npx', 'yarn', 'pnpm', 'pip', 'pip3',
+      // Build & test
+      'node', 'python', 'python3', 'tsc', 'jest', 'vitest', 'mocha',
+      'eslint', 'prettier', 'webpack', 'vite', 'esbuild',
+      // Git (for commits)
+      'git',
+      // Validation
+      'npm run build', 'npm run lint', 'npm run test', 'npm run typecheck',
+      'npm install', 'npm ci',
+    ],
+    deniedCommands: [
+      'rm -rf',
+      'sudo',
+      'npm publish',
+      'docker rm',
+      'kubectl delete',
+      'git push --force',
+      'git reset --hard',
+    ],
+    requiresApproval: [], // Phase-level approval, not command-level
+  },
+
+  /**
+   * Recovery Analyst (Opus)
+   * Needs: Analysis capabilities to determine if errors are automatable
+   * Read-only + light analysis
+   */
+  'recovery-analyst': {
+    allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+    allowedCommands: ['npm', 'node', 'cat', 'ls', 'grep', 'find', 'git'],
+    deniedCommands: [
+      'rm -rf',
+      'sudo',
+      'git push',
+      'git merge',
+      'npm publish',
+      'docker rm',
+      'kubectl delete',
+    ],
+    requiresApproval: [],
   },
 
   /**
