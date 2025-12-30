@@ -2,7 +2,7 @@ import { Server as SocketServer } from 'socket.io';
 
 export interface OrchestrationEvent {
   taskId: string;
-  agentType: 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer';
+  agentType: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer';
   status: 'started' | 'in-progress' | 'completed' | 'failed';
   message: string;
   timestamp: Date;
@@ -313,6 +313,42 @@ export class NotificationService {
     console.log(`✅ [WebSocket] Approval granted emitted:`, {
       taskId,
       phase,
+    });
+  }
+
+  /**
+   * Emitir evento de directiva inyectada (mid-execution user feedback)
+   */
+  static emitDirectiveInjected(taskId: string, data: {
+    directiveId: string;
+    priority: string;
+    targetPhase: string | null;
+    targetAgent: string | null;
+    contentPreview: string;
+  }): void {
+    this.emitNotification(taskId, 'directive_injected', data);
+
+    console.log(`💡 [WebSocket] Directive injected:`, {
+      taskId,
+      directiveId: data.directiveId,
+      priority: data.priority,
+    });
+  }
+
+  /**
+   * Emitir evento de directiva consumida (por un agente)
+   */
+  static emitDirectiveConsumed(taskId: string, data: {
+    directiveId: string;
+    phaseName: string;
+    agentType?: string;
+  }): void {
+    this.emitNotification(taskId, 'directive_consumed', data);
+
+    console.log(`✅ [WebSocket] Directive consumed:`, {
+      taskId,
+      directiveId: data.directiveId,
+      phaseName: data.phaseName,
     });
   }
 

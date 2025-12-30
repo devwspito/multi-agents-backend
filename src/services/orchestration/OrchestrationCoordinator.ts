@@ -7,14 +7,15 @@ import { NotificationService } from '../NotificationService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
 import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
-import { ProductManagerPhase } from './ProductManagerPhase';
-import { ProjectManagerPhase } from './ProjectManagerPhase';
+// Legacy phases REMOVED: ProductManagerPhase, ProjectManagerPhase, ProblemAnalystPhase
+// These are replaced by unified PlanningPhase
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
 import { JudgePhase } from './JudgePhase';
 // QAPhase REMOVED - Judge handles all quality validation per-story
 import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
+import { VerificationPhase } from './VerificationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
 import { AgentModelConfig } from '../../config/ModelConfigurations';
 import { safeGitExecSync } from '../../utils/safeGitExecution';
@@ -97,7 +98,8 @@ export class OrchestrationCoordinator {
     'Planning',            // 1. Unified planning (Problem + Product + Project in one pass)
     'Approval',            // 2. Human approval gate (epics + stories)
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers+Judge per epic)
-    'AutoMerge',           // 4. Merge approved PRs to main
+    'Verification',        // 4. Verify completeness and coherence before merge
+    'AutoMerge',           // 5. Merge approved PRs to main
   ];
 
   constructor() {
@@ -477,6 +479,19 @@ export class OrchestrationCoordinator {
           NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ ${budgetCheck.warning}`);
         }
 
+        // 💡 CHECK FOR PENDING DIRECTIVES
+        // Directives are user-injected instructions that should be incorporated into agent behavior
+        const directivesToInject = await this.consumeDirectivesForPhase(task, phaseName, taskId);
+        if (directivesToInject.length > 0) {
+          context.setData('injectedDirectives', directivesToInject);
+          console.log(`💡 [Directive] Injected ${directivesToInject.length} directive(s) into ${phaseName} context`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `💡 Injecting ${directivesToInject.length} user directive(s) into ${phaseName}`
+          );
+        }
+
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
@@ -724,13 +739,8 @@ export class OrchestrationCoordinator {
       case 'Planning':
         return new PlanningPhase(executeAgentWithContext);
 
-      // Legacy phases (kept for backward compatibility, but not in PHASE_ORDER)
-      case 'ProblemAnalyst':
-        return new (require('./ProblemAnalystPhase').ProblemAnalystPhase)(executeAgentWithContext);
-      case 'ProductManager':
-        return new ProductManagerPhase(executeAgentWithContext);
-      case 'ProjectManager':
-        return new ProjectManagerPhase(executeAgentWithContext);
+      // Legacy phases REMOVED: ProblemAnalyst, ProductManager, ProjectManager
+      // Use PlanningPhase instead (unified planning)
 
       case 'TeamOrchestration':
         return new TeamOrchestrationPhase(
@@ -756,6 +766,9 @@ export class OrchestrationCoordinator {
 
       case 'Approval':
         return new ApprovalPhase();
+
+      case 'Verification':
+        return new VerificationPhase(executeAgentWithContext);
 
       case 'AutoMerge':
         return new AutoMergePhase(this.githubService);
@@ -862,6 +875,164 @@ export class OrchestrationCoordinator {
    * - Keep only essential information
    * - Maintain phase results
    */
+  /**
+   * Consume pending directives that match the current phase
+   *
+   * Directives allow users to inject instructions mid-execution.
+   * They are picked up before each phase and injected into agent context.
+   *
+   * @param task - The task document
+   * @param phaseName - Current phase name (e.g., 'TeamOrchestration')
+   * @param taskId - Task ID for logging
+   * @returns Array of directives to inject into this phase
+   */
+  private async consumeDirectivesForPhase(
+    task: ITask,
+    phaseName: string,
+    taskId: string
+  ): Promise<Array<{ id: string; content: string; priority: string }>> {
+    // Refresh task to get latest directives
+    const freshTask = await Task.findById(task._id);
+    if (!freshTask) return [];
+
+    const pendingDirectives = freshTask.orchestration.pendingDirectives || [];
+    if (pendingDirectives.length === 0) return [];
+
+    // Filter directives that match this phase
+    // A directive matches if:
+    // 1. No targetPhase specified (applies to all), OR
+    // 2. targetPhase matches current phase
+    const matchingDirectives = pendingDirectives.filter(d => {
+      if (d.consumed) return false;
+      if (!d.targetPhase) return true; // No target = applies to all
+      return d.targetPhase.toLowerCase() === phaseName.toLowerCase();
+    });
+
+    if (matchingDirectives.length === 0) return [];
+
+    // Sort by priority: critical > high > normal > suggestion
+    const priorityOrder: Record<string, number> = {
+      'critical': 0,
+      'high': 1,
+      'normal': 2,
+      'suggestion': 3,
+    };
+    matchingDirectives.sort((a, b) =>
+      (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3)
+    );
+
+    // Mark directives as consumed and move to history
+    const consumedDirectives: Array<{ id: string; content: string; priority: string }> = [];
+
+    for (const directive of matchingDirectives) {
+      directive.consumed = true;
+      directive.injectedAt = new Date();
+
+      consumedDirectives.push({
+        id: directive.id,
+        content: directive.content,
+        priority: directive.priority,
+      });
+
+      // Emit consumed event
+      NotificationService.emitDirectiveConsumed(taskId, {
+        directiveId: directive.id,
+        phaseName,
+      });
+
+      console.log(`💡 [Directive] Consumed "${directive.id}" for phase ${phaseName}`);
+    }
+
+    // Move consumed directives to history
+    if (!freshTask.orchestration.directiveHistory) {
+      freshTask.orchestration.directiveHistory = [];
+    }
+    freshTask.orchestration.directiveHistory.push(...matchingDirectives as any);
+
+    // Remove consumed directives from pending
+    freshTask.orchestration.pendingDirectives = pendingDirectives.filter(d => !d.consumed);
+
+    freshTask.markModified('orchestration.pendingDirectives');
+    freshTask.markModified('orchestration.directiveHistory');
+    await freshTask.save();
+
+    // Update the task reference with fresh data
+    Object.assign(task.orchestration, freshTask.orchestration);
+
+    return consumedDirectives;
+  }
+
+  /**
+   * Get formatted directives block for a specific agent type
+   *
+   * This reads directly from the task's pendingDirectives to get
+   * directives that apply to the given agent type.
+   *
+   * Note: This does NOT consume directives (they remain pending).
+   * Consumption happens in consumeDirectivesForPhase at phase start.
+   *
+   * @param taskId - Task ID
+   * @param agentType - Agent type (e.g., 'developer', 'verification-fixer')
+   * @returns Formatted markdown block or empty string if no directives
+   */
+  private async getDirectivesForAgent(taskId: string, agentType: string): Promise<string> {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) return '';
+
+      const pendingDirectives = task.orchestration.pendingDirectives || [];
+      if (pendingDirectives.length === 0) return '';
+
+      // Filter directives that apply to this agent
+      const matchingDirectives = pendingDirectives.filter(d => {
+        if (d.consumed) return false;
+        // No targetAgent = applies to all, OR matches this agent
+        return !d.targetAgent || d.targetAgent === agentType;
+      });
+
+      if (matchingDirectives.length === 0) return '';
+
+      // Format as markdown block with priority indicators
+      const priorityEmoji: Record<string, string> = {
+        'critical': '🚨',
+        'high': '⚠️',
+        'normal': '💡',
+        'suggestion': '💭',
+      };
+
+      // Sort by priority
+      const priorityOrder: Record<string, number> = {
+        'critical': 0,
+        'high': 1,
+        'normal': 2,
+        'suggestion': 3,
+      };
+      matchingDirectives.sort((a, b) =>
+        (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3)
+      );
+
+      const formattedDirectives = matchingDirectives.map(d => {
+        const emoji = priorityEmoji[d.priority] || '💡';
+        return `${emoji} **[${d.priority.toUpperCase()}]** ${d.content}`;
+      }).join('\n\n');
+
+      return `
+## 💡 USER DIRECTIVES (PRIORITIZE THESE)
+
+The following instructions were injected by the user mid-execution.
+**You MUST prioritize these directives** and incorporate them into your work.
+
+${formattedDirectives}
+
+---
+
+`;
+    } catch (error: any) {
+      console.warn(`⚠️ [Directives] Failed to get directives: ${error.message}`);
+      return '';
+    }
+  }
+
   /**
    * Compact context if needed using SDK native /compact command
    *
@@ -1189,36 +1360,44 @@ export class OrchestrationCoordinator {
       const allMessages: any[] = [];
       let turnCount = 0;
 
-      // 🔥 LOOP DETECTION: Count consecutive messages without progress
-      // If we get too many assistant/user messages without tool_use, tool_result, or result = stuck
-      let messagesWithoutProgress = 0;
-      const MAX_MESSAGES_WITHOUT_PROGRESS = 50; // Threshold before we consider agent stuck
+      // 🔥 LOOP DETECTION: Detect stuck agents by counting messages without tool activity
+      // SDK sends assistant/user messages that CONTAIN tool_use/tool_result as content blocks
+      let messagesWithoutToolUse = 0;
+      const MAX_MESSAGES_WITHOUT_TOOL_USE = 100; // Higher threshold - only catch truly stuck agents
 
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
       console.log(`   SDK will handle timeouts and error recovery automatically`);
-      console.log(`   Loop detection enabled: will abort after ${MAX_MESSAGES_WITHOUT_PROGRESS} messages without progress`);
+      console.log(`   Loop detection: ${MAX_MESSAGES_WITHOUT_TOOL_USE} messages without tool activity`);
 
       try {
         // Simple stream consumption - SDK handles everything
         for await (const message of stream) {
           allMessages.push(message);
 
-          // 🔥 LOOP DETECTION: Check if this message represents progress
+          // 🔥 LOOP DETECTION: Check if this message contains tool activity
           const messageType = (message as any).type;
-          const isProgressMessage = ['tool_use', 'tool_result', 'result', 'turn_start'].includes(messageType);
+          const messageContent = (message as any).message?.content || [];
 
-          if (isProgressMessage) {
-            // Reset counter on progress
-            messagesWithoutProgress = 0;
+          // Check for tool activity in message content (SDK nests tool_use inside assistant messages)
+          const hasToolActivity =
+            messageType === 'result' ||
+            messageType === 'turn_start' ||
+            (Array.isArray(messageContent) && messageContent.some((block: any) =>
+              block.type === 'tool_use' || block.type === 'tool_result'
+            ));
+
+          if (hasToolActivity) {
+            // Reset counter on tool activity
+            messagesWithoutToolUse = 0;
           } else {
-            // Increment counter for non-progress messages (assistant, user, system, text without action)
-            messagesWithoutProgress++;
+            // Increment counter for messages without tool activity
+            messagesWithoutToolUse++;
 
-            // Check if stuck
-            if (messagesWithoutProgress >= MAX_MESSAGES_WITHOUT_PROGRESS) {
+            // Check if stuck (only after many messages without ANY tool use)
+            if (messagesWithoutToolUse >= MAX_MESSAGES_WITHOUT_TOOL_USE) {
               const lastFewTypes = allMessages.slice(-10).map(m => (m as any).type).join(', ');
               console.error(`\n${'='.repeat(80)}`);
-              console.error(`🚨 LOOP DETECTED: ${messagesWithoutProgress} consecutive messages without progress`);
+              console.error(`🚨 LOOP DETECTED: ${messagesWithoutToolUse} consecutive messages without tool activity`);
               console.error(`   Agent: ${agentType}`);
               console.error(`   Turn count: ${turnCount}`);
               console.error(`   Last 10 message types: ${lastFewTypes}`);
@@ -1228,13 +1407,13 @@ export class OrchestrationCoordinator {
                 NotificationService.emitConsoleLog(
                   taskId,
                   'error',
-                  `🚨 Agent ${agentType} stuck in loop - aborting after ${messagesWithoutProgress} messages without progress`
+                  `🚨 Agent ${agentType} stuck in loop - aborting after ${messagesWithoutToolUse} messages without tool activity`
                 );
               }
 
               // Throw error to break out of the stream
               const loopError = new Error(
-                `Agent ${agentType} stuck in loop: ${messagesWithoutProgress} consecutive messages without progress. ` +
+                `Agent ${agentType} stuck in loop: ${messagesWithoutToolUse} consecutive messages without tool activity. ` +
                 `Last message types: ${lastFewTypes}`
               );
               (loopError as any).isLoopDetection = true;
@@ -1742,7 +1921,10 @@ export class OrchestrationCoordinator {
       // Build developer prompt - Rich context per SDK philosophy
       const projectId = task.projectId?.toString() || '';
 
-      let prompt = `# Story: ${story.title}
+      // 💡 Get any injected directives for developers from task
+      const directivesBlock = await this.getDirectivesForAgent(task._id as any, 'developer');
+
+      let prompt = `${directivesBlock}# Story: ${story.title}
 
 ${story.description}
 

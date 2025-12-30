@@ -148,6 +148,60 @@ export class OrchestrationContext {
       console.log(`✅ [Branch Registry] Marked ${branchName} as merged`);
     }
   }
+
+  /**
+   * Get formatted directives block for inclusion in agent prompts
+   *
+   * Call this from phases to incorporate user-injected directives
+   * into the agent's system prompt.
+   *
+   * @param agentType - Optional filter for agent-specific directives
+   * @returns Formatted markdown block or empty string if no directives
+   */
+  getDirectivesBlock(agentType?: string): string {
+    const directives = this.getData<Array<{ id: string; content: string; priority: string }>>('injectedDirectives');
+
+    if (!directives || directives.length === 0) {
+      return '';
+    }
+
+    // Filter by agentType if specified
+    const filtered = agentType
+      ? directives.filter(d => {
+          const directive = d as any;
+          return !directive.targetAgent || directive.targetAgent === agentType;
+        })
+      : directives;
+
+    if (filtered.length === 0) {
+      return '';
+    }
+
+    // Format as markdown block with priority indicators
+    const priorityEmoji: Record<string, string> = {
+      'critical': '🚨',
+      'high': '⚠️',
+      'normal': '💡',
+      'suggestion': '💭',
+    };
+
+    const formattedDirectives = filtered.map(d => {
+      const emoji = priorityEmoji[d.priority] || '💡';
+      return `${emoji} **[${d.priority.toUpperCase()}]** ${d.content}`;
+    }).join('\n\n');
+
+    return `
+## 💡 USER DIRECTIVES (PRIORITIZE THESE)
+
+The following instructions were injected by the user mid-execution.
+**You MUST prioritize these directives** and incorporate them into your work.
+
+${formattedDirectives}
+
+---
+
+`;
+  }
 }
 
 /**

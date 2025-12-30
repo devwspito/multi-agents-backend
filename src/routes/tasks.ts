@@ -781,6 +781,10 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = (task.orchestration as any).autoMerge;
         phaseName = 'Auto-Merge';
         break;
+      case 'verification':
+        agentStep = task.orchestration.phases?.find((p: any) => p.name === 'Verification');
+        phaseName = 'Verification';
+        break;
       case 'test-creator':
         agentStep = (task.orchestration as any).testCreator;
         phaseName = 'Test Creator';
@@ -1486,6 +1490,231 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to cancel task',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/inject-directive
+ * Inject a directive into a running orchestration
+ *
+ * Allows users to send real-time instructions to agents while the task is in progress.
+ * Directives are picked up between phases and injected into the next agent's context.
+ *
+ * Body:
+ * - content (required): The directive text
+ * - priority: 'critical' | 'high' | 'normal' | 'suggestion' (default: 'normal')
+ * - targetPhase: Optional phase name to target (e.g., 'TeamOrchestration')
+ * - targetAgent: Optional agent type to target (e.g., 'developer')
+ */
+router.post('/:id/inject-directive', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    // Task must be in_progress or paused to inject directives
+    if (task.status !== 'in_progress' && !task.orchestration.paused) {
+      res.status(400).json({
+        success: false,
+        message: `Cannot inject directive into task with status: ${task.status}. Task must be in_progress or paused.`,
+      });
+      return;
+    }
+
+    // Validate request body
+    const { content, priority = 'normal', targetPhase, targetAgent } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Directive content is required and must be a non-empty string',
+      });
+      return;
+    }
+
+    // Validate priority
+    const validPriorities = ['critical', 'high', 'normal', 'suggestion'];
+    if (!validPriorities.includes(priority)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid priority. Must be one of: ${validPriorities.join(', ')}`,
+      });
+      return;
+    }
+
+    // Create the directive
+    const directiveId = `dir-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const directive = {
+      id: directiveId,
+      content: content.trim(),
+      priority,
+      targetPhase: targetPhase || undefined,
+      targetAgent: targetAgent || undefined,
+      consumed: false,
+      createdAt: new Date(),
+      createdBy: new mongoose.Types.ObjectId(req.user!.id),
+    };
+
+    // Initialize pendingDirectives array if it doesn't exist
+    if (!task.orchestration.pendingDirectives) {
+      task.orchestration.pendingDirectives = [];
+    }
+
+    // Add directive to the pending queue
+    task.orchestration.pendingDirectives.push(directive as any);
+    task.markModified('orchestration.pendingDirectives');
+    await task.save();
+
+    console.log(`💡 [Directive] Injected directive "${directiveId}" into task ${req.params.id}`);
+    console.log(`   Priority: ${priority}`);
+    console.log(`   Target Phase: ${targetPhase || 'any'}`);
+    console.log(`   Target Agent: ${targetAgent || 'any'}`);
+    console.log(`   Content: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
+
+    // Notify via WebSocket
+    const { NotificationService } = await import('../services/NotificationService');
+    NotificationService.emitConsoleLog(
+      req.params.id,
+      'info',
+      `💡 Directive received (${priority}): "${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`
+    );
+    NotificationService.emitDirectiveInjected(req.params.id, {
+      directiveId,
+      priority,
+      targetPhase: targetPhase || null,
+      targetAgent: targetAgent || null,
+      contentPreview: content.substring(0, 100),
+    });
+
+    res.json({
+      success: true,
+      message: 'Directive injected successfully. It will be picked up by the next matching phase/agent.',
+      data: {
+        directiveId,
+        taskId: req.params.id,
+        priority,
+        targetPhase: targetPhase || null,
+        targetAgent: targetAgent || null,
+        currentPhase: task.orchestration.currentPhase,
+        pendingDirectivesCount: task.orchestration.pendingDirectives.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error injecting directive:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to inject directive',
+    });
+  }
+});
+
+/**
+ * GET /api/tasks/:id/directives
+ * Get all pending and historical directives for a task
+ */
+router.get('/:id/directives', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        pending: task.orchestration.pendingDirectives || [],
+        history: task.orchestration.directiveHistory || [],
+        currentPhase: task.orchestration.currentPhase,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching directives:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch directives',
+    });
+  }
+});
+
+/**
+ * DELETE /api/tasks/:id/directives/:directiveId
+ * Remove a pending directive before it's consumed
+ */
+router.delete('/:id/directives/:directiveId', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    const directiveId = req.params.directiveId;
+    const pendingDirectives = task.orchestration.pendingDirectives || [];
+
+    const directiveIndex = pendingDirectives.findIndex(d => d.id === directiveId);
+
+    if (directiveIndex === -1) {
+      res.status(404).json({
+        success: false,
+        message: 'Directive not found or already consumed',
+      });
+      return;
+    }
+
+    // Remove the directive
+    pendingDirectives.splice(directiveIndex, 1);
+    task.orchestration.pendingDirectives = pendingDirectives;
+    task.markModified('orchestration.pendingDirectives');
+    await task.save();
+
+    console.log(`🗑️  [Directive] Removed directive "${directiveId}" from task ${req.params.id}`);
+
+    // Notify via WebSocket
+    const { NotificationService } = await import('../services/NotificationService');
+    NotificationService.emitConsoleLog(
+      req.params.id,
+      'info',
+      `🗑️  Directive "${directiveId}" removed`
+    );
+
+    res.json({
+      success: true,
+      message: 'Directive removed successfully',
+      data: {
+        directiveId,
+        remainingPendingCount: pendingDirectives.length,
+      },
+    });
+  } catch (error) {
+    console.error('Error removing directive:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove directive',
     });
   }
 });

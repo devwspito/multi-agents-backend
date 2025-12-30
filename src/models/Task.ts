@@ -13,6 +13,7 @@ export interface IStory {
   id: string;
   title: string;
   description: string;
+  acceptanceCriteria?: string[]; // Acceptance criteria for verification
   assignedTo?: string; // instanceId del developer (ej: "dev-1")
   priority: number;
   estimatedComplexity: StoryComplexity;
@@ -38,6 +39,17 @@ export interface IStory {
   judgeStatus?: ReviewStatus; // Judge evaluation result
   judgeComments?: string; // Judge feedback
   judgeIterations?: number; // Retry count
+
+  // 🔥 Cost tracking per story
+  cost_usd?: number; // Total cost for this story (dev + judge iterations + fixer)
+  developerCost_usd?: number; // Cost of developer agent
+  judgeCost_usd?: number; // Total cost of judge iterations
+  fixerCost_usd?: number; // Cost of fixer agent (if used)
+  judgeIterationCosts?: Array<{
+    iteration: number;
+    cost_usd: number;
+    verdict: 'approved' | 'rejected';
+  }>;
 }
 
 /**
@@ -125,6 +137,22 @@ export interface IPRConflict {
   severity: 'low' | 'medium' | 'high' | 'critical';
   autoResolvable: boolean;
   resolution?: string;
+}
+
+/**
+ * Directive - User instruction injected mid-execution
+ * Allows users to provide real-time feedback that agents incorporate
+ */
+export interface IDirective {
+  id: string;
+  content: string;                    // The actual directive text
+  priority: 'critical' | 'high' | 'normal' | 'suggestion';
+  targetPhase?: string;               // Optional: inject only in specific phase
+  targetAgent?: string;               // Optional: inject only for specific agent type
+  injectedAt?: Date;                  // When it was consumed by an agent
+  consumed: boolean;                  // Whether it's been processed
+  createdAt: Date;
+  createdBy?: mongoose.Types.ObjectId;
 }
 
 /**
@@ -312,6 +340,18 @@ export interface IOrchestration {
   totalCost: number;
   totalTokens: number;
 
+  // 🔥 Cost tracking by phase for visibility/debugging
+  costByPhase?: {
+    planning?: { cost_usd: number; tokens: number };
+    approval?: { cost_usd: number; tokens: number };
+    techLead?: { cost_usd: number; tokens: number };
+    developers?: { cost_usd: number; tokens: number };
+    judge?: { cost_usd: number; tokens: number };
+    fixer?: { cost_usd: number; tokens: number };
+    qa?: { cost_usd: number; tokens: number };
+    autoMerge?: { cost_usd: number; tokens: number };
+  };
+
   // Control de ejecución (pausar/reanudar/cancelar)
   paused?: boolean; // Usuario pausó manualmente la orquestación
   pausedAt?: Date;
@@ -319,6 +359,12 @@ export interface IOrchestration {
   cancelRequested?: boolean; // Usuario solicitó cancelación
   cancelRequestedAt?: Date;
   cancelRequestedBy?: mongoose.Types.ObjectId;
+
+  // 💡 MID-EXECUTION DIRECTIVE INJECTION
+  // Allows users to send instructions to agents while orchestration is running
+  // Directives are picked up between phases and injected into agent prompts
+  pendingDirectives?: IDirective[];
+  directiveHistory?: IDirective[];  // Archive of consumed directives for audit trail
 
   // Auto-aprobación opcional
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
@@ -450,6 +496,7 @@ const storySchema = new Schema<IStory>(
     id: { type: String, required: true },
     title: { type: String, required: true },
     description: { type: String, required: true },
+    acceptanceCriteria: [String],
     assignedTo: String,
     priority: { type: Number, default: 1 },
     estimatedComplexity: {
@@ -477,6 +524,16 @@ const storySchema = new Schema<IStory>(
     },
     judgeComments: String,
     judgeIterations: { type: Number, default: 0 },
+    // 🔥 Cost tracking per story
+    cost_usd: { type: Number, default: 0 }, // Total cost for this story
+    developerCost_usd: { type: Number, default: 0 }, // Cost of developer agent
+    judgeCost_usd: { type: Number, default: 0 }, // Total cost of judge iterations
+    fixerCost_usd: { type: Number, default: 0 }, // Cost of fixer agent (if used)
+    judgeIterationCosts: [{
+      iteration: Number,
+      cost_usd: Number,
+      verdict: { type: String, enum: ['approved', 'rejected'] },
+    }],
   },
   { _id: false }
 );
@@ -853,6 +910,17 @@ const taskSchema = new Schema<ITask>(
         type: Number,
         default: 0,
       },
+      // 🔥 Cost tracking by phase for visibility/debugging
+      costByPhase: {
+        planning: { cost_usd: Number, tokens: Number },
+        approval: { cost_usd: Number, tokens: Number },
+        techLead: { cost_usd: Number, tokens: Number },
+        developers: { cost_usd: Number, tokens: Number },
+        judge: { cost_usd: Number, tokens: Number },
+        fixer: { cost_usd: Number, tokens: Number },
+        qa: { cost_usd: Number, tokens: Number },
+        autoMerge: { cost_usd: Number, tokens: Number },
+      },
       paused: {
         type: Boolean,
         default: false,
@@ -871,6 +939,35 @@ const taskSchema = new Schema<ITask>(
         type: Schema.Types.ObjectId,
         ref: 'User',
       },
+
+      // 💡 MID-EXECUTION DIRECTIVE INJECTION
+      pendingDirectives: [{
+        id: { type: String, required: true },
+        content: { type: String, required: true },
+        priority: {
+          type: String,
+          enum: ['critical', 'high', 'normal', 'suggestion'],
+          default: 'normal',
+        },
+        targetPhase: String,           // Optional: only inject in this phase
+        targetAgent: String,           // Optional: only inject for this agent type
+        injectedAt: Date,              // When consumed by an agent
+        consumed: { type: Boolean, default: false },
+        createdAt: { type: Date, default: Date.now },
+        createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      }],
+      directiveHistory: [{             // Archive of consumed directives
+        id: { type: String, required: true },
+        content: { type: String, required: true },
+        priority: String,
+        targetPhase: String,
+        targetAgent: String,
+        injectedAt: Date,
+        consumed: { type: Boolean, default: true },
+        createdAt: Date,
+        createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      }],
+
       autoApprovalEnabled: {
         type: Boolean,
         default: false, // ❌ Auto-aprobación DESHABILITADA por defecto - requiere configuración explícita del usuario

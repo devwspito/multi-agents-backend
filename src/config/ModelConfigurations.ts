@@ -68,12 +68,16 @@ export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
  * - Removed: qa-engineer, fixer, test-creator, contract-tester, contract-fixer
  */
 export interface AgentModelConfig {
-  'problem-analyst': ClaudeModel;
-  'product-manager': ClaudeModel;
-  'project-manager': ClaudeModel;
+  'planning-agent': ClaudeModel;  // Unified planning (replaces problem-analyst + product-manager + project-manager)
+  'problem-analyst': ClaudeModel;  // Legacy - kept for backward compatibility
+  'product-manager': ClaudeModel;  // Legacy - kept for backward compatibility
+  'project-manager': ClaudeModel;  // Legacy - kept for backward compatibility
   'tech-lead': ClaudeModel;
   'developer': ClaudeModel;
   'judge': ClaudeModel;
+  'fixer': ClaudeModel;            // QA error fixer
+  'verification-fixer': ClaudeModel; // Verification issue fixer (completeness/coherence)
+  'recovery-analyst': ClaudeModel; // Opus analyst for Last Chance Recovery
   'merge-coordinator': ClaudeModel;
   'auto-merge': ClaudeModel;
   'error-detective': ClaudeModel;
@@ -86,11 +90,15 @@ export interface AgentModelConfig {
  * Premium Configuration (Opus + Sonnet)
  */
 export const PREMIUM_CONFIG: AgentModelConfig = {
+  'planning-agent': 'opus',  // Unified planning
   'problem-analyst': 'opus',
   'product-manager': 'opus',
   'project-manager': 'opus',
   'tech-lead': 'opus',
   'judge': 'opus',
+  'fixer': 'sonnet',
+  'verification-fixer': 'sonnet',
+  'recovery-analyst': 'opus',
   'error-detective': 'opus',
   'developer': 'sonnet',
   'merge-coordinator': 'sonnet',
@@ -105,11 +113,15 @@ export const PREMIUM_CONFIG: AgentModelConfig = {
  * Note: Developer ALWAYS uses Sonnet for code quality
  */
 export const STANDARD_CONFIG: AgentModelConfig = {
+  'planning-agent': 'sonnet',  // Unified planning
   'problem-analyst': 'sonnet',
   'product-manager': 'sonnet',
   'project-manager': 'sonnet',
   'tech-lead': 'sonnet',
   'judge': 'sonnet',
+  'fixer': 'sonnet',
+  'verification-fixer': 'sonnet',
+  'recovery-analyst': 'sonnet',
   'error-detective': 'sonnet',
   'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - code quality matters
   'merge-coordinator': 'haiku',
@@ -131,15 +143,19 @@ export const STANDARD_CONFIG: AgentModelConfig = {
  */
 export const RECOMMENDED_CONFIG: AgentModelConfig = {
   // 🧠 STRATEGIC - Opus
+  'planning-agent': 'opus',  // Unified planning (replaces 3 phases)
   'problem-analyst': 'opus',
   'product-manager': 'opus',
   'project-manager': 'opus',
   'tech-lead': 'opus',
   'error-detective': 'opus',
+  'recovery-analyst': 'opus',  // Opus for deep error analysis
 
   // ⚡ CODE QUALITY - Sonnet (Developer ALWAYS Sonnet)
   'judge': 'sonnet',
   'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - code quality matters
+  'fixer': 'sonnet',      // Fixer needs good code understanding
+  'verification-fixer': 'sonnet',  // Verification fixer needs good code understanding
 
   // 💨 MERGE OPERATIONS - Haiku
   'merge-coordinator': 'haiku',
@@ -154,12 +170,16 @@ export const RECOMMENDED_CONFIG: AgentModelConfig = {
  * Note: Developer ALWAYS uses Sonnet for optimal code generation
  */
 export const MAX_CONFIG: AgentModelConfig = {
+  'planning-agent': 'opus',  // Unified planning
   'problem-analyst': 'opus',
   'product-manager': 'opus',
   'project-manager': 'opus',
   'tech-lead': 'opus',
   'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - optimized for code generation
   'judge': 'opus',
+  'fixer': 'opus',
+  'verification-fixer': 'opus',
+  'recovery-analyst': 'opus',
   'merge-coordinator': 'opus',
   'auto-merge': 'opus',
   'error-detective': 'opus',
@@ -184,15 +204,19 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
 
   return {
     // 🧠 CRITICAL THINKING - Use TOP MODEL
+    'planning-agent': topModel,  // Unified planning
     'problem-analyst': topModel,
     'product-manager': topModel,
     'project-manager': topModel,
     'tech-lead': topModel,
     'judge': topModel,
     'error-detective': topModel,
+    'recovery-analyst': topModel,
 
-    // 👨‍💻 DEVELOPER - 🔒 ALWAYS Sonnet (never downgrade)
+    // 👨‍💻 DEVELOPER & FIXERS - 🔒 ALWAYS Sonnet (never downgrade)
     'developer': 'sonnet',
+    'fixer': 'sonnet',
+    'verification-fixer': 'sonnet',
 
     // 💨 MERGE OPERATIONS - Use BOTTOM MODEL
     'merge-coordinator': bottomModel,
@@ -209,12 +233,16 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
  */
 export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
   return {
+    'planning-agent': dbConfig.planningAgent || dbConfig['planning-agent'] || RECOMMENDED_CONFIG['planning-agent'],
     'problem-analyst': dbConfig.problemAnalyst || dbConfig['problem-analyst'] || RECOMMENDED_CONFIG['problem-analyst'],
     'product-manager': dbConfig.productManager || dbConfig['product-manager'] || RECOMMENDED_CONFIG['product-manager'],
     'project-manager': dbConfig.projectManager || dbConfig['project-manager'] || RECOMMENDED_CONFIG['project-manager'],
     'tech-lead': dbConfig.techLead || dbConfig['tech-lead'] || RECOMMENDED_CONFIG['tech-lead'],
     'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - ignore DB config
     'judge': dbConfig.judge || RECOMMENDED_CONFIG['judge'],
+    'fixer': dbConfig.fixer || RECOMMENDED_CONFIG['fixer'],
+    'verification-fixer': dbConfig.verificationFixer || dbConfig['verification-fixer'] || RECOMMENDED_CONFIG['verification-fixer'],
+    'recovery-analyst': dbConfig.recoveryAnalyst || dbConfig['recovery-analyst'] || RECOMMENDED_CONFIG['recovery-analyst'],
     'merge-coordinator': dbConfig.mergeCoordinator || dbConfig['merge-coordinator'] || RECOMMENDED_CONFIG['merge-coordinator'],
     'auto-merge': dbConfig.autoMerge || dbConfig['auto-merge'] || RECOMMENDED_CONFIG['auto-merge'],
     'error-detective': dbConfig.errorDetective || dbConfig['error-detective'] || RECOMMENDED_CONFIG['error-detective'],
