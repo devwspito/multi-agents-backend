@@ -121,8 +121,8 @@ export async function autoCommitDeveloperWork(
       };
     }
 
-    // Step 3: Create commit with descriptive message
-    const commitMessage = `feat: ${storyTitle}
+    // Step 3: Create commit with Conventional Commits format
+    const commitMessage = `feat(story): ${storyTitle}
 
 🔧 AUTO-COMMIT: Developer completed work but forgot to commit
 Automatically committed by GitCommitHelper to preserve work.

@@ -199,32 +199,31 @@ export class ApprovalPhase extends BasePhase {
 
   /**
    * Normalize phase name from PascalCase to kebab-case
-   * ProductManager -> product-manager
-   * QA -> qa-engineer
+   *
+   * Active phases from PHASE_ORDER:
+   * Planning → Approval → TeamOrchestration → Verification → AutoMerge
+   *
+   * Sub-phases within TeamOrchestration:
+   * TechLead → Developers → Judge → Fixer
    */
   private normalizePhase(phase: string): string {
-    // Special case mappings to match API routes
-    const specialCases: Record<string, string> = {
-      'ProblemAnalyst': 'problem-analyst',
-      'ProductManager': 'product-manager',
-      'ProjectManager': 'project-manager',
+    // Map PascalCase to kebab-case for API routes
+    const phaseMappings: Record<string, string> = {
+      // Main phases from PHASE_ORDER
+      'Planning': 'planning',
+      'Approval': 'approval',
+      'TeamOrchestration': 'team-orchestration',
+      'Verification': 'verification',
+      'AutoMerge': 'auto-merge',
+      // Sub-phases within TeamOrchestration
       'TechLead': 'tech-lead',
-      'QA': 'qa-engineer',
-      'Merge': 'merge-coordinator',
+      'Developers': 'development',
       'Judge': 'judge',
       'Fixer': 'fixer',
-      'Developers': 'development',
-      'TeamOrchestration': 'team-orchestration',
-      'AutoMerge': 'auto-merge',
-      'TestCreator': 'test-creator',
-      'ErrorDetective': 'error-detective',
-      'contract-testing': 'contract-testing', // Already kebab-case
-      'contract-fixer': 'contract-fixer', // Already kebab-case
-      'contract-tester': 'contract-tester', // Already kebab-case
     };
 
-    if (specialCases[phase]) {
-      return specialCases[phase];
+    if (phaseMappings[phase]) {
+      return phaseMappings[phase];
     }
 
     // Default: PascalCase to kebab-case
@@ -236,25 +235,23 @@ export class ApprovalPhase extends BasePhase {
 
   /**
    * Get human-readable phase name
+   *
+   * Active phases from PHASE_ORDER:
+   * Planning → Approval → TeamOrchestration → Verification → AutoMerge
    */
   private getPhaseName(phase: string): string {
     const phaseNames: Record<string, string> = {
-      'ProblemAnalyst': 'Problem Analyst',
-      'ProductManager': 'Product Manager',
-      'ProjectManager': 'Project Manager',
+      // Main phases from PHASE_ORDER
+      'Planning': 'Planning (Analysis + Epics + Stories)',
+      'Approval': 'Approval Gate',
+      'TeamOrchestration': 'Team Orchestration',
+      'Verification': 'Verification',
+      'AutoMerge': 'Auto-Merge',
+      // Sub-phases within TeamOrchestration
       'TechLead': 'Tech Lead',
       'Developers': 'Development Team',
-      'TeamOrchestration': 'Team Orchestration',
       'Judge': 'Judge Evaluation',
-      'TestCreator': 'Test Creator',
-      'QA': 'QA Engineer',
-      'Fixer': 'Fixer',
-      'Merge': 'Merge Coordinator',
-      'AutoMerge': 'Auto-Merge',
-      'ErrorDetective': 'Error Detective',
-      'contract-testing': 'Contract Testing',
-      'contract-fixer': 'Contract Fixer',
-      'contract-tester': 'Contract Tester',
+      'Fixer': 'Bug Fixer',
     };
 
     return phaseNames[phase] || phase;

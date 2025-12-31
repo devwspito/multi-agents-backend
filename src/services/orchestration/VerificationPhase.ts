@@ -304,8 +304,14 @@ export class VerificationPhase extends BasePhase {
     // 💡 Get any injected directives for verification-fixer
     const directivesBlock = context.getDirectivesBlock('verification-fixer');
 
+    // 🏗️ Get architectureBrief from context for pattern-aware fixes
+    const architectureBrief = context.getData<any>('architectureBrief');
+    if (architectureBrief) {
+      console.log(`🏗️ [Verification] Architecture brief available - fixer will follow project patterns`);
+    }
+
     // Build detailed prompt for fixer (with directives prepended)
-    const fixerPrompt = this.buildFixerPrompt(verificationResult, failedEpics, primaryRepo.name, attempt);
+    const fixerPrompt = this.buildFixerPrompt(verificationResult, failedEpics, primaryRepo.name, attempt, architectureBrief);
     const prompt = directivesBlock + fixerPrompt;
 
     try {
@@ -392,7 +398,8 @@ export class VerificationPhase extends BasePhase {
     verificationResult: VerificationPhaseData,
     failedEpics: VerificationResult[],
     repoName: string,
-    attempt: number
+    attempt: number,
+    architectureBrief?: any // 🏗️ Architecture insights from PlanningPhase
   ): string {
     const issuesList = failedEpics.map((epic, i) => {
       const completenessIssues = epic.completeness && !epic.completeness.isComplete
@@ -434,6 +441,20 @@ This is a **high-quality, enterprise-grade** service. Your fixes must be thoroug
 
 ${issuesList}
 
+${architectureBrief ? `---
+
+## 🏗️ PROJECT PATTERNS (Follow These When Fixing!)
+
+${architectureBrief.codePatterns ? `- **Naming**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
+- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
+- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
+- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
+
+${architectureBrief.conventions?.length > 0 ? `**Project Conventions**:
+${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+⚠️ Your fixes MUST follow these patterns or they will be rejected again.
+` : ''}
 ---
 
 ## 🔧 STEP-BY-STEP WORKFLOW

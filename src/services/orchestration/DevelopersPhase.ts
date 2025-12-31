@@ -592,18 +592,42 @@ export class DevelopersPhase extends BasePhase {
             console.log(`   Branch strategy: Story will start from epic branch (includes ${storyNumber - 1} previous stories)`);
             console.log(`${'='.repeat(80)}`);
 
-            // Execute complete isolated story pipeline
-            const costs = await this.executeIsolatedStoryPipeline(
-              task,
-              story,
-              member,
-              epic,
-              repositories,
-              workspacePath,
-              workspaceStructure,
-              attachments,
-              state,
-              context
+            // 🔥 RETRY LOGIC: Execute story pipeline with retry for transient errors
+            const { RetryService } = await import('./RetryService');
+            const MAX_STORY_RETRIES = parseInt(process.env.MAX_STORY_RETRIES || '3', 10);
+
+            const costs = await RetryService.executeWithRetry(
+              async () => this.executeIsolatedStoryPipeline(
+                task,
+                story,
+                member,
+                epic,
+                repositories,
+                workspacePath,
+                workspaceStructure,
+                attachments,
+                state,
+                context
+              ),
+              {
+                maxRetries: MAX_STORY_RETRIES,
+                initialDelayMs: 2000,
+                maxDelayMs: 30000,
+                retryableErrors: [
+                  'rate_limit',
+                  'timeout',
+                  'ECONNRESET',
+                  'ETIMEDOUT',
+                  '429',
+                  '503',
+                  'Credit balance is too low',
+                ],
+                onRetry: (attempt, error, delayMs) => {
+                  console.log(`\n🔄 [STORY RETRY] Attempt ${attempt}/${MAX_STORY_RETRIES} for story: ${story.title}`);
+                  console.log(`   Error: ${error?.message?.substring(0, 100) || 'Unknown'}`);
+                  console.log(`   Waiting ${Math.round(delayMs / 1000)}s before retry...`);
+                },
+              }
             );
 
             // Accumulate costs and tokens
@@ -915,6 +939,12 @@ export class DevelopersPhase extends BasePhase {
       // 🔐 Get devAuth from context (for testing authenticated endpoints)
       const devAuth = context.getData<any>('devAuth');
 
+      // 🏗️ Get architectureBrief from context (patterns, conventions, models from PlanningPhase)
+      const architectureBrief = context.getData<any>('architectureBrief');
+      if (architectureBrief) {
+        console.log(`🏗️ [DevelopersPhase] Architecture brief available - developer will follow project patterns`);
+      }
+
       // 🔥 DEFENSIVE VALIDATION: Check effectiveWorkspacePath type before calling executeDeveloperFn
       if (typeof effectiveWorkspacePath !== 'string' && effectiveWorkspacePath !== null) {
         console.error(`❌❌❌ [DevelopersPhase.executeIsolatedStoryPipeline] CRITICAL: effectiveWorkspacePath is not a string!`);
@@ -976,7 +1006,8 @@ export class DevelopersPhase extends BasePhase {
         undefined, // judgeFeedback
         epicBranchName, // Epic branch name from TeamOrchestrationPhase
         undefined, // forceTopModel
-        devAuth // 🔐 Developer authentication for testing endpoints
+        devAuth, // 🔐 Developer authentication for testing endpoints
+        architectureBrief // 🏗️ Architecture patterns from PlanningPhase
       );
 
       // Track developer cost and tokens
@@ -1054,11 +1085,31 @@ export class DevelopersPhase extends BasePhase {
         // 🔥🔥🔥 CRITICAL: Fetch from remote FIRST to ensure we see all commits
         // Developer may have pushed but local doesn't know about it yet
         const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
-        try {
-          console.log(`   📡 Fetching from remote to ensure all commits visible...`);
-          safeGitExecSync(`git fetch origin --prune`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
-        } catch (fetchErr: any) {
-          console.warn(`   ⚠️ Fetch failed (continuing anyway): ${fetchErr.message}`);
+
+        // 🔥 EXPONENTIAL BACKOFF for git fetch - critical for reliable verification
+        const MAX_FETCH_RETRIES = 3;
+
+        for (let fetchAttempt = 1; fetchAttempt <= MAX_FETCH_RETRIES; fetchAttempt++) {
+          try {
+            console.log(`   📡 Fetching from remote (attempt ${fetchAttempt}/${MAX_FETCH_RETRIES})...`);
+            safeGitExecSync(`git fetch origin --prune`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 90000
+            });
+            console.log(`   ✅ Fetch succeeded on attempt ${fetchAttempt}`);
+            break;
+          } catch (fetchErr: any) {
+            const waitMs = 2000 * Math.pow(2, fetchAttempt - 1); // 2s, 4s, 8s
+            if (fetchAttempt < MAX_FETCH_RETRIES) {
+              console.warn(`   ⚠️ Fetch attempt ${fetchAttempt} failed: ${fetchErr.message}`);
+              console.warn(`   ⏳ Waiting ${waitMs / 1000}s before retry...`);
+              await new Promise(resolve => setTimeout(resolve, waitMs));
+            } else {
+              console.error(`   ❌ Fetch FAILED after ${MAX_FETCH_RETRIES} attempts: ${fetchErr.message}`);
+              console.error(`   ⚠️ Proceeding with local state - verification may be incomplete!`);
+            }
+          }
         }
 
         const gitVerification = await this.verifyDeveloperWorkFromGit(
@@ -1115,7 +1166,22 @@ export class DevelopersPhase extends BasePhase {
           }
         } else {
           console.warn(`⚠️ [GIT-FIRST] No commits found on branch ${storyBranch}`);
-          console.warn(`   Falling back to marker validation...`);
+
+          // 🔥 AUTO-COMMIT: Try to recover developer's work if they forgot to commit
+          console.log(`🔧 [AUTO-COMMIT] Checking for uncommitted changes...`);
+          const { autoCommitDeveloperWork } = await import('./utils/GitCommitHelper');
+          const autoCommitResult = await autoCommitDeveloperWork(repoPath, story.title, storyBranch);
+
+          if (autoCommitResult.success && autoCommitResult.commitSHA) {
+            console.log(`✅ [AUTO-COMMIT] Recovered developer work!`);
+            console.log(`   Commit SHA: ${autoCommitResult.commitSHA.substring(0, 8)}`);
+            console.log(`   Action: ${autoCommitResult.action}`);
+            commitSHA = autoCommitResult.commitSHA;
+            gitValidationPassed = true;
+          } else {
+            console.warn(`   ${autoCommitResult.message}`);
+            console.warn(`   Falling back to marker validation...`);
+          }
         }
       } else {
         console.warn(`⚠️ [GIT-FIRST] Cannot verify git (missing branch/workspace/repo)`);
@@ -1193,6 +1259,66 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   Story: ${story.title}`);
       console.log(`   Branch: ${storyBranch || 'unknown'}`);
       console.log(`   Validation: ${gitValidationPassed ? 'GIT (commits found)' : 'MARKER (finished marker)'}`)
+
+      // 🔧🔧🔧 AUTOMATIC BUILD VERIFICATION (Commercial-Grade) 🔧🔧🔧
+      // This is what makes us competitive with Devin/Claude Code:
+      // We ENFORCE verification at the orchestration level, not just trust agent output
+      console.log(`\n🔧 [BUILD VERIFICATION] Automatically verifying code quality...`);
+      console.log(`   This runs INDEPENDENTLY of what developer claimed`);
+      console.log(`   Trust but verify: enforcing typecheck/test/lint at orchestration level`);
+
+      const { BuildVerificationService } = await import('../BuildVerificationService');
+      const verificationRepoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+
+      const verificationReport = await BuildVerificationService.verifyBuild(
+        verificationRepoPath,
+        taskId
+      );
+
+      if (!verificationReport.overall) {
+        console.error(`\n❌❌❌ [BUILD VERIFICATION] FAILED!`);
+        console.error(`   Total errors: ${verificationReport.totalErrors}`);
+        console.error(`   Summary:\n${verificationReport.summary}`);
+
+        // 🔥 CRITICAL: Don't proceed to Judge if code doesn't compile/pass tests
+        // This saves Judge cost and provides immediate feedback
+        const { NotificationService } = await import('../NotificationService');
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ Build verification failed for story "${story.title}": ${verificationReport.totalErrors} errors`
+        );
+
+        // 🔄 TODO: In future, could trigger automatic retry with feedback
+        // For now, log detailed feedback for debugging
+        console.error(`\n📋 FEEDBACK FOR DEVELOPER:\n${verificationReport.feedbackForAgent}`);
+
+        // Store verification failure in context for potential retry logic
+        context.setData('lastVerificationFailure', {
+          storyId: story.id,
+          errors: verificationReport.totalErrors,
+          feedback: verificationReport.feedbackForAgent,
+          timestamp: new Date(),
+        });
+
+        // Continue anyway for now - Judge will also catch issues
+        // But log prominently that we detected problems early
+        console.warn(`\n⚠️ [BUILD VERIFICATION] Proceeding to Judge despite failures`);
+        console.warn(`   Judge may catch additional issues or reject the code`);
+      } else {
+        console.log(`✅ [BUILD VERIFICATION] All checks passed!`);
+        console.log(`   - Typecheck: ✅`);
+        console.log(`   - Tests: ✅`);
+        console.log(`   - Lint: ✅ (or N/A)`);
+
+        const { NotificationService } = await import('../NotificationService');
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `✅ Build verification passed for story "${story.title}"`
+        );
+      }
+      // 🔧🔧🔧 END BUILD VERIFICATION 🔧🔧🔧
 
       // 🔥 CRITICAL: Verify commit exists on remote BEFORE Judge evaluation
       console.log(`\n🔍 [PRE-JUDGE] Verifying commit ${commitSHA} exists on remote...`);

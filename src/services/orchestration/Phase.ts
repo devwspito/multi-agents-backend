@@ -362,8 +362,8 @@ export abstract class BasePhase implements IPhase {
   /**
    * Execute phase with periodic cancellation checks
    *
-   * This wraps executePhase() and polls the database every 5 seconds
-   * to check if the user has requested cancellation.
+   * Uses a single polling mechanism (configurable interval) to check for cancellation.
+   * Optimized to reduce database queries while maintaining responsiveness.
    */
   private async executePhaseWithCancellationCheck(
     context: OrchestrationContext,
@@ -371,47 +371,53 @@ export abstract class BasePhase implements IPhase {
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const { Task } = await import('../../models/Task');
 
-    // Create a cancellation checker that polls every 5 seconds
+    // Configurable polling interval (default 5s, can be overridden via env)
+    const CANCELLATION_CHECK_INTERVAL_MS = parseInt(process.env.CANCELLATION_CHECK_INTERVAL_MS || '5000', 10);
+
     let cancelled = false;
-    const cancellationChecker = setInterval(async () => {
-      try {
-        const task = await Task.findById(context.task._id);
-        if (task?.orchestration.cancelRequested) {
-          cancelled = true;
-          console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
-          clearInterval(cancellationChecker);
+    let checkInterval: NodeJS.Timeout | null = null;
+
+    // Single polling mechanism - check cancellation at configured interval
+    const startCancellationChecker = () => {
+      checkInterval = setInterval(async () => {
+        try {
+          const task = await Task.findById(context.task._id, { 'orchestration.cancelRequested': 1 }).lean();
+          if (task?.orchestration?.cancelRequested) {
+            cancelled = true;
+            console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
+            if (checkInterval) clearInterval(checkInterval);
+          }
+        } catch (err) {
+          // Log but don't crash - cancellation check is non-critical
+          console.warn(`[${this.name}] Error checking cancellation (non-critical):`, err);
         }
-      } catch (err) {
-        console.error(`[${this.name}] Error checking cancellation:`, err);
+      }, CANCELLATION_CHECK_INTERVAL_MS);
+    };
+
+    const cleanup = () => {
+      if (checkInterval) {
+        clearInterval(checkInterval);
+        checkInterval = null;
       }
-    }, 5000); // Check every 5 seconds
+    };
 
     try {
-      // Execute the phase
-      const resultPromise = this.executePhase(context);
+      // Start cancellation checker
+      startCancellationChecker();
 
-      // Race between phase completion and cancellation detection
-      while (true) {
-        if (cancelled) {
-          clearInterval(cancellationChecker);
-          throw new Error('Task cancelled by user during phase execution');
-        }
+      // Execute the phase - no additional polling loop needed
+      const result = await this.executePhase(context);
 
-        // Check if phase is done
-        const raceResult = await Promise.race([
-          resultPromise,
-          new Promise(resolve => setTimeout(() => resolve('__polling__'), 1000))
-        ]);
-
-        if (raceResult !== '__polling__') {
-          clearInterval(cancellationChecker);
-          return raceResult as Omit<PhaseResult, 'phaseName' | 'duration'>;
-        }
-
-        // Continue polling
+      // Check one final time if cancelled during execution
+      if (cancelled) {
+        cleanup();
+        throw new Error('Task cancelled by user during phase execution');
       }
+
+      cleanup();
+      return result;
     } catch (error) {
-      clearInterval(cancellationChecker);
+      cleanup();
       throw error;
     }
   }

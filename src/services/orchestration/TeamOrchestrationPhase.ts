@@ -463,15 +463,40 @@ export class TeamOrchestrationPhase extends BasePhase {
         task.orchestration.team = [];
       }
 
-      // 🔥 CRITICAL: Accumulate ALL team costs to the main orchestration total
+      // 🔥 CRITICAL: Accumulate ALL team costs using ATOMIC operation to prevent race conditions
+      // When multiple teams run in parallel, using $inc ensures no lost updates
       const totalTeamsCost = totalTechLeadCost + totalJudgeCost + totalDevelopersCost + totalQACost;
       if (totalTeamsCost > 0) {
-        task.orchestration.totalCost = (task.orchestration.totalCost || 0) + totalTeamsCost;
-        console.log(`💰 [TeamOrchestration] Total cost from all teams: $${totalTeamsCost.toFixed(4)}`);
-        console.log(`💰 [TeamOrchestration] Running orchestration total: $${task.orchestration.totalCost.toFixed(4)}`);
-      }
+        const Task = require('../../models/Task').Task;
 
-      await task.save();
+        // Use atomic $inc to prevent race condition when parallel teams update costs
+        const updatedTask = await Task.findByIdAndUpdate(
+          task._id,
+          {
+            $inc: { 'orchestration.totalCost': totalTeamsCost },
+            $set: {
+              'orchestration.teamOrchestration.status': (context.task.orchestration as any).teamOrchestration.status,
+              'orchestration.teamOrchestration.completedAt': (context.task.orchestration as any).teamOrchestration.completedAt,
+              'orchestration.teamOrchestration.teams': (context.task.orchestration as any).teamOrchestration.teams,
+              // Update agent costs
+              ...(totalTechLeadCost > 0 ? { 'orchestration.techLead.cost_usd': totalTechLeadCost } : {}),
+              ...(totalJudgeCost > 0 ? { 'orchestration.judge.cost_usd': totalJudgeCost } : {}),
+              ...(totalQACost > 0 ? { 'orchestration.qaEngineer.cost_usd': totalQACost } : {}),
+            }
+          },
+          { new: true }
+        );
+
+        // Update local task reference with atomic result
+        if (updatedTask) {
+          task.orchestration.totalCost = updatedTask.orchestration.totalCost;
+        }
+
+        console.log(`💰 [TeamOrchestration] Total cost from all teams: $${totalTeamsCost.toFixed(4)} (atomic $inc)`);
+        console.log(`💰 [TeamOrchestration] Running orchestration total: $${task.orchestration.totalCost?.toFixed(4) || 'N/A'}`);
+      } else {
+        await task.save();
+      }
 
       // Notify completion
       NotificationService.emitAgentCompleted(
@@ -631,20 +656,24 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`✅ [Team ${teamNumber}] Created team directory: ${teamWorkspacePath}`);
       }
 
-      // Copy repository to isolated workspace (if not already copied)
-      if (!fs.existsSync(isolatedRepoPath)) {
-        if (!fs.existsSync(sourceRepoPath)) {
-          throw new Error(`Source repository not found: ${sourceRepoPath}`);
-        }
-
-        console.log(`📋 [Team ${teamNumber}] Copying repository to isolated workspace...`);
-        // Use cp -r to copy the entire repository including .git
-        const { execSync } = require('child_process');
-        execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
-        console.log(`✅ [Team ${teamNumber}] Repository copied to: ${isolatedRepoPath}`);
-      } else {
-        console.log(`✅ [Team ${teamNumber}] Isolated repository already exists: ${isolatedRepoPath}`);
+      // 🔥 FIX: Remove stale isolated workspace before copying
+      // This prevents the "nested folder" bug where cp -r copies INTO existing directory
+      // instead of replacing it, creating: repo/repo/src instead of repo/src
+      if (fs.existsSync(isolatedRepoPath)) {
+        console.log(`⚠️  [Team ${teamNumber}] Removing stale isolated workspace: ${isolatedRepoPath}`);
+        fs.rmSync(isolatedRepoPath, { recursive: true, force: true });
       }
+
+      // Copy repository to isolated workspace
+      if (!fs.existsSync(sourceRepoPath)) {
+        throw new Error(`Source repository not found: ${sourceRepoPath}`);
+      }
+
+      console.log(`📋 [Team ${teamNumber}] Copying repository to isolated workspace...`);
+      // Use cp -r to copy the entire repository including .git
+      const { execSync } = require('child_process');
+      execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+      console.log(`✅ [Team ${teamNumber}] Repository copied to: ${isolatedRepoPath}`);
 
       if (workspacePath && targetRepository) {
         console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
@@ -686,19 +715,13 @@ export class TeamOrchestrationPhase extends BasePhase {
 
           // 🔥 CRITICAL: Create initial commit in epic branch
           // This ensures epic branch has a base for story branches to branch from
-          const fs = require('fs');
-          const epicReadmePath = `${repoPath}/EPIC_${epic.id}.md`;
-          const epicReadmeContent = `# Epic: ${epic.title}\n\n${epic.description || 'Epic in progress...'}\n\n**Status:** In Progress\n**Created:** ${new Date().toISOString()}\n`;
-
-          fs.writeFileSync(epicReadmePath, epicReadmeContent, 'utf8');
-          console.log(`📝 [Team ${teamNumber}] Created epic README: EPIC_${epic.id}.md`);
-
-          safeGitExecSync(`git add .`, { cwd: repoPath, encoding: 'utf8' });
-          safeGitExecSync(`git commit -m "chore: Initialize epic ${epic.id} - ${epic.title}"`, {
+          // NOTE: Using --allow-empty to avoid creating EPIC_*.md tracking files
+          // that would pollute the production repository when merged
+          safeGitExecSync(`git commit --allow-empty -m "chore: Initialize epic ${epic.id} - ${epic.title}"`, {
             cwd: repoPath,
             encoding: 'utf8'
           });
-          console.log(`✅ [Team ${teamNumber}] Created initial commit in epic branch`);
+          console.log(`✅ [Team ${teamNumber}] Created initial empty commit in epic branch`);
 
           // Push epic branch with initial commit
           try {
@@ -860,27 +883,11 @@ export class TeamOrchestrationPhase extends BasePhase {
             );
             const repoPath = matchedRepo?.localPath || (workspacePath ? path.join(workspacePath, teamRepoName) : null);
 
-            // 🔥 Validate repoPath before attempting file operations
-            if (!repoPath || !path.isAbsolute(repoPath)) {
-              console.warn(`   ⚠️  [Team ${teamNumber}] Cannot create Docker files: invalid path (${repoPath})`);
-            } else {
+            // Log environment configuration (Docker setup removed - Agent SDK handles execution directly)
+            if (repoPath && path.isAbsolute(repoPath)) {
               console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language}/${teamRepoConfig.framework}`);
-
-              // Create Dockerfile if provided
-              if (teamRepoConfig.dockerfile) {
-                const dockerfilePath = path.join(repoPath, 'Dockerfile');
-                const dockerfileContent = teamRepoConfig.dockerfile.replace(/\\n/g, '\n');
-                fs.writeFileSync(dockerfilePath, dockerfileContent);
-                console.log(`   ✅ Created Dockerfile for ${teamRepoName}`);
-              }
-
-              // Create docker-compose.yml if provided
-              if (teamRepoConfig.dockerCompose) {
-                const composePath = path.join(repoPath, 'docker-compose.yml');
-                const composeContent = teamRepoConfig.dockerCompose.replace(/\\n/g, '\n');
-                fs.writeFileSync(composePath, composeContent);
-                console.log(`   ✅ Created docker-compose.yml for ${teamRepoName}`);
-              }
+            } else {
+              console.warn(`   ⚠️  [Team ${teamNumber}] Invalid repo path: ${repoPath}`);
             }
 
             // Store run/test commands in context for developers

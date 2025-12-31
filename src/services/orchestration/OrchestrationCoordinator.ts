@@ -1791,7 +1791,8 @@ ${formattedDirectives}
     judgeFeedback?: string, // Judge feedback for retry attempts
     _epicBranchName?: string, // Epic branch name from TeamOrchestrationPhase (unused - branches come from story.branchName)
     forceTopModel?: boolean, // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
-    devAuth?: any // 🔐 Developer authentication config (token or credentials for testing endpoints)
+    devAuth?: any, // 🔐 Developer authentication config (token or credentials for testing endpoints)
+    architectureBrief?: any // 🏗️ Architecture insights from PlanningPhase (patterns, conventions, models)
   ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
 
@@ -1940,6 +1941,34 @@ ${story.description}
 - **Story ID**: \`${story.id}\`
 
 Use these when calling \`recall()\` and \`remember()\` tools.`;
+
+      // 🏗️ Add Architecture Brief section from PlanningPhase
+      if (architectureBrief) {
+        prompt += `\n\n## 🏗️ ARCHITECTURE BRIEF (CRITICAL - Follow These Patterns!)
+
+**This project has established patterns. You MUST follow them to get your PR approved.**
+
+${architectureBrief.codePatterns ? `### Code Patterns (from existing codebase)
+- **Naming Convention**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
+- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
+- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
+- **Testing Pattern**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
+
+${architectureBrief.dataModels?.length > 0 ? `### Data Models (understand relationships before modifying)
+${architectureBrief.dataModels.map((m: any) => `- **${m.name}** (${m.file}): ${m.relationships?.join(', ') || 'standalone'}`).join('\n')}` : ''}
+
+${architectureBrief.prInsights ? `### What Gets Approved (from recent PRs)
+- ${architectureBrief.prInsights.commonPatterns?.join('\n- ') || 'No patterns documented'}
+
+**Rejection reasons to avoid**:
+- ${architectureBrief.prInsights.rejectionReasons?.join('\n- ') || 'None documented'}` : ''}
+
+${architectureBrief.conventions?.length > 0 ? `### Project Conventions
+${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+⚠️ **Code that doesn't follow these patterns will be REJECTED by the Judge.**
+`;
+      }
 
       // Add Judge feedback if this is a retry
       if (judgeFeedback) {

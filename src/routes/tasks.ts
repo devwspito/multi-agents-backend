@@ -5,6 +5,7 @@ import { Task } from '../models/Task';
 import { Repository } from '../models/Repository';
 // v1 OrchestrationCoordinator - battle-tested with full prompts
 import { OrchestrationCoordinator } from '../services/orchestration/OrchestrationCoordinator';
+import { storageService } from '../services/storage/StorageService';
 import { z } from 'zod';
 import mongoose from 'mongoose';
 
@@ -321,24 +322,35 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     task.description = validatedData.description || validatedData.content || '';
     task.status = 'in_progress';
 
-    // 🔥 PROCESS IMAGES if uploaded via multipart/form-data
-    // req.files is populated by multer middleware (array of files)
+    // 🔥 PROCESS IMAGES - Upload to Firebase Storage (not local disk)
+    // req.files is populated by multer middleware with memoryStorage (buffer in memory)
     if ((req as any).files && (req as any).files.length > 0) {
-      const uploadedFiles = (req as any).files;
-      console.log(`📎 [START] ${uploadedFiles.length} image(s) uploaded`);
+      const uploadedFiles = (req as any).files as Express.Multer.File[];
+      console.log(`📎 [START] ${uploadedFiles.length} image(s) to upload to Firebase`);
 
       if (!task.attachments) {
         task.attachments = [];
       }
 
-      // Process each uploaded file
+      // Upload each file to Firebase Storage
       for (const uploadedFile of uploadedFiles) {
-        console.log(`📎 [START] Processing image: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+        console.log(`📎 [START] Uploading to Firebase: ${uploadedFile.originalname} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
 
-        // Store relative path in task.attachments (ProductManager will read from filesystem)
-        const imagePath = `/uploads/${uploadedFile.filename}`;
-        task.attachments.push(imagePath);
-        console.log(`📎 [START] Image saved to attachments: ${imagePath}`);
+        try {
+          const storageFile = await storageService.saveUpload(
+            req.user!.id,
+            uploadedFile.buffer,
+            uploadedFile.originalname,
+            uploadedFile.mimetype
+          );
+
+          // Store Firebase path (e.g., "uploads/userId/timestamp-hash-filename.png")
+          task.attachments.push(storageFile.path);
+          console.log(`📎 [START] Image uploaded to Firebase: ${storageFile.path}`);
+        } catch (uploadError: any) {
+          console.error(`❌ [START] Failed to upload ${uploadedFile.originalname}:`, uploadError.message);
+          // Continue with other files, don't fail the whole request
+        }
       }
 
       console.log(`📎 [START] Total ${task.attachments.length} attachments for this task`);
@@ -449,22 +461,32 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
     task.orchestration.paused = false;
     task.orchestration.cancelRequested = false;
 
-    // Process images if uploaded
+    // 🔥 PROCESS IMAGES - Upload to Firebase Storage (not local disk)
     if ((req as any).files && (req as any).files.length > 0) {
-      const uploadedFiles = (req as any).files;
-      console.log(`📎 [CONTINUE] ${uploadedFiles.length} image(s) uploaded`);
+      const uploadedFiles = (req as any).files as Express.Multer.File[];
+      console.log(`📎 [CONTINUE] ${uploadedFiles.length} image(s) to upload to Firebase`);
 
       if (!task.attachments) {
         task.attachments = [];
       }
 
-      // Process each uploaded file
+      // Upload each file to Firebase Storage
       for (const uploadedFile of uploadedFiles) {
-        console.log(`📎 [CONTINUE] Processing image: ${uploadedFile.filename} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
+        console.log(`📎 [CONTINUE] Uploading to Firebase: ${uploadedFile.originalname} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
 
-        const imagePath = `/uploads/${uploadedFile.filename}`;
-        task.attachments.push(imagePath);
-        console.log(`📎 [CONTINUE] Image saved to attachments: ${imagePath}`);
+        try {
+          const storageFile = await storageService.saveUpload(
+            req.user!.id,
+            uploadedFile.buffer,
+            uploadedFile.originalname,
+            uploadedFile.mimetype
+          );
+
+          task.attachments.push(storageFile.path);
+          console.log(`📎 [CONTINUE] Image uploaded to Firebase: ${storageFile.path}`);
+        } catch (uploadError: any) {
+          console.error(`❌ [CONTINUE] Failed to upload ${uploadedFile.originalname}:`, uploadError.message);
+        }
       }
 
       console.log(`📎 [CONTINUE] Total ${task.attachments.length} attachments for this task`);

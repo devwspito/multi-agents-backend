@@ -6,10 +6,15 @@
  * - /health/ready - Readiness probe (checks dependencies)
  * - /health/live - Liveness probe (is the process alive?)
  * - /health/detailed - Full system status (for debugging)
+ *
+ * Checks ALL external services: MongoDB, Redis, Firebase, Anthropic, Voyage, GitHub
  */
 
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
+import Redis from 'ioredis';
+import { storageService } from '../services/storage/StorageService';
+import { productionMonitoring } from '../services/ProductionMonitoringService';
 
 const router = Router();
 
@@ -189,11 +194,99 @@ router.get('/detailed', async (_req: Request, res: Response) => {
     };
   }
 
-  // Redis check
+  // Redis check - real ping
   if (process.env.REDIS_URL) {
-    checks.redis = {
+    const redisStart = Date.now();
+    try {
+      const client = new Redis(process.env.REDIS_URL, {
+        connectTimeout: 5000,
+        lazyConnect: true,
+      });
+      await client.connect();
+      await client.ping();
+      await client.quit();
+      checks.redis = {
+        status: 'ok',
+        latency: Date.now() - redisStart,
+        message: 'Connected and responding',
+      };
+    } catch (error: any) {
+      checks.redis = {
+        status: 'error',
+        latency: Date.now() - redisStart,
+        message: error.message,
+      };
+    }
+  }
+
+  // Firebase Storage check
+  if (process.env.FIREBASE_STORAGE_BUCKET) {
+    const firebaseStart = Date.now();
+    try {
+      if (storageService.isAvailable()) {
+        // Try to list files (empty folder is OK)
+        await storageService.listFiles('health-check');
+        checks.firebase = {
+          status: 'ok',
+          latency: Date.now() - firebaseStart,
+          message: 'Storage accessible',
+        };
+      } else {
+        checks.firebase = {
+          status: 'error',
+          message: 'Storage not initialized',
+        };
+      }
+    } catch (error: any) {
+      checks.firebase = {
+        status: 'error',
+        latency: Date.now() - firebaseStart,
+        message: error.message,
+      };
+    }
+  }
+
+  // Anthropic API check
+  if (process.env.ANTHROPIC_API_KEY) {
+    const anthropicStart = Date.now();
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-3-haiku-20240307',
+          max_tokens: 1,
+          messages: [{ role: 'user', content: 'ping' }],
+        }),
+      });
+      checks.anthropic = {
+        status: response.ok ? 'ok' : (response.status === 401 ? 'error' : 'degraded'),
+        latency: Date.now() - anthropicStart,
+        message: response.ok ? 'API responding' : `HTTP ${response.status}`,
+      };
+    } catch (error: any) {
+      checks.anthropic = {
+        status: 'error',
+        latency: Date.now() - anthropicStart,
+        message: error.message,
+      };
+    }
+  }
+
+  // GitHub App check
+  if (process.env.GITHUB_APP_ID && process.env.GITHUB_PRIVATE_KEY) {
+    checks.github = {
       status: 'ok',
-      message: 'Redis URL configured',
+      message: 'GitHub App configured',
+    };
+  } else if (process.env.GITHUB_CLIENT_ID) {
+    checks.github = {
+      status: 'degraded',
+      message: 'Only OAuth configured (no App)',
     };
   }
 
@@ -273,6 +366,34 @@ router.get('/detailed', async (_req: Request, res: Response) => {
     pid: process.pid,
     checks,
   });
+});
+
+/**
+ * GET /health/metrics
+ * Production metrics - costs, alerts, service health
+ * For monitoring dashboards and alerting systems
+ */
+router.get('/metrics', async (_req: Request, res: Response) => {
+  try {
+    const metrics = await productionMonitoring.getMetricsSummary();
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      ...metrics,
+      costsFormatted: {
+        daily: `$${metrics.costs.daily.toFixed(2)}`,
+        limit: `$${metrics.costs.limit.toFixed(2)}`,
+        percentage: `${metrics.costs.percentage.toFixed(1)}%`,
+        status: metrics.costs.percentage >= 100 ? 'exceeded' :
+                metrics.costs.percentage >= 80 ? 'warning' : 'healthy',
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to retrieve metrics',
+      message: error.message,
+    });
+  }
 });
 
 export default router;
