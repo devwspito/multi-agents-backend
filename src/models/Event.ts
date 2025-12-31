@@ -14,7 +14,14 @@ export type EventType =
   | 'TaskResumed'
   | 'OrchestrationFailed'
 
-  // Product Manager events
+  // Unified Planning events (replaces ProductManager + ProjectManager)
+  | 'PlanningStarted'
+  | 'PlanningCompleted'
+  | 'PlanningFailed'
+  | 'PlanningApproved'
+  | 'PlanningRejected'
+
+  // Product Manager events (legacy)
   | 'ProductManagerStarted'
   | 'ProductManagerCompleted'
   | 'ProductManagerFailed'

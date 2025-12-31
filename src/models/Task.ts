@@ -367,25 +367,22 @@ export interface IOrchestration {
   directiveHistory?: IDirective[];  // Archive of consumed directives for audit trail
 
   // Auto-aprobación opcional
+  // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('planning' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'auto-merge' | 'contract-testing' | 'contract-fixer')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('planning' | 'team-orchestration' | 'verification' | 'auto-merge')[]; // Fases que se auto-aprueban
 
   // Model configuration
+  // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
   modelConfig?: {
     preset?: 'max' | 'premium' | 'recommended' | 'standard' | 'custom';
     customConfig?: {
-      problemAnalyst?: string;
-      productManager?: string;
-      projectManager?: string;
+      planning?: string;
       techLead?: string;
       developer?: string;
       judge?: string;
-      qaEngineer?: string;
       fixer?: string;
-      mergeCoordinator?: string;
+      verification?: string;
       autoMerge?: string;
-      e2eTester?: string;
-      contractFixer?: string;
     };
   };
 
@@ -972,9 +969,10 @@ const taskSchema = new Schema<ITask>(
         type: Boolean,
         default: false, // ❌ Auto-aprobación DESHABILITADA por defecto - requiere configuración explícita del usuario
       },
+      // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
       autoApprovalPhases: {
         type: [String],
-        enum: ['planning', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer', 'e2e-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
+        enum: ['planning', 'team-orchestration', 'verification', 'auto-merge'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       modelConfig: {
@@ -983,19 +981,15 @@ const taskSchema = new Schema<ITask>(
           enum: ['max', 'premium', 'recommended', 'standard', 'custom'],
           default: 'standard',
         },
+        // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
         customConfig: {
-          productManager: String,
-          problemAnalyst: String,
-          projectManager: String,
+          planning: String,
           techLead: String,
           developer: String,
           judge: String,
-          qaEngineer: String,
           fixer: String,
-          mergeCoordinator: String,
+          verification: String,
           autoMerge: String,
-          e2eTester: String,
-          contractFixer: String,
         },
       },
       approvalHistory: [{

@@ -93,7 +93,22 @@ export class TechLeadPhase extends BasePhase {
       phase: 'architecture',
     });
 
+    // 🔄 RETRY LOGIC: TechLead gets up to 3 attempts when violating rules
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+    let lastError: any = null;
+
+    while (retryCount < MAX_RETRIES) {
     try {
+      if (retryCount > 0) {
+        console.log(`\n🔄🔄🔄 [TechLead] RETRY ${retryCount}/${MAX_RETRIES - 1} - Fixing rule violations 🔄🔄🔄`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `🔄 TechLead Retry ${retryCount}/${MAX_RETRIES - 1}: ${lastError?.violationType || 'Rule violation'}`
+        );
+      }
+
       // Get epic branch if in multi-team mode
       const epicBranch = context.getData<string>('epicBranch');
 
@@ -203,8 +218,120 @@ ${previousOutput}
       // 🔥 NEW: Get Master Epic context for contract awareness
       const masterEpic = context.getData<any>('masterEpic');
 
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories) : `Act as the tech-lead agent.
+      // 🏗️ Get Architecture Brief from PlanningPhase (if available)
+      const architectureBrief = context.getData<any>('architectureBrief');
 
+      // 🔄 RETRY FEEDBACK: Add error feedback if this is a retry
+      let retrySection = '';
+      if (retryCount > 0 && lastError) {
+        if (lastError.violationType === '1DEV1STORY') {
+          retrySection = `
+
+# 🚨🚨🚨 PREVIOUS ATTEMPT FAILED - FIX REQUIRED 🚨🚨🚨
+
+## ❌ ERROR: 1 DEVELOPER = 1 STORY RULE VIOLATED
+
+Your previous output assigned MULTIPLE stories to the SAME developer. This is NOT allowed.
+
+**What went wrong:**
+${lastError.violations?.map(([devId, stories]: [string, string[]]) =>
+  `- ${devId} was assigned ${stories.length} stories: ${stories.join(', ')}`
+).join('\n') || 'Multiple stories per developer'}
+
+**Total stories:** ${lastError.totalStories}
+**Required developers:** ${lastError.totalStories} (one per story)
+
+## ✅ HOW TO FIX:
+
+1. Count your stories: If you have N stories, you need N developers
+2. Assign EXACTLY ONE story per developer:
+   - story-1 → dev-1
+   - story-2 → dev-2
+   - story-3 → dev-3
+   - etc.
+
+3. Update teamComposition.developers to equal the number of stories
+
+**DO NOT** assign multiple stories to the same developer again.
+
+---
+
+`;
+        } else if (lastError.violationType === 'FILE_OVERLAP') {
+          retrySection = `
+
+# 🚨🚨🚨 PREVIOUS ATTEMPT FAILED - FIX REQUIRED 🚨🚨🚨
+
+## ❌ ERROR: FILE OVERLAP DETECTED BETWEEN STORIES
+
+Your previous output had MULTIPLE stories modifying the SAME file(s). This causes merge conflicts.
+
+**Files with conflicts:**
+${lastError.conflicts?.map((c: any) =>
+  `- ${c.file} → modified by: ${c.stories.join(', ')}`
+).join('\n') || 'Multiple stories touch same files'}
+
+## ✅ HOW TO FIX:
+
+1. Each file should appear in ONLY ONE story's filesToModify/filesToCreate
+2. If two features need the same file, combine them into ONE story
+3. Or redesign to use different files (one per story)
+
+**Examples:**
+❌ WRONG:
+  story-1: filesToModify: ["src/app.ts", "src/config.ts"]
+  story-2: filesToModify: ["src/app.ts"]  ← CONFLICT!
+
+✅ CORRECT:
+  story-1: filesToModify: ["src/app.ts", "src/config.ts"]  ← all app.ts work here
+  story-2: filesToModify: ["src/routes.ts"]  ← different file
+
+---
+
+`;
+        }
+      }
+
+      const projectId = task.projectId?.toString() || '';
+      const memoryContext = `
+## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
+- **Project ID**: \`${projectId}\`
+- **Task ID**: \`${taskId}\`
+
+Use these when calling \`recall()\` and \`remember()\` tools.
+`;
+
+      // 🏗️ Build Architecture Brief section if available from PlanningPhase
+      let architectureBriefSection = '';
+      if (architectureBrief) {
+        architectureBriefSection = `
+## 🏗️ ARCHITECTURE BRIEF (from Planning Analysis)
+**CRITICAL: Follow these patterns discovered from the codebase!**
+
+${architectureBrief.codePatterns ? `### Code Patterns
+- **Naming Convention**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
+- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
+- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
+- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
+
+${architectureBrief.dataModels?.length > 0 ? `### Data Models
+${architectureBrief.dataModels.map((m: any) => `- **${m.name}** (${m.file}): ${m.relationships?.join(', ') || 'no relationships'}`).join('\n')}` : ''}
+
+${architectureBrief.prInsights ? `### PR Insights (What Gets Approved)
+- Recent PRs analyzed: ${architectureBrief.prInsights.recentPRs || 0}
+- Common patterns: ${architectureBrief.prInsights.commonPatterns?.join(', ') || 'None specified'}
+- Rejection reasons: ${architectureBrief.prInsights.rejectionReasons?.join(', ') || 'None specified'}` : ''}
+
+${architectureBrief.conventions?.length > 0 ? `### Project Conventions
+${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+**USE THESE PATTERNS** when creating stories - code that doesn't follow these patterns will be rejected.
+`;
+      }
+
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories, architectureBrief) : `${retrySection}Act as the tech-lead agent.
+${memoryContext}
+${architectureBriefSection}
 # Architecture & Planning
 ${revisionSection}
 ## Task: ${task.title}
@@ -256,20 +383,44 @@ ${repoInfo}
   ],
   "architectureDesign": "Technical architecture: system design, data flow, APIs, security, error handling",
   "teamComposition": {
-    "developers": 2,
-    "reasoning": "Team size reasoning"
+    "developers": 3,
+    "reasoning": "3 stories = 3 developers (1 DEV = 1 STORY rule)"
   },
   "storyAssignments": [
-    {"storyId": "story-1", "assignedTo": "dev-1"}
+    {"storyId": "story-1", "assignedTo": "dev-1"},
+    {"storyId": "story-2", "assignedTo": "dev-2"},
+    {"storyId": "story-3", "assignedTo": "dev-3"}
   ]
 }
 \`\`\`
+
+**🔥🔥🔥 CRITICAL RULES - SYSTEM WILL FAIL WITHOUT THESE 🔥🔥🔥**
+
+**RULE 1: 1 DEVELOPER = 1 STORY**
+- NEVER assign 2+ stories to same developer
+- Number of developers MUST equal number of stories
+- Example: 5 stories → 5 developers (dev-1 to dev-5)
+
+**RULE 2: NO FILE OVERLAPS BETWEEN STORIES**
+- NEVER have 2 stories modify the same file
+- Each file can only appear in ONE story's filesToModify/filesToCreate
+- If 2 features need same file → PUT THEM IN THE SAME STORY
+- This prevents merge conflicts when developers work in parallel
+
+❌ WRONG (will cause merge conflict):
+  story-1: filesToModify: ["src/app.ts"]
+  story-2: filesToModify: ["src/app.ts"]  ← SAME FILE!
+
+✅ CORRECT (no overlap):
+  story-1: filesToModify: ["src/routes/users.ts"]
+  story-2: filesToModify: ["src/routes/products.ts"]
 
 **RULES**:
 - EXPLORE FIRST: Use ls, find, Read to get real file paths
 - USE REAL PATHS: No placeholders
 - COMPLETE STORIES: Each must include acceptance criteria, files, technical specs, tests
-- ASSIGN ALL STORIES: Each to a dev-1, dev-2, etc.`;
+- 1:1 ASSIGNMENT: Each story to UNIQUE developer (story-1→dev-1, story-2→dev-2, etc.)
+- NO OVERLAPS: Each file in only ONE story`;
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
       // This ensures ALL agents receive the same multimedia context without re-processing
@@ -456,6 +607,58 @@ ${repoInfo}
 
       console.log(`✅ [TechLead] Successfully parsed ${parsed.epics.length} epic(s) with ${parsed.storyAssignments.length} story assignment(s)`);
 
+      // 🔥🔥🔥 STRICT VALIDATION: 1 DEVELOPER = 1 STORY (NEVER MORE) 🔥🔥🔥
+      // Count stories per developer
+      const storiesPerDev: { [devId: string]: string[] } = {};
+      for (const assignment of parsed.storyAssignments) {
+        const devId = assignment.assignedTo;
+        if (!storiesPerDev[devId]) {
+          storiesPerDev[devId] = [];
+        }
+        storiesPerDev[devId].push(assignment.storyId);
+      }
+
+      // Check for violations
+      const violations = Object.entries(storiesPerDev).filter(([_, stories]) => stories.length > 1);
+      if (violations.length > 0) {
+        console.error(`\n❌❌❌ [TechLead] CRITICAL VIOLATION: 1 DEVELOPER = 1 STORY RULE BROKEN! ❌❌❌`);
+        for (const [devId, stories] of violations) {
+          console.error(`   Developer ${devId} has ${stories.length} stories: ${stories.join(', ')}`);
+        }
+        console.error(`\n   RULE: Each developer must have EXACTLY 1 story.`);
+        console.error(`   Total stories: ${parsed.storyAssignments.length}`);
+        console.error(`   Required developers: ${parsed.storyAssignments.length} (1 per story)`);
+        console.error(`\n   TechLead must create ${parsed.storyAssignments.length} developers and assign 1 story to each.`);
+
+        // 🔄 RETRY: Throw with specific error type for retry logic
+        const error = new Error(
+          `RULE_VIOLATION_1DEV1STORY: TechLead assigned multiple stories to same developer. ` +
+          `Violations: ${violations.map(([d, s]) => `${d} has ${s.length} stories`).join('; ')}. ` +
+          `Rule: 1 Developer = 1 Story. Need ${parsed.storyAssignments.length} developers.`
+        );
+        (error as any).retryable = true;
+        (error as any).violationType = '1DEV1STORY';
+        (error as any).violations = violations;
+        (error as any).totalStories = parsed.storyAssignments.length;
+        throw error;
+      }
+
+      // Validate teamComposition matches story count
+      const requiredDevs = parsed.storyAssignments.length;
+      const configuredDevs = parsed.teamComposition?.developers || 0;
+      if (configuredDevs < requiredDevs) {
+        console.error(`\n❌ [TechLead] teamComposition.developers (${configuredDevs}) < stories (${requiredDevs})`);
+        console.error(`   Each story needs its own developer. Adjusting teamComposition...`);
+        parsed.teamComposition = {
+          ...parsed.teamComposition,
+          developers: requiredDevs,
+          reasoning: `Auto-adjusted: ${requiredDevs} stories = ${requiredDevs} developers (1:1 rule)`
+        };
+        console.log(`   ✅ Fixed: teamComposition.developers = ${requiredDevs}`);
+      }
+
+      console.log(`✅ [TechLead] 1 Dev = 1 Story validation passed: ${Object.keys(storiesPerDev).length} developers, ${parsed.storyAssignments.length} stories`);
+
       // Build complete stories map - Preserve all story data from Tech Lead
       const storiesMap: { [storyId: string]: any } = {};
       parsed.epics.forEach((epic: any) => {
@@ -506,12 +709,16 @@ ${repoInfo}
         console.error(`\n   ⚠️  TechLead must redesign stories to avoid file overlaps!`);
         console.error(`   💡 Options: 1) One file per story, 2) Sequential dependencies, 3) Vertical slicing`);
 
-        // 🔥 FAIL THE TASK - We cannot proceed with overlapping stories
-        throw new Error(
-          `FILE_OVERLAP_DETECTED: ${overlapResult.conflicts.length} file(s) are modified by multiple stories. ` +
-          `This will cause merge conflicts. TechLead must redesign stories. ` +
-          `Conflicts: ${overlapResult.conflicts.map(c => c.file).join(', ')}`
+        // 🔄 RETRY: Throw with specific error type for retry logic
+        const error = new Error(
+          `RULE_VIOLATION_FILE_OVERLAP: ${overlapResult.conflicts.length} file(s) are modified by multiple stories. ` +
+          `This will cause merge conflicts. ` +
+          `Conflicts: ${overlapResult.conflicts.map(c => `${c.file} (${c.stories.join(', ')})`).join('; ')}`
         );
+        (error as any).retryable = true;
+        (error as any).violationType = 'FILE_OVERLAP';
+        (error as any).conflicts = overlapResult.conflicts;
+        throw error;
       }
 
       console.log(`✅ [TechLead] No file overlaps detected - parallel execution is safe`);
@@ -763,6 +970,31 @@ ${repoInfo}
         },
       };
     } catch (error: any) {
+      // 🔄 RETRY: Check if this error is retryable
+      if (error.retryable && retryCount < MAX_RETRIES - 1) {
+        retryCount++;
+        lastError = error;
+        console.log(`\n⚠️  [TechLead] Retryable error caught: ${error.violationType}`);
+        console.log(`   Will retry (${retryCount}/${MAX_RETRIES - 1})...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `⚠️ TechLead rule violation: ${error.violationType}. Retrying (${retryCount}/${MAX_RETRIES - 1})...`
+        );
+        continue; // Go back to while loop
+      }
+
+      // Non-retryable error OR max retries reached
+      if (error.retryable) {
+        console.error(`\n❌❌❌ [TechLead] MAX RETRIES (${MAX_RETRIES}) REACHED - GIVING UP ❌❌❌`);
+        console.error(`   Last error: ${error.violationType}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ TechLead failed after ${MAX_RETRIES} attempts: ${error.violationType}`
+        );
+      }
+
       // Skip task updates in multi-team mode to avoid version conflicts
       if (!multiTeamMode) {
         task.orchestration.techLead.status = 'failed';
@@ -799,13 +1031,21 @@ ${repoInfo}
         error: error.message,
       };
     }
+    } // End of while loop
+
+    // Should never reach here (while loop always returns)
+    return {
+      success: false,
+      error: 'Unexpected: TechLead execution loop exited without result',
+    };
   }
 
   /**
    * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
    * 🔥 NEW: Includes Master Epic context for contract awareness
+   * 🏗️ NEW: Includes Architecture Brief from PlanningPhase
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[]): string {
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[], architectureBrief?: any): string {
     // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
     if (!epic.targetRepository) {
       console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository in buildMultiTeamPrompt!`);
@@ -892,9 +1132,37 @@ ${sharedContracts.sharedTypes?.length > 0 ? `Types: ${sharedContracts.sharedType
 ❌ **DO NOT** assign Express routes or MongoDB schemas
 ` : '';
 
+    // 🏗️ Architecture Brief section from PlanningPhase (if available)
+    let archBriefSection = '';
+    if (architectureBrief) {
+      archBriefSection = `
+## 🏗️ ARCHITECTURE BRIEF (from Planning Analysis)
+**CRITICAL: Follow these patterns discovered from the codebase!**
+
+${architectureBrief.codePatterns ? `### Code Patterns
+- **Naming Convention**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
+- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
+- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
+- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
+
+${architectureBrief.dataModels?.length > 0 ? `### Data Models
+${architectureBrief.dataModels.map((m: any) => `- **${m.name}** (${m.file}): ${m.relationships?.join(', ') || 'no relationships'}`).join('\n')}` : ''}
+
+${architectureBrief.prInsights ? `### PR Insights (What Gets Approved)
+- Recent PRs analyzed: ${architectureBrief.prInsights.recentPRs || 0}
+- Common patterns: ${architectureBrief.prInsights.commonPatterns?.join(', ') || 'None specified'}
+- Requirements: ${architectureBrief.prInsights.requirements?.join(', ') || 'None specified'}` : ''}
+
+${architectureBrief.conventions?.length > 0 ? `### Project Conventions
+${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+**USE THESE PATTERNS** when creating stories - code that doesn't follow these patterns will be rejected.
+`;
+    }
+
     return `TECH LEAD - MULTI-TEAM MODE
 ${masterEpicContext}
-
+${archBriefSection}
 ## Epic: ${epic.id} - ${epic.title}
 **Complexity**: ${epic.estimatedComplexity}
 **Target**: ${repoTypeEmoji} ${targetRepo} (${repoType})
@@ -937,14 +1205,16 @@ ${repoGuidance}
     "status": "pending"
   }],
   "architectureDesign": "Technical design",
-  "teamComposition": {"developers": 2, "reasoning": "Why"},
+  "teamComposition": {"developers": 1, "reasoning": "1 story = 1 developer (1:1 rule)"},
   "storyAssignments": [
     {"storyId": "${epic.id}-story-1", "assignedTo": "dev-1"}
   ]
 }
 \`\`\`
 
-Team size: ${epic.estimatedComplexity === 'simple' ? '1-2' : epic.estimatedComplexity === 'moderate' ? '2-3' : epic.estimatedComplexity === 'complex' ? '3-4' : '4-5'} developers
+**🔥🔥🔥 CRITICAL RULES 🔥🔥🔥**
+1. **1 DEV = 1 STORY**: Number of developers = Number of stories
+2. **NO FILE OVERLAPS**: Each file in only ONE story (prevents merge conflicts)
 
 Explore first, then output JSON.`;
   }

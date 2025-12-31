@@ -8,10 +8,12 @@ import rateLimit from 'express-rate-limit';
 import mongoSanitize from 'express-mongo-sanitize';
 import cookieParser from 'cookie-parser';
 import path from 'path';
+import fs from 'fs';
 import { env } from './config/env';
 import { connectDatabase } from './config/database';
 import { WorkspaceCleanupScheduler } from './services/WorkspaceCleanupScheduler';
 import { setupConsoleInterceptor } from './utils/consoleInterceptor';
+import { storageService } from './services/storage/StorageService';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -134,8 +136,50 @@ class AgentPlatformApp {
     // Cookie parsing
     this.app.use(cookieParser());
 
-    // Serve static files from uploads directory (for task attachments/images)
-    this.app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+    // Serve uploads from Firebase Storage (or local filesystem fallback)
+    this.app.get('/uploads/*', async (req: Request, res: Response) => {
+      try {
+        // Extract path after /uploads/
+        const filePath = req.path.substring(1); // Remove leading /
+
+        // Get file extension for MIME type
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes: Record<string, string> = {
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.png': 'image/png',
+          '.gif': 'image/gif',
+          '.webp': 'image/webp',
+        };
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+        // Try Firebase Storage first
+        if (storageService.isAvailable()) {
+          const exists = await storageService.exists(filePath);
+          if (exists) {
+            const buffer = await storageService.downloadBuffer(filePath);
+            res.setHeader('Content-Type', contentType);
+            res.setHeader('Cache-Control', 'public, max-age=31536000'); // 1 year cache
+            res.send(buffer);
+            return;
+          }
+        }
+
+        // Fallback to local filesystem (legacy)
+        const localPath = path.join(process.cwd(), filePath);
+        if (fs.existsSync(localPath)) {
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'public, max-age=31536000');
+          res.sendFile(localPath);
+          return;
+        }
+
+        res.status(404).json({ error: 'File not found' });
+      } catch (error: any) {
+        console.error('Error serving upload:', error.message);
+        res.status(500).json({ error: 'Failed to serve file' });
+      }
+    });
 
     // MongoDB injection prevention
     this.app.use(mongoSanitize());

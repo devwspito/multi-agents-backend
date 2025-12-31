@@ -747,7 +747,13 @@ export class JudgePhase extends BasePhase {
       console.warn(`   ⚠️  WARNING: No expected file changes listed - Judge may have limited context`);
     }
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName);
+    // 🏗️ Get architectureBrief from context for pattern-aware evaluation
+    const architectureBrief = context.getData<any>('architectureBrief');
+    if (architectureBrief) {
+      console.log(`🏗️ [Judge] Architecture brief available - will evaluate against project patterns`);
+    }
+
+    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief);
 
     // 🔥 SAFE CONTEXT ACCESS: Retrieve processed attachments (optional - defaults to empty array)
     // This ensures ALL agents receive the same multimedia context
@@ -890,15 +896,26 @@ export class JudgePhase extends BasePhase {
    * Build evaluation prompt for Judge agent
    */
   private buildJudgePrompt(
-    _task: any,
+    task: any,
     story: any,
     developer: any,
     _workspacePath: string | null,
     commitSHA?: string,
     targetRepository?: string,
-    storyBranchName?: string
+    storyBranchName?: string,
+    architectureBrief?: any // 🏗️ Architecture insights from PlanningPhase
   ): string {
+    const projectId = task.projectId?.toString() || '';
+    const taskId = task._id?.toString() || '';
+
     return `# Judge - Code Review
+
+## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
+- **Project ID**: \`${projectId}\`
+- **Task ID**: \`${taskId}\`
+- **Story ID**: \`${story.id}\`
+
+Use these when calling \`recall()\` and \`remember()\` tools.
 
 ## Story: ${story.title}
 Developer: ${developer.instanceId}
@@ -910,11 +927,27 @@ Files to check:
 - Modify: ${story.filesToModify?.join(', ') || 'none'}
 - Create: ${story.filesToCreate?.join(', ') || 'none'}
 
+${architectureBrief ? `## 🏗️ PROJECT PATTERNS (from Architecture Analysis)
+**Code MUST follow these patterns to be approved:**
+
+${architectureBrief.codePatterns ? `- **Naming**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
+- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
+- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
+- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
+
+${architectureBrief.conventions?.length > 0 ? `**Conventions to enforce**:
+${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+${architectureBrief.prInsights?.rejectionReasons?.length > 0 ? `**Common rejection reasons** (check for these):
+${architectureBrief.prInsights.rejectionReasons.map((r: string) => `- ${r}`).join('\n')}` : ''}
+
+⚠️ If code doesn't follow these patterns, mark "followsPatterns" as FALSE.
+` : ''}
 ## 🎯 EVALUATION (All must pass):
 1. ✅ CODE EXISTS - Not just docs/comments
 2. ✅ COMPLETE - No TODOs/stubs
 3. ✅ REQUIREMENTS MET - Story fully implemented
-4. ✅ PATTERNS - Follows codebase conventions
+4. ✅ PATTERNS - Follows project conventions ${architectureBrief ? '(see patterns above!)' : ''}
 5. ✅ QUALITY - No obvious bugs, has error handling
 
 ## INSTRUCTIONS (Be efficient):

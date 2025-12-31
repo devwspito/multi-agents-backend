@@ -661,6 +661,124 @@ export const memoryFeedbackTool = tool(
 );
 
 /**
+ * Custom Tool: Type Check
+ * Run TypeScript type checker and return structured results
+ */
+export const typeCheckTool = tool(
+  'type_check',
+  'Run TypeScript compiler in check mode (no emit) and return type errors. Critical for validating code before Judge review.',
+  {
+    repoPath: z.string().describe('Absolute path to repository'),
+    files: z.array(z.string()).optional().describe('Specific files to check (omit for full project)'),
+    strict: z.boolean().default(true).describe('Enable strict mode'),
+  },
+  async (args) => {
+    try {
+      let cmd = 'npx tsc --noEmit --pretty false';
+      if (args.strict) cmd += ' --strict';
+      if (args.files?.length) {
+        cmd += ` ${args.files.join(' ')}`;
+      }
+
+      try {
+        await execAsync(cmd, {
+          cwd: args.repoPath,
+          timeout: 120000, // 2 minutes
+          maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+        });
+
+        // No errors - type check passed
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                passed: true,
+                errorCount: 0,
+                errors: [],
+                message: 'All files passed type checking',
+              }, null, 2),
+            },
+          ],
+        };
+      } catch (tscError: any) {
+        // TypeScript outputs errors on stdout/stderr
+        const output = tscError.stdout || tscError.stderr || tscError.message || '';
+
+        // Parse error lines like: src/file.ts(10,5): error TS2322: Type 'string' is not assignable...
+        const errorPattern = /^(.+?)\((\d+),(\d+)\):\s*(error|warning)\s+(TS\d+):\s*(.+)$/gm;
+        const errors: Array<{
+          file: string;
+          line: number;
+          column: number;
+          severity: string;
+          code: string;
+          message: string;
+        }> = [];
+
+        let match;
+        while ((match = errorPattern.exec(output)) !== null) {
+          errors.push({
+            file: match[1],
+            line: parseInt(match[2], 10),
+            column: parseInt(match[3], 10),
+            severity: match[4],
+            code: match[5],
+            message: match[6],
+          });
+        }
+
+        // Group errors by file for easier reading
+        const errorsByFile: Record<string, typeof errors> = {};
+        for (const err of errors) {
+          if (!errorsByFile[err.file]) {
+            errorsByFile[err.file] = [];
+          }
+          errorsByFile[err.file].push(err);
+        }
+
+        // If we couldn't parse any errors, include raw output
+        const rawErrors = errors.length === 0 ? output.split('\n').filter((l: string) => l.includes('error')).slice(0, 20) : [];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: true, // Tool executed successfully
+                passed: false, // But found type errors
+                errorCount: errors.length || rawErrors.length,
+                errors: errors.slice(0, 50), // Limit to 50 errors
+                errorsByFile: Object.fromEntries(
+                  Object.entries(errorsByFile).slice(0, 10) // Top 10 files with errors
+                ),
+                rawErrors: rawErrors,
+                summary: `Found ${errors.length || rawErrors.length} type error(s) across ${Object.keys(errorsByFile).length} file(s)`,
+                recommendation: 'Fix type errors before proceeding to Judge review',
+              }, null, 2),
+            },
+          ],
+        };
+      }
+    } catch (error: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: error.message,
+              suggestion: 'Ensure TypeScript is installed: npm install typescript',
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  }
+);
+
+/**
  * Create custom MCP server with all tools
  */
 export function createCustomToolsServer() {
@@ -674,6 +792,7 @@ export function createCustomToolsServer() {
       validateSecurityComplianceTool,
       executeCommandTool,
       executeStreamingCommandTool,
+      typeCheckTool,
       // Memory tools
       rememberTool,
       recallTool,
@@ -693,6 +812,7 @@ export function getCustomTools() {
     validateSecurityComplianceTool,
     executeCommandTool,
     executeStreamingCommandTool,
+    typeCheckTool,
     // Memory tools
     rememberTool,
     recallTool,
