@@ -461,13 +461,16 @@ class BuildVerificationServiceClass {
     // The verifyBuild method will report it as "skipped"
 
     // Security Audit - for Node.js projects
+    // 🔥 FIX: parseErrors: false to prevent false positives
+    // npm audit returns exit code 1 when vulnerabilities found, but that's not a CODE error
+    // Security findings should be WARNINGS, not counted as errors
     if (config.projectType.includes('node')) {
       commands.push({
         name: 'security-audit',
         command: 'npm audit --audit-level=high 2>&1 || echo "AUDIT_ISSUES_FOUND"',
         timeout: 60000,
         required: false, // Warning only, doesn't fail the build
-        parseErrors: true,
+        parseErrors: false, // 🔥 Don't parse - audit findings are not code errors
       });
     } else if (config.projectType === 'python') {
       // Python: use pip-audit or safety
@@ -476,7 +479,7 @@ class BuildVerificationServiceClass {
         command: 'pip-audit 2>&1 || safety check 2>&1 || echo "No security audit tool available"',
         timeout: 60000,
         required: false,
-        parseErrors: true,
+        parseErrors: false, // 🔥 Don't parse - audit findings are not code errors
       });
     }
 
