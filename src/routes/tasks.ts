@@ -42,7 +42,18 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    z.enum(['planning', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'team-orchestration', 'development', 'judge', 'test-creator', 'qa-engineer', 'merge-coordinator', 'auto-merge', 'contract-testing', 'contract-fixer'])
+    // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+    z.enum([
+      'planning',           // Main phase
+      'team-orchestration', // Main phase (contains TechLead → Developers → Judge)
+      'verification',       // Main phase
+      'auto-merge',         // Main phase
+      // Sub-phases (for granular control)
+      'tech-lead',
+      'development',
+      'judge',
+      'fixer',
+    ])
   ).optional(),
 });
 
@@ -1021,15 +1032,13 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
     if (validatedData.phases !== undefined) {
       task.orchestration.autoApprovalPhases = validatedData.phases as any[];
     } else if (validatedData.enabled) {
-      // If enabling auto-approval without specifying phases, default to all phases
+      // If enabling auto-approval without specifying phases, default to all main phases
+      // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
       task.orchestration.autoApprovalPhases = [
-        'product-manager',
-        'project-manager',
-        'tech-lead',
+        'planning',
         'team-orchestration',
-        'development',
-        'qa-engineer',
-        'merge-coordinator'
+        'verification',
+        'auto-merge',
       ] as any[];
     }
 
