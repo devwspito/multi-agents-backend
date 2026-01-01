@@ -1402,7 +1402,11 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
 
 /**
  * POST /api/tasks/:id/resume
- * Reanudar una orquestación pausada manualmente
+ * Reanudar una orquestación pausada (manual o por billing error)
+ *
+ * Handles two pause types:
+ * 1. Manual pause: task.orchestration.paused = true
+ * 2. Billing error pause: task.status = 'paused' (can be resumed after credits recharged)
  */
 router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -1419,7 +1423,13 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    if (!task.orchestration.paused) {
+    // Check if task is paused (either manually or due to billing error)
+    const isManuallyPaused = task.orchestration.paused === true;
+    const isBillingPaused = task.status === 'paused';
+    const teamOrch = (task.orchestration as any).teamOrchestration;
+    const isBillingError = teamOrch?.pauseReason === 'billing_error';
+
+    if (!isManuallyPaused && !isBillingPaused) {
       res.status(400).json({
         success: false,
         message: 'Task is not paused',
@@ -1427,21 +1437,56 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Desmarcar pausa
+    // Log resume type
+    if (isBillingPaused && isBillingError) {
+      console.log(`\n💰 [Resume] BILLING RECOVERY for task ${req.params.id}`);
+      console.log(`   Completed teams: ${teamOrch?.completedTeams || 0}`);
+      console.log(`   Pending epics: ${teamOrch?.pendingEpicIds?.join(', ') || 'none'}`);
+      console.log(`   User recharged credits and is resuming...`);
+    } else {
+      console.log(`▶️  [Resume] Task ${req.params.id} resumed by user ${req.user!.id}`);
+    }
+
+    // Clear pause flags
     task.orchestration.paused = false;
     task.orchestration.pausedAt = undefined;
     task.orchestration.pausedBy = undefined;
-    await task.save();
 
-    console.log(`▶️  [Resume] Task ${req.params.id} resumed by user ${req.user!.id}`);
+    // If it was a billing error pause, reset status to in_progress
+    if (isBillingPaused) {
+      task.status = 'in_progress';
+
+      // Clear billing pause metadata but keep pending epics for retry
+      if (teamOrch) {
+        teamOrch.status = 'in_progress'; // Resume from paused_billing
+        teamOrch.pauseReason = undefined;
+        teamOrch.pausedAt = undefined;
+        // Keep pendingEpicIds so orchestration knows what to resume
+      }
+    }
+
+    await task.save();
 
     // Notificar via WebSocket
     const { NotificationService } = await import('../services/NotificationService');
-    NotificationService.emitConsoleLog(
-      req.params.id,
-      'info',
-      '▶️  Orchestration resuming...'
-    );
+
+    if (isBillingError) {
+      NotificationService.emitConsoleLog(
+        req.params.id,
+        'info',
+        '💰 Credits recharged! Resuming orchestration with pending epics...'
+      );
+      NotificationService.emitNotification(req.params.id, 'billing_recovery', {
+        message: 'Orchestration resumed after billing recovery',
+        pendingEpics: teamOrch?.pendingEpicIds?.length || 0,
+      });
+    } else {
+      NotificationService.emitConsoleLog(
+        req.params.id,
+        'info',
+        '▶️  Orchestration resuming...'
+      );
+    }
 
     // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
     orchestrationCoordinator.orchestrateTask(req.params.id).catch((error) => {
@@ -1450,10 +1495,14 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
 
     res.json({
       success: true,
-      message: 'Task resumed successfully',
+      message: isBillingError
+        ? 'Task resumed after billing recovery - pending epics will be retried'
+        : 'Task resumed successfully',
       data: {
         taskId: req.params.id,
         currentPhase: task.orchestration.currentPhase,
+        billingRecovery: isBillingError,
+        pendingEpics: teamOrch?.pendingEpicIds || [],
       },
     });
   } catch (error) {

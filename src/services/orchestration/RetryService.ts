@@ -204,3 +204,55 @@ export class CircuitBreakerError extends Error {
     this.name = 'CircuitBreakerError';
   }
 }
+
+/**
+ * Billing Error - Special error for API credit/billing issues
+ *
+ * This error type is EXCLUDED from Circuit Breaker calculations
+ * because it's not a code/logic error - it's a billing issue.
+ * The user can fix this by recharging their API credits.
+ */
+export class BillingError extends Error {
+  constructor(
+    public readonly originalError: string,
+    public readonly agentType?: string
+  ) {
+    super(`Billing error: ${originalError}`);
+    this.name = 'BillingError';
+  }
+}
+
+/**
+ * Check if an error is a billing/credit error
+ * These errors should NOT be counted in Circuit Breaker
+ */
+export function isBillingError(error: any): boolean {
+  const errorMessage = error?.message || error?.toString() || '';
+  const errorType = error?.error || '';
+
+  const billingPatterns = [
+    'Credit balance is too low',
+    'billing_error',
+    'insufficient_credits',
+    'payment_required',
+    'credit_limit',
+    'quota_exceeded',
+    'rate_limit_exceeded',
+    'account_suspended',
+  ];
+
+  return billingPatterns.some(pattern =>
+    errorMessage.toLowerCase().includes(pattern.toLowerCase()) ||
+    errorType.toLowerCase().includes(pattern.toLowerCase())
+  );
+}
+
+/**
+ * Wrap an error as BillingError if it matches billing patterns
+ */
+export function wrapAsBillingErrorIfApplicable(error: any, agentType?: string): Error {
+  if (isBillingError(error)) {
+    return new BillingError(error.message || error.toString(), agentType);
+  }
+  return error;
+}

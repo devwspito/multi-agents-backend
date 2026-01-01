@@ -12,6 +12,7 @@ import {
   validateRepositoryRemotes,
   validateRequiredPhaseContext,
 } from './utils/PhaseValidationHelpers';
+import { isBillingError, BillingError } from './RetryService';
 
 /**
  * Team Orchestration Phase
@@ -309,27 +310,94 @@ export class TeamOrchestrationPhase extends BasePhase {
       const successfulTeams = teamResults.filter(r => r.status === 'fulfilled' && r.value.success);
       const failedTeams = teamResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success));
 
-      // 🔥 CIRCUIT BREAKER: Stop if too many teams fail
-      const failureRate = failedTeams.length / teamResults.length;
+      // 🔥 BILLING ERROR DETECTION: Check if any failures are billing-related
+      // Billing errors should NOT trigger Circuit Breaker - they're recoverable
+      const billingFailedTeams: PromiseSettledResult<any>[] = [];
+      const actualFailedTeams: PromiseSettledResult<any>[] = [];
+
+      for (const result of failedTeams) {
+        const errorMessage = result.status === 'rejected'
+          ? result.reason?.message || result.reason
+          : result.value?.error || '';
+
+        if (isBillingError({ message: errorMessage })) {
+          billingFailedTeams.push(result);
+        } else {
+          actualFailedTeams.push(result);
+        }
+      }
+
+      // 💰 BILLING ERROR PAUSE: If ANY team failed due to billing, pause for recovery
+      if (billingFailedTeams.length > 0) {
+        console.warn(`\n💰💰💰 BILLING ERROR DETECTED 💰💰💰`);
+        console.warn(`   ${billingFailedTeams.length} team(s) failed due to billing/credit issues`);
+        console.warn(`   ${actualFailedTeams.length} team(s) failed due to other errors`);
+        console.warn(`   ${successfulTeams.length} team(s) completed successfully`);
+        console.warn(`\n   🔄 PAUSING TASK - User can resume after recharging API credits`);
+        console.warn(`💰💰💰💰💰💰💰💰💰💰💰💰💰💰💰\n`);
+
+        // Update task status to paused_billing
+        (context.task.orchestration as any).teamOrchestration.status = 'paused_billing';
+        (context.task.orchestration as any).teamOrchestration.pausedAt = new Date();
+        (context.task.orchestration as any).teamOrchestration.pauseReason = 'billing_error';
+        (context.task.orchestration as any).teamOrchestration.completedTeams = successfulTeams.length;
+        (context.task.orchestration as any).teamOrchestration.pendingTeams = billingFailedTeams.length;
+
+        // Store which epics need to be retried
+        const pendingEpicIds = billingFailedTeams.map((result) => {
+          const epicIdx = teamResults.indexOf(result);
+          return projectManagerEpics[epicIdx]?.id;
+        }).filter(Boolean);
+        (context.task.orchestration as any).teamOrchestration.pendingEpicIds = pendingEpicIds;
+
+        task.status = 'paused';
+        await task.save();
+
+        // Notify frontend about billing pause
+        NotificationService.emitNotification(taskId, 'billing_error_pause', {
+          billingErrors: billingFailedTeams.length,
+          completedTeams: successfulTeams.length,
+          pendingTeams: billingFailedTeams.length,
+          message: `⚠️ API credits exhausted. ${successfulTeams.length} teams completed. Recharge credits and resume.`,
+          pendingEpicIds: pendingEpicIds,
+        });
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `💰 BILLING PAUSE: ${billingFailedTeams.length} team(s) waiting. Recharge API credits and click "Resume" to continue.`
+        );
+
+        // Throw BillingError (special handling - can be resumed)
+        throw new BillingError(
+          `${billingFailedTeams.length} team(s) failed due to insufficient API credits. Task paused for recovery.`,
+          'team-orchestration'
+        );
+      }
+
+      // 🔥 CIRCUIT BREAKER: Stop if too many teams fail (EXCLUDING billing errors)
+      const failureRate = actualFailedTeams.length / teamResults.length;
       const failureThreshold = parseFloat(process.env.TEAM_FAILURE_THRESHOLD || '0.5'); // 50% default
 
       if (failureRate > failureThreshold && teamResults.length > 1) {
         const { CircuitBreakerError } = await import('./RetryService');
 
-        console.error(`\n❌ [CIRCUIT BREAKER] Too many teams failed: ${failedTeams.length}/${teamResults.length} (${(failureRate * 100).toFixed(1)}%)`);
+        console.error(`\n❌ [CIRCUIT BREAKER] Too many teams failed: ${actualFailedTeams.length}/${teamResults.length} (${(failureRate * 100).toFixed(1)}%)`);
         console.error(`   Threshold: ${(failureThreshold * 100).toFixed(0)}%`);
+        console.error(`   Note: ${billingFailedTeams.length} billing error(s) excluded from calculation`);
         console.error(`   Aborting orchestration to prevent further cost accumulation\n`);
 
         // Notify frontend
         NotificationService.emitNotification(taskId, 'circuit_breaker_triggered', {
-          failedTeams: failedTeams.length,
+          failedTeams: actualFailedTeams.length,
           totalTeams: teamResults.length,
           threshold: failureThreshold,
-          message: `Circuit breaker: ${failedTeams.length}/${teamResults.length} teams failed`
+          billingErrorsExcluded: billingFailedTeams.length,
+          message: `Circuit breaker: ${actualFailedTeams.length}/${teamResults.length} teams failed`
         });
 
         throw new CircuitBreakerError(
-          failedTeams.length,
+          actualFailedTeams.length,
           teamResults.length,
           failureThreshold
         );

@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'paused';
 export type AgentType = 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
@@ -635,7 +635,7 @@ const taskSchema = new Schema<ITask>(
     }],
     status: {
       type: String,
-      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled'],
+      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled', 'paused'],
       default: 'pending',
       index: true,
     },
