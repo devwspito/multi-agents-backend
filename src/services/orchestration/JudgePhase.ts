@@ -13,6 +13,9 @@ import {
   getDataOptional,
   getDataArray,
 } from './utils/ContextHelpers';
+import { SemanticVerificationService, VerificationResult } from '../SemanticVerificationService';
+import { CodebaseKnowledge } from '../CodebaseDiscoveryService';
+import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
 
 /**
  * Judge Phase
@@ -753,7 +756,80 @@ export class JudgePhase extends BasePhase {
       console.log(`🏗️ [Judge] Architecture brief available - will evaluate against project patterns`);
     }
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief);
+    // 🔬 AUTOMATED SEMANTIC VERIFICATION (runs BEFORE Judge reviews)
+    // This catches anti-patterns like `new Project()` instead of `createProject()`
+    let semanticVerificationResult: VerificationResult | undefined;
+    let semanticVerificationSection = '';
+
+    const codebaseKnowledge = context.getData<CodebaseKnowledge>('codebaseKnowledge');
+    // Story object may have filesToModify/filesToCreate from TechLead enrichment
+    const storyAny = story as any;
+    const modifiedFiles = [...(storyAny.filesToModify || []), ...(storyAny.filesToCreate || [])];
+
+    if (modifiedFiles.length > 0 && workspacePath) {
+      console.log(`\n🔬 [Judge] Running automated semantic verification...`);
+      try {
+        semanticVerificationResult = await SemanticVerificationService.verifyChanges(
+          workspacePath,
+          modifiedFiles,
+          codebaseKnowledge
+        );
+
+        semanticVerificationSection = SemanticVerificationService.formatForJudge(semanticVerificationResult);
+
+        if (!semanticVerificationResult.passed) {
+          console.log(`   ❌ Semantic verification FAILED - ${semanticVerificationResult.violations.filter(v => v.severity === 'error').length} errors found`);
+          // Emit to frontend
+          NotificationService.emitConsoleLog(
+            task._id?.toString() || '',
+            'warn',
+            `🔬 Semantic verification found ${semanticVerificationResult.violations.filter(v => v.severity === 'error').length} errors - Judge will reject`
+          );
+        } else {
+          console.log(`   ✅ Semantic verification passed`);
+        }
+      } catch (error: any) {
+        console.warn(`   ⚠️ Semantic verification failed to run: ${error.message}`);
+      }
+    }
+
+    // 🧪 AUTOMATED TEST EXECUTION (runs BEFORE Judge reviews)
+    // This catches functional issues that compile but fail at runtime
+    let testResult: TestResult | undefined;
+    let testResultsSection = '';
+
+    // Get custom test command from TechLead's environmentCommands
+    const environmentCommands = context.getData<any>('environmentCommands');
+    const customTestCommand = environmentCommands?.test;
+
+    if (workspacePath) {
+      console.log(`\n🧪 [Judge] Running automated tests...`);
+      try {
+        testResult = await AutomatedTestRunner.runTests(workspacePath, {
+          command: customTestCommand,
+          timeout: 90000, // 90 seconds for tests
+        });
+
+        testResultsSection = AutomatedTestRunner.formatForJudge(testResult);
+
+        if (!testResult.passed) {
+          console.log(`   ❌ Tests FAILED - ${testResult.failedTests} test(s) failing`);
+          NotificationService.emitConsoleLog(
+            task._id?.toString() || '',
+            'warn',
+            `🧪 ${testResult.failedTests} test(s) failed - Judge will reject: ${testResult.failedTestNames.slice(0, 3).join(', ')}`
+          );
+        } else if (testResult.totalTests > 0) {
+          console.log(`   ✅ All ${testResult.totalTests} tests passed`);
+        } else {
+          console.log(`   ⚠️ No tests found in codebase`);
+        }
+      } catch (error: any) {
+        console.warn(`   ⚠️ Test execution failed: ${error.message}`);
+      }
+    }
+
+    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief, semanticVerificationSection, testResultsSection);
 
     // 🔥 SAFE CONTEXT ACCESS: Retrieve processed attachments (optional - defaults to empty array)
     // This ensures ALL agents receive the same multimedia context
@@ -903,7 +979,9 @@ export class JudgePhase extends BasePhase {
     commitSHA?: string,
     targetRepository?: string,
     storyBranchName?: string,
-    architectureBrief?: any // 🏗️ Architecture insights from PlanningPhase
+    architectureBrief?: any, // 🏗️ Architecture insights from PlanningPhase
+    semanticVerificationSection?: string, // 🔬 Automated verification results
+    testResultsSection?: string // 🧪 Automated test results
   ): string {
     const projectId = task.projectId?.toString() || '';
     const taskId = task._id?.toString() || '';
@@ -943,12 +1021,25 @@ ${architectureBrief.prInsights.rejectionReasons.map((r: string) => `- ${r}`).joi
 
 ⚠️ If code doesn't follow these patterns, mark "followsPatterns" as FALSE.
 ` : ''}
+${semanticVerificationSection || ''}
+${testResultsSection || ''}
 ## 🎯 EVALUATION (All must pass):
 1. ✅ CODE EXISTS - Not just docs/comments
 2. ✅ COMPLETE - No TODOs/stubs
 3. ✅ REQUIREMENTS MET - Story fully implemented
 4. ✅ PATTERNS - Follows project conventions ${architectureBrief ? '(see patterns above!)' : ''}
 5. ✅ QUALITY - No obvious bugs, has error handling
+6. ✅ SEMANTIC CORRECTNESS - Uses correct patterns (e.g., createProject() NOT new Project())
+7. ✅ TESTS PASS - All automated tests must pass (if tests exist)
+
+## 🔬 CRITICAL: SEMANTIC VERIFICATION
+Before approving, search for existing patterns:
+\`\`\`
+Grep("createProject|createUser|new Project")
+\`\`\`
+❌ REJECT if: Developer used \`new Project()\` when \`createProject()\` exists
+❌ REJECT if: Entities created without required relationships (missing agents, teams, etc.)
+✅ APPROVE only if: Developer used existing helper functions correctly
 
 ## INSTRUCTIONS (Be efficient):
 1. Read the modified/created files
@@ -1170,6 +1261,10 @@ ${judgeFeedback}
 
 ❌ DO NOT mark as complete until ALL feedback items are addressed.`;
     console.log(`✅ [Judge] Formatted feedback for Developer`);
+
+    // 🔥 Store Judge feedback in context for Fixer to access
+    context.setData('lastJudgeFeedback', formattedFeedback);
+    context.setData('currentStory', story); // Also store current story for Fixer context
 
     NotificationService.emitAgentMessage(
       taskId,

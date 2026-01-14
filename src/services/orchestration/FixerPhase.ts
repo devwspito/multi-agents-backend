@@ -2,6 +2,9 @@ import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { OutputParser } from './utils/OutputParser';
+import { SemanticVerificationService } from '../SemanticVerificationService';
+import { CodebaseKnowledge } from '../CodebaseDiscoveryService';
+import { execSync } from 'child_process';
 
 /**
  * Fixer Phase
@@ -149,45 +152,168 @@ export class FixerPhase extends BasePhase {
 
     const repoPath = `${primaryRepo.name}`;
 
-    // Build prompt with QA errors
-    const prompt = `# Fixer - Error Resolution
+    // 🔥 Enhanced: Get rich context for smarter fixing
+    const architectureBrief = context.getData<any>('architectureBrief');
+    const currentStory = context.getData<any>('currentStory');
+    const codebaseKnowledge = context.getData<CodebaseKnowledge>('codebaseKnowledge');
+    const judgeFeedback = context.getData<string>('lastJudgeFeedback');
 
-## Error Type: ${qaErrorType}
+    // Get modified files from git
+    let modifiedFiles: string[] = [];
+    let gitDiff = '';
+    try {
+      const status = execSync('git diff --name-only HEAD~1 2>/dev/null || git diff --name-only', {
+        cwd: workspacePath,
+        encoding: 'utf8',
+        timeout: 5000
+      }).trim();
+      modifiedFiles = status.split('\n').filter(f => f);
 
-## Errors Found:
+      // Get short diff for context
+      gitDiff = execSync('git diff --stat HEAD~1 2>/dev/null || git diff --stat', {
+        cwd: workspacePath,
+        encoding: 'utf8',
+        timeout: 5000
+      }).trim();
+    } catch {
+      // Ignore git errors
+    }
+
+    // Run semantic verification to find anti-patterns
+    let semanticSection = '';
+    if (modifiedFiles.length > 0 && codebaseKnowledge) {
+      const semanticResult = await SemanticVerificationService.verifyChanges(
+        workspacePath!,
+        modifiedFiles,
+        codebaseKnowledge
+      );
+      if (semanticResult.violations.length > 0) {
+        semanticSection = `
+## 🔍 SEMANTIC ANTI-PATTERNS DETECTED
+
+**These patterns are WRONG and must be fixed:**
+
+${semanticResult.violations.map(v => `
+### ❌ ${v.type.toUpperCase()} in \`${v.file}\`${v.line ? `:${v.line}` : ''}
+- **Issue**: ${v.message}
+- **Fix**: ${v.suggestion}
+${v.codeSnippet ? `\`\`\`\n${v.codeSnippet}\n\`\`\`` : ''}
+`).join('\n')}
+`;
+      }
+    }
+
+    // Build architecture patterns section
+    let patternsSection = '';
+    if (architectureBrief?.helperFunctions?.length > 0) {
+      patternsSection = `
+## 🏗️ REQUIRED PATTERNS (Use These!)
+
+| Helper Function | File | What to Use | What NOT to Use |
+|----------------|------|-------------|-----------------|
+${architectureBrief.helperFunctions.slice(0, 10).map((h: any) =>
+  `| \`${h.name}()\` | ${h.file} | ✅ ${h.usage} | ❌ ${h.antiPattern} |`
+).join('\n')}
+
+**🚨 If you used \`new Model()\` instead of \`createModel()\`, REPLACE IT.**
+`;
+    }
+
+    // Build story context section
+    let storySection = '';
+    if (currentStory) {
+      storySection = `
+## 📖 CURRENT STORY CONTEXT
+
+**Story**: ${currentStory.title || currentStory.id}
+**Description**: ${(currentStory.description || '').substring(0, 500)}
+
+${currentStory.acceptanceCriteria?.length > 0 ? `**Acceptance Criteria**:
+${currentStory.acceptanceCriteria.map((ac: string, i: number) => `${i + 1}. ${ac}`).join('\n')}` : ''}
+`;
+    }
+
+    // Build Judge feedback section
+    let judgeSection = '';
+    if (judgeFeedback) {
+      judgeSection = `
+## 🔴 JUDGE REJECTION FEEDBACK
+
+The Judge rejected this code for these reasons:
+
+${judgeFeedback}
+
+**You MUST address each point above.**
+`;
+    }
+
+    // Build prompt with full context
+    const prompt = `# Fixer - Error Resolution (Full Context Mode)
+
+## 📋 Error Type: ${qaErrorType}
+
+## ❌ Errors Found:
 \`\`\`
 ${qaErrors}
 \`\`\`
 
-## 🎯 INSTRUCTIONS (Be efficient):
+${gitDiff ? `## 📁 Modified Files:
+\`\`\`
+${gitDiff}
+\`\`\`` : ''}
 
-1. **FIX ERRORS** (priority order):
+${semanticSection}
+${patternsSection}
+${storySection}
+${judgeSection}
+
+## 🎯 FIXING STRATEGY (Follow This Order):
+
+1. **UNDERSTAND THE ERRORS**
+   - Read the error messages carefully
+   - Identify the root cause (not just symptoms)
+
+2. **CHECK PATTERNS** (CRITICAL!)
+   - If error involves entity creation → Use helper functions from patterns above
+   - If error involves imports → Check the file structure
+   - If error involves types → Check the model definitions
+
+3. **FIX SYSTEMATICALLY**
    - Syntax/compilation errors first
    - Import/module errors
    - Type errors
+   - Anti-pattern violations (use helpers!)
    - Test failures
 
-2. **COMMIT CHANGES**:
+4. **VERIFY BEFORE COMMIT**
+   - Run \`npm run build\` or \`npx tsc --noEmit\`
+   - Run \`npm test\` if tests exist
+   - Check that all errors are resolved
+
+5. **COMMIT CHANGES**:
    \`\`\`bash
    cd ${repoPath}
    git add .
-   git commit -m "Fix ${qaErrorType} errors"
+   git commit -m "fix: ${qaErrorType} errors - use proper patterns"
+   git push origin HEAD
    \`\`\`
 
-## SUCCESS CRITERIA:
+## ✅ SUCCESS CRITERIA:
 - All errors resolved
-- Code compiles
+- Code compiles without errors
+- Uses correct helper functions (NOT \`new Model()\`)
 - Tests pass (if applicable)
-- Changes committed
+- Changes committed and pushed
 
-## OUTPUT (JSON only):
+## 📤 OUTPUT (JSON only):
 {
   "fixed": true|false,
   "filesModified": ["file1.js", "file2.ts"],
-  "changes": ["Fixed import", "Added missing type"]
+  "changes": ["Fixed import", "Used createProject() instead of new Project()"],
+  "patternsApplied": ["createProject", "createTeam"]
 }
 
-Fix errors quickly. Focus on functionality over perfection.`;
+**Remember**: Quality > Speed. Fix the ROOT CAUSE, not just the symptoms.`;
 
     try {
       const result = await this.executeAgentFn(
@@ -521,7 +647,24 @@ If NOT automatable:
         return { success: false, error: 'No repository found' };
       }
 
-      const fixerPrompt = `You are a Targeted Fixer Agent. You fix specific, well-defined errors.
+      // 🔥 Enhanced: Get architecture patterns for Last Chance mode too
+      const architectureBrief = context.getData<any>('architectureBrief');
+      let patternsSection = '';
+      if (architectureBrief?.helperFunctions?.length > 0) {
+        patternsSection = `
+# 🏗️ REQUIRED PATTERNS (Use These!)
+
+| Helper Function | File | Usage |
+|----------------|------|-------|
+${architectureBrief.helperFunctions.slice(0, 8).map((h: any) =>
+  `| \`${h.name}()\` | ${h.file} | ${h.usage} |`
+).join('\n')}
+
+**🚨 If any fix involves entity creation, USE the helper functions above, NOT \`new Model()\`.**
+`;
+      }
+
+      const fixerPrompt = `You are a Targeted Fixer Agent with full codebase knowledge.
 
 # Analysis from Recovery Analyst
 
@@ -537,13 +680,18 @@ ${analysis.fixes?.map((fix: any, i: number) => `
 **Difficulty**: ${fix.difficulty}
 `).join('\n')}
 
+${patternsSection}
+
 # Your Mission
 
 Apply the fixes listed above:
 
 1. **Read** each file mentioned
-2. **Edit** to apply the exact fix described
-3. **Commit** your changes:
+2. **Understand the context** - check imports, relationships
+3. **Apply the fix** using Edit tool
+4. **Use correct patterns** - helper functions, NOT \`new Model()\`
+5. **Verify** - run \`npx tsc --noEmit\` if TypeScript
+6. **Commit** your changes:
    \`\`\`bash
    cd ${primaryRepo.name}
    git add .
@@ -551,7 +699,7 @@ Apply the fixes listed above:
    git push origin HEAD
    \`\`\`
 
-4. **Output** JSON result
+7. **Output** JSON result
 
 # Output Format (MANDATORY JSON)
 
@@ -559,7 +707,8 @@ Apply the fixes listed above:
 {
   "fixed": true,
   "filesModified": ["src/components/MessageMedia.jsx"],
-  "changes": ["Wrapped case blocks in curly braces"],
+  "changes": ["Wrapped case blocks in curly braces", "Used createProject() instead of new Project()"],
+  "patternsApplied": ["createProject"],
   "summary": "Applied 2 lint fixes"
 }
 \`\`\`

@@ -6,6 +6,7 @@ import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
+import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
 
 /**
  * Developers Phase
@@ -214,6 +215,36 @@ export class DevelopersPhase extends BasePhase {
       );
       if (!securityResult.success) {
         console.warn(`   ⚠️  Security scan completed with warnings`);
+      }
+    }
+
+    // 🔍 PROACTIVE ISSUE DETECTION: Check for potential issues before development
+    if (repositories.length > 0 && workspacePath) {
+      console.log(`\n🔍 [Developers] Running proactive issue detection...`);
+      const stories = context.getData<any[]>('stories') || [];
+      const allFilesToModify = stories.flatMap((s: any) => s.filesToModify || []);
+      const allFilesToCreate = stories.flatMap((s: any) => s.filesToCreate || []);
+      const allFilesToRead = stories.flatMap((s: any) => s.filesToRead || []);
+
+      const preflightResult = await ProactiveIssueDetector.runPreflightChecks({
+        workspacePath: repositories[0].localPath,
+        filesToModify: allFilesToModify,
+        filesToCreate: allFilesToCreate,
+        filesToRead: allFilesToRead,
+      });
+
+      if (!preflightResult.canProceed) {
+        console.warn(`   ⚠️  Preflight check found ${preflightResult.issues.length} blocking issues`);
+        for (const issue of preflightResult.issues.filter(i => i.severity === 'blocker')) {
+          console.warn(`      ❌ ${issue.category}: ${issue.message}`);
+        }
+        // Store issues in context for Developer to see
+        context.setData('preflightIssues', preflightResult.issues);
+      } else {
+        console.log(`   ✅ Preflight checks passed`);
+        if (preflightResult.recommendations.length > 0) {
+          context.setData('preflightRecommendations', preflightResult.recommendations);
+        }
       }
     }
 
@@ -945,6 +976,17 @@ export class DevelopersPhase extends BasePhase {
         console.log(`🏗️ [DevelopersPhase] Architecture brief available - developer will follow project patterns`);
       }
 
+      // 🔧 Get environmentCommands from context (test, lint, typecheck, etc. from TechLead)
+      const environmentCommands = context.getData<any>('environmentCommands');
+      if (environmentCommands) {
+        console.log(`🔧 [DevelopersPhase] Environment commands available - developer will use project-specific verification`);
+        console.log(`   Test: ${environmentCommands.test || '(not specified)'}`);
+        console.log(`   Lint: ${environmentCommands.lint || '(not specified)'}`);
+        console.log(`   Typecheck: ${environmentCommands.typecheck || '(not specified)'}`);
+      } else {
+        console.log(`⚠️  [DevelopersPhase] No environment commands - developer will use default verification`);
+      }
+
       // 🔥 DEFENSIVE VALIDATION: Check effectiveWorkspacePath type before calling executeDeveloperFn
       if (typeof effectiveWorkspacePath !== 'string' && effectiveWorkspacePath !== null) {
         console.error(`❌❌❌ [DevelopersPhase.executeIsolatedStoryPipeline] CRITICAL: effectiveWorkspacePath is not a string!`);
@@ -1007,7 +1049,8 @@ export class DevelopersPhase extends BasePhase {
         epicBranchName, // Epic branch name from TeamOrchestrationPhase
         undefined, // forceTopModel
         devAuth, // 🔐 Developer authentication for testing endpoints
-        architectureBrief // 🏗️ Architecture patterns from PlanningPhase
+        architectureBrief, // 🏗️ Architecture patterns from PlanningPhase
+        environmentCommands // 🔧 Environment commands from TechLead (dynamic verification)
       );
 
       // Track developer cost and tokens

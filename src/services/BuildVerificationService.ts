@@ -14,6 +14,7 @@
  */
 
 import { execSync } from 'child_process';
+import { promisify } from 'util';
 import { LogService } from './logging/LogService';
 
 export interface VerificationCommand {
@@ -357,17 +358,18 @@ class BuildVerificationServiceClass {
    * Works across all languages/frameworks
    */
   async findTestFiles(repoPath: string): Promise<string[]> {
-    const { glob } = require('glob');
+    const glob = require('glob');
+    const globAsync = promisify(glob);
 
     try {
       const allTestFiles: string[] = [];
 
       for (const pattern of this.TEST_FILE_PATTERNS) {
-        const matches = await glob(pattern, {
+        const matches = await globAsync(pattern, {
           cwd: repoPath,
           ignore: ['**/node_modules/**', '**/vendor/**', '**/dist/**', '**/build/**', '**/.git/**'],
           nodir: true,
-        });
+        }) as string[];
         allTestFiles.push(...matches);
       }
 

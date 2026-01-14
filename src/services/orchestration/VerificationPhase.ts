@@ -18,6 +18,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { CompletenessValidator, CompletenessReport } from '../verification/CompletenessValidator';
 import { CoherenceChecker, CoherenceReport } from '../verification/CoherenceChecker';
+import { QualityGates, QualityGateResult } from '../QualityGates';
 import { LogService } from '../logging/LogService';
 import { NotificationService } from '../NotificationService';
 import { OutputParser } from './utils/OutputParser';
@@ -28,6 +29,7 @@ export interface VerificationResult {
   storyId?: string;
   completeness: CompletenessReport | null;
   coherence: CoherenceReport | null;
+  qualityGates: QualityGateResult | null;
   passed: boolean;
   issues: string[];
   feedback: string;
@@ -633,6 +635,7 @@ If validation fails:
     const issues: string[] = [];
     let completenessReport: CompletenessReport | null = null;
     let coherenceReport: CoherenceReport | null = null;
+    let qualityGatesReport: QualityGateResult | null = null;
 
     // Find repository path for this epic
     const repoName = epic.targetRepository || context.repositories[0]?.name;
@@ -679,6 +682,36 @@ If validation fails:
       console.warn(`⚠️ [Verification] Error checking coherence:`, error.message);
     }
 
+    // 3. Run Quality Gates Check (compilation, linting, tests, security)
+    try {
+      console.log(`   🚦 [Verification] Running quality gates for epic ${epic.id}...`);
+
+      // Get modified files from epic stories (cast to any for optional properties)
+      const modifiedFiles = epicStories.flatMap((s: any) => [
+        ...(s.filesToModify || []),
+        ...(s.filesToCreate || []),
+      ]);
+
+      qualityGatesReport = await QualityGates.runAllGates({
+        workspacePath: repoPath,
+        modifiedFiles,
+        minCoverage: 70,
+        strictMode: false, // Don't block on TODOs
+      });
+
+      if (!qualityGatesReport.passed) {
+        for (const gate of qualityGatesReport.blockingGates) {
+          issues.push(`[Quality Gate] ${gate} failed`);
+        }
+        // Add recommendations
+        for (const rec of qualityGatesReport.recommendations.slice(0, 3)) {
+          issues.push(rec);
+        }
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ [Verification] Error running quality gates:`, error.message);
+    }
+
     // Determine if epic passed
     const passed = issues.length === 0;
 
@@ -686,14 +719,19 @@ If validation fails:
     let feedback = '';
     if (!passed) {
       feedback = this.generateEpicFeedback(epic, issues, completenessReport, coherenceReport);
+      // Add quality gates feedback
+      if (qualityGatesReport && !qualityGatesReport.passed) {
+        feedback += `\n\n${QualityGates.formatForPrompt(qualityGatesReport)}`;
+      }
     } else {
-      feedback = `✅ Epic ${epic.id} passed all verification checks.`;
+      feedback = `✅ Epic ${epic.id} passed all verification checks (score: ${qualityGatesReport?.overallScore || 100}/100).`;
     }
 
     return {
       epicId: epic.id,
       completeness: completenessReport,
       coherence: coherenceReport,
+      qualityGates: qualityGatesReport,
       passed,
       issues,
       feedback,

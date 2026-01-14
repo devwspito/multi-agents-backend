@@ -227,4 +227,108 @@ export class OrchestrationRecoveryService {
       return false;
     }
   }
+
+  /**
+   * Resume a failed task from where it left off
+   *
+   * This allows manually restarting a task that failed due to:
+   * - Server crash/restart
+   * - Agent timeout
+   * - SDK errors
+   * - etc.
+   *
+   * The orchestrator will detect completed phases and skip them.
+   */
+  async resumeFailedTask(taskId: string): Promise<{
+    success: boolean;
+    message: string;
+    task?: ITask;
+  }> {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🔄 [Recovery] Attempting to resume failed task: ${taskId}`);
+    console.log(`${'='.repeat(60)}`);
+
+    try {
+      // Find the task
+      const task = await Task.findById(taskId);
+      if (!task) {
+        return { success: false, message: 'Task not found' };
+      }
+
+      // Check current status
+      if (task.status === 'completed') {
+        return { success: false, message: 'Task is already completed' };
+      }
+
+      if (task.status === 'in_progress') {
+        return { success: false, message: 'Task is already in progress' };
+      }
+
+      if (task.status === 'cancelled') {
+        return { success: false, message: 'Task was cancelled and cannot be resumed' };
+      }
+
+      // Allow resuming 'failed' or 'pending' tasks
+      if (task.status !== 'failed' && task.status !== 'pending') {
+        return { success: false, message: `Cannot resume task with status: ${task.status}` };
+      }
+
+      console.log(`📋 [Recovery] Task details:`);
+      console.log(`   Title: ${task.title}`);
+      console.log(`   Status: ${task.status}`);
+      console.log(`   Current Phase: ${task.orchestration.currentPhase}`);
+
+      // Reset status to pending so orchestrator picks it up
+      task.status = 'pending';
+      task.orchestration.cancelRequested = false;
+
+      // If it failed during a phase, we'll restart from that phase
+      // The orchestrator will skip already completed phases
+      await task.save();
+
+      console.log(`✅ [Recovery] Task status reset to pending`);
+
+      // Notify frontend
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔄 Resuming failed task from phase: ${task.orchestration.currentPhase}`
+      );
+
+      // Create new orchestrator and resume
+      const taskOrchestrator = new OrchestrationCoordinator();
+
+      // Run orchestration in background (don't block)
+      taskOrchestrator.orchestrateTask(taskId).catch((error) => {
+        console.error(`❌ [Recovery] Resume failed for task ${taskId}:`, error.message);
+        NotificationService.emitTaskFailed(taskId, {
+          error: `Resume failed: ${error.message}`,
+        });
+      });
+
+      console.log(`✅ [Recovery] Task ${taskId} resume initiated`);
+
+      return {
+        success: true,
+        message: `Task resume initiated from phase: ${task.orchestration.currentPhase}`,
+        task: await Task.findById(taskId) as ITask
+      };
+    } catch (error: any) {
+      console.error(`❌ [Recovery] Error resuming task ${taskId}:`, error.message);
+      return { success: false, message: `Error: ${error.message}` };
+    }
+  }
+
+  /**
+   * Get list of failed tasks that can be resumed
+   */
+  async getResumableTasks(): Promise<any[]> {
+    return Task.find({
+      status: { $in: ['failed', 'pending'] },
+      'orchestration.paused': { $ne: true },
+    })
+      .sort({ updatedAt: -1 })
+      .limit(20)
+      .lean();
+  }
 }

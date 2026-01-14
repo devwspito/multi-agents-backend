@@ -325,6 +325,20 @@ ${architectureBrief.prInsights ? `### PR Insights (What Gets Approved)
 ${architectureBrief.conventions?.length > 0 ? `### Project Conventions
 ${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
 
+${architectureBrief.helperFunctions?.length > 0 ? `### 🔧 HELPER FUNCTIONS (MANDATORY TO USE!)
+| Function | File | Usage | Anti-Pattern |
+|----------|------|-------|--------------|
+${architectureBrief.helperFunctions.map((h: any) => `| \`${h.name}()\` | ${h.file} | ${h.usage} | ❌ ${h.antiPattern} |`).join('\n')}
+
+**⚠️ Stories MUST specify these helpers. Developers MUST use them.**` : ''}
+
+${architectureBrief.entityCreationRules?.length > 0 ? `### 📋 ENTITY CREATION RULES (CRITICAL!)
+| Entity | MUST Use | NEVER Use |
+|--------|----------|-----------|
+${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | \`${r.mustUse || 'Check codebase'}\` | ❌ \`${r.mustNotUse}\` |`).join('\n')}
+
+**🔴 Code that ignores these rules will be REJECTED by Judge.**` : ''}
+
 **USE THESE PATTERNS** when creating stories - code that doesn't follow these patterns will be rejected.
 `;
       }
@@ -343,13 +357,25 @@ ${repoInfo}
 ## 🎯 INSTRUCTIONS (Be concise and efficient):
 
 1. **EXPLORE** (max 3 minutes): Scan codebase structure to find real file paths
-2. **CREATE 2-4 EPICS**: Major feature groups
-3. **CREATE 3-5 STORIES PER EPIC**: Each 1-3 hours of work
+2. **DISCOVER PATTERNS**: Search for existing helper functions (createProject, createUser, etc.)
+3. **CREATE 2-4 EPICS**: Major feature groups
+4. **CREATE 3-5 STORIES PER EPIC**: Each 1-3 hours of work with PATTERNS included
 
-## STORY FORMAT (include all):
+## 🔍 MANDATORY: PATTERN DISCOVERY (Before Creating Stories)
+\`\`\`bash
+# Find existing helper functions for entity creation:
+Grep("createProject|createUser|createTeam|new Project")
+Grep("export.*function.*create|export.*class.*Service")
+\`\`\`
+**If you find createX() functions, stories MUST tell developers to use them instead of new Model().**
+
+## STORY FORMAT (MUST include all sections):
 - **Acceptance Criteria**: Given/When/Then format
 - **Files**: Exact paths to read/modify/create
 - **Technical Details**: Functions, APIs, types to implement
+- **🔧 PATTERNS TO USE**: Which existing functions to use
+- **⚠️ ANTI-PATTERNS TO AVOID**: What NOT to do
+- **Code Examples**: Show developer exactly HOW to implement
 - **Testing**: What tests to write
 - **Done Criteria**: Checklist for completion
 
@@ -367,7 +393,7 @@ ${repoInfo}
         {
           "id": "story-1",
           "title": "Story title",
-          "description": "Complete description with: Acceptance Criteria (Given/When/Then), Files to modify, Functions/APIs to implement, Tests to write, Done criteria",
+          "description": "Complete description with acceptance criteria and requirements",
           "epicId": "epic-1",
           "priority": 1,
           "estimatedComplexity": "simple|moderate|complex",
@@ -375,7 +401,25 @@ ${repoInfo}
           "status": "pending",
           "filesToRead": ["real/path/file.ts"],
           "filesToModify": ["real/path/file2.ts"],
-          "filesToCreate": ["real/path/new.ts"]
+          "filesToCreate": ["real/path/new.ts"],
+          "acceptanceCriteria": [
+            "Given X, When Y, Then Z",
+            "Given A, When B, Then C"
+          ],
+          "mustUseHelpers": [
+            {"function": "createProject", "from": "src/utils/helpers.ts", "reason": "Sets up required relationships"}
+          ],
+          "antiPatterns": [
+            {"bad": "new Project({ name })", "why": "Missing agents, teams, defaultTeam", "good": "await createProject({ name })"}
+          ],
+          "codeExamples": [
+            {
+              "description": "How to create a project correctly",
+              "code": "const project = await createProject({ name, description });\\n// This automatically creates: agents, teams, defaultTeam",
+              "doNot": "const project = new Project({ name }); // ❌ Missing relationships!"
+            }
+          ],
+          "testRequirements": ["Unit test for createProject", "Integration test for API endpoint"]
         }
       ],
       "status": "pending"
@@ -805,6 +849,32 @@ ${repoInfo}
         payload: parsed.teamComposition,
       });
 
+      // 🔧 ENVIRONMENT CONFIG: Parse and emit if TechLead provided it
+      // This contains project-specific commands (test, lint, typecheck, etc.)
+      if (parsed.environmentConfig) {
+        console.log(`📋 [TechLead] Environment config found - storing for developers`);
+        console.log(`   Install: ${parsed.environmentConfig.installCommand || 'not specified'}`);
+        console.log(`   Test: ${parsed.environmentConfig.testCommand || 'not specified'}`);
+        console.log(`   Lint: ${parsed.environmentConfig.lintCommand || 'not specified'}`);
+        console.log(`   Typecheck: ${parsed.environmentConfig.typecheckCommand || 'not specified'}`);
+
+        // Emit EnvironmentConfigDefined event for TeamOrchestrationPhase
+        await eventStore.append({
+          taskId: task._id as any,
+          eventType: 'EnvironmentConfigDefined',
+          agentName: 'tech-lead',
+          payload: parsed.environmentConfig,
+        });
+
+        // Store in task.orchestration for persistence (survives server restart)
+        task.orchestration.environmentConfig = parsed.environmentConfig;
+        task.markModified('orchestration.environmentConfig');
+
+        console.log(`✅ [TechLead] EnvironmentConfigDefined event emitted + stored in task`);
+      } else {
+        console.log(`⚠️  [TechLead] No environmentConfig in output - using defaults`);
+      }
+
       // ✅ BACKWARD COMPATIBILITY: Also store in Task model (will remove later)
       const epicsWithStringIds = parsed.epics.map((epic: any) => ({
         ...epic,
@@ -1156,6 +1226,20 @@ ${architectureBrief.prInsights ? `### PR Insights (What Gets Approved)
 ${architectureBrief.conventions?.length > 0 ? `### Project Conventions
 ${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
 
+${architectureBrief.helperFunctions?.length > 0 ? `### 🔧 HELPER FUNCTIONS (MANDATORY TO USE!)
+| Function | File | Usage | Anti-Pattern |
+|----------|------|-------|--------------|
+${architectureBrief.helperFunctions.map((h: any) => `| \`${h.name}()\` | ${h.file} | ${h.usage} | ❌ ${h.antiPattern} |`).join('\n')}
+
+**⚠️ Stories MUST specify these helpers. Developers MUST use them.**` : ''}
+
+${architectureBrief.entityCreationRules?.length > 0 ? `### 📋 ENTITY CREATION RULES (CRITICAL!)
+| Entity | MUST Use | NEVER Use |
+|--------|----------|-----------|
+${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | \`${r.mustUse || 'Check codebase'}\` | ❌ \`${r.mustNotUse}\` |`).join('\n')}
+
+**🔴 Code that ignores these rules will be REJECTED by Judge.**` : ''}
+
 **USE THESE PATTERNS** when creating stories - code that doesn't follow these patterns will be rejected.
 `;
     }
@@ -1174,9 +1258,14 @@ ${repoGuidance}
 
 ## 🎯 INSTRUCTIONS:
 1. EXPLORE codebase (max 2 min): cd ${workspacePath}/${targetRepo} && find src
-2. **CRITICAL**: Only create stories appropriate for ${repoType} repository
-3. BREAK INTO 2-5 STORIES (each 1-3 hours work)
-4. ASSIGN DEVELOPERS (1 dev per story)
+2. **DISCOVER PATTERNS**: Grep("createProject|createUser|new Project") to find existing helpers
+3. **CRITICAL**: Only create stories appropriate for ${repoType} repository
+4. BREAK INTO 2-5 STORIES (each 1-3 hours work) - include PATTERNS TO USE in each story
+5. ASSIGN DEVELOPERS (1 dev per story)
+
+## 🔧 STORY DESCRIPTIONS MUST INCLUDE:
+- 🔧 **PATTERNS TO USE**: Which existing functions to use (e.g., "Use createProject() NOT new Project()")
+- ⚠️ **ANTI-PATTERNS TO AVOID**: What NOT to do (code that compiles but won't work)
 
 ## JSON OUTPUT ONLY:
 \`\`\`json
@@ -1191,7 +1280,7 @@ ${repoGuidance}
       {
         "id": "${epic.id}-story-1",
         "title": "Story title",
-        "description": "Complete with: Acceptance Criteria, Files, Functions/APIs, Tests, Done criteria",
+        "description": "Complete with: Acceptance Criteria, Files, Functions/APIs, 🔧 PATTERNS TO USE, ⚠️ ANTI-PATTERNS TO AVOID, Tests, Done criteria",
         "epicId": "${epic.id}",
         "priority": 1,
         "estimatedComplexity": "simple|moderate|complex",

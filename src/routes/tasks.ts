@@ -1402,11 +1402,12 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
 
 /**
  * POST /api/tasks/:id/resume
- * Reanudar una orquestación pausada (manual o por billing error)
+ * Reanudar una orquestación pausada o fallida
  *
- * Handles two pause types:
+ * Handles multiple resume scenarios:
  * 1. Manual pause: task.orchestration.paused = true
  * 2. Billing error pause: task.status = 'paused' (can be resumed after credits recharged)
+ * 3. Failed task: task.status = 'failed' (retry from last phase)
  */
 router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -1423,21 +1424,52 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Check if task is paused (either manually or due to billing error)
+    // Check if task is paused (either manually or due to billing error) or failed
     const isManuallyPaused = task.orchestration.paused === true;
     const isBillingPaused = task.status === 'paused';
+    const isFailed = task.status === 'failed';
     const teamOrch = (task.orchestration as any).teamOrchestration;
     const isBillingError = teamOrch?.pauseReason === 'billing_error';
 
-    if (!isManuallyPaused && !isBillingPaused) {
+    if (!isManuallyPaused && !isBillingPaused && !isFailed) {
       res.status(400).json({
         success: false,
-        message: 'Task is not paused',
+        message: `Task cannot be resumed (status: ${task.status})`,
       });
       return;
     }
 
-    // Log resume type
+    // Handle failed task resume - use OrchestrationRecoveryService
+    if (isFailed) {
+      console.log(`\n🔄 [Resume] Resuming FAILED task ${req.params.id}`);
+      console.log(`   Current phase: ${task.orchestration.currentPhase}`);
+
+      const { OrchestrationRecoveryService } = await import('../services/orchestration/OrchestrationRecoveryService');
+      const recoveryService = new OrchestrationRecoveryService();
+
+      const result = await recoveryService.resumeFailedTask(req.params.id);
+
+      if (!result.success) {
+        res.status(400).json({
+          success: false,
+          message: result.message,
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: result.message,
+        data: {
+          taskId: req.params.id,
+          currentPhase: task.orchestration.currentPhase,
+          resumeType: 'failed_task_recovery',
+        },
+      });
+      return;
+    }
+
+    // Log resume type (for paused tasks)
     if (isBillingPaused && isBillingError) {
       console.log(`\n💰 [Resume] BILLING RECOVERY for task ${req.params.id}`);
       console.log(`   Completed teams: ${teamOrch?.completedTeams || 0}`);
