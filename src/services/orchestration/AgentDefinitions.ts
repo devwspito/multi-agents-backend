@@ -98,7 +98,37 @@ Además de las herramientas SDK nativas (Read, Write, Edit, Bash, Grep, Glob), t
 - **inspect_site**: Analizar estructura y tecnologías de un sitio
   \`inspect_site({ url: "https://example.com", aspects: ["structure", "technologies"] })\`
 
-⚠️ **USA ESTAS HERRAMIENTAS** - Son más potentes que las nativas para tareas complejas.
+### 🚀 EJECUCIÓN AUTÓNOMA (BACKGROUND TASKS)
+**USA ESTO para operaciones largas sin bloquear tu trabajo:**
+- **run_build_background**: Ejecutar build sin bloquear
+  \`run_build_background({ taskId: "<task_id>", cwd: "/path/to/project", command: "npm run build" })\`
+- **run_tests_background**: Ejecutar tests sin bloquear
+  \`run_tests_background({ taskId: "<task_id>", cwd: "/path/to/project", pattern: "*.test.ts" })\`
+- **check_background_task**: Verificar estado de tarea background
+  \`check_background_task({ backgroundTaskId: "bg-xxx", outputLines: 20 })\`
+- **wait_for_background_task**: Esperar a que termine una tarea
+  \`wait_for_background_task({ backgroundTaskId: "bg-xxx", timeoutMs: 300000 })\`
+
+### ⚡ SLASH COMMANDS (OPERACIONES ESPECIALIZADAS)
+- **execute_slash_command**: Ejecutar comando especializado
+  \`execute_slash_command({ command: "/test src/*.ts", taskId: "<task_id>" })\`
+  Comandos disponibles: /test, /review, /security, /refactor, /architect, /fix, /optimize
+- **list_slash_commands**: Ver todos los comandos disponibles
+  \`list_slash_commands({})\`
+
+### 📝 DECISIONES AUTÓNOMAS (AUDIT TRAIL)
+- **log_autonomous_decision**: Registrar decisiones tomadas autónomamente
+  \`log_autonomous_decision({ taskId: "<task_id>", decision: "Elegí X sobre Y", reasoning: "Porque...", alternatives: ["Y", "Z"], confidence: 0.8 })\`
+
+### 💾 SESIÓN Y CONTEXTO
+- **save_session_context**: Guardar contexto para continuar después
+  \`save_session_context({ sessionId: "<session_id>", context: { learnings: [...], state: "..." } })\`
+- **get_session_messages**: Recuperar historial de conversación
+  \`get_session_messages({ sessionId: "<session_id>", maxTokens: 50000 })\`
+
+⚠️ **USA run_build_background/run_tests_background** para builds y tests largos - NO bloquees esperando.
+⚠️ **USA log_autonomous_decision** cuando tomes decisiones importantes sin consultar.
+⚠️ **USA execute_slash_command** para tareas especializadas (/test, /review, /security).
 ⚠️ **SIEMPRE llama memory_recall al inicio** para aprender de sesiones anteriores.
 `;
 
