@@ -37,6 +37,7 @@ import fs from 'fs';
 import { createCustomToolsServer } from '../../tools/customTools';
 import { createExtraToolsServer } from '../../tools/extraTools';
 import { createExploratoryToolsServer } from '../../tools/exploratoryTools';
+import { createAutonomousToolsServer } from '../../tools/autonomousTools';
 
 // 🧠 Smart Context & Memory - Pre-execution intelligence for ALL agents
 import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
@@ -1526,6 +1527,7 @@ ${formattedDirectives}
       const customToolsServer = createCustomToolsServer();
       const extraToolsServer = createExtraToolsServer();
       const exploratoryToolsServer = createExploratoryToolsServer();
+      const autonomousToolsServer = createAutonomousToolsServer();
 
       let stream;
       try {
@@ -1540,11 +1542,12 @@ ${formattedDirectives}
               ...process.env,
               ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
             },
-            // 🔧 MCP Tools - Enhanced agent capabilities
+            // 🔧 MCP Tools - Enhanced agent capabilities (ALL tools for maximum autonomy)
             mcpServers: {
               'custom-dev-tools': customToolsServer,
               'extra-tools': extraToolsServer,
               'exploratory-tools': exploratoryToolsServer,
+              'autonomous-tools': autonomousToolsServer,
             },
           },
         });
