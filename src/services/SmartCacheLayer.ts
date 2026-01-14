@@ -277,6 +277,28 @@ export class SmartCacheLayer {
   }
 
   /**
+   * Check if key exists in cache
+   */
+  has(key: string): boolean {
+    const entry = this.cache.get(key);
+    if (!entry) return false;
+
+    // Check TTL
+    if (Date.now() > entry.created + entry.ttl) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Get current cache size (entry count)
+   */
+  size(): number {
+    return this.cache.size;
+  }
+
+  /**
    * Build cache key with category prefix
    */
   private buildKey(key: string, category?: CacheCategory): string {
