@@ -35,6 +35,11 @@ import fs from 'fs';
 // 🔧 MCP Tools - Custom tools for enhanced agent capabilities
 import { createCustomToolsServer } from '../../tools/customTools';
 import { createExtraToolsServer } from '../../tools/extraTools';
+import { createExploratoryToolsServer } from '../../tools/exploratoryTools';
+
+// 🧠 Smart Context & Memory - Pre-execution intelligence for ALL agents
+import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
+import { AgentMemoryBridge } from '../AgentMemoryBridge';
 
 /**
  * DeveloperProgress - Tracks developer execution in real-time
@@ -1366,7 +1371,53 @@ ${formattedDirectives}
     console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
     console.log(`🔧 [ExecuteAgent] Model: ${model} (from alias: ${modelAlias}) for ${agentType}`);
 
-    // Build final prompt
+    // 🧠 SMART CONTEXT INJECTION - Pre-execution intelligence for ALL agents
+    let smartContextBlock = '';
+    try {
+      const contextInjector = SmartContextInjector.getInstance();
+      await contextInjector.initialize(workspacePath);
+
+      const memoryBridge = AgentMemoryBridge.getInstance();
+      await memoryBridge.initialize(workspacePath);
+
+      // Map agent type to phase
+      const phaseMapping: Record<string, AgentPhase> = {
+        'planning-agent': 'problem-analyst',
+        'product-manager': 'product-manager',
+        'project-manager': 'project-manager',
+        'tech-lead': 'tech-lead',
+        'developer': 'developer',
+        'judge': 'judge',
+        'qa-engineer': 'qa-engineer',
+        'fixer': 'fixer',
+        'auto-merge': 'auto-merge'
+      };
+
+      const phase = phaseMapping[agentType] || 'developer';
+
+      // Generate smart context
+      const injectedContext = await contextInjector.generateContext({
+        phase,
+        taskDescription: prompt.substring(0, 500), // First 500 chars for context
+        workspacePath,
+        focusAreas: [] // Could extract from prompt
+      });
+
+      smartContextBlock = injectedContext.formattedContext;
+
+      // Get relevant memories
+      const memories = memoryBridge.recallForPhase(phase, 8);
+      if (memories.length > 0) {
+        smartContextBlock += memoryBridge.formatForPrompt(memories, 'RELEVANT MEMORIES FROM PREVIOUS PHASES');
+      }
+
+      console.log(`🧠 [ExecuteAgent] Smart context injected: ${smartContextBlock.length} chars`);
+    } catch (contextError) {
+      console.warn(`⚠️ [ExecuteAgent] Smart context generation failed (non-critical):`, contextError);
+      // Continue without smart context - not a critical failure
+    }
+
+    // Build final prompt with smart context
     // When images are present, use generator function (required by SDK)
     let promptContent: string | AsyncGenerator;
 
@@ -1376,7 +1427,7 @@ ${formattedDirectives}
       const content: any[] = [
         {
           type: 'text',
-          text: `${agentDef.prompt}\n\n${prompt}`
+          text: `${agentDef.prompt}\n\n${smartContextBlock}\n\n${prompt}`
         }
       ];
 
@@ -1402,8 +1453,8 @@ ${formattedDirectives}
         };
       })();
     } else {
-      // Simple string prompt when no images
-      promptContent = `${agentDef.prompt}\n\n${prompt}`;
+      // Simple string prompt when no images - include smart context
+      promptContent = `${agentDef.prompt}\n\n${smartContextBlock}\n\n${prompt}`;
     }
 
     // 🔥 RETRY MECHANISM for SDK errors (JSON parsing, connection issues)
@@ -1473,6 +1524,7 @@ ${formattedDirectives}
       // Create MCP servers for custom tools
       const customToolsServer = createCustomToolsServer();
       const extraToolsServer = createExtraToolsServer();
+      const exploratoryToolsServer = createExploratoryToolsServer();
 
       let stream;
       try {
@@ -1491,6 +1543,7 @@ ${formattedDirectives}
             mcpServers: {
               'custom-dev-tools': customToolsServer,
               'extra-tools': extraToolsServer,
+              'exploratory-tools': exploratoryToolsServer,
             },
           },
         });
