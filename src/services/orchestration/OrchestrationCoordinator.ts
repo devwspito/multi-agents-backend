@@ -5,6 +5,7 @@ import { GitHubService } from '../GitHubService';
 // PRManagementService REMOVED - AutoMergePhase creates its own instance
 import { ContextCompactionService } from '../ContextCompactionService';
 import { NotificationService } from '../NotificationService';
+import { AgentActivityService } from '../AgentActivityService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
 import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
@@ -1733,7 +1734,14 @@ ${formattedDirectives}
           if ((message as any).type === 'tool_use') {
             const tool = (message as any).name || 'unknown';
             const input = (message as any).input || {};
+            // toolId available in (message as any).id for matching with result if needed
             console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
+
+            // 🎯 Emit structured activity for real-time frontend display
+            if (taskId) {
+              // Emit tool use event (will be paired with result)
+              AgentActivityService.emitToolUse(taskId, agentType, tool, input);
+            }
 
             // Log file operations for visibility
             if (tool === 'Read' && input.file_path) {
