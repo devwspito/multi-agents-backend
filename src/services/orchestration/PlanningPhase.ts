@@ -3,6 +3,7 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { validateStoryOverlap, logOverlapValidation } from './utils/StoryOverlapValidator';
 import { storageService } from '../storage/StorageService';
+import { CodebaseDiscoveryService, CodebaseKnowledge } from '../CodebaseDiscoveryService';
 import fs from 'fs';
 import path from 'path';
 
@@ -228,8 +229,22 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         context.setData('attachments', attachments);
       }
 
-      // Build the unified planning prompt
-      const prompt = this.buildPlanningPrompt(task, repositories, repoInfo, previousContextSection);
+      // 🔥 PROGRAMMATIC CODEBASE DISCOVERY (find helpers, patterns BEFORE agent runs)
+      // This ensures we have RELIABLE knowledge about existing patterns
+      console.log(`\n🔍 [PlanningPhase] Running programmatic codebase discovery...`);
+      let codebaseKnowledge: CodebaseKnowledge | undefined;
+      const effectiveWorkspacePath = workspacePath || process.cwd();
+      try {
+        codebaseKnowledge = await CodebaseDiscoveryService.discoverCodebase(effectiveWorkspacePath);
+        // Store for subsequent phases (TechLead, Developer will use this)
+        context.setData('codebaseKnowledge', codebaseKnowledge);
+        console.log(`✅ [PlanningPhase] Discovered ${codebaseKnowledge.helperFunctions.length} helper functions, ${codebaseKnowledge.entityCreationRules.length} entity rules`);
+      } catch (error: any) {
+        console.warn(`⚠️ [PlanningPhase] Codebase discovery failed (will continue): ${error.message}`);
+      }
+
+      // Build the unified planning prompt (includes discovered patterns)
+      const prompt = this.buildPlanningPrompt(task, repositories, repoInfo, previousContextSection, codebaseKnowledge);
 
       // Execute with bypassPermissions (like TechLead)
       // Note: 'plan' mode causes interactive behavior (asks questions)
@@ -303,7 +318,16 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
       freshTask.orchestration.planning.output = result.output;
       freshTask.orchestration.planning.epics = enrichedEpics;
       freshTask.orchestration.planning.analysis = parsed.analysis;
-      freshTask.orchestration.planning.architectureBrief = parsed.architectureBrief; // 🏗️ Architecture insights for TechLead/Developers
+
+      // 🔥 MERGE: Combine agent's architectureBrief with programmatically discovered patterns
+      // This ensures helperFunctions/entityCreationRules are ALWAYS present even if agent misses them
+      const mergedArchitectureBrief = {
+        ...parsed.architectureBrief,
+        // Override with programmatic discovery (more reliable than agent discovery)
+        ...(codebaseKnowledge ? CodebaseDiscoveryService.toArchitectureBriefFields(codebaseKnowledge) : {}),
+      };
+      freshTask.orchestration.planning.architectureBrief = mergedArchitectureBrief; // 🏗️ Architecture insights for TechLead/Developers
+      freshTask.orchestration.planning.codebaseKnowledge = codebaseKnowledge; // 🔧 Raw programmatic discovery data
       freshTask.orchestration.planning.sessionId = result.sessionId;
       freshTask.orchestration.planning.usage = result.usage;
       freshTask.orchestration.planning.cost_usd = result.cost;
@@ -421,10 +445,16 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
     task: any,
     repositories: any[],
     repoInfo: string,
-    previousContextSection: string
+    previousContextSection: string,
+    codebaseKnowledge?: CodebaseKnowledge
   ): string {
     const projectId = task.projectId?.toString() || '';
     const taskId = task._id?.toString() || '';
+
+    // 🔥 DISCOVERED PATTERNS SECTION (from programmatic discovery)
+    const discoveredPatternsSection = codebaseKnowledge
+      ? CodebaseDiscoveryService.formatForPrompt(codebaseKnowledge)
+      : '';
 
     const memoryContext = `
 ## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
@@ -512,6 +542,7 @@ ${task.attachments?.length > 0 ? `**Attachments**: ${task.attachments.length} im
 ${repoInfo}
 ${repoGuidance}
 ${previousContextSection}
+${discoveredPatternsSection}
 
 ## WORKFLOW
 
@@ -612,7 +643,7 @@ Each epic MUST have:
 
 After exploring the codebase, output EXACTLY this structure (no text before or after):
 
-{"architectureBrief":{"codePatterns":{"namingConvention":"camelCase for variables, PascalCase for classes","fileStructure":"src/routes/, src/services/, src/models/","errorHandling":"Try-catch with LogService.error()","testing":"Jest with *.test.ts naming"},"dataModels":[{"name":"User","file":"src/models/User.ts","relationships":["has many Tasks","belongs to Organization"]},{"name":"Task","file":"src/models/Task.ts","relationships":["belongs to User","has one Orchestration"]}],"prInsights":{"recentPRs":3,"commonPatterns":["All PRs include tests","Use async/await consistently","Error messages are descriptive"],"rejectionReasons":["Missing tests","Breaking changes without migration"]},"conventions":["Use TypeScript strict mode","No any types","Document public APIs with JSDoc"]},"analysis":{"problemStatement":"Clear problem description","successCriteria":["criterion 1"],"risks":["risk 1"],"technicalApproach":"Solution approach following existing patterns"},"epics":[{"id":"epic-backend-api","title":"Create API Endpoints","description":"REST API for CRUD operations","targetRepository":"${repositories[0]?.name || 'backend'}","affectedRepositories":["${repositories[0]?.name || 'backend'}"],"filesToModify":["src/routes/index.ts"],"filesToCreate":["src/controllers/NewController.ts"],"filesToRead":["src/config/database.ts"],"estimatedComplexity":"moderate","dependencies":[],"executionOrder":1,"followsPatterns":["Uses existing route structure","Error handling matches LogService pattern"]},{"id":"epic-frontend-ui","title":"User Interface","description":"React components for the feature","targetRepository":"${repositories[1]?.name || repositories[0]?.name || 'frontend'}","affectedRepositories":["${repositories[1]?.name || repositories[0]?.name || 'frontend'}"],"filesToModify":["src/App.tsx"],"filesToCreate":["src/components/NewComponent.tsx"],"filesToRead":["src/api/client.ts"],"estimatedComplexity":"simple","dependencies":["epic-backend-api"],"executionOrder":2,"followsPatterns":["Component naming matches existing","Uses existing API client pattern"]}],"totalTeamsNeeded":2,"dependencies":{"cross_repo":["backend API must exist before frontend"],"external":[],"sequential":["epic-2 depends on epic-1"]},"risks":["Risk 1"],"outOfScope":["Out of scope item"],"assumptions":["Assumption 1 - I decided X because Y","Assumption 2 - Chose approach Z for scalability"]}
+{"architectureBrief":{"codePatterns":{"namingConvention":"camelCase for variables, PascalCase for classes","fileStructure":"src/routes/, src/services/, src/models/","errorHandling":"Try-catch with LogService.error()","testing":"Jest with *.test.ts naming"},"dataModels":[{"name":"User","file":"src/models/User.ts","relationships":["has many Tasks","belongs to Organization"]},{"name":"Task","file":"src/models/Task.ts","relationships":["belongs to User","has one Orchestration"]}],"prInsights":{"recentPRs":3,"commonPatterns":["All PRs include tests","Use async/await consistently","Error messages are descriptive"],"rejectionReasons":["Missing tests","Breaking changes without migration"]},"helperFunctions":[{"name":"createProject","file":"src/utils/projectHelpers.ts","usage":"Use createProject() instead of new Project()","antiPattern":"new Project() misses required agent/team relationships"}],"entityCreationRules":[{"entity":"Project","mustUse":"createProject() from projectHelpers.ts","mustNotUse":"new Project() - missing relationships","requiredRelationships":["agents","teams","defaultTeam"]}],"conventions":["Use TypeScript strict mode","No any types","Document public APIs with JSDoc"]},"analysis":{"problemStatement":"Clear problem description","successCriteria":["criterion 1"],"risks":["risk 1"],"technicalApproach":"Solution approach following existing patterns"},"epics":[{"id":"epic-backend-api","title":"Create API Endpoints","description":"REST API for CRUD operations","targetRepository":"${repositories[0]?.name || 'backend'}","affectedRepositories":["${repositories[0]?.name || 'backend'}"],"filesToModify":["src/routes/index.ts"],"filesToCreate":["src/controllers/NewController.ts"],"filesToRead":["src/config/database.ts"],"estimatedComplexity":"moderate","dependencies":[],"executionOrder":1,"followsPatterns":["Uses existing route structure","Error handling matches LogService pattern"]},{"id":"epic-frontend-ui","title":"User Interface","description":"React components for the feature","targetRepository":"${repositories[1]?.name || repositories[0]?.name || 'frontend'}","affectedRepositories":["${repositories[1]?.name || repositories[0]?.name || 'frontend'}"],"filesToModify":["src/App.tsx"],"filesToCreate":["src/components/NewComponent.tsx"],"filesToRead":["src/api/client.ts"],"estimatedComplexity":"simple","dependencies":["epic-backend-api"],"executionOrder":2,"followsPatterns":["Component naming matches existing","Uses existing API client pattern"]}],"totalTeamsNeeded":2,"dependencies":{"cross_repo":["backend API must exist before frontend"],"external":[],"sequential":["epic-2 depends on epic-1"]},"risks":["Risk 1"],"outOfScope":["Out of scope item"],"assumptions":["Assumption 1 - I decided X because Y","Assumption 2 - Chose approach Z for scalability"]}
 
 🛑 REMINDER: FIRST do DEEP ARCHITECTURE ANALYSIS (PRs, models, patterns), THEN output ONLY the JSON. NO questions. NO text. JUST JSON.`;
   }

@@ -111,7 +111,8 @@
       "Bash(UNIVERSAL_OUTPUT_TEMPLATE.md )",
       "Bash(VALIDACIONES_ROBUSTAS_COMPLETAS.md )",
       "Bash(VERIFICATION_COMPLETE.md )",
-      "Bash(ZERO_TOLERANCE_POLICY.md)"
+      "Bash(ZERO_TOLERANCE_POLICY.md)",
+      "Bash(pgrep:*)"
     ],
     "deny": [],
     "ask": []

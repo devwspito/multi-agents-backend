@@ -445,6 +445,20 @@ class AgentPlatformApp {
       });
       console.log('✅ Auto-recovery of interrupted orchestrations is ENABLED');
 
+      // 🔄 Start failed execution retry processor
+      console.log('🔄 Starting failed execution retry service...');
+      const { FailedExecutionRetryService } = await import('./services/FailedExecutionRetryService');
+      FailedExecutionRetryService.startBackgroundProcessor(2 * 60 * 1000); // Check every 2 minutes
+      console.log('✅ Failed execution retry service is ENABLED');
+
+      // 🔄 Recover active execution checkpoints
+      console.log('🔄 Checking for active execution checkpoints...');
+      const { ExecutionCheckpointService } = await import('./services/ExecutionCheckpointService');
+      ExecutionCheckpointService.recoverActiveExecutions().catch((error) => {
+        console.error('❌ Checkpoint recovery failed:', error);
+      });
+      console.log('✅ Execution checkpoint recovery is ENABLED');
+
       // Inicializar middleware
       this.initializeMiddleware();
 

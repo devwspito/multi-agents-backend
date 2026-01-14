@@ -932,42 +932,79 @@ export class TeamOrchestrationPhase extends BasePhase {
       }
 
       // 🐳 Apply TechLead environment configuration if available
+      // Sources (in priority order):
+      // 1. EnvironmentConfigDefined event
+      // 2. task.orchestration.environmentConfig (persisted in DB)
       try {
+        let envConfig: any = null;
+        const teamRepoName = epic.targetRepository;
+
+        // Try event store first
         const { eventStore } = await import('../EventStore');
         const allEvents = await eventStore.getEvents(parentContext.task._id as any);
         const envConfigEvents = allEvents.filter((e: any) => e.eventType === 'EnvironmentConfigDefined');
 
         if (envConfigEvents.length > 0) {
-          const latestEnvConfig = envConfigEvents[envConfigEvents.length - 1].payload;
-          console.log(`\n🐳 [Team ${teamNumber}] Applying TechLead environment configuration...`);
+          envConfig = envConfigEvents[envConfigEvents.length - 1].payload;
+          console.log(`\n🐳 [Team ${teamNumber}] Found environment config from event store`);
+        }
 
-          // Get repository info for this team's epic
-          const teamRepoName = epic.targetRepository;
-          const teamRepoConfig = latestEnvConfig[teamRepoName];
+        // Fallback: Read from task.orchestration.environmentConfig (DB persistence)
+        if (!envConfig && parentContext.task.orchestration?.environmentConfig) {
+          envConfig = parentContext.task.orchestration.environmentConfig;
+          console.log(`\n🐳 [Team ${teamNumber}] Found environment config from task DB`);
+        }
 
-          if (teamRepoConfig) {
+        if (envConfig) {
+          console.log(`   🔧 [Team ${teamNumber}] Applying TechLead environment configuration...`);
+
+          // Handle two config formats:
+          // 1. Per-repo: { "repoName": { installCommand, testCommand, ... } }
+          // 2. Global: { installCommand, testCommand, ... }
+          const teamRepoConfig = envConfig[teamRepoName] || envConfig;
+
+          // Determine if this is a valid config (has at least one command)
+          const hasCommands = teamRepoConfig.installCommand || teamRepoConfig.runCommand ||
+                             teamRepoConfig.buildCommand || teamRepoConfig.testCommand;
+
+          if (hasCommands) {
             const matchedRepo = parentContext.repositories.find((r: any) =>
               r.name === teamRepoName || r.githubRepoName === teamRepoName
             );
             const repoPath = matchedRepo?.localPath || (workspacePath ? path.join(workspacePath, teamRepoName) : null);
 
-            // Log environment configuration (Docker setup removed - Agent SDK handles execution directly)
+            // Log environment configuration
             if (repoPath && path.isAbsolute(repoPath)) {
-              console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language}/${teamRepoConfig.framework}`);
+              console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language || 'unknown'}/${teamRepoConfig.framework || 'unknown'}`);
             } else {
               console.warn(`   ⚠️  [Team ${teamNumber}] Invalid repo path: ${repoPath}`);
             }
 
-            // Store run/test commands in context for developers
+            // Store ALL commands in context for developers (including lint and typecheck)
+            // These are used to build dynamic verification markers in developer prompt
             teamContext.setData('environmentCommands', {
               install: teamRepoConfig.installCommand,
               run: teamRepoConfig.runCommand,
               build: teamRepoConfig.buildCommand,
               test: teamRepoConfig.testCommand,
+              lint: teamRepoConfig.lintCommand,        // 🔧 NEW: lint command for dynamic markers
+              typecheck: teamRepoConfig.typecheckCommand, // 🔧 NEW: typecheck command for dynamic markers
               port: teamRepoConfig.defaultPort,
+              language: teamRepoConfig.language,
+              framework: teamRepoConfig.framework,
             });
-            console.log(`   🏃 Run command: ${teamRepoConfig.runCommand}`);
+
+            console.log(`   🏃 Commands configured:`);
+            console.log(`      Install: ${teamRepoConfig.installCommand || '(not specified)'}`);
+            console.log(`      Test: ${teamRepoConfig.testCommand || '(not specified)'}`);
+            console.log(`      Lint: ${teamRepoConfig.lintCommand || '(not specified)'}`);
+            console.log(`      Typecheck: ${teamRepoConfig.typecheckCommand || '(not specified)'}`);
+            console.log(`      Build: ${teamRepoConfig.buildCommand || '(not specified)'}`);
+          } else {
+            console.warn(`   ⚠️  [Team ${teamNumber}] No commands found in environment config for ${teamRepoName}`);
           }
+        } else {
+          console.log(`\n⚠️  [Team ${teamNumber}] No environment config available - using defaults`);
         }
       } catch (envError: any) {
         console.warn(`⚠️  [Team ${teamNumber}] Could not apply environment config: ${envError.message}`);

@@ -386,6 +386,21 @@ export interface IOrchestration {
     };
   };
 
+  // 🔧 Environment configuration from TechLead
+  // Contains project-specific commands (test, lint, typecheck, etc.)
+  // Stored in DB for persistence across server restarts
+  environmentConfig?: {
+    installCommand?: string;
+    runCommand?: string;
+    buildCommand?: string;
+    testCommand?: string;
+    lintCommand?: string;
+    typecheckCommand?: string;
+    defaultPort?: number;
+    language?: string;
+    framework?: string;
+  };
+
   // Historial de aprobaciones
   approvalHistory?: {
     phase: string;
@@ -991,6 +1006,18 @@ const taskSchema = new Schema<ITask>(
           verification: String,
           autoMerge: String,
         },
+      },
+      // 🔧 Environment configuration from TechLead (persisted for server restart recovery)
+      environmentConfig: {
+        installCommand: String,
+        runCommand: String,
+        buildCommand: String,
+        testCommand: String,
+        lintCommand: String,
+        typecheckCommand: String,
+        defaultPort: Number,
+        language: String,
+        framework: String,
       },
       approvalHistory: [{
         phase: String,

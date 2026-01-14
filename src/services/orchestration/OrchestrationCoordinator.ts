@@ -1,5 +1,6 @@
 import { Task, ITask } from '../../models/Task';
 import { Repository } from '../../models/Repository';
+import { FailedExecution, FailureType } from '../../models/FailedExecution';
 import { GitHubService } from '../GitHubService';
 // PRManagementService REMOVED - AutoMergePhase creates its own instance
 import { ContextCompactionService } from '../ContextCompactionService';
@@ -23,6 +24,9 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 // 🔥 Best practice services
 import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
+
+// 🎯 Claude Code level services integration
+import { ServiceIntegrationHub, HubConfig } from '../ServiceIntegrationHub';
 
 import path from 'path';
 import os from 'os';
@@ -406,6 +410,26 @@ export class OrchestrationCoordinator {
       context.setData('apiKeySource', apiKeySource);
       context.setData('workspaceStructure', workspaceStructure);
 
+      // 🎯 Initialize ServiceIntegrationHub for Claude Code level services
+      const hubConfig: HubConfig = {
+        workspacePath,
+        projectId: project?._id?.toString() || taskId,
+        enableMetrics: true,
+        enableLearning: true,
+        enableMemory: true,
+      };
+      const serviceHub = new ServiceIntegrationHub(hubConfig);
+
+      try {
+        await serviceHub.initialize();
+        context.setData('serviceHub', serviceHub);
+        console.log(`🎯 [Orchestration] ServiceIntegrationHub initialized with all services`);
+        NotificationService.emitConsoleLog(taskId, 'info', `🎯 All Claude Code level services initialized`);
+      } catch (hubError) {
+        console.warn(`⚠️  [Orchestration] ServiceIntegrationHub initialization warning: ${hubError}`);
+        // Continue without hub - graceful degradation
+      }
+
       // Mark task as in progress
       task.status = 'in_progress';
       task.orchestration.currentPhase = 'analysis';
@@ -494,6 +518,12 @@ export class OrchestrationCoordinator {
 
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
+
+        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing
+        // This ensures recovery knows where to resume from if server crashes
+        task.orchestration.currentPhase = this.mapPhaseToEnum(phaseName);
+        await task.save();
+        console.log(`📍 [Orchestration] Phase tracking updated: ${phaseName} → ${task.orchestration.currentPhase}`);
 
         // Execute phase with retry logic for transient failures
         // 🔥 TIMEOUT RETRY STRATEGY: If agent times out, retry once with Opus (most powerful model)
@@ -1064,6 +1094,128 @@ ${formattedDirectives}
   }
 
   /**
+   * Save a failed execution for later retry
+   *
+   * Persists all context needed to retry the execution:
+   * - Agent type, prompt, workspace
+   * - Failure type and diagnostics
+   * - Context snapshot for retry
+   */
+  private async saveFailedExecution(params: {
+    taskId?: string;
+    agentType: string;
+    agentName?: string;
+    phaseName?: string;
+    prompt: string;
+    workspacePath: string;
+    model: string;
+    permissionMode?: string;
+    error: Error & {
+      isTimeout?: boolean;
+      isHistoryOverflow?: boolean;
+      isLoopDetection?: boolean;
+    };
+    diagnostics: {
+      messagesReceived: number;
+      historyMessages: number;
+      turnsCompleted: number;
+      lastMessageTypes: string[];
+      streamDurationMs: number;
+    };
+    context?: OrchestrationContext;
+  }): Promise<void> {
+    try {
+      // Determine failure type from error flags
+      let failureType: FailureType = 'unknown';
+      if (params.error.isTimeout) {
+        failureType = 'timeout';
+      } else if (params.error.isHistoryOverflow) {
+        failureType = 'history_overflow';
+      } else if (params.error.isLoopDetection) {
+        failureType = 'loop_detection';
+      } else if (params.error.message?.includes('SDK query failed')) {
+        failureType = 'sdk_error';
+      } else if (params.error.message?.includes('API') || params.error.message?.includes('rate limit')) {
+        failureType = 'api_error';
+      } else if (params.error.message?.includes('git')) {
+        failureType = 'git_error';
+      }
+
+      // Get task for project ID
+      let projectId;
+      if (params.taskId) {
+        const task = await Task.findById(params.taskId);
+        projectId = task?.projectId;
+      }
+
+      // Snapshot context for retry (only essential data from sharedData)
+      const contextSnapshot = params.context ? {
+        epics: params.context.getData<any[]>('epics')?.slice(0, 10), // Limit size
+        stories: params.context.getData<any[]>('stories')?.slice(0, 20),
+        currentPhase: Array.from(params.context.phaseResults.keys()).pop(), // Last phase name
+        taskId: params.context.task._id?.toString(),
+        // Don't include full phaseResults - too large
+      } : undefined;
+
+      // Calculate retry delay based on failure type
+      // Timeout/overflow: wait longer, Loop: don't auto-retry
+      const retryDelayMs = failureType === 'loop_detection'
+        ? null // Don't auto-retry loops
+        : failureType === 'timeout' || failureType === 'history_overflow'
+          ? 5 * 60 * 1000 // 5 minutes for heavy failures
+          : 60 * 1000; // 1 minute for light failures
+
+      const failedExec = new FailedExecution({
+        taskId: params.taskId,
+        projectId,
+        agentType: params.agentType,
+        agentName: params.agentName,
+        phaseName: params.phaseName,
+        prompt: params.prompt.substring(0, 50000), // Limit prompt size
+        workspacePath: params.workspacePath,
+        modelId: params.model,
+        permissionMode: params.permissionMode || 'bypassPermissions',
+        failureType,
+        errorMessage: params.error.message,
+        errorStack: params.error.stack?.substring(0, 5000),
+        messagesReceived: params.diagnostics.messagesReceived,
+        historyMessages: params.diagnostics.historyMessages,
+        turnsCompleted: params.diagnostics.turnsCompleted,
+        lastMessageTypes: params.diagnostics.lastMessageTypes.slice(-20),
+        streamDurationMs: params.diagnostics.streamDurationMs,
+        retryStatus: failureType === 'loop_detection' ? 'abandoned' : 'pending',
+        retryCount: 0,
+        maxRetries: 3,
+        nextRetryAt: retryDelayMs ? new Date(Date.now() + retryDelayMs) : undefined,
+        contextSnapshot,
+      });
+
+      await failedExec.save();
+
+      console.log(`💾 [FailedExecution] Saved failed execution for retry:`);
+      console.log(`   ID: ${failedExec._id}`);
+      console.log(`   Agent: ${params.agentType}`);
+      console.log(`   Failure: ${failureType}`);
+      console.log(`   Retry status: ${failedExec.retryStatus}`);
+      if (failedExec.nextRetryAt) {
+        console.log(`   Next retry: ${failedExec.nextRetryAt.toISOString()}`);
+      }
+
+      // Emit notification for visibility
+      if (params.taskId) {
+        NotificationService.emitConsoleLog(
+          params.taskId,
+          'warn',
+          `💾 Execution saved for retry: ${params.agentType} (${failureType})`
+        );
+      }
+    } catch (saveError: any) {
+      // Don't let save failure break the main error flow
+      console.error(`❌ [FailedExecution] Failed to save:`, saveError.message);
+    }
+  }
+
+  /**
    * Execute a single agent with SDK query function
    *
    * This is the low-level agent execution used by all phases.
@@ -1365,13 +1517,56 @@ ${formattedDirectives}
       let messagesWithoutToolUse = 0;
       const MAX_MESSAGES_WITHOUT_TOOL_USE = 100; // Higher threshold - only catch truly stuck agents
 
+      // 🔥 HISTORY DETECTION: Track if we've received first turn_start (agent is actually active)
+      // SDK may send conversation history (assistant/user messages) before agent starts working
+      let agentStarted = false;
+      let historyMessagesReceived = 0;
+      const MAX_HISTORY_MESSAGES = 200; // Fail-safe: abort if too much history without agent starting
+      const startTime = Date.now();
+
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
       console.log(`   SDK will handle timeouts and error recovery automatically`);
       console.log(`   Loop detection: ${MAX_MESSAGES_WITHOUT_TOOL_USE} messages without tool activity`);
+      console.log(`   History limit: ${MAX_HISTORY_MESSAGES} messages before agent must start`);
+
+      // 🔥 EXTERNAL WATCHDOG: Timer that fires if no message received for too long
+      // This catches cases where stream.next() blocks forever
+      // No global timeout - trust the agent as long as it's making progress
+      const MESSAGE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max between messages
+      let lastMessageTime = Date.now();
+      let watchdogTriggered = false;
+
+      const watchdogInterval = setInterval(() => {
+        const timeSinceLastMessage = Date.now() - lastMessageTime;
+        const totalElapsed = Date.now() - startTime;
+
+        if (timeSinceLastMessage > MESSAGE_TIMEOUT_MS) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`🚨 WATCHDOG TIMEOUT: No message received in ${Math.floor(timeSinceLastMessage / 1000)}s`);
+          console.error(`   Agent: ${agentType}`);
+          console.error(`   Total elapsed: ${Math.floor(totalElapsed / 1000)}s`);
+          console.error(`   Messages received: ${allMessages.length}`);
+          console.error(`   Turns completed: ${turnCount}`);
+          console.error(`${'='.repeat(80)}\n`);
+          watchdogTriggered = true;
+          // Note: We can't abort the stream from here, but we set a flag
+          // The main loop will check this flag on each iteration
+        }
+      }, 30000); // Check every 30 seconds
 
       try {
         // Simple stream consumption - SDK handles everything
         for await (const message of stream) {
+          // Update watchdog timer
+          lastMessageTime = Date.now();
+
+          // 🔥 CHECK WATCHDOG: If triggered while we were waiting, abort now
+          if (watchdogTriggered) {
+            const error = new Error(`Agent ${agentType} stream timeout - watchdog triggered`);
+            (error as any).isTimeout = true;
+            (error as any).isWatchdogTimeout = true;
+            throw error;
+          }
           allMessages.push(message);
 
           // 🔥 LOOP DETECTION: Check if this message contains tool activity
@@ -1385,6 +1580,39 @@ ${formattedDirectives}
             (Array.isArray(messageContent) && messageContent.some((block: any) =>
               block.type === 'tool_use' || block.type === 'tool_result'
             ));
+
+          // 🔥 AGENT STARTED: First turn_start means agent is actively working
+          if (messageType === 'turn_start') {
+            if (!agentStarted) {
+              console.log(`✅ [ExecuteAgent] Agent started after ${historyMessagesReceived} history messages`);
+              agentStarted = true;
+            }
+          }
+
+          // 🔥 HISTORY PROTECTION: Count messages before agent starts
+          if (!agentStarted) {
+            historyMessagesReceived++;
+
+            // Fail-safe: too much history without agent starting
+            if (historyMessagesReceived >= MAX_HISTORY_MESSAGES) {
+              const lastFewTypes = allMessages.slice(-10).map(m => (m as any).type).join(', ');
+              console.error(`\n${'='.repeat(80)}`);
+              console.error(`🚨 HISTORY OVERFLOW: ${historyMessagesReceived} messages without agent starting`);
+              console.error(`   Agent: ${agentType}`);
+              console.error(`   Last 10 message types: ${lastFewTypes}`);
+              console.error(`${'='.repeat(80)}\n`);
+
+              const error = new Error(
+                `Agent ${agentType} failed to start: ${historyMessagesReceived} messages without turn_start. ` +
+                `SDK may be stuck replaying history. Last message types: ${lastFewTypes}`
+              );
+              (error as any).isHistoryOverflow = true;
+              throw error;
+            }
+
+            // Don't count history messages toward loop detection - skip to next message
+            continue;
+          }
 
           if (hasToolActivity) {
             // Reset counter on tool activity
@@ -1530,13 +1758,21 @@ ${formattedDirectives}
           }
         }
       } catch (streamError: any) {
+        // Clear watchdog on error
+        clearInterval(watchdogInterval);
+        const streamDurationMs = Date.now() - startTime;
+        const lastMessageTypes = allMessages.slice(-20).map(m => (m as any).type);
+
         console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
           message: streamError.message,
           stack: streamError.stack,
           code: streamError.code,
           turnCount,
+          streamDurationMs,
           lastMessages: allMessages.slice(-3),
           isLoopDetection: streamError.isLoopDetection || false,
+          isTimeout: streamError.isTimeout || false,
+          isHistoryOverflow: streamError.isHistoryOverflow || false,
         });
 
         // 🔥 LOOP DETECTION: Don't retry loop errors - they won't magically fix themselves
@@ -1546,9 +1782,32 @@ ${formattedDirectives}
           streamError.isNonRetryable = true;
         }
 
+        // 💾 PERSIST FAILED EXECUTION for later retry
+        await this.saveFailedExecution({
+          taskId,
+          agentType,
+          agentName: _agentName,
+          prompt: typeof promptContent === 'string' ? promptContent : prompt,
+          workspacePath,
+          model,
+          permissionMode: effectivePermissionMode,
+          error: streamError,
+          diagnostics: {
+            messagesReceived: allMessages.length,
+            historyMessages: historyMessagesReceived,
+            turnsCompleted: turnCount,
+            lastMessageTypes,
+            streamDurationMs,
+          },
+          context: contextOverride,
+        });
+
         // Re-throw - SDK already provides detailed error info
         throw streamError;
       }
+
+      // Clear watchdog on successful completion
+      clearInterval(watchdogInterval);
 
       console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
 
@@ -1792,7 +2051,8 @@ ${formattedDirectives}
     _epicBranchName?: string, // Epic branch name from TeamOrchestrationPhase (unused - branches come from story.branchName)
     forceTopModel?: boolean, // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
     devAuth?: any, // 🔐 Developer authentication config (token or credentials for testing endpoints)
-    architectureBrief?: any // 🏗️ Architecture insights from PlanningPhase (patterns, conventions, models)
+    architectureBrief?: any, // 🏗️ Architecture insights from PlanningPhase (patterns, conventions, models)
+    environmentCommands?: any // 🔧 Environment commands from TechLead (test, lint, typecheck, etc.)
   ): Promise<{ output?: string; cost?: number } | void> {
     const taskId = (task._id as any).toString();
 
@@ -1925,10 +2185,65 @@ ${formattedDirectives}
       // 💡 Get any injected directives for developers from task
       const directivesBlock = await this.getDirectivesForAgent(task._id as any, 'developer');
 
+      // Extract story-specific guidance (from TechLead enhanced format)
+      const storyHelpers = story.mustUseHelpers || [];
+      const storyAntiPatterns = story.antiPatterns || [];
+      const storyCodeExamples = story.codeExamples || [];
+      const storyAcceptanceCriteria = story.acceptanceCriteria || [];
+
+      // 🔍 Smart file analysis - understand dependencies and impact
+      let fileAnalysisSection = '';
+      const filesToModify = story.filesToModify || [];
+      const filesToCreate = story.filesToCreate || [];
+
+      if (filesToModify.length > 0 || filesToCreate.length > 0) {
+        try {
+          const { SmartCodeAnalyzer } = await import('../SmartCodeAnalyzer');
+          const targetFiles = [...filesToModify, ...filesToCreate];
+          const suggestions = SmartCodeAnalyzer.getSuggestedReads(targetFiles, workspacePath, 8);
+
+          if (suggestions.length > 0) {
+            fileAnalysisSection = `
+## 📊 SMART FILE ANALYSIS
+
+Before making changes, understand these file relationships:
+
+| File | Why Read This |
+|------|---------------|
+${suggestions.map(s => `| \`${s.file}\` | ${s.reason} |`).join('\n')}
+
+**Read these files first** to understand the existing patterns and avoid breaking changes.
+`;
+          }
+        } catch (error: any) {
+          console.log(`   ⚠️ Smart analysis skipped: ${error.message}`);
+        }
+      }
+
       let prompt = `${directivesBlock}# Story: ${story.title}
 
 ${story.description}
 
+${storyAcceptanceCriteria.length > 0 ? `## ✅ ACCEPTANCE CRITERIA
+${storyAcceptanceCriteria.map((ac: string, i: number) => `${i + 1}. ${ac}`).join('\n')}
+` : ''}
+${fileAnalysisSection}
+${storyHelpers.length > 0 ? `## 🔧 REQUIRED HELPERS (YOU MUST USE THESE!)
+${storyHelpers.map((h: any) => `- **\`${h.function}()\`** from \`${h.from}\`
+  - Reason: ${h.reason}`).join('\n')}
+` : ''}
+${storyAntiPatterns.length > 0 ? `## ❌ ANTI-PATTERNS (DO NOT DO THIS!)
+${storyAntiPatterns.map((ap: any) => `- ❌ BAD: \`${ap.bad}\`
+  - Why: ${ap.why}
+  - ✅ GOOD: \`${ap.good}\``).join('\n\n')}
+` : ''}
+${storyCodeExamples.length > 0 ? `## 📝 CODE EXAMPLES (Follow These!)
+${storyCodeExamples.map((ex: any) => `### ${ex.description}
+\`\`\`typescript
+${ex.code}
+\`\`\`
+${ex.doNot ? `❌ DO NOT: \`${ex.doNot}\`` : ''}`).join('\n\n')}
+` : ''}
 ## 🎯 TARGET REPOSITORY: ${targetRepository}
 **CRITICAL**: You MUST work ONLY in the "${targetRepository}" directory.
 - All file paths must start with: ${targetRepository}/
@@ -1965,6 +2280,21 @@ ${architectureBrief.prInsights ? `### What Gets Approved (from recent PRs)
 
 ${architectureBrief.conventions?.length > 0 ? `### Project Conventions
 ${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
+
+${architectureBrief.helperFunctions?.length > 0 ? `### 🔧 MANDATORY HELPER FUNCTIONS (USE THESE!)
+| Function | File | What to Use | What NOT to Use |
+|----------|------|-------------|-----------------|
+${architectureBrief.helperFunctions.map((h: any) => `| \`${h.name}()\` | ${h.file} | ✅ ${h.usage} | ❌ ${h.antiPattern} |`).join('\n')}
+
+**🚨 CRITICAL: You MUST use these helper functions. DO NOT create entities manually!**` : ''}
+
+${architectureBrief.entityCreationRules?.length > 0 ? `### 📋 ENTITY CREATION RULES (MANDATORY!)
+| Entity | MUST Use | NEVER Use |
+|--------|----------|-----------|
+${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | ✅ \`${r.mustUse || 'Check codebase for helper'}\` | ❌ \`${r.mustNotUse}\` |`).join('\n')}
+
+**🔴 FAILURE TO FOLLOW THESE RULES = AUTOMATIC REJECTION**
+If you use \`new Model()\` instead of \`createModel()\`, the Judge will REJECT your code.` : ''}
 
 ⚠️ **Code that doesn't follow these patterns will be REJECTED by the Judge.**
 `;
@@ -2097,6 +2427,96 @@ try {
 `;
       }
 
+      // 🔧 DYNAMIC VERIFICATION: Add project-specific verification commands and markers
+      // This OVERRIDES the generic markers in AgentDefinitions.ts with project-specific ones
+      if (environmentCommands) {
+        console.log(`🔧 [Developer ${member.instanceId}] Adding dynamic verification commands from environmentConfig`);
+
+        // Build the list of required markers based on available commands
+        const markers: string[] = ['✅ ENVIRONMENT_READY (after setup commands succeed)'];
+        const verificationSteps: string[] = [];
+
+        // Typecheck (only if command exists and is not empty)
+        if (environmentCommands.typecheck && environmentCommands.typecheck !== 'N/A') {
+          markers.push('✅ TYPECHECK_PASSED');
+          verificationSteps.push(`1. **Typecheck**: \`${environmentCommands.typecheck}\` → Output: ✅ TYPECHECK_PASSED`);
+        } else {
+          verificationSteps.push(`1. **Typecheck**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
+        }
+
+        // Tests (only if command exists and is not empty)
+        if (environmentCommands.test && environmentCommands.test !== 'N/A' && environmentCommands.test !== 'npm run build') {
+          markers.push('✅ TESTS_PASSED');
+          verificationSteps.push(`2. **Tests**: \`${environmentCommands.test}\` → Output: ✅ TESTS_PASSED`);
+        } else {
+          verificationSteps.push(`2. **Tests**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
+        }
+
+        // Lint (only if command exists and is not empty)
+        if (environmentCommands.lint && environmentCommands.lint !== 'N/A') {
+          markers.push('✅ LINT_PASSED');
+          verificationSteps.push(`3. **Lint**: \`${environmentCommands.lint}\` → Output: ✅ LINT_PASSED`);
+        } else {
+          verificationSteps.push(`3. **Lint**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
+        }
+
+        // Build (only if command exists)
+        if (environmentCommands.build) {
+          verificationSteps.push(`4. **Build**: \`${environmentCommands.build}\` (verify build passes)`);
+        }
+
+        // Always required markers
+        markers.push('✅ EXHAUSTIVE_VERIFICATION_PASSED (all verification loops complete)');
+        markers.push('📍 Commit SHA: [40-character SHA]');
+        markers.push('✅ DEVELOPER_FINISHED_SUCCESSFULLY');
+
+        prompt += `
+
+## 🔧 PROJECT-SPECIFIC VERIFICATION (OVERRIDES DEFAULT MARKERS)
+
+**⚠️ IMPORTANT: This project has CUSTOM verification commands from TechLead.**
+**Only use the markers listed below - ignore generic markers from system prompt.**
+
+### Verification Commands for this project:
+${verificationSteps.join('\n')}
+
+### Required Markers (output ONLY these):
+${markers.map((m, i) => `${i}. ${m}`).join('\n')}
+
+### Workflow:
+1. Run available verification commands
+2. Output the corresponding marker ONLY if the command exists
+3. If a command is "NOT CONFIGURED", skip that marker entirely
+4. Always end with ✅ DEVELOPER_FINISHED_SUCCESSFULLY
+
+**Example for this project:**
+\`\`\`
+${environmentCommands.install ? `Bash("${environmentCommands.install}")` : '# No install command'}
+✅ ENVIRONMENT_READY
+
+${environmentCommands.typecheck && environmentCommands.typecheck !== 'N/A' ?
+  `Bash("${environmentCommands.typecheck}")
+✅ TYPECHECK_PASSED` :
+  '# No typecheck for this project'}
+
+${environmentCommands.test && environmentCommands.test !== 'N/A' && environmentCommands.test !== 'npm run build' ?
+  `Bash("${environmentCommands.test}")
+✅ TESTS_PASSED` :
+  '# No tests for this project'}
+
+${environmentCommands.lint && environmentCommands.lint !== 'N/A' ?
+  `Bash("${environmentCommands.lint}")
+✅ LINT_PASSED` :
+  '# No lint for this project'}
+
+✅ EXHAUSTIVE_VERIFICATION_PASSED
+git commit and push...
+📍 Commit SHA: abc123...
+✅ DEVELOPER_FINISHED_SUCCESSFULLY
+\`\`\`
+`;
+      }
+
       // Prefix all file paths with repository name
       const prefixPath = (f: string) => `${targetRepository}/${f}`;
 
@@ -2171,6 +2591,139 @@ You are in: ${workspacePath}
 Target repository: ${targetRepository}/
 
 All file paths must be prefixed with: ${targetRepository}/
+
+## 🔄 ITERATIVE DEVELOPMENT WORKFLOW (CLAUDE CODE STYLE)
+
+**You MUST follow this exact pattern for EVERY file:**
+
+\`\`\`
+┌─────────────────────────────────────────┐
+│  1. READ file completely                │
+│  2. EDIT with your changes              │
+│  3. VERIFY: npx tsc --noEmit            │
+│  4. If ERROR → FIX NOW, then verify     │
+│  5. If CLEAN → next file or commit      │
+└─────────────────────────────────────────┘
+\`\`\`
+
+**🚨 CRITICAL: After EVERY Edit(), run verification:**
+\`\`\`bash
+cd ${targetRepository} && npx tsc --noEmit 2>&1 | head -20
+\`\`\`
+
+**If you see an error:**
+1. READ the error message (file:line)
+2. FIX the issue IMMEDIATELY (don't continue)
+3. VERIFY again
+4. Only proceed when clean
+
+**Example flow:**
+\`\`\`
+Read("${targetRepository}/src/services/MyService.ts")
+Edit("${targetRepository}/src/services/MyService.ts", old, new)
+Bash("cd ${targetRepository} && npx tsc --noEmit 2>&1 | head -20")
+# If error → fix it, verify again
+# If clean → proceed
+\`\`\`
+
+**DO NOT:**
+- Skip verification after edits
+- Continue to next file with errors
+- Use @ts-ignore or // @ts-expect-error
+- Commit code that doesn't compile
+
+## 🔧 INLINE ERROR RECOVERY
+
+When you see a TypeScript error, fix it IMMEDIATELY:
+
+| Error Pattern | Fix |
+|--------------|-----|
+| \`Cannot find module 'X'\` | Add import: \`import { X } from './path'\` |
+| \`Property 'X' does not exist\` | Check interface or use \`obj?.X\` |
+| \`Type 'X' not assignable to 'Y'\` | Cast: \`value as Type\` or fix source |
+| \`'X' is declared but never used\` | Remove or prefix with \`_\` |
+| \`Object is possibly undefined\` | Add null check: \`if (x) { }\` |
+
+**Error workflow:**
+1. READ error (file:line:column)
+2. READ that section of the file
+3. UNDERSTAND why (missing import? wrong type? typo?)
+4. FIX the root cause (not a workaround)
+5. VERIFY with tsc again
+
+## 🔍 ADAPTIVE EXPLORATION
+
+**When unsure, EXPLORE first - don't guess!**
+
+| Need | Search |
+|------|--------|
+| Find a file | \`Glob("**/FileName.ts")\` |
+| Find a function | \`Grep("function funcName", path="src")\` |
+| Find a type | \`Grep("interface TypeName", path="src")\` |
+| Find usage | \`Grep("funcName(", path="src")\` |
+| Find tests | \`Glob("**/*.test.ts")\` |
+
+**Before creating anything new:**
+1. Search if it exists
+2. Find similar code for patterns
+3. Understand the structure
+4. THEN implement
+
+## 🧪 MANDATORY: WRITE TESTS
+
+For every function/class you create, you MUST write tests:
+
+1. **Create test file** alongside source: \`MyService.test.ts\`
+2. **Test cases required:**
+   - Basic functionality (happy path)
+   - Edge cases (empty strings, zero, null)
+   - Error handling (invalid inputs)
+3. **Run tests after writing:**
+   \`\`\`bash
+   cd ${targetRepository} && npm test -- --passWithNoTests
+   \`\`\`
+4. **Fix failing tests before committing**
+
+**Test Template:**
+\`\`\`typescript
+import { MyFunction } from './MyFile';
+
+describe('MyFunction', () => {
+  it('should work with valid input', () => {
+    expect(MyFunction('valid')).toBeDefined();
+  });
+
+  it('should handle empty input', () => {
+    expect(MyFunction('')).toThrow();
+  });
+
+  it('should handle errors', () => {
+    expect(() => MyFunction(null)).toThrow();
+  });
+});
+\`\`\`
+
+## 📚 LEARN FROM PATTERNS
+
+**Before coding:**
+1. Find similar implementations in codebase
+2. Use existing helper functions (DON'T create new ones if they exist)
+3. Follow the same patterns you find
+
+**Example - finding helpers:**
+\`\`\`
+Grep("export function", path="src/utils")
+Grep("export const", path="src/helpers")
+\`\`\`
+
+## 🚦 QUALITY CHECKLIST (Before Commit)
+
+- [ ] Code compiles: \`npx tsc --noEmit\`
+- [ ] Tests pass: \`npm test\`
+- [ ] No console.log/debugger left in code
+- [ ] No empty catch blocks
+- [ ] Used existing helpers instead of creating new ones
+- [ ] All imports resolve correctly
 
 ## Your task:
 ${judgeFeedback ? 'Fix the code based on Judge feedback above.' : 'Implement this story completely with production-ready code. Work iteratively - read, edit, verify, repeat.'}
@@ -2359,6 +2912,43 @@ After writing code, you MUST follow this EXACT sequence:
         }
 
         console.log(`${'='.repeat(80)}\n`);
+
+        // 🔥 NEW: Run DeveloperSelfCheck for quality verification before Judge
+        try {
+          const { DeveloperSelfCheckService } = await import('../DeveloperSelfCheckService');
+          const modifiedFilesList = safeGitExecSync(`cd "${repoPath}" && git show --name-only --pretty=format: HEAD`, { encoding: 'utf8' })
+            .trim().split('\n').filter((f: string) => f);
+
+          console.log(`\n🔍 [Developer ${member.instanceId}] Running pre-Judge quality verification...`);
+
+          const selfCheckResult = await DeveloperSelfCheckService.runAllChecks({
+            workspacePath: repoPath,
+            modifiedFiles: modifiedFilesList,
+            skipTests: true, // Tests will run in Judge phase
+            timeout: 30000,
+          });
+
+          if (!selfCheckResult.passed) {
+            console.log(`⚠️  [Developer ${member.instanceId}] Quality check found issues:`);
+            selfCheckResult.blockingErrors.slice(0, 5).forEach(e => console.log(`   - ${e}`));
+
+            // Store for Judge context
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⚠️  Developer ${member.instanceId} quality check:\n${DeveloperSelfCheckService.formatForDeveloper(selfCheckResult)}`
+            );
+          } else {
+            console.log(`✅ [Developer ${member.instanceId}] Quality verification passed`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ Developer ${member.instanceId}: Pre-Judge quality verification passed`
+            );
+          }
+        } catch (selfCheckError: any) {
+          console.warn(`⚠️  [Developer ${member.instanceId}] Self-check skipped: ${selfCheckError.message}`);
+        }
 
         // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
         NotificationService.emitConsoleLog(
