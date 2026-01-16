@@ -17,12 +17,13 @@ import {
 import { SemanticVerificationService, VerificationResult } from '../SemanticVerificationService';
 import { CodebaseKnowledge } from '../CodebaseDiscoveryService';
 import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
-import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
+import { ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
 import {
   buildPlanningJudgePrompt,
   buildTechLeadJudgePrompt,
+  buildDeveloperJudgePrompt,
 } from './prompts/JudgePrompts';
 
 /**
@@ -1134,7 +1135,20 @@ export class JudgePhase extends BasePhase {
     // 💡 USER DIRECTIVES - Incorporate any user-injected instructions for Judge
     const directivesBlock = context.getDirectivesBlock('judge');
 
-    const basePrompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief, semanticVerificationSection, testResultsSection, projectRadiographies);
+    // 🏛️ UNIFIED: Use external prompt from JudgePrompts.ts
+    const basePrompt = buildDeveloperJudgePrompt({
+      projectId: task.projectId?.toString() || '',
+      taskId: task._id?.toString() || '',
+      story,
+      developer,
+      targetRepository,
+      storyBranchName,
+      commitSHA,
+      architectureBrief,
+      projectRadiography: targetRepository && projectRadiographies ? projectRadiographies.get(targetRepository) : undefined,
+      semanticVerificationSection,
+      testResultsSection,
+    });
 
     // Inject directives at the beginning of the prompt
     const prompt = directivesBlock ? `${directivesBlock}\n${basePrompt}` : basePrompt;
@@ -1318,187 +1332,16 @@ export class JudgePhase extends BasePhase {
     }
   }
 
-  /**
-   * Build evaluation prompt for Judge agent
-   */
-  private buildJudgePrompt(
-    task: any,
-    story: any,
-    developer: any,
-    _workspacePath: string | null,
-    commitSHA?: string,
-    targetRepository?: string,
-    storyBranchName?: string,
-    architectureBrief?: any, // 🏗️ Architecture insights from PlanningPhase
-    semanticVerificationSection?: string, // 🔬 Automated verification results
-    testResultsSection?: string, // 🧪 Automated test results
-    projectRadiographies?: Map<string, ProjectRadiography> // 🔬 Language-agnostic project analysis
-  ): string {
-    const projectId = task.projectId?.toString() || '';
-    const taskId = task._id?.toString() || '';
+  // 🔥 buildJudgePrompt REMOVED - Now uses external buildDeveloperJudgePrompt from JudgePrompts.ts
+  // This keeps all prompts in one place for easy maintenance and future DB storage
 
-    return `# ⚖️ JUDGE AGENT - CODE REVIEW
+  // ============================================================================
+  // 🔍 OUTPUT PARSING
+  // ============================================================================
 
-## 💡 YOUR PHILOSOPHY: BE A RIGOROUS REVIEWER
-
-**You are the QUALITY GATE.** Code that passes you goes to production. Be thorough, be fair, be specific.
-
-### ⚡ GOLDEN RULES:
-1. **READ THE CODE** - Don't assume, verify
-   - ✅ RIGHT: \`Read("src/services/UserService.ts")\` → then evaluate
-   - ❌ WRONG: "The code looks fine" without reading it
-
-2. **CHECK AGAINST REQUIREMENTS** - Every acceptance criterion must be met
-   - ✅ RIGHT: Cross-reference code with each acceptance criterion
-   - ❌ WRONG: "Implementation looks complete" without verification
-
-3. **VERIFY PATTERNS** - Code must follow project conventions
-   - ✅ RIGHT: \`Grep("createProject|new Project")\` to verify correct usage
-   - ❌ WRONG: Approving \`new Project()\` when \`createProject()\` exists
-
-4. **GIVE ACTIONABLE FEEDBACK** - If rejecting, explain HOW to fix
-   - ✅ RIGHT: "Line 45: Use createProject() instead of new Project(). See helper at src/utils/helpers.ts:23"
-   - ❌ WRONG: "Code doesn't follow patterns"
-
-5. **BE FAIR** - Only reject for real issues, not style preferences
-   - ✅ RIGHT: Reject for missing functionality, bugs, anti-patterns
-   - ❌ WRONG: Reject because you would have written it differently
-
----
-
-## 🧠 MEMORY CONTEXT
-- **Project ID**: \`${projectId}\`
-- **Task ID**: \`${taskId}\`
-- **Story ID**: \`${story.id}\`
-
-## 📋 REVIEW CONTEXT
-**Story**: ${story.title}
-**Developer**: ${developer.instanceId}
-${targetRepository ? `**Repository**: ${targetRepository}` : ''}
-${storyBranchName ? `**Branch**: ${storyBranchName}` : ''}
-${commitSHA ? `**Commit**: ${commitSHA}` : ''}
-
-Files to check:
-- Modify: ${story.filesToModify?.join(', ') || 'none'}
-- Create: ${story.filesToCreate?.join(', ') || 'none'}
-
-${architectureBrief ? `## 🏗️ PROJECT PATTERNS (from Architecture Analysis)
-**Code MUST follow these patterns to be approved:**
-
-${architectureBrief.codePatterns ? `- **Naming**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
-- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
-- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
-- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
-
-${architectureBrief.conventions?.length > 0 ? `**Conventions to enforce**:
-${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
-
-${architectureBrief.prInsights?.rejectionReasons?.length > 0 ? `**Common rejection reasons** (check for these):
-${architectureBrief.prInsights.rejectionReasons.map((r: string) => `- ${r}`).join('\n')}` : ''}
-
-⚠️ If code doesn't follow these patterns, mark "followsPatterns" as FALSE.
-` : ''}
-${projectRadiographies && targetRepository && projectRadiographies.get(targetRepository) ? `## 🔬 PROJECT RADIOGRAPHY (${targetRepository})
-**Use this as the source of truth for code patterns and conventions:**
-
-${ProjectRadiographyService.formatForPrompt(projectRadiographies.get(targetRepository)!)}
-
----
-**⚠️ EVALUATION CRITERIA FROM RADIOGRAPHY**:
-- Code MUST match the naming convention: ${projectRadiographies.get(targetRepository)!.conventions.namingConvention}
-- Code MUST match the file structure: ${projectRadiographies.get(targetRepository)!.conventions.fileStructure}
-- Code MUST match the code style: ${projectRadiographies.get(targetRepository)!.conventions.codeStyle}
----
-` : ''}
-${semanticVerificationSection || ''}
-${testResultsSection || ''}
-## 🎯 EVALUATION CHECKLIST (ALL must pass for approval):
-
-| Criterion | What to Check | Auto-Fail If... |
-|-----------|---------------|-----------------|
-| 1. CODE EXISTS | Files were actually modified/created | Empty commits, only docs/comments |
-| 2. COMPLETE | No TODOs, stubs, or placeholders | Contains TODO, FIXME, "implement later" |
-| 3. REQUIREMENTS | All acceptance criteria met | Any criterion not demonstrably met |
-| 4. PATTERNS | Follows project conventions | Uses \`new Model()\` instead of \`createModel()\` |
-| 5. QUALITY | No bugs, has error handling | Try-catch without handling, null pointer risks |
-| 6. TESTS | Tests pass (if they exist) | Tests fail or were broken |
-
-## 📋 YOUR WORKFLOW (Follow This Order):
-
-### Step 1: Fetch and Read the Code
-\`\`\`bash
-# Fetch latest from remote
-Bash("cd ${targetRepository} && git fetch origin ${storyBranchName || 'HEAD'}")
-
-# Read the modified files
-Read("path/to/modified/file.ts")
-\`\`\`
-
-### Step 2: Check for Anti-Patterns
-\`\`\`bash
-# Search for helper functions
-Grep("createProject|createUser|new Project")
-
-# Search for TODOs
-Grep("TODO|FIXME|implement")
-\`\`\`
-
-### Step 3: Cross-Reference with Acceptance Criteria
-For EACH acceptance criterion:
-- Find the code that implements it
-- Verify it works as expected
-- Note if anything is missing
-
-### Step 4: Make Your Decision
-- **APPROVE** if ALL criteria pass
-- **REJECT** if ANY criterion fails (with specific feedback)
-
-## 🔬 SEMANTIC VERIFICATION (CRITICAL!)
-
-**Before approving, verify pattern usage:**
-\`\`\`
-Grep("createProject|createUser|createTeam|new Project|new User")
-\`\`\`
-
-| If You Find... | Decision |
-|----------------|----------|
-| \`new Project()\` when \`createProject()\` exists | ❌ REJECT |
-| Entities created without required relationships | ❌ REJECT |
-| Correct helper function usage | ✅ Can approve |
-
-## 📤 OUTPUT FORMAT (JSON only):
-
-\`\`\`json
-{
-  "status": "approved" | "changes_requested",
-  "feedback": "Specific, actionable feedback explaining what passed/failed",
-  "criteria": {
-    "codeExists": true,
-    "codeComplete": true,
-    "requirementsMet": true,
-    "followsPatterns": true,
-    "qualityStandards": true
-  },
-  "filesReviewed": ["file1.ts", "file2.ts"],
-  "specificIssues": [
-    "Line 45 of UserService.ts: Use createUser() instead of new User()"
-  ]
-}
-\`\`\`
-
-## ⚠️ CRITICAL RULES:
-
-1. **If ANY criterion fails** → status MUST be "changes_requested"
-2. **Feedback must be ACTIONABLE** → Tell developer EXACTLY what to fix and WHERE
-3. **Be FAIR** → Don't reject for style preferences, only for real issues
-4. **Give CREDIT** → If code is good, say so! Developers learn from positive feedback too
-
-## 🎯 FINAL CHECK - Ask Yourself:
-
-"If I were the developer, would this feedback help me fix the issue in 5 minutes?"
-- If YES → Your feedback is good
-- If NO → Add more specific details (file, line, what to change)`;
-  }
+  // ============================================================================
+  // 🔍 OUTPUT PARSING - Parse Judge agent output
+  // ============================================================================
 
   /**
    * Parse Judge agent output - Uses plain text markers with SMART FALLBACK
