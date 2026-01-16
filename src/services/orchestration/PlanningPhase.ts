@@ -6,7 +6,7 @@ import { validateStoryOverlap, logOverlapValidation } from './utils/StoryOverlap
 import { storageService } from '../storage/StorageService';
 import { CodebaseDiscoveryService, CodebaseKnowledge } from '../CodebaseDiscoveryService';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
-// Anthropic SDK no longer needed - Judge now uses executeAgentFn with tools
+import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
 import fs from 'fs';
@@ -1586,174 +1586,63 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
 
     // Get workspace path for Judge to read files
     const workspacePath = task.orchestration?.workspacePath || process.cwd();
-
-    // Build repository paths for Judge
     const repositories = task.repositories || [];
-    const repoPathsInfo = repositories.map((repo: any) => {
-      return `- ${repo.name} (${repo.type}): ${workspacePath}/${repo.name}`;
-    }).join('\n');
 
-    try {
-      const evaluationPrompt = `You are a STRICT Planning Judge with access to READ THE ACTUAL CODEBASE.
+    // 🏛️ UNIFIED: Use JudgePhase.evaluateWithType() for consistent judge execution
+    const judgePhase = new JudgePhase(this.executeAgentFn);
+    const judgeResult = await judgePhase.evaluateWithType({
+      type: 'planning',
+      workspacePath,
+      taskId,
+      repositories,
+      taskTitle: task.title || 'No title',
+      taskDescription: task.description || 'No description',
+      epics,
+    });
 
-## YOUR MISSION
-Evaluate if the Planning Agent's epics FULLY cover the user's requirements.
+    // Emit detailed evaluation results
+    AgentActivityService.emitToolUse(taskId, 'Planning-Judge', 'AIVerdict', {
+      verdict: judgeResult.approved ? 'APPROVE' : 'REJECT',
+      score: judgeResult.score,
+      filesVerified: judgeResult.filesVerified?.length || 0,
+      issuesCount: judgeResult.issues?.length || 0,
+      cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
+    });
 
-## 🔥 CRITICAL: YOU HAVE TOOLS!
-You have access to Read, Glob, and Grep tools. USE THEM to:
-1. VERIFY if files mentioned in epics actually exist
-2. READ relevant files to understand current implementation
-3. CHECK if proposed changes make sense given existing code
+    // Emit reasoning
+    AgentActivityService.emitMessage(taskId, 'Planning-Judge',
+      `🤖 Judge Evaluation (score: ${judgeResult.score || 0}/100):\n` +
+      `${judgeResult.feedback}\n\n` +
+      (judgeResult.filesVerified && judgeResult.filesVerified.length > 0 ? `📁 Files Verified: ${judgeResult.filesVerified.join(', ')}\n` : '') +
+      (judgeResult.issues && judgeResult.issues.length > 0 ? `\n❌ Issues:\n${judgeResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
+      (judgeResult.suggestions && judgeResult.suggestions.length > 0 ? `\n💡 Suggestions:\n${judgeResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
+    );
 
-## WORKSPACE
-${repoPathsInfo || 'No repositories specified'}
+    // Approval requires both approved status AND score >= 60
+    const approved = judgeResult.approved && (judgeResult.score || 0) >= 60;
 
-## ORIGINAL TASK FROM USER
-Title: ${task.title || 'No title'}
-Description: ${task.description || 'No description'}
-
-## PLANNING AGENT'S OUTPUT TO EVALUATE
-\`\`\`json
-${JSON.stringify(epics, null, 2)}
-\`\`\`
-
-## YOUR EVALUATION PROCESS
-1. **READ THE CODE** - Use Glob/Read to check files mentioned in filesToModify/filesToRead
-2. **VERIFY EXISTENCE** - Before saying "file X is missing", READ to confirm it doesn't exist
-3. **CHECK PATTERNS** - Read existing similar files to verify proposed approach fits
-4. **EVALUATE COVERAGE** - Does the plan cover ALL user requirements?
-
-## EVALUATION CRITERIA
-
-### 1. REQUIREMENT COVERAGE
-- Do the epics FULLY cover what the user asked for?
-- Are there missing pieces that would leave requirements unmet?
-
-### 2. FILE ACCURACY
-- Do filesToModify actually exist? (USE Read/Glob to verify!)
-- Are filesToCreate truly new files that don't exist?
-- Are the file paths correct?
-
-### 3. FULL-STACK COVERAGE
-- If task needs both backend and frontend, are both covered?
-- Are there API-UI mismatches?
-
-### 4. LOGICAL STRUCTURE
-- Do epics have proper dependencies?
-- Is the implementation order logical?
-
-## YOUR OUTPUT
-After reading relevant files to verify, output your verdict:
-
-\`\`\`json
-{
-  "verdict": "APPROVE" or "REJECT",
-  "score": 0-100,
-  "reasoning": "Brief explanation based on what you READ in the codebase",
-  "filesVerified": ["List of files you actually read to verify"],
-  "issues": ["Only REAL issues - not things you verified exist"],
-  "suggestions": ["Improvements based on actual code you read"],
-  "missingRequirements": ["Things the user asked for that aren't covered"]
-}
-\`\`\`
-
-## ⚠️ IMPORTANT
-- DO NOT reject for "missing files" without first trying to READ them
-- If a file exists (you can read it), it's NOT missing
-- Only reject for REAL issues verified by reading code
-- Be thorough but fair
-
-START by using Glob to find relevant files, then Read key ones to understand the codebase.`;
-
-      const startTime = Date.now();
-
-      // 🔥 Execute Judge as AGENT with tools (not just API call)
-      const judgeResult = await this.executeAgentFn(
-        'planning-judge',
-        evaluationPrompt,
-        workspacePath,
-        taskId,
-        'Planning Judge',
-        undefined, // sessionId
-        undefined, // fork
-        undefined, // attachments
-        undefined, // options
-        undefined, // contextOverride
-        undefined, // skipOptimization
-        'bypassPermissions' // Same permissions as Planning Agent
+    if (approved) {
+      AgentActivityService.emitMessage(taskId, 'Planning-Judge', `✅ APPROVED with score ${judgeResult.score}/100`);
+    } else {
+      AgentActivityService.emitError(taskId, 'Planning-Judge',
+        `❌ REJECTED (score: ${judgeResult.score}/100)\n` +
+        `Reason: ${judgeResult.feedback}\n` +
+        `Issues: ${judgeResult.issues?.join(', ')}`
       );
-
-      const duration = Date.now() - startTime;
-      console.log(`   💰 [Planning Judge] Agent evaluation completed in ${duration}ms, cost: $${judgeResult.cost?.toFixed(4) || '?'}`);
-
-      // Parse Judge output
-      const jsonMatch = judgeResult.output.match(/```json\n([\s\S]*?)\n```/) || judgeResult.output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
-
-      if (!jsonMatch) {
-        console.warn(`⚠️ [Planning Judge] No JSON verdict found in output, defaulting to approve`);
-        AgentActivityService.emitMessage(taskId, 'Planning-Judge', `⚠️ Judge output inconclusive - approving by default`);
-        return {
-          approved: true,
-          epicsCount: epics.length,
-        };
-      }
-
-      const aiResult = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-
-      // Emit detailed evaluation results
-      AgentActivityService.emitToolUse(taskId, 'Planning-Judge', 'AIVerdict', {
-        verdict: aiResult.verdict,
-        score: aiResult.score,
-        filesVerified: aiResult.filesVerified?.length || 0,
-        issuesCount: aiResult.issues?.length || 0,
-        cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
-      });
-
-      // Emit reasoning
-      AgentActivityService.emitMessage(taskId, 'Planning-Judge',
-        `🤖 Judge Evaluation (score: ${aiResult.score}/100):\n` +
-        `${aiResult.reasoning}\n\n` +
-        (aiResult.filesVerified?.length > 0 ? `📁 Files Verified: ${aiResult.filesVerified.join(', ')}\n` : '') +
-        (aiResult.issues?.length > 0 ? `\n❌ Issues:\n${aiResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
-        (aiResult.suggestions?.length > 0 ? `\n💡 Suggestions:\n${aiResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
-      );
-
-      const approved = aiResult.verdict === 'APPROVE' && aiResult.score >= 60;
-
-      if (approved) {
-        console.log(`   ✅ [Planning Judge] APPROVED (score: ${aiResult.score}/100)`);
-        AgentActivityService.emitMessage(taskId, 'Planning-Judge', `✅ APPROVED with score ${aiResult.score}/100`);
-      } else {
-        console.log(`   ❌ [Planning Judge] REJECTED (score: ${aiResult.score}/100)`);
-        AgentActivityService.emitError(taskId, 'Planning-Judge',
-          `❌ REJECTED (score: ${aiResult.score}/100)\n` +
-          `Reason: ${aiResult.reasoning}\n` +
-          `Issues: ${aiResult.issues?.join(', ')}`
-        );
-      }
-
-      return {
-        approved,
-        reason: approved ? undefined : aiResult.reasoning,
-        feedback: approved ? undefined : (aiResult.issues || []).concat(aiResult.suggestions || []).join('\n'),
-        epicsCount: epics.length,
-        aiEvaluation: {
-          verdict: aiResult.verdict,
-          reasoning: aiResult.reasoning,
-          issues: aiResult.issues || [],
-          suggestions: aiResult.suggestions || [],
-          score: aiResult.score,
-        },
-      };
-    } catch (error: any) {
-      console.warn(`⚠️ [Planning Judge] Agent evaluation failed: ${error.message} - falling back to approval`);
-      AgentActivityService.emitMessage(taskId, 'Planning-Judge', `⚠️ Judge evaluation failed - using fallback approval`);
-
-      // Fallback: approve to not block progress
-      return {
-        approved: true,
-        epicsCount: epics.length,
-      };
     }
+
+    return {
+      approved,
+      reason: approved ? undefined : judgeResult.feedback,
+      feedback: approved ? undefined : (judgeResult.issues || []).concat(judgeResult.suggestions || []).join('\n'),
+      epicsCount: epics.length,
+      aiEvaluation: {
+        verdict: judgeResult.approved ? 'APPROVE' : 'REJECT',
+        reasoning: judgeResult.feedback,
+        issues: judgeResult.issues || [],
+        suggestions: judgeResult.suggestions || [],
+        score: judgeResult.score || 0,
+      },
+    };
   }
 }
