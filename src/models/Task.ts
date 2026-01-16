@@ -367,9 +367,18 @@ export interface IOrchestration {
   directiveHistory?: IDirective[];  // Archive of consumed directives for audit trail
 
   // Auto-aprobación opcional
-  // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+  // Phases: planning, tech-lead (architecture), team-orchestration, verification, auto-merge
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('planning' | 'team-orchestration' | 'verification' | 'auto-merge')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('planning' | 'tech-lead' | 'team-orchestration' | 'verification' | 'auto-merge' | 'development' | 'judge' | 'fixer')[]; // Fases que se auto-aprueban
+  supervisorThreshold?: number; // 0-100: Auto-approve when Supervisor score >= threshold (default 80)
+  // 📌 Pending approval data for re-emit on socket reconnect
+  pendingApproval?: {
+    phase: string;
+    phaseName: string;
+    agentOutput?: any;
+    retryCount?: number;
+    timestamp?: Date;
+  };
 
   // Model configuration
   // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
@@ -485,6 +494,29 @@ export interface ITask extends Document {
     level: 'log' | 'info' | 'warn' | 'error';
     message: string;
     timestamp: Date;
+  }[];
+
+  // 🎯 Activity events for OpenCode-style display (persisted for refresh survival)
+  activities?: {
+    agentName: string;
+    type: 'read' | 'edit' | 'write' | 'bash' | 'think' | 'tool' | 'error' | 'message';
+    timestamp: Date;
+    file?: string;
+    content?: string;
+    command?: string;
+    output?: string;
+    toolName?: string;
+    toolInput?: any;
+    diff?: {
+      oldContent?: string;
+      newContent?: string;
+      lines: {
+        type: 'add' | 'remove' | 'context';
+        content: string;
+        oldNum?: number;
+        newNum?: number;
+      }[];
+    };
   }[];
 
   // Webhook deduplication metadata
@@ -984,11 +1016,27 @@ const taskSchema = new Schema<ITask>(
         type: Boolean,
         default: false, // ❌ Auto-aprobación DESHABILITADA por defecto - requiere configuración explícita del usuario
       },
-      // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+      // Phases: planning, tech-lead (architecture), team-orchestration, development, verification, auto-merge
       autoApprovalPhases: {
         type: [String],
-        enum: ['planning', 'team-orchestration', 'verification', 'auto-merge'],
+        enum: ['planning', 'tech-lead', 'team-orchestration', 'development', 'verification', 'auto-merge'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
+      },
+      // 📌 Pending approval data for re-emit on socket reconnect
+      pendingApproval: {
+        phase: String,
+        phaseName: String,
+        agentOutput: Schema.Types.Mixed,
+        retryCount: { type: Number, default: 0 },
+        timestamp: Date,
+      },
+      // 🤖 Supervisor auto-approval threshold (0-100)
+      // When Supervisor score >= threshold, auto-approve without waiting for human
+      supervisorThreshold: {
+        type: Number,
+        min: 0,
+        max: 100,
+        default: 80, // 80% compliance = auto-approve
       },
       modelConfig: {
         preset: {
@@ -1090,6 +1138,37 @@ const taskSchema = new Schema<ITask>(
       timestamp: {
         type: Date,
         default: Date.now,
+      },
+    }],
+    // 🎯 Activity events for OpenCode-style display (persisted for refresh survival)
+    activities: [{
+      agentName: String,
+      type: {
+        type: String,
+        enum: ['read', 'edit', 'write', 'bash', 'think', 'tool', 'error', 'message'],
+      },
+      timestamp: {
+        type: Date,
+        default: Date.now,
+      },
+      file: String,
+      content: String,
+      command: String,
+      output: String,
+      toolName: String,
+      toolInput: Schema.Types.Mixed,
+      diff: {
+        oldContent: String,
+        newContent: String,
+        lines: [{
+          type: {
+            type: String,
+            enum: ['add', 'remove', 'context'],
+          },
+          content: String,
+          oldNum: Number,
+          newNum: Number,
+        }],
       },
     }],
     // Webhook deduplication metadata

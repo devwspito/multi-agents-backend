@@ -2,6 +2,7 @@ import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { IStory } from '../../models/Task';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 import {
   initializeJudgeOrchestration,
@@ -16,6 +17,9 @@ import {
 import { SemanticVerificationService, VerificationResult } from '../SemanticVerificationService';
 import { CodebaseKnowledge } from '../CodebaseDiscoveryService';
 import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
+import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
+import { sessionCheckpointService } from '../SessionCheckpointService';
+import { granularMemoryService } from '../GranularMemoryService';
 
 /**
  * Judge Phase
@@ -54,9 +58,19 @@ export class JudgePhase extends BasePhase {
 
   /**
    * Skip if Judge already evaluated all stories (ONLY for recovery, NOT for continuations)
+   *
+   * 🔥 CRITICAL: In multi-team mode, only check stories for THIS EPIC!
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
+
+    // 🔥 CRITICAL FIX: Detect multi-team mode (teamEpic is set in context)
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    if (multiTeamMode) {
+      console.log(`\n🎯 [Judge.shouldSkip] Multi-team mode detected - Epic: ${teamEpic.id}`);
+    }
 
     // Refresh task
     const Task = require('../../models/Task').Task;
@@ -80,9 +94,17 @@ export class JudgePhase extends BasePhase {
     // 🔥 EVENT SOURCING: Get stories from EventStore
     const { eventStore } = await import('../EventStore');
     const state = await eventStore.getCurrentState(task._id as any);
-    const stories = state.stories || [];
 
-    console.log(`\n🔍 [Judge.shouldSkip] Checking if Judge already reviewed code...`);
+    // 🔥 CRITICAL FIX: In multi-team mode, filter stories by THIS EPIC!
+    // Without this, Team 2-N would see Team 1's stories as "approved" and skip!
+    let stories = state.stories || [];
+    if (multiTeamMode && teamEpic) {
+      stories = stories.filter((s: any) => s.epicId === teamEpic.id);
+      console.log(`   🎯 Filtered to epic ${teamEpic.id}: ${stories.length} stories (was ${state.stories?.length || 0} total)`);
+    }
+
+    const epicInfo = multiTeamMode ? ` (epic: ${teamEpic?.id})` : '';
+    console.log(`\n🔍 [Judge.shouldSkip] Checking if Judge already reviewed code${epicInfo}...`);
     console.log(`   Total stories: ${stories.length}`);
     console.log(`   Total Judge evaluations: ${judgeEvaluations.length}`);
 
@@ -177,6 +199,13 @@ export class JudgePhase extends BasePhase {
     }
 
     NotificationService.emitAgentStarted(taskId, 'Judge');
+
+    // 🎯 ACTIVITY: Emit Judge start for Activity tab
+    AgentActivityService.emitMessage(
+      taskId,
+      'Judge',
+      `⚖️ Starting code review for ${stories?.length || 0} stories...`
+    );
 
     await LogService.agentStarted('judge', taskId, {
       phase: 'qa', // Judge is part of QA phase (quality assurance)
@@ -280,6 +309,18 @@ export class JudgePhase extends BasePhase {
 
     // 🔥 BATCH MODE: Return full verdict
     if (allPassed) {
+      // 🎯 ACTIVITY: Emit Judge verdict for Activity tab
+      AgentActivityService.emitToolUse(taskId, 'Judge', 'CodeReview', {
+        verdict: 'APPROVED',
+        approved: totalApproved,
+        failed: 0,
+      });
+      AgentActivityService.emitMessage(
+        taskId,
+        'Judge',
+        `✅ Code review complete: All ${totalApproved} stories APPROVED`
+      );
+
       NotificationService.emitAgentCompleted(
         taskId,
         'Judge',
@@ -293,6 +334,34 @@ export class JudgePhase extends BasePhase {
           verdict: 'all_stories_approved',
         },
       });
+
+      // 🧠 GRANULAR MEMORY: Store Judge completion and learnings
+      const projectId = task.projectId?.toString();
+      if (projectId) {
+        try {
+          await granularMemoryService.storeProgress({
+            projectId,
+            taskId,
+            phaseType: 'judge',
+            agentType: 'judge',
+            status: 'completed',
+            details: `Judge approved all ${totalApproved} stories`,
+          });
+
+          // Store learning about what made the code pass
+          await granularMemoryService.storeLearning({
+            projectId,
+            taskId,
+            title: 'Quality Standards Met',
+            content: `All ${totalApproved} stories passed code review. Patterns that work: follow existing codebase conventions, proper error handling, complete implementations without TODOs.`,
+            importance: 'medium',
+          });
+
+          console.log(`🧠 [Judge] Stored completion memory`);
+        } catch (memError: any) {
+          console.warn(`⚠️ [Judge] Failed to store memory: ${memError.message}`);
+        }
+      }
 
       return {
         success: true,
@@ -316,6 +385,18 @@ export class JudgePhase extends BasePhase {
         },
       };
     } else {
+      // 🎯 ACTIVITY: Emit Judge verdict for Activity tab (failures)
+      AgentActivityService.emitToolUse(taskId, 'Judge', 'CodeReview', {
+        verdict: 'REJECTED',
+        approved: totalApproved,
+        failed: totalFailed,
+      });
+      AgentActivityService.emitError(
+        taskId,
+        'Judge',
+        `❌ Code review: ${totalFailed} stories FAILED quality review`
+      );
+
       NotificationService.emitAgentMessage(
         taskId,
         'Judge',
@@ -756,6 +837,15 @@ export class JudgePhase extends BasePhase {
       console.log(`🏗️ [Judge] Architecture brief available - will evaluate against project patterns`);
     }
 
+    // 🔬 Get projectRadiographies for language-agnostic pattern evaluation
+    const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
+    if (projectRadiographies && targetRepository) {
+      const targetRadiography = projectRadiographies.get(targetRepository);
+      if (targetRadiography) {
+        console.log(`🔬 [Judge] Project radiography available for ${targetRepository}: ${targetRadiography.language.primary}/${targetRadiography.framework.name}`);
+      }
+    }
+
     // 🔬 AUTOMATED SEMANTIC VERIFICATION (runs BEFORE Judge reviews)
     // This catches anti-patterns like `new Project()` instead of `createProject()`
     let semanticVerificationResult: VerificationResult | undefined;
@@ -829,7 +919,13 @@ export class JudgePhase extends BasePhase {
       }
     }
 
-    const prompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief, semanticVerificationSection, testResultsSection);
+    // 💡 USER DIRECTIVES - Incorporate any user-injected instructions for Judge
+    const directivesBlock = context.getDirectivesBlock('judge');
+
+    const basePrompt = this.buildJudgePrompt(task, story, developer, workspacePath, commitSHA, targetRepository, storyBranchName, architectureBrief, semanticVerificationSection, testResultsSection, projectRadiographies);
+
+    // Inject directives at the beginning of the prompt
+    const prompt = directivesBlock ? `${directivesBlock}\n${basePrompt}` : basePrompt;
 
     // 🔥 SAFE CONTEXT ACCESS: Retrieve processed attachments (optional - defaults to empty array)
     // This ensures ALL agents receive the same multimedia context
@@ -888,6 +984,23 @@ export class JudgePhase extends BasePhase {
       }
     }
 
+    // 🔄 SESSION RESUME: Check for existing session checkpoint for this judge evaluation
+    const existingSessionCheckpoint = await sessionCheckpointService.loadCheckpoint(
+      taskId,
+      'judge',
+      story.id // Use storyId as entityId for per-story judge resume
+    );
+    const resumeOptions = sessionCheckpointService.buildResumeOptions(existingSessionCheckpoint);
+
+    if (resumeOptions?.isResume) {
+      console.log(`\n🔄🔄🔄 [Judge] RESUMING evaluation for story "${story.title}" from previous session...`);
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔄 Judge: Resuming evaluation for story "${story.title}" from checkpoint`
+      );
+    }
+
     try {
       const result = await this.executeAgentFn(
         'judge',
@@ -901,8 +1014,27 @@ export class JudgePhase extends BasePhase {
         {
           maxIterations: 5,
           timeout: 300000, // 5 minutes
-        }
+        },
+        undefined, // contextOverride
+        undefined, // skipOptimization
+        undefined, // permissionMode
+        resumeOptions // 🔄 Session resume options
       );
+
+      // 🔄 Save session checkpoint after judge starts (for mid-execution recovery)
+      if (result.sdkSessionId) {
+        await sessionCheckpointService.saveCheckpoint(
+          taskId,
+          'judge',
+          result.sdkSessionId,
+          story.id, // Use storyId as entityId
+          result.lastMessageUuid,
+          {
+            storyTitle: story.title,
+            developerId: developer.instanceId,
+          }
+        );
+      }
 
       console.log(`\n✅ [Judge] Judge agent execution completed successfully`);
       console.log(`   📊 Output length: ${result.output?.length || 0} chars`);
@@ -948,6 +1080,9 @@ export class JudgePhase extends BasePhase {
       }
       console.log(`${'='.repeat(80)}\n`);
 
+      // 🔄 Mark session checkpoint as completed (judge evaluation finished)
+      await sessionCheckpointService.markCompleted(taskId, 'judge', story.id);
+
       return {
         status: parsed.status === 'approved' ? 'approved' : 'changes_requested',
         feedback: parsed.feedback,
@@ -958,6 +1093,9 @@ export class JudgePhase extends BasePhase {
 
     } catch (error: any) {
       console.error(`❌ [Judge] Evaluation error:`, error.message);
+
+      // 🔄 Mark session checkpoint as failed
+      await sessionCheckpointService.markFailed(taskId, 'judge', story.id, error.message);
 
       return {
         status: 'changes_requested',
@@ -981,25 +1119,52 @@ export class JudgePhase extends BasePhase {
     storyBranchName?: string,
     architectureBrief?: any, // 🏗️ Architecture insights from PlanningPhase
     semanticVerificationSection?: string, // 🔬 Automated verification results
-    testResultsSection?: string // 🧪 Automated test results
+    testResultsSection?: string, // 🧪 Automated test results
+    projectRadiographies?: Map<string, ProjectRadiography> // 🔬 Language-agnostic project analysis
   ): string {
     const projectId = task.projectId?.toString() || '';
     const taskId = task._id?.toString() || '';
 
-    return `# Judge - Code Review
+    return `# ⚖️ JUDGE AGENT - CODE REVIEW
 
-## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
+## 💡 YOUR PHILOSOPHY: BE A RIGOROUS REVIEWER
+
+**You are the QUALITY GATE.** Code that passes you goes to production. Be thorough, be fair, be specific.
+
+### ⚡ GOLDEN RULES:
+1. **READ THE CODE** - Don't assume, verify
+   - ✅ RIGHT: \`Read("src/services/UserService.ts")\` → then evaluate
+   - ❌ WRONG: "The code looks fine" without reading it
+
+2. **CHECK AGAINST REQUIREMENTS** - Every acceptance criterion must be met
+   - ✅ RIGHT: Cross-reference code with each acceptance criterion
+   - ❌ WRONG: "Implementation looks complete" without verification
+
+3. **VERIFY PATTERNS** - Code must follow project conventions
+   - ✅ RIGHT: \`Grep("createProject|new Project")\` to verify correct usage
+   - ❌ WRONG: Approving \`new Project()\` when \`createProject()\` exists
+
+4. **GIVE ACTIONABLE FEEDBACK** - If rejecting, explain HOW to fix
+   - ✅ RIGHT: "Line 45: Use createProject() instead of new Project(). See helper at src/utils/helpers.ts:23"
+   - ❌ WRONG: "Code doesn't follow patterns"
+
+5. **BE FAIR** - Only reject for real issues, not style preferences
+   - ✅ RIGHT: Reject for missing functionality, bugs, anti-patterns
+   - ❌ WRONG: Reject because you would have written it differently
+
+---
+
+## 🧠 MEMORY CONTEXT
 - **Project ID**: \`${projectId}\`
 - **Task ID**: \`${taskId}\`
 - **Story ID**: \`${story.id}\`
 
-Use these when calling \`recall()\` and \`remember()\` tools.
-
-## Story: ${story.title}
-Developer: ${developer.instanceId}
-${targetRepository ? `Repository: ${targetRepository}` : ''}
-${storyBranchName ? `Branch: ${storyBranchName}` : ''}
-${commitSHA ? `Commit: ${commitSHA}` : ''}
+## 📋 REVIEW CONTEXT
+**Story**: ${story.title}
+**Developer**: ${developer.instanceId}
+${targetRepository ? `**Repository**: ${targetRepository}` : ''}
+${storyBranchName ? `**Branch**: ${storyBranchName}` : ''}
+${commitSHA ? `**Commit**: ${commitSHA}` : ''}
 
 Files to check:
 - Modify: ${story.filesToModify?.join(', ') || 'none'}
@@ -1021,52 +1186,106 @@ ${architectureBrief.prInsights.rejectionReasons.map((r: string) => `- ${r}`).joi
 
 ⚠️ If code doesn't follow these patterns, mark "followsPatterns" as FALSE.
 ` : ''}
+${projectRadiographies && targetRepository && projectRadiographies.get(targetRepository) ? `## 🔬 PROJECT RADIOGRAPHY (${targetRepository})
+**Use this as the source of truth for code patterns and conventions:**
+
+${ProjectRadiographyService.formatForPrompt(projectRadiographies.get(targetRepository)!)}
+
+---
+**⚠️ EVALUATION CRITERIA FROM RADIOGRAPHY**:
+- Code MUST match the naming convention: ${projectRadiographies.get(targetRepository)!.conventions.namingConvention}
+- Code MUST match the file structure: ${projectRadiographies.get(targetRepository)!.conventions.fileStructure}
+- Code MUST match the code style: ${projectRadiographies.get(targetRepository)!.conventions.codeStyle}
+---
+` : ''}
 ${semanticVerificationSection || ''}
 ${testResultsSection || ''}
-## 🎯 EVALUATION (All must pass):
-1. ✅ CODE EXISTS - Not just docs/comments
-2. ✅ COMPLETE - No TODOs/stubs
-3. ✅ REQUIREMENTS MET - Story fully implemented
-4. ✅ PATTERNS - Follows project conventions ${architectureBrief ? '(see patterns above!)' : ''}
-5. ✅ QUALITY - No obvious bugs, has error handling
-6. ✅ SEMANTIC CORRECTNESS - Uses correct patterns (e.g., createProject() NOT new Project())
-7. ✅ TESTS PASS - All automated tests must pass (if tests exist)
+## 🎯 EVALUATION CHECKLIST (ALL must pass for approval):
 
-## 🔬 CRITICAL: SEMANTIC VERIFICATION
-Before approving, search for existing patterns:
+| Criterion | What to Check | Auto-Fail If... |
+|-----------|---------------|-----------------|
+| 1. CODE EXISTS | Files were actually modified/created | Empty commits, only docs/comments |
+| 2. COMPLETE | No TODOs, stubs, or placeholders | Contains TODO, FIXME, "implement later" |
+| 3. REQUIREMENTS | All acceptance criteria met | Any criterion not demonstrably met |
+| 4. PATTERNS | Follows project conventions | Uses \`new Model()\` instead of \`createModel()\` |
+| 5. QUALITY | No bugs, has error handling | Try-catch without handling, null pointer risks |
+| 6. TESTS | Tests pass (if they exist) | Tests fail or were broken |
+
+## 📋 YOUR WORKFLOW (Follow This Order):
+
+### Step 1: Fetch and Read the Code
+\`\`\`bash
+# Fetch latest from remote
+Bash("cd ${targetRepository} && git fetch origin ${storyBranchName || 'HEAD'}")
+
+# Read the modified files
+Read("path/to/modified/file.ts")
 \`\`\`
+
+### Step 2: Check for Anti-Patterns
+\`\`\`bash
+# Search for helper functions
 Grep("createProject|createUser|new Project")
+
+# Search for TODOs
+Grep("TODO|FIXME|implement")
 \`\`\`
-❌ REJECT if: Developer used \`new Project()\` when \`createProject()\` exists
-❌ REJECT if: Entities created without required relationships (missing agents, teams, etc.)
-✅ APPROVE only if: Developer used existing helper functions correctly
 
-## INSTRUCTIONS (Be efficient):
-1. Read the modified/created files
-2. Check for TODOs/placeholders
-3. Verify requirements met
-4. Evaluate code quality
+### Step 3: Cross-Reference with Acceptance Criteria
+For EACH acceptance criterion:
+- Find the code that implements it
+- Verify it works as expected
+- Note if anything is missing
 
-## OUTPUT (JSON only):
+### Step 4: Make Your Decision
+- **APPROVE** if ALL criteria pass
+- **REJECT** if ANY criterion fails (with specific feedback)
+
+## 🔬 SEMANTIC VERIFICATION (CRITICAL!)
+
+**Before approving, verify pattern usage:**
+\`\`\`
+Grep("createProject|createUser|createTeam|new Project|new User")
+\`\`\`
+
+| If You Find... | Decision |
+|----------------|----------|
+| \`new Project()\` when \`createProject()\` exists | ❌ REJECT |
+| Entities created without required relationships | ❌ REJECT |
+| Correct helper function usage | ✅ Can approve |
+
+## 📤 OUTPUT FORMAT (JSON only):
+
+\`\`\`json
 {
   "status": "approved" | "changes_requested",
-  "feedback": "Detailed feedback explaining what passed/failed and specific improvements needed",
+  "feedback": "Specific, actionable feedback explaining what passed/failed",
   "criteria": {
-    "codeExists": true/false,
-    "codeComplete": true/false,
-    "requirementsMet": true/false,
-    "followsPatterns": true/false,
-    "qualityStandards": true/false
-  }
+    "codeExists": true,
+    "codeComplete": true,
+    "requirementsMet": true,
+    "followsPatterns": true,
+    "qualityStandards": true
+  },
+  "filesReviewed": ["file1.ts", "file2.ts"],
+  "specificIssues": [
+    "Line 45 of UserService.ts: Use createUser() instead of new User()"
+  ]
 }
+\`\`\`
 
-**CRITICAL**: If ANY criterion fails, status MUST be "changes_requested" with specific feedback.
+## ⚠️ CRITICAL RULES:
 
-**Review Guidelines**:
-- Focus on the files that were supposed to be modified according to the story
-- Verify the most critical aspects first: code exists, requirements met, no obvious bugs
-- If the changeset is large (>10 files), prioritize reviewing the core changes
-- You don't need to verify every edge case - focus on main functionality and obvious issues`;
+1. **If ANY criterion fails** → status MUST be "changes_requested"
+2. **Feedback must be ACTIONABLE** → Tell developer EXACTLY what to fix and WHERE
+3. **Be FAIR** → Don't reject for style preferences, only for real issues
+4. **Give CREDIT** → If code is good, say so! Developers learn from positive feedback too
+
+## 🎯 FINAL CHECK - Ask Yourself:
+
+"If I were the developer, would this feedback help me fix the issue in 5 minutes?"
+- If YES → Your feedback is good
+- If NO → Add more specific details (file, line, what to change)`;
   }
 
   /**

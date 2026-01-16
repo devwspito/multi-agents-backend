@@ -109,13 +109,16 @@ export class ProjectManagerPhase extends BasePhase {
 
     try {
       // Build repositories information with TYPE for multi-repo orchestration
+      const effectiveWorkspace = context.workspacePath || process.cwd();
       const repoInfo = context.repositories.length > 0
         ? `\n## Available Repositories:\n${context.repositories.map((repo, i) => {
             const typeEmoji = repo.type === 'backend' ? '🔧' : repo.type === 'frontend' ? '🎨' : '📦';
+            const localPath = `${effectiveWorkspace}/${repo.name}`;
             return `${i + 1}. **${repo.name}** (${typeEmoji} ${repo.type.toUpperCase()})
    - GitHub: ${repo.githubRepoName}
    - Branch: ${repo.githubBranch}
-   - Execution Order: ${repo.executionOrder || 'not set'}`;
+   - Execution Order: ${repo.executionOrder || 'not set'}
+   - **LOCAL PATH**: \`${localPath}\` ← USE THIS for Glob/Read/Grep!`;
           }).join('\n')}\n
 ## 🔥 CRITICAL: Multi-Repo Epic Assignment Rules
 

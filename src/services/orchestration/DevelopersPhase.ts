@@ -4,9 +4,14 @@ import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
+import { AgentActivityService } from '../AgentActivityService';
+import { NotificationService } from '../NotificationService';
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
+import { ProjectRadiography } from '../ProjectRadiographyService';
+import { sessionCheckpointService } from '../SessionCheckpointService';
+import { granularMemoryService } from '../GranularMemoryService';
 
 /**
  * Developers Phase
@@ -120,6 +125,12 @@ export class DevelopersPhase extends BasePhase {
 
   /**
    * Skip if developers already completed all stories (ONLY for recovery, NOT for continuations)
+   *
+   * 🔥 SMART RECOVERY: Uses EventStore as source of truth + DB as fallback
+   * This ensures that if server restarts mid-development:
+   * - Stories 1-8 completed → Skip them (already done)
+   * - Story 9 in progress → Continue from story 9
+   * - NOT re-execute all 10 developers!
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -140,7 +151,70 @@ export class DevelopersPhase extends BasePhase {
       return false; // DO NOT SKIP
     }
 
-    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
+    // 🔥 SMART RECOVERY: Check EventStore for accurate story completion status
+    console.log(`\n🔍 [Developers.shouldSkip] Checking for recovery scenario...`);
+
+    // 🔥 CRITICAL FIX: In multi-team mode, only check stories for THIS team's epic
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    if (multiTeamMode) {
+      console.log(`   🎯 Multi-team mode: Checking only epic ${teamEpic.id}`);
+    }
+
+    try {
+      const { eventStore } = await import('../EventStore');
+      const state = await eventStore.getCurrentState(context.task._id as any);
+
+      // 🔥 CRITICAL FIX: Filter stories by epicId in multi-team mode
+      // Without this filter, Team 2-N would see Team 1's completed stories and incorrectly skip!
+      let relevantStories = state.stories || [];
+      if (multiTeamMode && teamEpic) {
+        relevantStories = relevantStories.filter((s: any) => s.epicId === teamEpic.id);
+        console.log(`   🎯 Filtered to epic ${teamEpic.id}: ${relevantStories.length} stories (was ${state.stories?.length || 0} total)`);
+      }
+
+      // Use getCurrentState which gives us the aggregated stories with status
+      const totalStories = relevantStories.length;
+      const completedStories = relevantStories.filter((s: any) =>
+        s.status === 'completed' || s.mergedToEpic === true
+      ).length;
+
+      console.log(`   📊 EventStore status${multiTeamMode ? ` (epic: ${teamEpic.id})` : ''}:`);
+      console.log(`      Total stories: ${totalStories}`);
+      console.log(`      Completed: ${completedStories}`);
+
+      if (totalStories > 0 && completedStories === totalStories) {
+        const epicInfo = multiTeamMode ? ` for epic ${teamEpic.id}` : '';
+        console.log(`\n✅ [SKIP] ALL ${totalStories} stories completed${epicInfo} (from EventStore)`);
+
+        // Restore team from context or DB
+        const team = context.task.orchestration.team || [];
+        context.setData('developmentTeam', team);
+        context.setData('developmentComplete', true);
+
+        return true;
+      }
+
+      // 🔥 CRITICAL: In multi-team mode, if NO stories exist for this epic yet, DON'T skip!
+      // This happens when TechLead hasn't created stories for this epic yet
+      if (multiTeamMode && totalStories === 0) {
+        console.log(`   ⚠️ No stories found for epic ${teamEpic.id} - TechLead needs to create them`);
+        console.log(`   → Will NOT skip - need to execute TechLead first or create stories`);
+        return false;
+      }
+
+      if (completedStories > 0 && completedStories < totalStories) {
+        console.log(`\n🔄 [PARTIAL RECOVERY] ${completedStories}/${totalStories} stories completed`);
+        console.log(`   → Will resume from incomplete stories (NOT re-execute all)`);
+        // Don't skip - but individual stories will be skipped in executePhase
+        return false;
+      }
+    } catch (error: any) {
+      console.log(`   ⚠️ EventStore check failed: ${error.message}`);
+    }
+
+    // 🛠️ FALLBACK RECOVERY: Check DB if EventStore failed
     const team = context.task.orchestration.team || [];
     // Get stories from Project Manager (not epics from Tech Lead)
     const stories = context.task.orchestration.projectManager?.stories || [];
@@ -148,7 +222,11 @@ export class DevelopersPhase extends BasePhase {
 
     // If team exists and has members, AND all epics/stories are completed, skip
     if (team.length > 0 && epics.length > 0) {
-      const allEpicsCompleted = epics.every((epic: any) => epic.status === 'completed');
+      const completedCount = epics.filter((epic: any) => epic.status === 'completed').length;
+      const allEpicsCompleted = completedCount === epics.length;
+
+      console.log(`   📊 DB fallback status:`);
+      console.log(`      Total: ${epics.length}, Completed: ${completedCount}`);
 
       if (allEpicsCompleted) {
         console.log(`[SKIP] Developers already completed - all ${epics.length} stories done (recovery mode)`);
@@ -160,6 +238,69 @@ export class DevelopersPhase extends BasePhase {
 
         return true;
       }
+
+      if (completedCount > 0) {
+        console.log(`\n🔄 [PARTIAL RECOVERY] ${completedCount}/${epics.length} stories completed (from DB)`);
+        console.log(`   → Will resume from incomplete stories`);
+      }
+    }
+
+    // 🧠 GRANULAR MEMORY: Third fallback - check memory for completed progress
+    // 🔥 CRITICAL FIX: In multi-team mode, filter memories by epicId!
+    try {
+      const taskId = (context.task._id as any).toString();
+      const projectId = context.task.projectId?.toString();
+      if (projectId) {
+        const phaseMemories = await granularMemoryService.getPhaseMemories({
+          projectId,
+          taskId,
+          phaseType: 'developer',
+          limit: 100,
+        });
+
+        // 🔥 CRITICAL: In multi-team mode, only check memories for THIS epic
+        const relevantMemories = multiTeamMode && teamEpic
+          ? phaseMemories.filter((m: any) => m.epicId === teamEpic.id || !m.epicId)
+          : phaseMemories;
+
+        if (multiTeamMode) {
+          console.log(`   🎯 Filtered memories to epic ${teamEpic?.id}: ${relevantMemories.length} (was ${phaseMemories.length})`);
+        }
+
+        // Check for phase completion marker FOR THIS EPIC
+        const completionMarker = relevantMemories.find((m: any) =>
+          m.type === 'progress' &&
+          m.title?.includes('COMPLETED') &&
+          m.phaseType === 'developer' &&
+          !m.storyId && // Phase-level, not story-level
+          (!multiTeamMode || m.epicId === teamEpic?.id) // In multi-team, must match epic
+        );
+
+        if (completionMarker) {
+          const epicInfo = multiTeamMode ? ` for epic ${teamEpic?.id}` : '';
+          console.log(`\n🧠 [MEMORY RECOVERY] Found phase completion marker${epicInfo} in granular memory`);
+          console.log(`   Marker: ${completionMarker.title}`);
+          console.log(`   → Phase already completed, skipping`);
+
+          context.setData('developmentTeam', team);
+          context.setData('developmentComplete', true);
+          return true;
+        }
+
+        // Count completed stories from memory FOR THIS EPIC
+        const completedInMemory = relevantMemories.filter((m: any) =>
+          m.type === 'progress' &&
+          m.title?.startsWith('COMPLETED:') &&
+          m.storyId
+        );
+
+        if (completedInMemory.length > 0) {
+          const epicInfo = multiTeamMode ? ` for epic ${teamEpic?.id}` : '';
+          console.log(`   🧠 Memory shows ${completedInMemory.length} stories completed${epicInfo}`);
+        }
+      }
+    } catch (memError: any) {
+      console.log(`   ⚠️ Granular memory check failed: ${memError.message}`);
     }
 
     return false;
@@ -273,6 +414,15 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   Team size: ${composition.developers} developer(s)`);
       console.log(`   Story assignments: ${assignments.length}`);
     }
+
+    // 🎯 ACTIVITY: Emit Developers start for Activity tab
+    const developerLabel = multiTeamMode ? `Developer (Epic: ${teamEpic?.id})` : 'Developer';
+    AgentActivityService.emitMessage(
+      taskId,
+      developerLabel,
+      `👨‍💻 Starting development${multiTeamMode ? ` for epic: ${teamEpic?.title}` : ''} with ${composition.developers} developer(s)...`
+    );
+    NotificationService.emitAgentStarted(taskId, developerLabel);
 
     try {
       // 🔥 EVENT SOURCING: Rebuild state from events
@@ -601,6 +751,26 @@ export class DevelopersPhase extends BasePhase {
         console.log(`   Stories will execute one at a time to avoid conflicts`);
         console.log(`   Each story will include changes from all previous stories`);
 
+        // 🧠 GRANULAR MEMORY: Get completed stories from memory as backup
+        // This ensures we don't re-execute stories even if EventStore state is stale
+        let memoryCompletedStories: string[] = [];
+        const projectId = task.projectId?.toString();
+        if (projectId) {
+          try {
+            memoryCompletedStories = await granularMemoryService.getCompletedStories({
+              projectId,
+              taskId,
+              epicId: epic.id,
+            });
+            if (memoryCompletedStories.length > 0) {
+              console.log(`🧠 [Memory] Found ${memoryCompletedStories.length} completed stories in granular memory`);
+              console.log(`   IDs: ${memoryCompletedStories.join(', ')}`);
+            }
+          } catch (memError: any) {
+            console.warn(`⚠️ [Memory] Failed to get completed stories: ${memError.message}`);
+          }
+        }
+
         let storyNumber = 0;
         const totalStories = epicDevelopers.reduce((sum, dev) => sum + (dev.assignedStories?.length || 0), 0);
 
@@ -615,6 +785,26 @@ export class DevelopersPhase extends BasePhase {
               continue;
             }
 
+            // 🔄 GRANULAR RECOVERY: Skip stories that are already completed
+            // Checks THREE sources: EventStore status, mergedToEpic flag, AND granular memory
+            // This ensures we don't re-execute even if one source is stale
+            const storyAny = story as any;
+            const isCompletedInEventStore = story.status === 'completed';
+            const isMergedToEpic = storyAny.mergedToEpic === true;
+            const isCompletedInMemory = memoryCompletedStories.includes(storyId);
+
+            if (isCompletedInEventStore || isMergedToEpic || isCompletedInMemory) {
+              console.log(`\n${'='.repeat(80)}`);
+              console.log(`⏭️ [STORY RECOVERY] Skipping already completed story: ${story.title}`);
+              console.log(`   Story ID: ${storyId}`);
+              console.log(`   Completed sources:`);
+              if (isCompletedInEventStore) console.log(`     ✅ EventStore status: completed`);
+              if (isMergedToEpic) console.log(`     ✅ Merged to epic branch`);
+              if (isCompletedInMemory) console.log(`     ✅ Granular memory: completed`);
+              console.log(`${'='.repeat(80)}`);
+              continue;
+            }
+
             console.log(`\n${'='.repeat(80)}`);
             console.log(`🚀 [STORY ${storyNumber}/${totalStories}] Starting pipeline: ${story.title}`);
             console.log(`   Story ID: ${storyId}`);
@@ -622,6 +812,21 @@ export class DevelopersPhase extends BasePhase {
             console.log(`   Epic: ${epic.name}`);
             console.log(`   Branch strategy: Story will start from epic branch (includes ${storyNumber - 1} previous stories)`);
             console.log(`${'='.repeat(80)}`);
+
+            // 🔥 EVENT SOURCING: Emit StoryStarted event for recovery tracking
+            const { eventStore } = await import('../EventStore');
+            await eventStore.append({
+              taskId: task._id as any,
+              eventType: 'StoryStarted',
+              agentName: 'developer',
+              payload: {
+                storyId: story.id,
+                epicId: epic.id,
+                title: story.title,
+                developer: member.instanceId,
+              },
+            });
+            console.log(`📝 [EventStore] Emitted StoryStarted for: ${story.title}`);
 
             // 🔥 RETRY LOGIC: Execute story pipeline with retry for transient errors
             const { RetryService } = await import('./RetryService');
@@ -724,6 +929,39 @@ export class DevelopersPhase extends BasePhase {
       });
 
       console.log(`📝 [Developers] Emitted DevelopersCompleted event (success)`);
+
+      // 🧠 GRANULAR MEMORY: Store phase-level completion marker
+      const projectId = task.projectId?.toString();
+      if (projectId) {
+        try {
+          const storiesImplemented = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
+          await granularMemoryService.storeProgress({
+            projectId,
+            taskId,
+            phaseType: 'developer',
+            agentType: 'developer',
+            status: 'completed',
+            details: `Development phase completed: ${storiesImplemented} stories implemented by ${team.length} developer(s) across ${orderedEpics.length} epic(s)`,
+          });
+          console.log(`🧠 [Memory] Stored phase completion marker`);
+        } catch (memError: any) {
+          console.warn(`⚠️ [Memory] Failed to store phase completion: ${memError.message}`);
+        }
+      }
+
+      // 🎯 ACTIVITY: Emit Developers completion for Activity tab
+      const storiesCount = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
+      AgentActivityService.emitToolUse(taskId, developerLabel, 'Development', {
+        developers: team.length,
+        stories: storiesCount,
+        epics: orderedEpics.length,
+      });
+      AgentActivityService.emitMessage(
+        taskId,
+        developerLabel,
+        `✅ Development complete: ${storiesCount} stories implemented by ${team.length} developer(s)`
+      );
+      NotificationService.emitAgentCompleted(taskId, developerLabel, `${storiesCount} stories implemented`);
 
       // Log cost summary
       console.log(`\n💰 Development Phase Cost Summary:`);
@@ -976,6 +1214,15 @@ export class DevelopersPhase extends BasePhase {
         console.log(`🏗️ [DevelopersPhase] Architecture brief available - developer will follow project patterns`);
       }
 
+      // 🔬 Get projectRadiographies from context (language-agnostic analysis from PlanningPhase)
+      const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
+      if (projectRadiographies) {
+        const targetRadiography = projectRadiographies.get(epic.targetRepository);
+        if (targetRadiography) {
+          console.log(`🔬 [DevelopersPhase] Project radiography available for ${epic.targetRepository}: ${targetRadiography.language.primary}/${targetRadiography.framework.name}`);
+        }
+      }
+
       // 🔧 Get environmentCommands from context (test, lint, typecheck, etc. from TechLead)
       const environmentCommands = context.getData<any>('environmentCommands');
       if (environmentCommands) {
@@ -1036,6 +1283,23 @@ export class DevelopersPhase extends BasePhase {
         console.log(`🔄 [CHECKPOINT] Created: ${checkpoint.id} (${checkpoint.commitHash.substring(0, 7)})`);
       }
 
+      // 🔄 SESSION RESUME: Check for existing session checkpoint for this story
+      const existingSessionCheckpoint = await sessionCheckpointService.loadCheckpoint(
+        taskId,
+        'developer',
+        story.id // Use storyId as entityId for per-story resume
+      );
+      const resumeOptions = sessionCheckpointService.buildResumeOptions(existingSessionCheckpoint);
+
+      if (resumeOptions?.isResume) {
+        console.log(`\n🔄🔄🔄 [Developer ${developer.instanceId}] RESUMING story "${story.title}" from previous session...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 Developer ${developer.instanceId}: Resuming story "${story.title}" from checkpoint`
+        );
+      }
+
       const developerResult = await this.executeDeveloperFn(
         task,
         developer,
@@ -1050,8 +1314,26 @@ export class DevelopersPhase extends BasePhase {
         undefined, // forceTopModel
         devAuth, // 🔐 Developer authentication for testing endpoints
         architectureBrief, // 🏗️ Architecture patterns from PlanningPhase
-        environmentCommands // 🔧 Environment commands from TechLead (dynamic verification)
+        environmentCommands, // 🔧 Environment commands from TechLead (dynamic verification)
+        projectRadiographies, // 🔬 Language-agnostic project analysis from PlanningPhase
+        resumeOptions // 🔄 Session resume options
       );
+
+      // 🔄 Save session checkpoint after developer starts (for mid-execution recovery)
+      if (developerResult?.sdkSessionId) {
+        await sessionCheckpointService.saveCheckpoint(
+          taskId,
+          'developer',
+          developerResult.sdkSessionId,
+          story.id, // Use storyId as entityId
+          developerResult.lastMessageUuid,
+          {
+            developerId: developer.instanceId,
+            storyTitle: story.title,
+            epicId: epic.id,
+          }
+        );
+      }
 
       // Track developer cost and tokens
       const developerCost = developerResult?.cost || 0;
@@ -1634,6 +1916,9 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('storyBranchName', updatedStory.branchName); // 🔥 CRITICAL: LITERAL branch name from Developer
       judgeContext.setData('isolatedWorkspacePath', effectiveWorkspacePath); // 🔥 Pass isolated path explicitly
 
+      // ⚖️ JUDGE: AI validates the actual code changes
+      console.log(`\n⚖️ [STEP 2/3] Running Judge validation...`);
+
       const { JudgePhase } = await import('./JudgePhase');
 
       // Use executeAgentFn for Judge (NOT executeDeveloperFn)
@@ -1724,6 +2009,105 @@ export class DevelopersPhase extends BasePhase {
         }
 
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
+
+        // 🔄 GRANULAR RECOVERY: Persist story completion to database
+        // This allows recovery to skip already-completed stories on restart
+        try {
+          const taskId = (task._id as any).toString();
+          const { Task } = await import('../../models/Task');
+
+          // Update story status in EventStore (in-memory)
+          story.status = 'completed';
+          (story as any).mergedToEpic = true;
+          (story as any).completedAt = new Date();
+
+          // Persist to MongoDB - update the specific story in projectManager.stories array
+          await Task.updateOne(
+            { _id: task._id, 'orchestration.projectManager.stories.id': story.id },
+            {
+              $set: {
+                'orchestration.projectManager.stories.$.status': 'completed',
+                'orchestration.projectManager.stories.$.mergedToEpic': true,
+                'orchestration.projectManager.stories.$.completedAt': new Date(),
+              }
+            }
+          );
+
+          console.log(`💾 [RECOVERY] Story "${story.title}" status persisted to database`);
+
+          // 🔥 EVENT SOURCING: Emit StoryCompleted event for recovery tracking
+          // This is CRITICAL - EventStore.buildState() uses this to mark stories as completed
+          const { eventStore } = await import('../EventStore');
+          await eventStore.append({
+            taskId: task._id as any,
+            eventType: 'StoryCompleted',
+            agentName: 'developer',
+            payload: {
+              storyId: story.id,
+              epicId: (story as any).epicId,
+              title: story.title,
+              completedBy: (story as any).assignedTo,
+            },
+          });
+          console.log(`📝 [EventStore] Emitted StoryCompleted for: ${story.title}`);
+
+          // 🔄 Mark session checkpoint as completed (no resume needed for this story)
+          await sessionCheckpointService.markCompleted(taskId, 'developer', story.id);
+
+          // 🧠 GRANULAR MEMORY: Store story completion and what was done
+          const projectId = task.projectId?.toString();
+          if (projectId) {
+            try {
+              // Store story completion as progress
+              await granularMemoryService.storeProgress({
+                projectId,
+                taskId,
+                phaseType: 'developer',
+                agentType: 'developer',
+                epicId: (story as any).epicId,
+                storyId: story.id,
+                status: 'completed',
+                details: `Story "${story.title}" completed by ${(story as any).assignedTo || 'developer'}`,
+              });
+
+              // Store file changes if available
+              if ((story as any).filesToModify?.length || (story as any).filesToCreate?.length) {
+                const allFiles = [
+                  ...((story as any).filesToModify || []),
+                  ...((story as any).filesToCreate || [])
+                ];
+                for (const filePath of allFiles.slice(0, 10)) { // Limit to 10 files
+                  await granularMemoryService.storeFileChange({
+                    projectId,
+                    taskId,
+                    phaseType: 'developer',
+                    agentType: 'developer',
+                    epicId: (story as any).epicId,
+                    storyId: story.id,
+                    filePath,
+                    operation: (story as any).filesToCreate?.includes(filePath) ? 'create' : 'modify',
+                    summary: `Changed for story: ${story.title}`,
+                  });
+                }
+              }
+
+              console.log(`🧠 [Memory] Stored completion for story: ${story.title}`);
+            } catch (memError: any) {
+              console.warn(`⚠️ [Memory] Failed to store story completion: ${memError.message}`);
+            }
+          }
+
+          // Emit activity for visibility
+          const { AgentActivityService } = await import('../AgentActivityService');
+          AgentActivityService.emitMessage(
+            taskId,
+            'System',
+            `💾 Story checkpoint saved: "${story.title}" marked as completed`
+          );
+        } catch (persistError: any) {
+          console.error(`⚠️ [RECOVERY] Failed to persist story status: ${persistError.message}`);
+          // Non-critical - don't fail the pipeline, just log warning
+        }
       } else {
         // Judge REJECTED - keep branch for investigation
         console.error(`❌ [STEP ${iteration}/${maxRetries}] Judge REJECTED story: ${story.title}`);
@@ -1750,6 +2134,66 @@ export class DevelopersPhase extends BasePhase {
           'error',
           `❌ Story rejected by Judge: ${story.title}\nBranch: ${updatedStory.branchName}\nFeedback: ${feedback}`
         );
+
+        // 🔄 GRANULAR RECOVERY: Persist rejected status to database
+        try {
+          const { Task } = await import('../../models/Task');
+          story.status = 'failed';
+          (story as any).error = feedback;
+
+          await Task.updateOne(
+            { _id: task._id, 'orchestration.projectManager.stories.id': story.id },
+            {
+              $set: {
+                'orchestration.projectManager.stories.$.status': 'failed',
+                'orchestration.projectManager.stories.$.error': feedback,
+                'orchestration.projectManager.stories.$.failedAt': new Date(),
+              }
+            }
+          );
+          console.log(`💾 [RECOVERY] Story "${story.title}" marked as failed in database`);
+
+          // 🔥 EVENT SOURCING: Emit StoryFailed event for recovery tracking
+          const { eventStore } = await import('../EventStore');
+          await eventStore.append({
+            taskId: task._id as any,
+            eventType: 'StoryFailed',
+            agentName: 'developer',
+            payload: {
+              storyId: story.id,
+              epicId: (story as any).epicId,
+              title: story.title,
+              error: feedback,
+            },
+          });
+          console.log(`📝 [EventStore] Emitted StoryFailed for: ${story.title}`);
+
+          // 🔄 Mark session checkpoint as failed (keep checkpoint for potential retry)
+          await sessionCheckpointService.markFailed(taskId, 'developer', story.id, feedback);
+
+          // 🧠 GRANULAR MEMORY: Store error for future learning
+          // This helps future retries understand what went wrong
+          const projectId = task.projectId?.toString();
+          if (projectId) {
+            try {
+              await granularMemoryService.storeError({
+                projectId,
+                taskId,
+                phaseType: 'developer',
+                agentType: 'judge',
+                epicId: (story as any).epicId,
+                storyId: story.id,
+                errorMessage: `Judge rejected story "${story.title}": ${feedback}`,
+                avoidanceRule: `When implementing "${story.title}", avoid: ${feedback.substring(0, 200)}`,
+              });
+              console.log(`🧠 [Memory] Stored error for story: ${story.title}`);
+            } catch (memError: any) {
+              console.warn(`⚠️ [Memory] Failed to store error: ${memError.message}`);
+            }
+          }
+        } catch (persistError: any) {
+          console.error(`⚠️ [RECOVERY] Failed to persist story failure status: ${persistError.message}`);
+        }
       }
 
       // 🔥 COST TRACKING: Include conflict resolution cost from merge operation

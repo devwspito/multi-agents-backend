@@ -339,10 +339,10 @@ class AgentPlatformApp {
           socketId: socket.id,
         });
 
-        // Re-emitir logs históricos acumulados (para sobrevivir refresh)
+        // Re-emitir logs y actividades históricos (para sobrevivir refresh)
         try {
           const { Task } = await import('./models/Task');
-          const task = await Task.findById(taskId).select('logs orchestration status').lean();
+          const task = await Task.findById(taskId).select('logs activities orchestration status inputTokens outputTokens totalCost').lean();
 
           if (task) {
             // 1. Emitir logs históricos uno por uno
@@ -358,37 +358,91 @@ class AgentPlatformApp {
               });
             }
 
-            // 2. Si hay aprobación pendiente, re-emitir evento
-            // Detectamos aprobación pendiente cuando:
-            // - Task está in_progress
-            // - El último log menciona "Waiting for human approval"
-            if (task.status === 'in_progress' && task.logs && task.logs.length > 0) {
-              const lastLog = task.logs[task.logs.length - 1];
-              if (lastLog.message && lastLog.message.includes('Waiting for human approval')) {
-                // Extraer el nombre de la fase del mensaje (ej: "Product Manager")
-                const match = lastLog.message.match(/Waiting for human approval of: (.+)$/);
-                if (match) {
-                  const phaseName = match[1].trim();
-                  const phase = phaseName.replace(/\s+/g, ''); // "Product Manager" -> "ProductManager"
+            // 2. 🎯 Emitir actividades históricas para Activity tab (OpenCode-style)
+            if (task.activities && task.activities.length > 0) {
+              console.log(`📡 Re-emitting ${task.activities.length} historical activities to socket ${socket.id}`);
+              task.activities.forEach((activity: any) => {
+                socket.emit('agent:activity', {
+                  taskId: taskId,
+                  agentName: activity.agentName,
+                  type: activity.type,
+                  timestamp: activity.timestamp,
+                  file: activity.file,
+                  content: activity.content,
+                  command: activity.command,
+                  output: activity.output,
+                  toolName: activity.toolName,
+                  toolInput: activity.toolInput,
+                  diff: activity.diff,
+                });
+              });
+            }
 
-                  console.log(`⏸️  Re-emitting approval_required for ${phaseName} to socket ${socket.id}`);
-                  socket.emit('notification', {
-                    type: 'approval_required',
-                    data: {
-                      phase: phase,
-                      phaseName: phaseName,
-                      agentName: phase,
-                      approvalType: 'planning',
-                      timestamp: new Date(),
-                    },
-                  });
-                }
-              }
+            // 3. Si hay aprobación pendiente, re-emitir evento usando datos persistidos
+            const pendingApproval = (task as any).orchestration?.pendingApproval;
+            if (task.status === 'in_progress' && pendingApproval && pendingApproval.phase) {
+              console.log(`⏸️  Re-emitting approval_required from persisted data:`, {
+                phase: pendingApproval.phase,
+                phaseName: pendingApproval.phaseName,
+              });
+              socket.emit('notification', {
+                type: 'approval_required',
+                data: {
+                  phase: pendingApproval.phase, // Already kebab-case
+                  phaseName: pendingApproval.phaseName,
+                  agentName: pendingApproval.phaseName,
+                  approvalType: 'planning',
+                  agentOutput: pendingApproval.agentOutput || {},
+                  retryCount: pendingApproval.retryCount || 0,
+                  timestamp: pendingApproval.timestamp || new Date(),
+                },
+              });
             }
           }
         } catch (error) {
           console.error(`❌ Error re-emitting historical data for task ${taskId}:`, error);
         }
+      });
+
+      // Event: join:task (usado por useAgentActivity hook - formato con colon)
+      socket.on('join:task', async (data: { taskId: string }) => {
+        const taskId = data.taskId;
+        console.log(`📌 Socket ${socket.id} joining task room via join:task: ${taskId}`);
+        socket.join(`task:${taskId}`);
+
+        // Confirmar que se unió al room
+        socket.emit('task-joined', {
+          success: true,
+          taskId,
+          socketId: socket.id,
+        });
+
+        // Re-emitir logs históricos (igual que join-task)
+        try {
+          const { Task } = await import('./models/Task');
+          const task = await Task.findById(taskId).select('logs').lean();
+
+          if (task && task.logs && task.logs.length > 0) {
+            console.log(`📜 Re-emitting ${task.logs.length} historical logs to socket ${socket.id}`);
+            task.logs.forEach((log: any) => {
+              socket.emit('console:log', {
+                taskId: taskId,
+                level: log.level,
+                message: log.message,
+                timestamp: log.timestamp,
+              });
+            });
+          }
+        } catch (error) {
+          console.error(`❌ Error re-emitting historical data:`, error);
+        }
+      });
+
+      // Event: leave:task (usado por useAgentActivity hook)
+      socket.on('leave:task', (data: { taskId: string }) => {
+        const taskId = data.taskId;
+        console.log(`📌 Socket ${socket.id} leaving task room: ${taskId}`);
+        socket.leave(`task:${taskId}`);
       });
 
       // Event: identify (compatibilidad con frontend)

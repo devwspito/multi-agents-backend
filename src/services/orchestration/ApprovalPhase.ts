@@ -38,6 +38,9 @@ export class ApprovalPhase extends BasePhase {
 
   /**
    * Skip if auto-approval is enabled for previous phase
+   *
+   * 🔥 IMPORTANT: If there's a pendingApproval in DB (recovery scenario),
+   * we should NOT skip - we need to re-emit and wait for user approval.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
@@ -49,10 +52,26 @@ export class ApprovalPhase extends BasePhase {
       context.task = freshTask;
     }
 
+    const taskId = (context.task._id as any).toString();
+
+    // 🔥 FIX: Check for existing pendingApproval in DB (recovery scenario)
+    // If there's a pending approval, we MUST NOT skip - re-emit and wait
+    const pendingApproval = context.task.orchestration?.pendingApproval;
+    if (pendingApproval && pendingApproval.phase) {
+      console.log(`🔄 [Approval] Found existing pendingApproval in DB: ${pendingApproval.phase}`);
+      console.log(`🔄 [Approval] This is likely a recovery scenario - will re-emit approval_required`);
+
+      // Store in context so executePhase knows to use this
+      context.setData('currentPhaseName', this.denormalizePhase(pendingApproval.phase));
+      context.setData('recoveredPendingApproval', pendingApproval);
+
+      return false; // Do NOT skip - we need to wait for approval
+    }
+
     // Get previous phase from context
     const previousPhase = context.getData<string>('currentPhaseName');
     if (!previousPhase) {
-      console.log(`[SKIP] No previous phase specified, skipping approval`);
+      console.log(`[SKIP] No previous phase specified and no pendingApproval, skipping approval`);
       return true;
     }
 
@@ -66,7 +85,6 @@ export class ApprovalPhase extends BasePhase {
     if (autoApprovalEnabled && autoApprovalPhases.includes(normalizedPhaseName as any)) {
       console.log(`✅ [SKIP] Auto-approval enabled for phase: ${previousPhase} (normalized: ${normalizedPhaseName})`);
 
-      const taskId = (context.task._id as any).toString();
       NotificationService.emitConsoleLog(taskId, 'info', `✅ Auto-approval enabled for ${previousPhase} - continuing without human approval`);
 
       // Log auto-approval in history
@@ -91,6 +109,25 @@ export class ApprovalPhase extends BasePhase {
     return false; // Require human approval
   }
 
+  /**
+   * Convert kebab-case back to PascalCase
+   */
+  private denormalizePhase(normalizedPhase: string): string {
+    const reverseMapping: Record<string, string> = {
+      'planning': 'Planning',
+      'approval': 'Approval',
+      'team-orchestration': 'TeamOrchestration',
+      'verification': 'Verification',
+      'auto-merge': 'AutoMerge',
+      'tech-lead': 'TechLead',
+      'development': 'Developers',
+      'judge': 'Judge',
+      'fixer': 'Fixer',
+    };
+
+    return reverseMapping[normalizedPhase] || normalizedPhase;
+  }
+
   protected async executePhase(
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
@@ -98,24 +135,47 @@ export class ApprovalPhase extends BasePhase {
     const taskId = (task._id as any).toString();
     const previousPhase = context.getData<string>('currentPhaseName');
 
-    if (!previousPhase) {
+    // 🔥 FIX: Check if we recovered a pending approval from DB (recovery scenario)
+    const recoveredPendingApproval = context.getData<any>('recoveredPendingApproval');
+
+    if (!previousPhase && !recoveredPendingApproval) {
       return {
         success: false,
         error: 'No previous phase specified for approval',
       };
     }
 
-    const phaseName = this.getPhaseName(previousPhase);
-    const normalizedPhase = this.normalizePhase(previousPhase); // product-manager
+    // Use recovered data or compute from context
+    const normalizedPhase = recoveredPendingApproval?.phase || this.normalizePhase(previousPhase!);
+    const phaseName = recoveredPendingApproval?.phaseName || this.getPhaseName(previousPhase!);
+    const agentOutput = recoveredPendingApproval?.agentOutput || context.getPhaseResult(previousPhase!)?.data || {};
 
     // Debug logging to understand the mapping
-    console.log(`📋 [Approval] Phase mapping: "${previousPhase}" → "${normalizedPhase}" (human: ${phaseName})`);
+    const isRecovery = !!recoveredPendingApproval;
+    console.log(`📋 [Approval] Phase: "${normalizedPhase}" (human: ${phaseName})${isRecovery ? ' [RECOVERED]' : ''}`);
 
-    console.log(`⏸️  [Approval] Waiting for human approval of: ${phaseName}`);
-    NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Waiting for human approval of: ${phaseName}`);
+    console.log(`⏸️  [Approval] Waiting for human approval of: ${phaseName}${isRecovery ? ' (re-emitting after recovery)' : ''}`);
+    NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Waiting for human approval of: ${phaseName}${isRecovery ? ' (recovered)' : ''}`);
 
     // Marcar que hay aprobación pendiente para re-emit en join-task
     context.setData('approvalPending', true);
+
+    // 📌 Persist pending approval data for re-emit on socket reconnect
+    // Only persist if not already in DB (fresh execution, not recovery)
+    if (!isRecovery) {
+      const Task = require('../../models/Task').Task;
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
+          'orchestration.pendingApproval': {
+            phase: normalizedPhase,
+            phaseName: phaseName,
+            agentOutput: agentOutput,
+            retryCount: 0,
+            timestamp: new Date(),
+          },
+        },
+      });
+    }
 
     // Emit WebSocket notification to frontend
     NotificationService.emitApprovalRequired(taskId, {
@@ -123,7 +183,7 @@ export class ApprovalPhase extends BasePhase {
       phaseName: phaseName,
       agentName: phaseName, // Use human-readable name
       approvalType: 'planning',
-      agentOutput: context.getPhaseResult(previousPhase)?.data || {},
+      agentOutput: agentOutput,
     });
 
     // === WAIT FOR APPROVAL EVENT (event-based, no polling) ===
@@ -147,11 +207,19 @@ export class ApprovalPhase extends BasePhase {
       // Limpiar flag de aprobación pendiente
       context.setData('approvalPending', false);
 
+      // 📌 Clear persisted pending approval
+      await Task.findByIdAndUpdate(task._id, {
+        $unset: { 'orchestration.pendingApproval': 1 },
+      });
+
       if (approved) {
         console.log(`✅ [Approval] ${phaseName} approved by user (via event)`);
         NotificationService.emitConsoleLog(taskId, 'info', `✅ ${phaseName} approved by user - continuing orchestration`);
 
-        NotificationService.emitApprovalGranted(taskId, normalizedPhase, phaseName);
+        NotificationService.emitApprovalGranted(taskId, {
+          phase: normalizedPhase,
+          approved: true,
+        });
 
         return {
           success: true,
@@ -163,6 +231,11 @@ export class ApprovalPhase extends BasePhase {
       } else {
         console.log(`❌ [Approval] ${phaseName} rejected by user (via event)`);
         NotificationService.emitConsoleLog(taskId, 'error', `❌ ${phaseName} rejected by user - stopping orchestration`);
+
+        NotificationService.emitApprovalGranted(taskId, {
+          phase: normalizedPhase,
+          approved: false,
+        });
 
         return {
           success: false,

@@ -37,10 +37,10 @@ class ApprovalEventEmitter extends EventEmitter {
    *
    * Called by approval route (/api/tasks/:id/approve/:phase) when user approves/rejects
    */
-  emitApproval(taskId: string, phase: string, approved: boolean): void {
+  emitApproval(taskId: string, phase: string, approved: boolean, feedback?: string): void {
     const eventName = `approval:${taskId}:${phase}`;
-    console.log(`📡 [Event] Emitting approval event: ${eventName} (approved: ${approved})`);
-    this.emit(eventName, { approved, timestamp: new Date() });
+    console.log(`📡 [Event] Emitting approval event: ${eventName} (approved: ${approved}, feedback: ${feedback ? 'yes' : 'no'})`);
+    this.emit(eventName, { approved, feedback, timestamp: new Date() });
   }
 
   /**
@@ -52,10 +52,10 @@ class ApprovalEventEmitter extends EventEmitter {
    * @param taskId - Task ID
    * @param phase - Phase name (e.g., 'ProductManager', 'TechLead')
    * @param timeoutMs - Max wait time in milliseconds (default: 24 hours)
-   * @returns Promise<boolean> - true if approved, false if rejected
+   * @returns Promise<{ approved: boolean, feedback?: string }> - approval result with optional feedback
    * @throws Error if timeout exceeded
    */
-  waitForApproval(taskId: string, phase: string, timeoutMs: number): Promise<boolean> {
+  waitForApproval(taskId: string, phase: string, timeoutMs: number): Promise<{ approved: boolean; feedback?: string }> {
     const eventName = `approval:${taskId}:${phase}`;
 
     return new Promise((resolve, reject) => {
@@ -66,11 +66,11 @@ class ApprovalEventEmitter extends EventEmitter {
         reject(new Error(`Approval timeout after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      const handler = (data: { approved: boolean; timestamp: Date }) => {
+      const handler = (data: { approved: boolean; feedback?: string; timestamp: Date }) => {
         clearTimeout(timeout);
         // 🔥 IMPORTANT: Clean up to prevent memory leak
         this.removeAllListeners(eventName);
-        resolve(data.approved);
+        resolve({ approved: data.approved, feedback: data.feedback });
       };
 
       this.once(eventName, handler);

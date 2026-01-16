@@ -4,6 +4,7 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
+import { approvalEvents } from '../ApprovalEvents';
 // JudgePhase runs per-story inside DevelopersPhase, not as separate batch in multi-team mode
 // QAPhase, FixerPhase, GitHubService, PRManagementService REMOVED - Judge handles quality validation per-story
 import { safeGitExecSync, fixGitRemoteAuth, normalizeRepoName } from '../../utils/safeGitExecution';
@@ -13,6 +14,9 @@ import {
   validateRequiredPhaseContext,
 } from './utils/PhaseValidationHelpers';
 import { isBillingError, BillingError } from './RetryService';
+
+// TechLead approval timeout (1 hour)
+const TECH_LEAD_APPROVAL_TIMEOUT_MS = 1 * 60 * 60 * 1000;
 
 /**
  * Team Orchestration Phase
@@ -72,6 +76,20 @@ export class TeamOrchestrationPhase extends BasePhase {
     if (teamOrchestration?.status === 'completed') {
       console.log(`[SKIP] TeamOrchestration already completed - skipping re-execution (recovery mode)`);
       return true;
+    }
+
+    // 🔥 CHECKPOINT RECOVERY: Check if some epics already completed
+    // Instead of skipping the whole phase, we'll filter out completed epics in executePhase
+    const completedEpicIds = teamOrchestration?.completedEpicIds || [];
+    if (completedEpicIds.length > 0) {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`🔄 [CHECKPOINT RECOVERY] Found ${completedEpicIds.length} completed epic(s)`);
+      console.log(`   Completed: ${completedEpicIds.join(', ')}`);
+      console.log(`   Will resume with remaining epics only`);
+      console.log(`${'='.repeat(60)}\n`);
+
+      // Store in context for executePhase to use
+      context.setData('completedEpicIds', completedEpicIds);
     }
 
     return false;
@@ -198,6 +216,41 @@ export class TeamOrchestrationPhase extends BasePhase {
       console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
       console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths and target repositories`);
 
+      // 🔥🔥🔥 CHECKPOINT RECOVERY: Filter out already completed epics 🔥🔥🔥
+      const completedEpicIds = context.getData<string[]>('completedEpicIds') || [];
+      if (completedEpicIds.length > 0) {
+        const originalCount = projectManagerEpics.length;
+        projectManagerEpics = projectManagerEpics.filter((epic: any) => {
+          const epicId = epic.id || epic.title;
+          const alreadyCompleted = completedEpicIds.includes(epicId);
+          if (alreadyCompleted) {
+            console.log(`   ⏭️  SKIPPING epic "${epicId}" - already completed (checkpoint recovery)`);
+          }
+          return !alreadyCompleted;
+        });
+
+        console.log(`\n${'🔄'.repeat(30)}`);
+        console.log(`🔄 [CHECKPOINT RECOVERY] Filtered epics: ${originalCount} → ${projectManagerEpics.length} remaining`);
+        console.log(`   Skipped: ${completedEpicIds.length} already completed epic(s)`);
+        console.log(`   Remaining: ${projectManagerEpics.map((e: any) => e.id || e.title).join(', ') || 'none'}`);
+        console.log(`${'🔄'.repeat(30)}\n`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 CHECKPOINT RECOVERY: Skipping ${completedEpicIds.length} completed epic(s), processing ${projectManagerEpics.length} remaining`
+        );
+
+        // If all epics already completed, return success
+        if (projectManagerEpics.length === 0) {
+          console.log(`✅ [TeamOrchestration] ALL EPICS ALREADY COMPLETED - nothing to do`);
+          return {
+            success: true,
+            data: { message: 'All epics already completed (checkpoint recovery)', completedEpicIds },
+          };
+        }
+      }
+
       // 🔥 CRITICAL FIX: Validate all repositories have valid git remotes BEFORE spawning teams
       // This prevents ALL team git operations from failing with unclear errors
       await validateRepositoryRemotes(
@@ -265,10 +318,16 @@ export class TeamOrchestrationPhase extends BasePhase {
 
           // SEQUENTIAL execution (safe - no git conflicts)
           for (const epic of epics) {
-            console.log(`   🔧 Executing epic: ${epic.targetRepository} (sequential mode)`);
+            const epicId = epic.id || epic.title;
+            console.log(`   🔧 Executing epic: ${epicId} → ${epic.targetRepository} (sequential mode)`);
             try {
               const result = await this.executeTeam(epic, ++teamCounter, context);
               groupResults.push({ status: 'fulfilled', value: result });
+
+              // 🔥🔥🔥 CHECKPOINT: Save epic completion to DB immediately 🔥🔥🔥
+              if (result.success) {
+                await this.saveEpicCheckpoint(task._id, epicId, taskId);
+              }
             } catch (error) {
               groupResults.push({ status: 'rejected', reason: error });
             }
@@ -285,6 +344,16 @@ export class TeamOrchestrationPhase extends BasePhase {
           );
 
           groupResults = await Promise.allSettled(groupPromises);
+
+          // 🔥🔥🔥 CHECKPOINT: Save all successful epics from parallel batch 🔥🔥🔥
+          for (let i = 0; i < groupResults.length; i++) {
+            const result = groupResults[i];
+            const epic = epics[i];
+            const epicId = epic.id || epic.title;
+            if (result.status === 'fulfilled' && result.value.success) {
+              await this.saveEpicCheckpoint(task._id, epicId, taskId);
+            }
+          }
         }
 
         teamResults.push(...groupResults);
@@ -913,22 +982,186 @@ export class TeamOrchestrationPhase extends BasePhase {
         total: 0
       };
 
-      // Tech Lead: Design architecture for this epic
-      console.log(`\n[Team ${teamNumber}] Phase 1: Tech Lead (Architecture)`);
-      const techLeadResult = await techLeadPhase.execute(teamContext);
-      if (!techLeadResult.success) {
-        throw new Error(`Tech Lead failed: ${techLeadResult.error}`);
-      }
-      // Track Tech Lead cost and tokens (check both metadata and metrics)
-      const techLeadCost = Number(techLeadResult.metadata?.cost || techLeadResult.metrics?.cost_usd || 0);
-      const techLeadUsage = {
-        input: Number(techLeadResult.metadata?.input_tokens || techLeadResult.metrics?.input_tokens || 0),
-        output: Number(techLeadResult.metadata?.output_tokens || techLeadResult.metrics?.output_tokens || 0),
-      };
-      if (techLeadCost > 0) {
-        (teamCosts as any).techLead = techLeadCost;
-        (teamCosts as any).techLeadUsage = techLeadUsage;
-        console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
+      // 🔄 TECH LEAD EXECUTION + APPROVAL LOOP
+      // User can review and provide feedback on architecture before developers start
+      // If rejected with feedback, re-execute TechLead with feedback as directive
+      const autoApprovalEnabled = parentContext.task.orchestration.autoApprovalEnabled;
+      const autoApprovalPhases = parentContext.task.orchestration.autoApprovalPhases || [];
+      const techLeadAutoApproved = autoApprovalEnabled && autoApprovalPhases.includes('tech-lead' as any);
+
+      const MAX_TECH_LEAD_RETRIES = 3;
+      let techLeadRetryCount = 0;
+      let techLeadResult: any = null;
+      let techLeadApproved = false; // 🔥 FIX: Start as false, execute TechLead first, THEN check approval
+
+      // 🔥 FIX: Use do-while pattern to ensure TechLead executes at least once
+      // Previous bug: when auto-approval enabled, while(!true) never executed
+      do {
+        // Tech Lead: Design architecture for this epic
+        console.log(`\n[Team ${teamNumber}] Phase 1: Tech Lead (Architecture)${techLeadRetryCount > 0 ? ` - Attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES}` : ''}`);
+
+        if (techLeadRetryCount > 0) {
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `🔄 [Team ${teamNumber}] Re-executing Tech Lead with user feedback (attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES})`
+          );
+        }
+
+        techLeadResult = await techLeadPhase.execute(teamContext);
+        if (!techLeadResult.success) {
+          throw new Error(`Tech Lead failed: ${techLeadResult.error}`);
+        }
+
+        // Track Tech Lead cost and tokens (check both metadata and metrics)
+        const techLeadCost = Number(techLeadResult.metadata?.cost || techLeadResult.metrics?.cost_usd || 0);
+        const techLeadUsage = {
+          input: Number(techLeadResult.metadata?.input_tokens || techLeadResult.metrics?.input_tokens || 0),
+          output: Number(techLeadResult.metadata?.output_tokens || techLeadResult.metrics?.output_tokens || 0),
+        };
+        if (techLeadCost > 0) {
+          (teamCosts as any).techLead = ((teamCosts as any).techLead || 0) + techLeadCost;
+          (teamCosts as any).techLeadUsage = techLeadUsage;
+          console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
+        }
+
+        // 🛑 TECH LEAD APPROVAL GATE - Check auto-approval AFTER execution
+        if (techLeadAutoApproved) {
+          console.log(`✅ [Team ${teamNumber}] Tech Lead auto-approved (configured)`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead auto-approved for epic: ${epic.title}`);
+          techLeadApproved = true;
+          break; // Exit loop - no need to wait for manual approval
+        }
+
+        console.log(`\n⏸️  [Team ${teamNumber}] Waiting for Tech Lead approval...`);
+
+        // 🔥 CRITICAL: Persist pendingApproval to DB so bypass endpoint can find it
+        const Task = require('../../models/Task').Task;
+        await Task.findByIdAndUpdate(parentContext.task._id, {
+          $set: {
+            'orchestration.pendingApproval': {
+              phase: 'tech-lead',
+              phaseName: `Tech Lead Architecture (Epic: ${epic.title})`,
+              agentOutput: techLeadResult.data || {},
+              retryCount: techLeadRetryCount,
+              timestamp: new Date(),
+            },
+          },
+        });
+        console.log(`📝 [Team ${teamNumber}] Persisted pendingApproval to DB for bypass support`);
+
+        // Emit approval required notification
+        NotificationService.emitApprovalRequired(taskId, {
+          phase: 'tech-lead',
+          phaseName: `Tech Lead Architecture (Epic: ${epic.title})`,
+          agentName: 'Tech Lead',
+          approvalType: 'planning',
+          agentOutput: techLeadResult.data || {},
+          retryCount: techLeadRetryCount,
+        });
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `⏸️ [Team ${teamNumber}] Waiting for Tech Lead architecture approval for epic: ${epic.title}`
+        );
+
+        try {
+          const approvalResult = await approvalEvents.waitForApproval(
+            taskId,
+            'tech-lead',
+            TECH_LEAD_APPROVAL_TIMEOUT_MS
+          );
+
+          // 🔥 CRITICAL: Clear pendingApproval from DB after processing
+          await Task.findByIdAndUpdate(parentContext.task._id, {
+            $unset: { 'orchestration.pendingApproval': 1 },
+          });
+          console.log(`📝 [Team ${teamNumber}] Cleared pendingApproval from DB`);
+
+          if (approvalResult.approved) {
+            console.log(`✅ [Team ${teamNumber}] Tech Lead architecture approved`);
+            NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead architecture approved - continuing to development`);
+
+            // Emit approval granted for frontend
+            NotificationService.emitApprovalGranted(taskId, {
+              phase: 'tech-lead',
+              approved: true,
+            });
+
+            techLeadApproved = true;
+          } else {
+            // Rejected - check if there's feedback for re-execution
+            techLeadRetryCount++;
+
+            if (approvalResult.feedback && techLeadRetryCount < MAX_TECH_LEAD_RETRIES) {
+              console.log(`🔄 [Team ${teamNumber}] Tech Lead rejected with feedback - will re-execute`);
+              console.log(`   Feedback: ${approvalResult.feedback}`);
+              NotificationService.emitConsoleLog(
+                taskId,
+                'warn',
+                `🔄 Tech Lead rejected with feedback. Re-executing (${techLeadRetryCount}/${MAX_TECH_LEAD_RETRIES})...`
+              );
+
+              // Inject user feedback as directive for re-execution
+              const existingDirectives = teamContext.getData<any[]>('injectedDirectives') || [];
+              teamContext.setData('injectedDirectives', [
+                ...existingDirectives,
+                {
+                  id: `user-feedback-${Date.now()}`,
+                  content: `🚨 USER FEEDBACK (CRITICAL - ADDRESS THIS!):\n${approvalResult.feedback}`,
+                  priority: 'critical',
+                  targetAgent: 'tech-lead',
+                  source: 'user-rejection',
+                },
+              ]);
+
+              // Emit rejection notification (not approval_granted)
+              NotificationService.emitApprovalGranted(taskId, {
+                phase: 'tech-lead',
+                approved: false,
+                feedback: approvalResult.feedback,
+                willRetry: true,
+              });
+
+              // Continue loop to re-execute TechLead
+            } else if (!approvalResult.feedback) {
+              console.log(`❌ [Team ${teamNumber}] Tech Lead rejected without feedback - cannot re-execute`);
+              NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead rejected without feedback - task failed`);
+
+              NotificationService.emitApprovalGranted(taskId, {
+                phase: 'tech-lead',
+                approved: false,
+              });
+
+              throw new Error('Tech Lead architecture rejected by user without feedback');
+            } else {
+              console.log(`❌ [Team ${teamNumber}] Tech Lead rejected - max retries (${MAX_TECH_LEAD_RETRIES}) reached`);
+              NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead max retries reached - task failed`);
+
+              NotificationService.emitApprovalGranted(taskId, {
+                phase: 'tech-lead',
+                approved: false,
+                maxRetriesReached: true,
+              });
+
+              throw new Error(`Tech Lead architecture rejected after ${MAX_TECH_LEAD_RETRIES} attempts`);
+            }
+          }
+        } catch (error: any) {
+          if (error.message.includes('timeout')) {
+            console.log(`⏱️  [Team ${teamNumber}] Tech Lead approval timeout - auto-continuing`);
+            NotificationService.emitConsoleLog(taskId, 'warn', `⏱️ Tech Lead approval timeout - auto-continuing`);
+            techLeadApproved = true; // Continue on timeout
+          } else {
+            throw error;
+          }
+        }
+      } while (!techLeadApproved && techLeadRetryCount < MAX_TECH_LEAD_RETRIES);
+
+      // Ensure techLeadResult is available after the loop
+      if (!techLeadResult) {
+        throw new Error('Tech Lead did not produce a result');
       }
 
       // 🐳 Apply TechLead environment configuration if available
@@ -1504,6 +1737,38 @@ Or if you cannot fix it:
     } catch (error: any) {
       console.error(`❌ [PR] Error checking/installing GitHub CLI: ${error.message}`);
       return false;
+    }
+  }
+
+  /**
+   * 🔥 CHECKPOINT: Save epic completion to DB for recovery
+   * This allows resuming from exactly where we left off instead of re-executing all epics
+   */
+  private async saveEpicCheckpoint(taskId: any, epicId: string, taskIdStr: string): Promise<void> {
+    try {
+      const Task = require('../../models/Task').Task;
+
+      // Atomic $addToSet to prevent duplicates
+      await Task.findByIdAndUpdate(taskId, {
+        $addToSet: {
+          'orchestration.teamOrchestration.completedEpicIds': epicId,
+        },
+        $set: {
+          'orchestration.teamOrchestration.lastCheckpoint': new Date(),
+          'orchestration.teamOrchestration.lastCompletedEpicId': epicId,
+        },
+      });
+
+      console.log(`   💾 [CHECKPOINT] Epic "${epicId}" saved to DB - can resume from here if interrupted`);
+
+      NotificationService.emitConsoleLog(
+        taskIdStr,
+        'info',
+        `💾 CHECKPOINT: Epic "${epicId}" completed and saved`
+      );
+    } catch (error: any) {
+      console.error(`   ⚠️  [CHECKPOINT] Failed to save checkpoint for epic "${epicId}": ${error.message}`);
+      // Don't throw - checkpoint failure shouldn't stop execution
     }
   }
 }

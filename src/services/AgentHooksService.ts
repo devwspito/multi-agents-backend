@@ -441,6 +441,172 @@ class AgentHooksServiceClass {
   clearStats(): void {
     this.toolStats.clear();
   }
+
+  // ========== AGENT EXECUTION HOOKS ==========
+  // These hooks run before/after entire agent executions (not individual tools)
+
+  private agentStats: Map<string, {
+    executions: number;
+    totalDuration: number;
+    totalCost: number;
+    totalTokens: number;
+    failures: number;
+    lastExecution: Date;
+  }> = new Map();
+
+  /**
+   * Run pre-execution hooks before an agent starts
+   */
+  async runPreExecutionHooks(params: {
+    agentType: string;
+    taskId: string;
+    workspacePath: string;
+    prompt: string;
+  }): Promise<{
+    blocked: boolean;
+    reason?: string;
+    warnings: string[];
+  }> {
+    const warnings: string[] = [];
+
+    // Check for dangerous patterns in prompt
+    const dangerousPatterns = [
+      'delete all',
+      'drop database',
+      'rm -rf',
+      'format disk',
+    ];
+
+    for (const pattern of dangerousPatterns) {
+      if (params.prompt.toLowerCase().includes(pattern)) {
+        warnings.push(`Prompt contains potentially dangerous pattern: "${pattern}"`);
+      }
+    }
+
+    // Log execution start
+    console.log(`🚀 [AgentHooks] Pre-execution: ${params.agentType} starting for task ${params.taskId}`);
+
+    // Could add more validation here:
+    // - Check workspace exists
+    // - Validate agent permissions
+    // - Check rate limits
+    // - etc.
+
+    return {
+      blocked: false,
+      warnings,
+    };
+  }
+
+  /**
+   * Run post-execution hooks after an agent completes
+   */
+  async runPostExecutionHooks(params: {
+    agentType: string;
+    taskId: string;
+    workspacePath: string;
+    success: boolean;
+    output: string;
+    duration: number;
+    cost: number;
+    tokens: number;
+  }): Promise<void> {
+    // Log execution end
+    const status = params.success ? '✅' : '❌';
+    console.log(`${status} [AgentHooks] Post-execution: ${params.agentType} completed in ${Math.round(params.duration / 1000)}s, cost: $${params.cost.toFixed(4)}`);
+
+    // Emit notification for tracking
+    NotificationService.emitConsoleLog(
+      params.taskId,
+      params.success ? 'info' : 'error',
+      `Agent ${params.agentType} completed: ${params.success ? 'success' : 'failed'} (${Math.round(params.duration / 1000)}s, $${params.cost.toFixed(4)})`
+    );
+
+    // Could add more post-processing:
+    // - Send webhooks
+    // - Update dashboards
+    // - Trigger alerts on failures
+    // - etc.
+  }
+
+  /**
+   * Record execution statistics for an agent
+   */
+  recordExecution(params: {
+    agentType: string;
+    duration: number;
+    success: boolean;
+    cost: number;
+    tokens: number;
+  }): void {
+    const existing = this.agentStats.get(params.agentType) || {
+      executions: 0,
+      totalDuration: 0,
+      totalCost: 0,
+      totalTokens: 0,
+      failures: 0,
+      lastExecution: new Date(),
+    };
+
+    this.agentStats.set(params.agentType, {
+      executions: existing.executions + 1,
+      totalDuration: existing.totalDuration + params.duration,
+      totalCost: existing.totalCost + params.cost,
+      totalTokens: existing.totalTokens + params.tokens,
+      failures: existing.failures + (params.success ? 0 : 1),
+      lastExecution: new Date(),
+    });
+  }
+
+  /**
+   * Get agent execution statistics
+   */
+  getAgentStats(): Record<string, {
+    executions: number;
+    avgDuration: number;
+    totalCost: number;
+    avgCost: number;
+    totalTokens: number;
+    failureRate: number;
+    lastExecution: Date;
+  }> {
+    const stats: Record<string, any> = {};
+
+    for (const [agent, data] of this.agentStats.entries()) {
+      stats[agent] = {
+        executions: data.executions,
+        avgDuration: data.executions > 0 ? Math.round(data.totalDuration / data.executions) : 0,
+        totalCost: Math.round(data.totalCost * 10000) / 10000,
+        avgCost: data.executions > 0 ? Math.round((data.totalCost / data.executions) * 10000) / 10000 : 0,
+        totalTokens: data.totalTokens,
+        failureRate: data.executions > 0 ? Math.round((data.failures / data.executions) * 100) : 0,
+        lastExecution: data.lastExecution,
+      };
+    }
+
+    return stats;
+  }
+
+  /**
+   * Get most expensive agents by total cost
+   */
+  getMostExpensiveAgents(limit: number = 10): Array<{ agent: string; totalCost: number; executions: number }> {
+    return Array.from(this.agentStats.entries())
+      .sort((a, b) => b[1].totalCost - a[1].totalCost)
+      .slice(0, limit)
+      .map(([agent, data]) => ({
+        agent,
+        totalCost: Math.round(data.totalCost * 10000) / 10000,
+        executions: data.executions,
+      }));
+  }
+
+  /**
+   * Clear agent statistics
+   */
+  clearAgentStats(): void {
+    this.agentStats.clear();
+  }
 }
 
 // Singleton instance

@@ -143,24 +143,24 @@ export class NotificationService {
   /**
    * Emitir notificación formateada para el frontend
    * Compatible con el formato que espera el WebSocketContext
+   *
+   * Frontend useWebSocket.js wraps this as: { type: 'notification', notification: data }
+   * Chat.jsx expects: data.type === 'notification' && data.notification.type === 'approval_required'
    */
   static emitNotification(taskId: string, notificationType: string, data: any): void {
     const io = this.getIO();
     if (!io) return;
 
+    // Emit the notification payload directly - useWebSocket.js will wrap it
+    // as { type: 'notification', notification: <this payload> }
     const notification = {
-      type: 'notification',
-      notification: {
-        type: notificationType,
-        data: {
-          ...data,
-          timestamp: new Date(),
-        },
+      type: notificationType,
+      data: {
+        ...data,
+        timestamp: new Date(),
       },
     };
 
-    // Emit the full notification object (not just notification.notification)
-    // This matches what the frontend expects in ConsoleViewer and WebSocketContext
     io.to(`task:${taskId}`).emit('notification', notification);
 
     console.log(`📬 [WebSocket] Notification emitted:`, {
@@ -285,6 +285,7 @@ export class NotificationService {
     agentName: string;
     approvalType?: 'planning' | 'code_change' | 'test_results' | 'evaluation' | 'merge';
     agentOutput?: any;
+    retryCount?: number;
   }): void {
     this.emitNotification(taskId, 'approval_required', {
       phase: approvalData.phase,
@@ -292,27 +293,42 @@ export class NotificationService {
       agentName: approvalData.agentName,
       approvalType: approvalData.approvalType || 'planning',
       agentOutput: approvalData.agentOutput || {},
+      retryCount: approvalData.retryCount || 0,
     });
 
     console.log(`⏸️ [WebSocket] Approval required emitted:`, {
       taskId,
       phase: approvalData.phase,
       phaseName: approvalData.phaseName,
+      retryCount: approvalData.retryCount || 0,
     });
   }
 
   /**
-   * Emitir aprobación concedida
+   * Emitir aprobación concedida (o rechazada)
+   * @param taskId - Task ID
+   * @param data - Object with phase, approved status, and optional feedback
    */
-  static emitApprovalGranted(taskId: string, phase: string, phaseName: string): void {
+  static emitApprovalGranted(taskId: string, data: {
+    phase: string;
+    approved: boolean;
+    feedback?: string;
+    willRetry?: boolean;
+    maxRetriesReached?: boolean;
+  }): void {
     this.emitNotification(taskId, 'approval_granted', {
-      phase,
-      phaseName,
+      phase: data.phase,
+      approved: data.approved,
+      feedback: data.feedback,
+      willRetry: data.willRetry,
+      maxRetriesReached: data.maxRetriesReached,
     });
 
-    console.log(`✅ [WebSocket] Approval granted emitted:`, {
+    console.log(`${data.approved ? '✅' : '❌'} [WebSocket] Approval ${data.approved ? 'granted' : 'rejected'} emitted:`, {
       taskId,
-      phase,
+      phase: data.phase,
+      approved: data.approved,
+      willRetry: data.willRetry,
     });
   }
 
@@ -407,6 +423,34 @@ export class NotificationService {
     console.log(`✅ [WebSocket] Phase completed:`, {
       taskId,
       phaseName,
+    });
+  }
+
+  /**
+   * Emitir actualización de costo al frontend
+   * El frontend usa esto para actualizar el TokenMeter en tiempo real
+   */
+  static emitCostUpdate(taskId: string, costData: {
+    totalCost: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+  }): void {
+    const io = this.getIO();
+    if (!io) return;
+
+    io.to(`task:${taskId}`).emit('cost:update', {
+      taskId,
+      ...costData,
+      timestamp: new Date(),
+    });
+
+    console.log(`💰 [WebSocket] Cost update emitted:`, {
+      taskId,
+      totalCost: `$${costData.totalCost.toFixed(4)}`,
+      inputTokens: costData.inputTokens,
+      outputTokens: costData.outputTokens,
     });
   }
 
