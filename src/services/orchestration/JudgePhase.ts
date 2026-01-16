@@ -1229,7 +1229,7 @@ export class JudgePhase extends BasePhase {
         },
         undefined, // contextOverride
         undefined, // skipOptimization
-        undefined, // permissionMode
+        'bypassPermissions', // 🔥 Judge is autonomous - never needs approval
         resumeOptions // 🔄 Session resume options
       );
 
