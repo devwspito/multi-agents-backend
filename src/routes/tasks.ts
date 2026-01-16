@@ -55,6 +55,9 @@ const autoApprovalConfigSchema = z.object({
       'fixer',
     ])
   ).optional(),
+  // 🤖 Supervisor auto-approval threshold (0-100)
+  // When Supervisor score >= threshold, auto-approve without human intervention
+  supervisorThreshold: z.number().min(0).max(100).optional(),
 });
 
 const modelConfigSchema = z.object({
@@ -726,8 +729,31 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     let agentStep: any = null;
     let phaseName = '';
 
+    // 🔥 DEBUG: Log orchestration state to understand why planning might be null
+    console.log(`📋 [Approve] Phase: ${phase}, TaskId: ${req.params.id}`);
+    console.log(`📋 [Approve] orchestration.planning exists: ${!!task.orchestration?.planning}`);
+    console.log(`📋 [Approve] orchestration.planning.status: ${task.orchestration?.planning?.status}`);
+    console.log(`📋 [Approve] orchestration keys: ${Object.keys(task.orchestration || {}).join(', ')}`);
+
     switch (phase) {
       case 'planning':
+        // 🔥 FIX: If planning phase data doesn't exist, create it to allow approval
+        // This handles cases where DB state is incomplete or recovery scenarios
+        if (!task.orchestration.planning) {
+          console.log(`🔧 [Approve] planning field missing in orchestration - creating synthetic step`);
+          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
+
+          const timestamp = task.orchestration.pendingApproval?.timestamp || new Date();
+
+          task.orchestration.planning = {
+            agent: 'planning-agent',
+            status: 'completed', // Mark as completed so approval can proceed
+            startedAt: timestamp,
+            completedAt: new Date(),
+          } as any;
+          await task.save();
+          console.log(`✅ [Approve] Created synthetic planning step`);
+        }
         agentStep = task.orchestration.planning;
         phaseName = 'Planning (Unified)';
         break;
@@ -740,6 +766,27 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         phaseName = 'Project Manager';
         break;
       case 'tech-lead':
+        // 🔥 FIX: If tech-lead phase data doesn't exist, create it to allow approval
+        // This handles cases where:
+        // 1. Multi-team mode doesn't initialize techLead in orchestration
+        // 2. New Judge pattern completes without creating the field
+        // 3. Recovery scenarios where DB state is incomplete
+        if (!task.orchestration.techLead) {
+          console.log(`🔧 [Approve] tech-lead field missing in orchestration - creating synthetic step`);
+          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
+
+          // Use pendingApproval timestamp if available, otherwise use now
+          const timestamp = task.orchestration.pendingApproval?.timestamp || new Date();
+
+          task.orchestration.techLead = {
+            agent: 'tech-lead',
+            status: 'completed', // Mark as completed so approval can proceed
+            startedAt: timestamp,
+            completedAt: new Date(),
+          } as any;
+          await task.save();
+          console.log(`✅ [Approve] Created synthetic tech-lead step`);
+        }
         agentStep = task.orchestration.techLead;
         phaseName = 'Tech Lead';
         break;
@@ -906,6 +953,9 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       };
     }
 
+    // Phases that support re-execution with feedback (don't fail task)
+    const reExecutablePhases = ['tech-lead', 'planning'];
+
     // Actualizar estado de aprobación
     if (validatedData.approved) {
       agentStep.approval.status = 'approved';
@@ -918,10 +968,14 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       agentStep.approval.status = 'rejected';
       agentStep.approved = false;
 
-      // Si se rechaza, marcar la tarea como fallida
-      task.status = 'failed';
-
-      console.log(`❌ [Approval] ${phaseName} rejected by user ${req.user!.id}`);
+      if (!reExecutablePhases.includes(phase)) {
+        // Only mark as failed for phases that don't support re-execution
+        task.status = 'failed';
+        console.log(`❌ [Approval] ${phaseName} rejected by user ${req.user!.id} - task marked as failed`);
+      } else {
+        // For re-executable phases, keep task in_progress - orchestrator will re-execute
+        console.log(`🔄 [Approval] ${phaseName} rejected by user ${req.user!.id} - will re-execute with feedback`);
+      }
     }
 
     // Guardar comentarios si existen
@@ -950,14 +1004,17 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     // 📡 Emit approval event to notify waiting orchestrator (event-based, no polling)
     const { approvalEvents } = await import('../services/ApprovalEvents');
     const taskId = (task._id as any).toString();
-    approvalEvents.emitApproval(taskId, phase, validatedData.approved);
+    approvalEvents.emitApproval(taskId, phase, validatedData.approved, validatedData.comments);
 
     // Emitir notificación WebSocket
     const { NotificationService } = await import('../services/NotificationService');
 
     if (validatedData.approved) {
       // Emitir evento de aprobación concedida (limpia el prompt en el frontend)
-      NotificationService.emitApprovalGranted(taskId, phase, phaseName);
+      NotificationService.emitApprovalGranted(taskId, {
+        phase,
+        approved: true,
+      });
 
       NotificationService.emitAgentMessage(
         taskId,
@@ -965,13 +1022,23 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         `✅ **${phaseName}** has been approved by user. Continuing orchestration...`
       );
     } else {
-      // También emitir approval_granted para limpiar el prompt (aunque fue rechazado)
-      NotificationService.emitApprovalGranted(taskId, phase, phaseName);
+      // Emitir evento de rechazo (puede incluir feedback para re-ejecución)
+      NotificationService.emitApprovalGranted(taskId, {
+        phase,
+        approved: false,
+        feedback: validatedData.comments,
+        willRetry: reExecutablePhases.includes(phase) && !!validatedData.comments,
+      });
+
+      // Only show "failed" message if it's not a re-executable phase
+      const message = reExecutablePhases.includes(phase) && validatedData.comments
+        ? `🔄 **${phaseName}** was rejected with feedback. Re-executing phase...${validatedData.comments ? `\n\n**Feedback**: ${validatedData.comments}` : ''}`
+        : `❌ **${phaseName}** was rejected by user. Task marked as failed.${validatedData.comments ? `\n\n**Comments**: ${validatedData.comments}` : ''}`;
 
       NotificationService.emitAgentMessage(
         taskId,
         'System',
-        `❌ **${phaseName}** was rejected by user. Task marked as failed.${validatedData.comments ? `\n\n**Comments**: ${validatedData.comments}` : ''}`
+        message
       );
     }
 
@@ -1042,9 +1109,15 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       ] as any[];
     }
 
+    // 🤖 Update Supervisor threshold (default 80 if not specified)
+    if (validatedData.supervisorThreshold !== undefined) {
+      task.orchestration.supervisorThreshold = validatedData.supervisorThreshold;
+    }
+
     await task.save();
 
-    console.log(`🚁 [Auto-Approval] Configuration updated for task ${req.params.id}: enabled=${validatedData.enabled}, phases=${task.orchestration.autoApprovalPhases?.join(', ')}`);
+    const threshold = task.orchestration.supervisorThreshold ?? 80;
+    console.log(`🚁 [Auto-Approval] Configuration updated for task ${req.params.id}: enabled=${validatedData.enabled}, phases=${task.orchestration.autoApprovalPhases?.join(', ')}, supervisorThreshold=${threshold}%`);
 
     res.json({
       success: true,
@@ -1052,6 +1125,7 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       data: {
         enabled: task.orchestration.autoApprovalEnabled,
         phases: task.orchestration.autoApprovalPhases || [],
+        supervisorThreshold: threshold,
       },
     });
   } catch (error) {
@@ -1082,7 +1156,7 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       _id: req.params.id,
       userId: req.user!.id,
     })
-      .select('orchestration.autoApprovalEnabled orchestration.autoApprovalPhases')
+      .select('orchestration.autoApprovalEnabled orchestration.autoApprovalPhases orchestration.supervisorThreshold')
       .lean();
 
     if (!task) {
@@ -1098,6 +1172,7 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       data: {
         enabled: task.orchestration.autoApprovalEnabled || false,
         phases: task.orchestration.autoApprovalPhases || [],
+        supervisorThreshold: task.orchestration.supervisorThreshold ?? 80, // Default 80%
       },
     });
   } catch (error) {
@@ -1105,6 +1180,169 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
     res.status(500).json({
       success: false,
       message: 'Failed to fetch auto-approval configuration',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/bypass-approval
+ * 🔥 BYPASS: Force-approve the current pending approval phase
+ *
+ * This allows the user to skip manual approval AFTER the orchestration has already started waiting.
+ * Useful if you forgot to enable auto-approval before starting the task.
+ *
+ * Optionally enables auto-approval for future phases of the same type.
+ */
+router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { enableAutoApproval = false, enableForAllPhases = false } = req.body;
+
+    const task = await Task.findOne({
+      _id: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    // Get the pending approval phase from persisted data
+    const pendingApproval = task.orchestration?.pendingApproval;
+    const taskId = (task._id as any).toString();
+
+    // 🔥 SMART PHASE DETECTION: Try to determine phase even if not persisted
+    let phase: string;
+    let phaseName: string;
+
+    if (pendingApproval && pendingApproval.phase) {
+      // Use persisted pending approval
+      phase = pendingApproval.phase;
+      phaseName = pendingApproval.phaseName || phase;
+      console.log(`🔥 [Bypass] Found persisted pendingApproval: ${phase}`);
+    } else {
+      // Try to infer current phase from task state
+      console.log(`⚠️ [Bypass] No persisted pendingApproval, inferring from task state...`);
+
+      // Check what phase we're likely waiting on
+      const planning = task.orchestration?.planning;
+      const techLead = task.orchestration?.techLead;
+
+      if (planning?.status === 'completed' && (!techLead || techLead?.status !== 'completed')) {
+        // Planning done but TechLead not complete = likely waiting on TechLead approval
+        phase = 'tech-lead';
+        phaseName = 'Tech Lead Architecture';
+        console.log(`🔍 [Bypass] Inferred phase: ${phase} (Planning done, TechLead not complete)`);
+      } else if (planning?.status === 'in_progress' || planning?.status === 'pending') {
+        // Planning in progress = might be waiting on Planning approval
+        phase = 'planning';
+        phaseName = 'Planning';
+        console.log(`🔍 [Bypass] Inferred phase: ${phase} (Planning in progress)`);
+      } else {
+        // Default to trying common approval phases
+        phase = 'tech-lead'; // Most common waiting point
+        phaseName = 'Tech Lead';
+        console.log(`🔍 [Bypass] Using default phase: ${phase}`);
+      }
+    }
+
+    console.log(`🔥 [Bypass] Force-approving pending phase: ${phase} (${phaseName})`);
+
+    // Clear the pending approval from DB
+    task.orchestration.pendingApproval = undefined;
+
+    // Log to approval history
+    if (!task.orchestration.approvalHistory) {
+      task.orchestration.approvalHistory = [];
+    }
+    task.orchestration.approvalHistory.push({
+      phase: phase,
+      phaseName: phaseName,
+      approved: true,
+      approvedBy: new mongoose.Types.ObjectId(req.user!.id),
+      approvedAt: new Date(),
+      comments: 'Bypassed by user (forced approval)',
+      autoApproved: false,
+    });
+
+    // Optionally enable auto-approval for future phases
+    if (enableAutoApproval) {
+      if (enableForAllPhases) {
+        // Enable for all main phases
+        task.orchestration.autoApprovalEnabled = true;
+        task.orchestration.autoApprovalPhases = [
+          'planning',
+          'team-orchestration',
+          'verification',
+          'auto-merge',
+          'tech-lead',
+          'development',
+          'judge',
+          'fixer',
+        ] as any[];
+        console.log(`✅ [Bypass] Auto-approval enabled for ALL phases`);
+      } else {
+        // Enable just for this phase type
+        task.orchestration.autoApprovalEnabled = true;
+        const currentPhases = task.orchestration.autoApprovalPhases || [];
+        if (!currentPhases.includes(phase as any)) {
+          currentPhases.push(phase as any);
+          task.orchestration.autoApprovalPhases = currentPhases;
+        }
+        console.log(`✅ [Bypass] Auto-approval enabled for phase: ${phase}`);
+      }
+    }
+
+    await task.save();
+
+    // 📡 Emit approval event to release the waiting orchestrator
+    const { approvalEvents } = await import('../services/ApprovalEvents');
+
+    // 🔥 SHOTGUN APPROACH: If we don't have a persisted pendingApproval,
+    // emit approval for ALL common phases to ensure we release any waiting orchestrator
+    if (!pendingApproval || !pendingApproval.phase) {
+      console.log(`🔫 [Bypass] No persisted approval - emitting for common phases...`);
+      const commonPhases = ['planning', 'tech-lead', 'team-orchestration', 'verification'];
+      for (const p of commonPhases) {
+        console.log(`   📡 Emitting approval for: ${p}`);
+        approvalEvents.emitApproval(taskId, p, true, 'Bypassed by user (shotgun)');
+      }
+    } else {
+      // Normal case: emit for the specific phase
+      approvalEvents.emitApproval(taskId, phase, true, 'Bypassed by user');
+    }
+
+    // Emit WebSocket notification
+    const { NotificationService } = await import('../services/NotificationService');
+    NotificationService.emitApprovalGranted(taskId, {
+      phase,
+      approved: true,
+    });
+
+    NotificationService.emitAgentMessage(
+      taskId,
+      'System',
+      `🔥 **${phaseName}** was bypassed (force-approved) by user. Continuing orchestration...${enableAutoApproval ? `\n\n✅ Auto-approval ${enableForAllPhases ? 'enabled for all phases' : `enabled for ${phase}`}` : ''}`
+    );
+
+    res.json({
+      success: true,
+      message: `Successfully bypassed ${phaseName}`,
+      data: {
+        phase: phase,
+        phaseName: phaseName,
+        autoApprovalEnabled: task.orchestration.autoApprovalEnabled || false,
+        autoApprovalPhases: task.orchestration.autoApprovalPhases || [],
+      },
+    });
+  } catch (error) {
+    console.error('Error bypassing approval:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to bypass approval',
     });
   }
 });
@@ -2129,6 +2367,520 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
     res.status(500).json({
       success: false,
       message: 'Failed to resolve human intervention',
+    });
+  }
+});
+
+// =============================================================================
+// 🎮 MID-EXECUTION INTERVENTION ENDPOINTS
+// Claude Code / OpenCode level feature
+// =============================================================================
+
+/**
+ * POST /api/tasks/:id/intervention/pause
+ * Pause execution immediately (mid-turn, not just between phases)
+ */
+router.post('/:id/intervention/pause', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+    const { reason = 'User requested pause' } = req.body;
+
+    const success = ExecutionControlService.requestPause(req.params.id, reason, 'user');
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        message: 'No active execution to pause for this task',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Execution paused mid-turn',
+      data: {
+        taskId: req.params.id,
+        reason,
+        state: ExecutionControlService.getState(req.params.id),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error pausing execution:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to pause execution',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/intervention/resume
+ * Resume paused mid-turn execution
+ */
+router.post('/:id/intervention/resume', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+
+    const success = ExecutionControlService.resume(req.params.id);
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        message: 'No paused execution to resume for this task',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Execution resumed',
+      data: {
+        taskId: req.params.id,
+        state: ExecutionControlService.getState(req.params.id),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error resuming execution:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to resume execution',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/intervention/abort
+ * Abort execution immediately
+ */
+router.post('/:id/intervention/abort', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+    const { reason = 'User requested abort' } = req.body;
+
+    const success = ExecutionControlService.requestAbort(req.params.id, reason, 'user');
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        message: 'No active execution to abort for this task',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Execution aborted',
+      data: {
+        taskId: req.params.id,
+        reason,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error aborting execution:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to abort execution',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/intervention/directive
+ * Inject a directive mid-execution (will be applied at next opportunity)
+ */
+router.post('/:id/intervention/directive', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+    const { directive, urgency = 'after_tool' } = req.body;
+
+    if (!directive) {
+      res.status(400).json({
+        success: false,
+        message: 'Directive content is required',
+      });
+      return;
+    }
+
+    const success = ExecutionControlService.injectDirective(
+      req.params.id,
+      directive,
+      urgency,
+      'user'
+    );
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        message: 'No active execution to inject directive into',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Directive injected mid-execution',
+      data: {
+        taskId: req.params.id,
+        directive: directive.substring(0, 100) + (directive.length > 100 ? '...' : ''),
+        urgency,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error injecting directive:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to inject directive',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/intervention/warning
+ * Send a warning to the agent (non-blocking)
+ */
+router.post('/:id/intervention/warning', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+    const { warning } = req.body;
+
+    if (!warning) {
+      res.status(400).json({
+        success: false,
+        message: 'Warning message is required',
+      });
+      return;
+    }
+
+    const success = ExecutionControlService.sendWarning(req.params.id, warning, 'user');
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        message: 'No active execution to send warning to',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Warning sent to agent',
+      data: {
+        taskId: req.params.id,
+        warning: warning.substring(0, 100) + (warning.length > 100 ? '...' : ''),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error sending warning:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send warning',
+    });
+  }
+});
+
+/**
+ * GET /api/tasks/:id/intervention/state
+ * Get current execution state for a task
+ */
+router.get('/:id/intervention/state', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+
+    const state = ExecutionControlService.getState(req.params.id);
+
+    res.json({
+      success: true,
+      data: {
+        taskId: req.params.id,
+        hasActiveExecution: !!state,
+        state: state || null,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting execution state:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get execution state',
+    });
+  }
+});
+
+/**
+ * GET /api/tasks/intervention/active
+ * Get all active executions across all tasks
+ */
+router.get('/intervention/active', authenticate, async (_req: AuthRequest, res) => {
+  try {
+    const { ExecutionControlService } = await import('../services/ExecutionControlService');
+
+    const activeExecutions = ExecutionControlService.getActiveExecutions();
+
+    res.json({
+      success: true,
+      data: {
+        count: activeExecutions.length,
+        executions: activeExecutions,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting active executions:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get active executions',
+    });
+  }
+});
+
+// =============================================================================
+// 🎨 HUMAN-IN-THE-LOOP CODE EDITING
+// User can edit agent's code before accepting
+// =============================================================================
+
+const userCodeEditSchema = z.object({
+  file: z.string().min(1),
+  content: z.string(),
+  originalAgentContent: z.string(),
+  wasEdited: z.boolean(),
+  agentName: z.string().optional(),
+});
+
+const codeDirectiveSchema = z.object({
+  file: z.string().min(1),
+  directive: z.string().min(1),
+  currentContent: z.string().optional(),
+  agentName: z.string().optional(),
+});
+
+/**
+ * POST /api/tasks/:id/user-code-edit
+ * Save user's manual code edit
+ *
+ * This allows users to modify agent's code before accepting it.
+ * The change is saved to the agent's workspace and a note is injected
+ * into the agent's context for future reference.
+ */
+router.post('/:id/user-code-edit', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const validatedData = userCodeEditSchema.parse(req.body);
+    const taskId = req.params.id;
+
+    const task = await Task.findOne({
+      _id: taskId,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    console.log(`\n✏️  [User Code Edit] Task ${taskId}`);
+    console.log(`   File: ${validatedData.file}`);
+    console.log(`   Was edited by user: ${validatedData.wasEdited}`);
+    console.log(`   Agent: ${validatedData.agentName || 'unknown'}`);
+
+    // Initialize userCodeEdits array if it doesn't exist
+    if (!(task.orchestration as any).userCodeEdits) {
+      (task.orchestration as any).userCodeEdits = [];
+    }
+
+    // Record the user edit
+    const editRecord = {
+      id: `edit-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      file: validatedData.file,
+      userContent: validatedData.content,
+      originalAgentContent: validatedData.originalAgentContent,
+      wasEdited: validatedData.wasEdited,
+      agentName: validatedData.agentName,
+      editedAt: new Date(),
+      editedBy: new mongoose.Types.ObjectId(req.user!.id),
+    };
+
+    (task.orchestration as any).userCodeEdits.push(editRecord);
+    task.markModified('orchestration.userCodeEdits');
+
+    // If user made changes, inject a directive for future agent context
+    if (validatedData.wasEdited) {
+      // Initialize pendingDirectives array if it doesn't exist
+      if (!task.orchestration.pendingDirectives) {
+        task.orchestration.pendingDirectives = [];
+      }
+
+      // Add a note about the user's edit for agent context
+      const userEditNote = {
+        id: `user-edit-note-${Date.now()}`,
+        content: `IMPORTANT: User manually edited "${validatedData.file}". The user's version should be respected. Key differences from agent's version may indicate user preferences.`,
+        priority: 'high' as const,
+        consumed: false,
+        createdAt: new Date(),
+        createdBy: new mongoose.Types.ObjectId(req.user!.id),
+        metadata: {
+          type: 'user_code_edit',
+          file: validatedData.file,
+        },
+      };
+
+      task.orchestration.pendingDirectives.push(userEditNote as any);
+      task.markModified('orchestration.pendingDirectives');
+
+      console.log(`   📝 Added user edit note to agent context`);
+    }
+
+    await task.save();
+
+    // Emit notification via WebSocket
+    const { NotificationService } = await import('../services/NotificationService');
+
+    if (validatedData.wasEdited) {
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `✏️  User edited "${validatedData.file}" before accepting. Agent will be notified of user preferences.`
+      );
+      NotificationService.emitAgentMessage(
+        taskId,
+        'System',
+        `User manually edited **${validatedData.file}**. Changes saved.`
+      );
+    } else {
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `✅ User accepted "${validatedData.file}" as-is`
+      );
+    }
+
+    res.json({
+      success: true,
+      message: validatedData.wasEdited
+        ? 'Code saved with your edits. Agent will be notified.'
+        : 'Code accepted as-is.',
+      data: {
+        editId: editRecord.id,
+        file: validatedData.file,
+        wasEdited: validatedData.wasEdited,
+      },
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid code edit data',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    console.error('Error saving user code edit:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to save code edit',
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/code-directive
+ * Send a directive for a specific file
+ *
+ * User can ask the agent to make specific changes to a file
+ * without accepting or rejecting the current version.
+ */
+router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const validatedData = codeDirectiveSchema.parse(req.body);
+    const taskId = req.params.id;
+
+    const task = await Task.findOne({
+      _id: taskId,
+      userId: req.user!.id,
+    });
+
+    if (!task) {
+      res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      });
+      return;
+    }
+
+    console.log(`\n💡 [Code Directive] Task ${taskId}`);
+    console.log(`   File: ${validatedData.file}`);
+    console.log(`   Directive: ${validatedData.directive.substring(0, 100)}...`);
+    console.log(`   Agent: ${validatedData.agentName || 'any'}`);
+
+    // Initialize pendingDirectives array if it doesn't exist
+    if (!task.orchestration.pendingDirectives) {
+      task.orchestration.pendingDirectives = [];
+    }
+
+    // Create a file-specific directive
+    const directiveId = `code-dir-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const directive = {
+      id: directiveId,
+      content: `FILE-SPECIFIC DIRECTIVE for "${validatedData.file}": ${validatedData.directive}`,
+      priority: 'high' as const,
+      targetAgent: validatedData.agentName || undefined,
+      consumed: false,
+      createdAt: new Date(),
+      createdBy: new mongoose.Types.ObjectId(req.user!.id),
+      metadata: {
+        type: 'code_directive',
+        file: validatedData.file,
+        originalDirective: validatedData.directive,
+      },
+    };
+
+    task.orchestration.pendingDirectives.push(directive as any);
+    task.markModified('orchestration.pendingDirectives');
+    await task.save();
+
+    // Emit notification via WebSocket
+    const { NotificationService } = await import('../services/NotificationService');
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `💡 User directive for "${validatedData.file}": "${validatedData.directive.substring(0, 50)}..."`
+    );
+    NotificationService.emitAgentMessage(
+      taskId,
+      'System',
+      `User requested changes to **${validatedData.file}**: ${validatedData.directive}`
+    );
+    NotificationService.emitDirectiveInjected(taskId, {
+      directiveId,
+      priority: 'high',
+      targetPhase: null,
+      targetAgent: validatedData.agentName || null,
+      contentPreview: `File: ${validatedData.file} - ${validatedData.directive.substring(0, 50)}`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Directive sent. The agent will make the requested changes.',
+      data: {
+        directiveId,
+        file: validatedData.file,
+        directive: validatedData.directive,
+      },
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid directive data',
+        errors: error.errors,
+      });
+      return;
+    }
+
+    console.error('Error sending code directive:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send directive',
     });
   }
 });

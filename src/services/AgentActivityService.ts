@@ -378,12 +378,49 @@ export class AgentActivityService {
 
   // ==================== PRIVATE HELPERS ====================
 
-  private static emitActivity(taskId: string, activity: ActivityEvent): void {
+  private static async emitActivity(taskId: string, activity: ActivityEvent): Promise<void> {
     const io = this.getIO();
-    if (!io) return;
+    if (!io) {
+      console.warn(`⚠️ [AgentActivityService] Socket.IO not available, cannot emit activity`);
+      return;
+    }
 
-    // Emit to task room
+    // Emit to task room (real-time)
+    console.log(`📡 [AgentActivityService] Emitting ${activity.type} activity for ${activity.agentName} to task:${taskId}`);
     io.to(`task:${taskId}`).emit('agent:activity', activity);
+
+    // Persist to database (survive refresh)
+    try {
+      const mongoose = await import('mongoose');
+      if (!mongoose.default.Types.ObjectId.isValid(taskId)) {
+        return; // Skip persistence for invalid IDs
+      }
+
+      const { Task } = await import('../models/Task');
+      await Task.findByIdAndUpdate(
+        taskId,
+        {
+          $push: {
+            activities: {
+              agentName: activity.agentName,
+              type: activity.type,
+              timestamp: activity.timestamp,
+              file: activity.file,
+              content: activity.content,
+              command: activity.command,
+              output: activity.output,
+              toolName: activity.toolName,
+              toolInput: activity.toolInput,
+              diff: activity.diff,
+            },
+          },
+        },
+        { new: false }
+      );
+    } catch (error) {
+      console.error(`❌ [AgentActivityService] Error persisting activity to DB:`, error);
+      // Don't throw - activity emission shouldn't break orchestration
+    }
   }
 
   private static truncateContent(content: string, maxLength: number): string {
@@ -473,23 +510,24 @@ export class AgentActivityService {
       }
     }
 
-    // Limit diff size
+    // Limit diff lines for display, but ALWAYS include full content for editing
     const maxLines = 50;
+    let displayLines = diffLines;
+
     if (diffLines.length > maxLines) {
       const half = Math.floor(maxLines / 2);
-      return {
-        oldContent: oldContent.substring(0, 500),
-        newContent: newContent.substring(0, 500),
-        lines: [
-          ...diffLines.slice(0, half),
-          { type: 'context', content: `... ${diffLines.length - maxLines} more lines ...` },
-          ...diffLines.slice(-half),
-        ],
-      };
+      displayLines = [
+        ...diffLines.slice(0, half),
+        { type: 'context', content: `... ${diffLines.length - maxLines} more lines ...` },
+        ...diffLines.slice(-half),
+      ];
     }
 
+    // ALWAYS include full content for Human-in-the-Loop code editing
     return {
-      lines: diffLines,
+      oldContent: oldContent,
+      newContent: newContent,
+      lines: displayLines,
     };
   }
 

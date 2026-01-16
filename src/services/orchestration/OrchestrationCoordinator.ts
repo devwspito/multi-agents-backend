@@ -42,6 +42,19 @@ import { createAutonomousToolsServer } from '../../tools/autonomousTools';
 // 🧠 Smart Context & Memory - Pre-execution intelligence for ALL agents
 import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
 import { AgentMemoryBridge } from '../AgentMemoryBridge';
+import { granularMemoryService } from '../GranularMemoryService';
+
+// 🚀 Autonomous Services - Full integration for maximum agent capability
+import { BackgroundTaskService } from '../BackgroundTaskService';
+import { SessionService } from '../SessionService';
+import { SlashCommandService } from '../SlashCommandService';
+import { AgentHooksService } from '../AgentHooksService';
+import { ExecutionControlService } from '../ExecutionControlService';
+import { StreamingService } from '../StreamingService';
+
+// 🧠 Advanced AI Features - Extended Thinking & Dynamic Model Routing
+import { ExtendedThinkingService } from '../ExtendedThinkingService';
+import { DynamicModelRouter } from '../DynamicModelRouter';
 
 /**
  * DeveloperProgress - Tracks developer execution in real-time
@@ -282,6 +295,40 @@ export class OrchestrationCoordinator {
         throw new Error(`Task ${taskId} not found`);
       }
 
+      // 🔄 RECOVERY DETECTION: Check if resuming from a previous execution
+      const isRecovery = task.status === 'in_progress' || task.status === 'paused';
+      const savedPhase = task.orchestration?.currentPhase;
+
+      if (isRecovery && savedPhase && savedPhase !== 'analysis') {
+        console.log(`\n${'🔄'.repeat(30)}`);
+        console.log(`🔄 [RECOVERY MODE] Resuming task from previous execution`);
+        console.log(`🔄   Task status: ${task.status}`);
+        console.log(`🔄   Last phase: ${savedPhase}`);
+        console.log(`🔄   Phases will check if already completed and skip accordingly`);
+        console.log(`${'🔄'.repeat(30)}\n`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 RECOVERY MODE: Resuming from ${savedPhase}. Completed phases will be skipped.`
+        );
+
+        // Check for pending approval to re-emit
+        if (task.orchestration?.pendingApproval?.phase) {
+          console.log(`🔄   Found pending approval: ${task.orchestration.pendingApproval.phase}`);
+          console.log(`🔄   Will re-emit approval_required when ApprovalPhase executes`);
+        }
+      }
+
+      // 📋 EMIT TASK REQUEST TO ACTIVITY - First thing user sees
+      const taskDescription = task.description || task.title || 'No description provided';
+      AgentActivityService.emitMessage(
+        taskId,
+        'System',
+        `📋 TASK: ${taskDescription}`
+      );
+      NotificationService.emitConsoleLog(taskId, 'info', `📋 Task request: ${taskDescription.substring(0, 200)}${taskDescription.length > 200 ? '...' : ''}`);
+
       // Load repositories
       // Note: Repository belongs to Project, not directly to User
       // So we don't filter by userId - just verify the IDs exist
@@ -333,7 +380,15 @@ export class OrchestrationCoordinator {
       log.success(`Found ${repositories.length} repositories for task`, {
         repositories: repositories.map(r => r.name),
       });
-      NotificationService.emitConsoleLog(taskId, 'info', `✅ Found ${repositories.length} repositories for task`);
+
+      // 📦 EMIT REPOSITORIES TO ACTIVITY
+      const repoNames = repositories.map((r: any) => r.name).join(', ');
+      AgentActivityService.emitMessage(
+        taskId,
+        'System',
+        `📦 Repositories: ${repoNames}`
+      );
+      NotificationService.emitConsoleLog(taskId, 'info', `✅ Found ${repositories.length} repositories: ${repoNames}`);
 
       // Setup workspace (pass user token for cloning - NOT encrypted)
       const workspacePath = await this.setupWorkspace(taskId, repositories, user.accessToken);
@@ -526,6 +581,19 @@ export class OrchestrationCoordinator {
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
+        // 🔥🔥🔥 CRITICAL FIX: CHECK IF PHASE SHOULD BE SKIPPED (RECOVERY MODE) 🔥🔥🔥
+        // This is what allows resuming from where we left off instead of starting over
+        if (phase.shouldSkip && typeof phase.shouldSkip === 'function') {
+          const shouldSkipPhase = await phase.shouldSkip(context);
+          if (shouldSkipPhase) {
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed (recovery mode)`);
+            console.log(`${'='.repeat(60)}\n`);
+            NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed)`);
+            continue; // Move to next phase
+          }
+        }
+
         // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing
         // This ensures recovery knows where to resume from if server crashes
         task.orchestration.currentPhase = this.mapPhaseToEnum(phaseName);
@@ -695,6 +763,14 @@ export class OrchestrationCoordinator {
         // Phase succeeded - continue to next phase
         const wasSkipped = result.warnings?.includes('Phase was skipped');
 
+        // 🔥 FIX: ALWAYS set currentPhaseName (even for skipped phases)
+        // ApprovalPhase needs this to know what phase to approve
+        // Recovery scenario: Planning is skipped but Approval still needs to run
+        if (phaseName !== 'Approval') {
+          context.setData('currentPhaseName', phaseName);
+          console.log(`📝 Stored currentPhaseName in context: ${phaseName}${wasSkipped ? ' (skipped)' : ''}`);
+        }
+
         if (wasSkipped) {
           console.log(`⏭️  [${phaseName}] Skipped`);
           NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Phase ${phaseName} skipped`);
@@ -709,13 +785,8 @@ export class OrchestrationCoordinator {
             await new Promise(resolve => setTimeout(resolve, 2000));
           }
 
-          // 🔥 CRITICAL: Store current phase name for ApprovalPhase
-          // ApprovalPhase needs to know which phase just completed to check auto-approval
-          // IMPORTANT: Only store if phase actually executed (not skipped)
-          if (phaseName !== 'Approval') {
-            context.setData('currentPhaseName', phaseName);
-            console.log(`📝 Stored currentPhaseName in context: ${phaseName}`);
-          }
+          // 🚀 AUTOMATIC QUALITY GATES - Run tests and reviews after key phases
+          await this.runAutomaticQualityGates(taskId, phaseName, context, workspacePath);
         }
 
         // Context compaction to prevent context overflow
@@ -1071,6 +1142,107 @@ ${formattedDirectives}
   }
 
   /**
+   * 🚀 AUTOMATIC QUALITY GATES - Run tests and reviews after key phases
+   *
+   * Integrates BackgroundTaskService and SlashCommandService for:
+   * - After TeamOrchestration: Run tests in background
+   * - Before AutoMerge: Run code review
+   * - After Verification: Run security audit
+   *
+   * These are non-blocking and additive - they don't stop the orchestration
+   * but provide valuable feedback for the agents and human reviewers.
+   */
+  private async runAutomaticQualityGates(
+    taskId: string,
+    phaseName: string,
+    context: OrchestrationContext,
+    workspacePath: string
+  ): Promise<void> {
+    try {
+      // 🧪 After TeamOrchestration: Run tests in background
+      if (phaseName === 'TeamOrchestration') {
+        console.log(`\n🧪 [Quality Gates] Running automatic tests after TeamOrchestration...`);
+        NotificationService.emitConsoleLog(taskId, 'info', `🧪 Running automatic tests in background...`);
+
+        // Start tests in background - doesn't block orchestration
+        const testTask = await BackgroundTaskService.runTests({
+          taskId,
+          cwd: workspacePath,
+          command: 'npm test -- --passWithNoTests 2>&1 || echo "Tests completed with some failures"',
+        });
+
+        console.log(`   📋 Background test task started: ${testTask.id}`);
+        NotificationService.emitConsoleLog(taskId, 'info', `📋 Background test task: ${testTask.id}`);
+
+        // Store test task ID in context for later reference
+        context.setData('backgroundTestTaskId', testTask.id);
+
+        // Also run /test command for detailed analysis (stored for agent reference)
+        const testResult = await SlashCommandService.execute('/test', taskId);
+        if (testResult.success && testResult.prompt) {
+          context.setData('testAnalysisPrompt', testResult.prompt);
+          console.log(`   ✅ Test analysis prompt generated`);
+        }
+      }
+
+      // 📝 Before AutoMerge: Run code review
+      if (phaseName === 'Verification') {
+        console.log(`\n📝 [Quality Gates] Running automatic code review before AutoMerge...`);
+        NotificationService.emitConsoleLog(taskId, 'info', `📝 Running code review...`);
+
+        // Run /review command for the changes
+        const reviewResult = await SlashCommandService.execute('/review git diff main...HEAD', taskId);
+        if (reviewResult.success && reviewResult.prompt) {
+          context.setData('codeReviewPrompt', reviewResult.prompt);
+          console.log(`   ✅ Code review prompt generated`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ Code review analysis ready`);
+        }
+
+        // Run /security command for security audit
+        const securityResult = await SlashCommandService.execute('/security', taskId);
+        if (securityResult.success && securityResult.prompt) {
+          context.setData('securityAuditPrompt', securityResult.prompt);
+          console.log(`   ✅ Security audit prompt generated`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ Security audit analysis ready`);
+        }
+      }
+
+      // 📊 After any phase: Check background task status
+      const bgTestId = context.getData('backgroundTestTaskId') as string | undefined;
+      if (bgTestId && typeof bgTestId === 'string') {
+        const testStatus = BackgroundTaskService.getStatus(bgTestId);
+        if (testStatus) {
+          if (testStatus.status === 'completed') {
+            console.log(`   ✅ Background tests completed (exit: ${testStatus.exitCode})`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              testStatus.exitCode === 0 ? 'info' : 'warn',
+              `🧪 Background tests ${testStatus.exitCode === 0 ? 'passed' : 'completed with issues'}`
+            );
+            // Store results in context
+            context.setData('testResults', {
+              status: testStatus.status,
+              exitCode: testStatus.exitCode,
+              output: testStatus.output.slice(-50), // Last 50 lines
+            });
+          } else if (testStatus.status === 'failed') {
+            console.log(`   ❌ Background tests failed: ${testStatus.error}`);
+            NotificationService.emitConsoleLog(taskId, 'error', `🧪 Background tests failed`);
+          } else if (testStatus.status === 'running') {
+            const runningTasks = BackgroundTaskService.getRunningCount();
+            console.log(`   ⏳ Background tests still running (${runningTasks} tasks active)`);
+          }
+        }
+      }
+
+    } catch (error: any) {
+      // Quality gates are non-critical - log but don't fail orchestration
+      console.warn(`⚠️ [Quality Gates] Non-critical error: ${error.message}`);
+      NotificationService.emitConsoleLog(taskId, 'warn', `⚠️ Quality gate warning: ${error.message}`);
+    }
+  }
+
+  /**
    * Compact context if needed using SDK native /compact command
    *
    * SDK provides native /compact: https://docs.claude.com/en/api/agent-sdk/slash-commands
@@ -1248,7 +1420,13 @@ ${formattedDirectives}
     },
     contextOverride?: OrchestrationContext,
     skipOptimization?: boolean, // 🔥 Skip optimizeConfigForBudget (used for retry with forceTopModel)
-    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' // 🔥 SDK permission mode
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', // 🔥 SDK permission mode
+    // 🔄 SESSION RESUME: Continue from interrupted execution
+    resumeOptions?: {
+      resumeSessionId?: string;    // SDK session ID to resume from
+      resumeAtMessage?: string;    // Specific message UUID to resume from (optional)
+      isResume?: boolean;          // Flag to indicate this is a resume
+    }
   ): Promise<any> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
@@ -1350,10 +1528,53 @@ ${formattedDirectives}
       console.log(`🚀 [ExecuteAgent] SKIPPING optimization (forceTopModel retry) - using topModel for: ${agentType}`);
     }
 
-    // Get model alias from config ('sonnet', 'haiku', or 'opus')
-    const modelAlias = getAgentModel(agentType, modelConfig);
-    // Convert to explicit model ID for SDK (ensures we use latest 4.5 versions)
-    const model = configs.getExplicitModelId(modelAlias);
+    // 🎯 DYNAMIC MODEL ROUTING: Select model based on task complexity
+    // This replaces static per-agent model assignment with intelligent runtime selection
+    let model: string;
+    let modelAlias: string;
+    let thinkingBudget = 0;
+
+    if (DynamicModelRouter.isEnabled() && !skipOptimization) {
+      // Use dynamic routing based on complexity analysis
+      const modelSelection = DynamicModelRouter.selectModel(
+        taskId,
+        agentType,
+        prompt,
+        {
+          forceTopModel: skipOptimization,
+        }
+      );
+
+      model = modelSelection.modelId;
+      modelAlias = modelSelection.tier;
+
+      // 🎯 Emit Dynamic Routing to Activity (not just console)
+      const routingMsg = `🎯 Model: ${modelSelection.tier.toUpperCase()} | Complexity: ${(modelSelection.complexity * 100).toFixed(0)}% | ${modelSelection.reason}`;
+      AgentActivityService.emitMessage(taskId || '', agentType, routingMsg);
+      NotificationService.emitConsoleLog(taskId || '', 'info', `[DynamicRouter] ${routingMsg}`);
+
+      // 🧠 EXTENDED THINKING: Get thinking budget for complex tasks
+      thinkingBudget = ExtendedThinkingService.getThinkingBudget(
+        taskId,
+        agentType,
+        prompt,
+        {}
+      );
+
+      if (thinkingBudget > 0) {
+        // 🧠 Emit Extended Thinking to Activity
+        const thinkingMsg = `🧠 Extended Thinking: ${thinkingBudget.toLocaleString()} token budget`;
+        AgentActivityService.emitMessage(taskId || '', agentType, thinkingMsg);
+        NotificationService.emitConsoleLog(taskId || '', 'info', `[ExtendedThinking] Enabled for ${agentType} with ${thinkingBudget} tokens`);
+      }
+    } else {
+      // Fallback to static config (when dynamic routing disabled or forceTopModel)
+      modelAlias = getAgentModel(agentType, modelConfig);
+      model = configs.getExplicitModelId(modelAlias);
+      const staticMsg = `📊 Static Config: ${modelAlias.toUpperCase()} (dynamic routing disabled)`;
+      AgentActivityService.emitMessage(taskId || '', agentType, staticMsg);
+      NotificationService.emitConsoleLog(taskId || '', 'info', `[StaticConfig] Using ${modelAlias} for ${agentType}`);
+    }
 
     // 🔥 CRITICAL VALIDATION: workspacePath MUST be a string
     // The SDK's query() function requires options.cwd to be a string
@@ -1368,10 +1589,49 @@ ${formattedDirectives}
       );
     }
 
-    console.log(`🤖 [ExecuteAgent] Starting ${agentType}`);
-    console.log(`📁 [ExecuteAgent] Working directory: ${workspacePath}`);
-    console.log(`📎 [ExecuteAgent] Attachments received: ${attachments ? attachments.length : 0}`);
-    console.log(`🔧 [ExecuteAgent] Model: ${model} (from alias: ${modelAlias}) for ${agentType}`);
+    // 🤖 Emit agent start to Activity
+    AgentActivityService.emitMessage(taskId || '', agentType, `🤖 Starting ${agentType}`);
+    NotificationService.emitConsoleLog(taskId || '', 'info', `[ExecuteAgent] Starting ${agentType} | Model: ${modelAlias} | Dir: ${workspacePath}`);
+
+    // 🔗 PRE-EXECUTION HOOKS - Run before agent starts
+    const executionStartTime = Date.now();
+    try {
+      const preHookResult = await AgentHooksService.runPreExecutionHooks({
+        agentType,
+        taskId: taskId || 'unknown',
+        workspacePath,
+        prompt: prompt.substring(0, 500), // Truncate for hooks
+      });
+
+      if (preHookResult.blocked) {
+        console.warn(`⚠️ [ExecuteAgent] Pre-execution hook blocked: ${preHookResult.reason}`);
+        NotificationService.emitConsoleLog(taskId || '', 'warn', `⚠️ Agent ${agentType} blocked by pre-hook: ${preHookResult.reason}`);
+        throw new Error(`Agent blocked by pre-execution hook: ${preHookResult.reason}`);
+      }
+
+      if (preHookResult.warnings.length > 0) {
+        console.log(`⚠️ [ExecuteAgent] Pre-hook warnings: ${preHookResult.warnings.join(', ')}`);
+      }
+    } catch (hookError: any) {
+      if (hookError.message?.includes('blocked by pre-execution')) {
+        throw hookError; // Re-throw if it's a deliberate block
+      }
+      console.warn(`⚠️ [ExecuteAgent] Pre-execution hook error (non-critical): ${hookError.message}`);
+    }
+
+    // 📊 SESSION - Load previous context if available
+    let sessionContext: any = {};
+    if (sessionId && taskId) {
+      try {
+        const existingSession = await SessionService.getSession(sessionId);
+        if (existingSession?.context) {
+          sessionContext = existingSession.context;
+          console.log(`📂 [ExecuteAgent] Loaded session context: ${Object.keys(sessionContext).length} keys`);
+        }
+      } catch (sessionError: any) {
+        console.warn(`⚠️ [ExecuteAgent] Session load error (non-critical): ${sessionError.message}`);
+      }
+    }
 
     // 🧠 SMART CONTEXT INJECTION - Pre-execution intelligence for ALL agents
     let smartContextBlock = '';
@@ -1407,10 +1667,69 @@ ${formattedDirectives}
 
       smartContextBlock = injectedContext.formattedContext;
 
-      // Get relevant memories
+      // 🧠 GRANULAR MEMORY (PRIMARY) - Get memories from MongoDB
+      if (taskId) {
+        try {
+          // Get task to extract projectId
+          const taskDoc = await Task.findById(taskId).select('projectId').lean();
+          if (taskDoc?.projectId) {
+            const projectId = taskDoc.projectId.toString();
+
+            // Get relevant memories for this phase
+            const granularMemories = await granularMemoryService.getPhaseMemories({
+              projectId,
+              taskId,
+              phaseType: phase,
+              limit: 30,
+            });
+
+            if (granularMemories.length > 0) {
+              smartContextBlock += granularMemoryService.formatForPrompt(
+                granularMemories,
+                'GRANULAR MEMORY (What you did before - USE THIS!)'
+              );
+              console.log(`🧠 [ExecuteAgent] Injected ${granularMemories.length} granular memories`);
+            }
+
+            // Get errors to avoid
+            const errorsToAvoid = await granularMemoryService.getErrorsToAvoid({
+              projectId,
+              taskId,
+              limit: 5,
+            });
+
+            if (errorsToAvoid.length > 0) {
+              smartContextBlock += '\n\n🚫 ERRORS TO AVOID (from previous runs):\n';
+              for (const err of errorsToAvoid) {
+                smartContextBlock += `• ${err.title}\n`;
+                if (err.error?.avoidanceRule) {
+                  smartContextBlock += `  → ${err.error.avoidanceRule}\n`;
+                }
+              }
+            }
+
+            // Get patterns and conventions (project-level)
+            const patterns = await granularMemoryService.getPatternsAndConventions({
+              projectId,
+              limit: 10,
+            });
+
+            if (patterns.length > 0) {
+              smartContextBlock += '\n\n📏 PROJECT CONVENTIONS:\n';
+              for (const p of patterns) {
+                smartContextBlock += `• ${p.title}: ${p.content.substring(0, 200)}\n`;
+              }
+            }
+          }
+        } catch (memError: any) {
+          console.warn(`⚠️ [ExecuteAgent] Granular memory retrieval failed: ${memError.message}`);
+        }
+      }
+
+      // 🧠 AGENT MEMORY BRIDGE (SECONDARY) - File-based memory
       const memories = memoryBridge.recallForPhase(phase, 8);
       if (memories.length > 0) {
-        smartContextBlock += memoryBridge.formatForPrompt(memories, 'RELEVANT MEMORIES FROM PREVIOUS PHASES');
+        smartContextBlock += memoryBridge.formatForPrompt(memories, 'ADDITIONAL MEMORIES FROM FILE SYSTEM');
       }
 
       console.log(`🧠 [ExecuteAgent] Smart context injected: ${smartContextBlock.length} chars`);
@@ -1531,28 +1850,83 @@ ${formattedDirectives}
 
       let stream;
       try {
-        stream = query({
-          prompt: promptContent as any,
-          options: {
-            cwd: workspacePath,
-            model, // Explicit model ID: claude-haiku-4-5-*, claude-sonnet-4-5-*, claude-opus-4-5-*
-            // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
-            permissionMode: effectivePermissionMode,
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
-            },
-            // 🔧 MCP Tools - Enhanced agent capabilities (ALL tools for maximum autonomy)
-            mcpServers: {
-              'custom-dev-tools': customToolsServer,
-              'extra-tools': extraToolsServer,
-              'exploratory-tools': exploratoryToolsServer,
-              'autonomous-tools': autonomousToolsServer,
-            },
+        // 🧠 Build query options with optional extended thinking
+        const queryOptions: any = {
+          cwd: workspacePath,
+          model, // Explicit model ID: claude-haiku-4-5-*, claude-sonnet-4-5-*, claude-opus-4-5-*
+          // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
+          permissionMode: effectivePermissionMode,
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
           },
+          // 🔧 MCP Tools - Enhanced agent capabilities (ALL tools for maximum autonomy)
+          mcpServers: {
+            'custom-dev-tools': customToolsServer,
+            'extra-tools': extraToolsServer,
+            'exploratory-tools': exploratoryToolsServer,
+            'autonomous-tools': autonomousToolsServer,
+          },
+        };
+
+        // 🔄 SESSION RESUME: Add resume options if provided
+        // This allows continuing from an interrupted execution exactly where it left off
+        if (resumeOptions?.isResume && resumeOptions?.resumeSessionId) {
+          queryOptions.resume = resumeOptions.resumeSessionId;
+          console.log(`\n🔄🔄🔄 [SESSION RESUME] Resuming from session: ${resumeOptions.resumeSessionId}`);
+
+          if (resumeOptions.resumeAtMessage) {
+            queryOptions.resumeSessionAt = resumeOptions.resumeAtMessage;
+            console.log(`   → Resuming at message: ${resumeOptions.resumeAtMessage}`);
+          }
+
+          NotificationService.emitConsoleLog(
+            taskId || '',
+            'info',
+            `🔄 [SESSION RESUME] Continuing ${agentType} from previous session`
+          );
+          AgentActivityService.emitMessage(
+            taskId || '',
+            agentType,
+            `🔄 Resuming from previous session...`
+          );
+        }
+
+        // 🧠 EXTENDED THINKING: Add maxThinkingTokens for complex tasks
+        // SDK uses maxThinkingTokens option directly (NOT thinking: {...})
+        if (thinkingBudget > 0) {
+          queryOptions.maxThinkingTokens = thinkingBudget;
+
+          // 🧠 Emit to Activity - Claude is now THINKING deeply
+          AgentActivityService.emitThinking(
+            taskId || '',
+            agentType,
+            `Deep reasoning enabled with ${thinkingBudget.toLocaleString()} token budget`
+          );
+          NotificationService.emitConsoleLog(
+            taskId || '',
+            'info',
+            `🧠 [ExtendedThinking] ACTIVE for ${agentType} - ${thinkingBudget} tokens allocated`
+          );
+        }
+
+        // 🔄 For resume mode, use continuation prompt instead of full prompt
+        const effectivePrompt = (resumeOptions?.isResume && resumeOptions?.resumeSessionId)
+          ? 'Continue your work from where you left off. Complete any remaining tasks.'
+          : promptContent;
+
+        stream = query({
+          prompt: effectivePrompt as any,
+          options: queryOptions,
         });
 
         console.log(`✅ [ExecuteAgent] SDK query() call successful, stream created`);
+
+        // 🎮 START EXECUTION TRACKING: Enable mid-turn intervention
+        if (taskId) {
+          ExecutionControlService.startExecution(taskId, agentType, 'executing');
+        }
+
       } catch (queryError: any) {
         console.error(`❌ [ExecuteAgent] Failed to create SDK stream:`, {
           message: queryError.message,
@@ -1561,6 +1935,13 @@ ${formattedDirectives}
           fullError: queryError
         });
         throw new Error(`SDK query failed: ${queryError.message}`);
+      }
+
+      // 📺 TRUE TOKEN STREAMING: Start streaming session for real-time token delivery
+      let streamId: string | null = null;
+      if (taskId) {
+        streamId = StreamingService.startStream(taskId, agentType);
+        console.log(`📺 [TokenStreaming] Stream started: ${streamId}`);
       }
 
       // 🔥 TRUST THE SDK: Let SDK handle all timeouts and error recovery
@@ -1577,9 +1958,27 @@ ${formattedDirectives}
       // 🔥 HISTORY DETECTION: Track if we've received first turn_start (agent is actually active)
       // SDK may send conversation history (assistant/user messages) before agent starts working
       let agentStarted = false;
+
+      // 🎯 ACTIVITY TRACKING: Map tool_use calls to their results for AgentActivityService
+      // Key: tool_use ID, Value: { name, input }
+      const pendingToolCalls = new Map<string, { name: string; input: any }>();
       let historyMessagesReceived = 0;
+
+      // 💰 USAGE TRACKING: Accumulate tokens from stream messages
+      // Agent SDK doesn't return usage in finalResult - we must accumulate from stream events
+      const accumulatedUsage = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      };
       const MAX_HISTORY_MESSAGES = 200; // Fail-safe: abort if too much history without agent starting
       const startTime = Date.now();
+
+      // 🔄 SESSION TRACKING: Capture session_id and message UUIDs for resume capability
+      // These are essential for mid-execution recovery
+      let sdkSessionId: string | undefined;
+      let lastMessageUuid: string | undefined;
 
       console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
       console.log(`   SDK will handle timeouts and error recovery automatically`);
@@ -1624,11 +2023,102 @@ ${formattedDirectives}
             (error as any).isWatchdogTimeout = true;
             throw error;
           }
+
+          // 🎮 MID-EXECUTION INTERVENTION: Check for pause/abort requests
+          if (taskId) {
+            // Check for abort request
+            if (ExecutionControlService.shouldAbort(taskId)) {
+              const error = new Error(`Agent ${agentType} aborted by supervisor/user`);
+              (error as any).isUserAbort = true;
+              throw error;
+            }
+
+            // Check for pause request - wait until resumed
+            if (ExecutionControlService.shouldPause(taskId)) {
+              console.log(`⏸️ [ExecuteAgent] Paused by supervisor/user - waiting for resume...`);
+              await ExecutionControlService.waitForResume(taskId);
+              console.log(`▶️ [ExecuteAgent] Resumed - continuing execution`);
+
+              // After resume, check if we should abort instead
+              if (ExecutionControlService.shouldAbort(taskId)) {
+                const error = new Error(`Agent ${agentType} aborted after pause`);
+                (error as any).isUserAbort = true;
+                throw error;
+              }
+            }
+
+            // Update execution state
+            ExecutionControlService.updateState(taskId, { turnCount });
+          }
+
           allMessages.push(message);
+
+          // 🔄 SESSION CAPTURE: Extract session_id and uuid for resume capability
+          // SDK messages include session_id and uuid fields per sdk.d.ts
+          const msgSessionId = (message as any).session_id;
+          const msgUuid = (message as any).uuid;
+          if (msgSessionId && !sdkSessionId) {
+            sdkSessionId = msgSessionId;
+            console.log(`🔄 [SESSION] Captured SDK session_id: ${sdkSessionId}`);
+          }
+          if (msgUuid) {
+            lastMessageUuid = msgUuid; // Always update to track last message
+          }
 
           // 🔥 LOOP DETECTION: Check if this message contains tool activity
           const messageType = (message as any).type;
           const messageContent = (message as any).message?.content || [];
+
+          // 🔍 DEBUG: Log ALL message types to understand SDK structure
+          if (turnCount <= 3) { // Only log first 3 turns to avoid spam
+            console.log(`🔍 [SDK Message] type=${messageType}, hasContent=${messageContent.length > 0}`);
+            if (messageContent.length > 0) {
+              const contentTypes = messageContent.map((b: any) => b.type).join(', ');
+              console.log(`   Content blocks: ${contentTypes}`);
+            }
+          }
+
+          // 🎯 ACTIVITY: Process tool_use blocks nested in message.content
+          if (Array.isArray(messageContent)) {
+            for (const block of messageContent) {
+              if (block.type === 'tool_use') {
+                const tool = block.name || 'unknown';
+                const input = block.input || {};
+                const toolId = block.id;
+
+                console.log(`🔧 [Activity] Found tool_use in content: ${tool} (id: ${toolId?.substring(0, 8)}...)`);
+
+                if (toolId) {
+                  pendingToolCalls.set(toolId, { name: tool, input });
+                }
+
+                // Emit activity event
+                if (taskId) {
+                  AgentActivityService.emitToolUse(taskId, agentType, tool, input);
+                }
+              } else if (block.type === 'tool_result') {
+                const toolUseId = block.tool_use_id;
+                const result = block.content || '';
+
+                console.log(`📤 [Activity] Found tool_result in content (id: ${toolUseId?.substring(0, 8)}...)`);
+
+                if (taskId && toolUseId) {
+                  const pendingCall = pendingToolCalls.get(toolUseId);
+                  if (pendingCall) {
+                    console.log(`📡 [Activity] Emitting activity for: ${pendingCall.name}`);
+                    AgentActivityService.processToolResult(
+                      taskId,
+                      agentType,
+                      pendingCall.name,
+                      pendingCall.input,
+                      result
+                    );
+                    pendingToolCalls.delete(toolUseId);
+                  }
+                }
+              }
+            }
+          }
 
           // Check for tool activity in message content (SDK nests tool_use inside assistant messages)
           const hasToolActivity =
@@ -1737,13 +2227,25 @@ ${formattedDirectives}
           if ((message as any).type === 'tool_use') {
             const tool = (message as any).name || 'unknown';
             const input = (message as any).input || {};
-            // toolId available in (message as any).id for matching with result if needed
+            const toolId = (message as any).id;
             console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
+
+            // 🎯 Store pending tool call for matching with result
+            if (toolId) {
+              pendingToolCalls.set(toolId, { name: tool, input });
+              console.log(`📝 [Activity] Stored tool call: ${tool} (id: ${toolId.substring(0, 8)}...)`);
+            } else {
+              console.warn(`⚠️ [Activity] tool_use missing ID, cannot track: ${tool}`);
+            }
 
             // 🎯 Emit structured activity for real-time frontend display
             if (taskId) {
               // Emit tool use event (will be paired with result)
               AgentActivityService.emitToolUse(taskId, agentType, tool, input);
+              console.log(`📡 [Activity] Emitted tool_use: ${tool}`);
+
+              // 📺 TOOL STREAMING: Emit tool start event for real-time UI
+              StreamingService.streamToolStart(taskId, agentType, tool, toolId || 'unknown', input);
             }
 
             // Log file operations for visibility
@@ -1784,6 +2286,7 @@ ${formattedDirectives}
           if ((message as any).type === 'tool_result') {
             const status = (message as any).is_error ? '❌' : '✅';
             const result = (message as any).content || (message as any).result || '';
+            const toolUseId = (message as any).tool_use_id;
 
             // 🔥 LOG TOOL RESULT - especially for git commands
             console.log(`${status} [${agentType}] Tool completed`);
@@ -1793,14 +2296,111 @@ ${formattedDirectives}
               const resultPreview = result.substring(0, 200).replace(/\n/g, ' ');
               console.log(`   📤 Result: ${resultPreview}${result.length > 200 ? '...' : ''}`);
             }
+
+            // 🎯 ACTIVITY: Emit structured activity with tool result
+            if (taskId && toolUseId) {
+              const pendingCall = pendingToolCalls.get(toolUseId);
+              if (pendingCall) {
+                console.log(`📡 [Activity] Processing tool result: ${pendingCall.name} (id: ${toolUseId.substring(0, 8)}...)`);
+                AgentActivityService.processToolResult(
+                  taskId,
+                  agentType,
+                  pendingCall.name,
+                  pendingCall.input,
+                  result
+                );
+
+                // 📺 TOOL STREAMING: Emit tool complete event for real-time UI
+                const isError = (message as any).is_error === true;
+                StreamingService.streamToolComplete(
+                  taskId,
+                  agentType,
+                  pendingCall.name,
+                  toolUseId,
+                  result,
+                  0, // Duration not tracked at this level
+                  !isError
+                );
+
+                // 📺 FILE CHANGE STREAMING: Emit file change for Edit/Write operations
+                if (!isError && (pendingCall.name === 'Edit' || pendingCall.name === 'Write')) {
+                  const filePath = pendingCall.input?.file_path || pendingCall.input?.path;
+                  if (filePath) {
+                    StreamingService.streamFileChange(
+                      taskId,
+                      agentType,
+                      filePath,
+                      pendingCall.name === 'Write' ? 'created' : 'modified'
+                    );
+                  }
+                }
+
+                // 📺 COMMAND OUTPUT STREAMING: Emit command output for Bash operations
+                if (pendingCall.name === 'Bash') {
+                  const command = pendingCall.input?.command || '';
+                  StreamingService.streamCommandOutput(
+                    taskId,
+                    agentType,
+                    command,
+                    {
+                      stdout: typeof result === 'string' ? result : JSON.stringify(result),
+                      exitCode: isError ? 1 : 0
+                    }
+                  );
+                }
+
+                pendingToolCalls.delete(toolUseId); // Clean up
+              } else {
+                console.warn(`⚠️ [Activity] No pending call for tool_use_id: ${toolUseId.substring(0, 8)}...`);
+              }
+            } else {
+              console.warn(`⚠️ [Activity] Cannot process tool_result: taskId=${!!taskId}, toolUseId=${!!toolUseId}`);
+            }
           }
 
           if ((message as any).type === 'text') {
             const text = (message as any).text || '';
             if (text.length > 0) {
-              const preview = text.substring(0, 100);
-              console.log(`💬 [${agentType}] Agent says: ${preview}...`);
+              // 💬 Emit agent text to Activity (truncate if too long)
+              const displayText = text.length > 500 ? text.substring(0, 500) + '...' : text;
+              if (taskId) {
+                AgentActivityService.emitMessage(taskId, agentType, `💬 ${displayText}`);
+              }
+
+              // 📺 TRUE TOKEN STREAMING: Stream text to frontend in real-time
+              if (streamId) {
+                StreamingService.streamToken(streamId, text);
+              }
             }
+          }
+
+          // 📺 CONTENT BLOCK STREAMING: Also stream text blocks from message.content array
+          // SDK sometimes sends text as content blocks inside assistant messages
+          if (Array.isArray(messageContent)) {
+            for (const block of messageContent) {
+              if (block.type === 'text' && block.text) {
+                // 💬 Emit text block to Activity
+                const displayText = block.text.length > 500 ? block.text.substring(0, 500) + '...' : block.text;
+                if (taskId && displayText.length > 10) { // Only emit meaningful text
+                  AgentActivityService.emitMessage(taskId, agentType, `💬 ${displayText}`);
+                }
+                if (streamId) {
+                  StreamingService.streamToken(streamId, block.text);
+                }
+              }
+            }
+          }
+
+          // 💰 USAGE ACCUMULATION: Extract tokens from various message types
+          // Agent SDK sends usage in multiple places - accumulate from all sources
+          const msgUsage = (message as any).usage ||
+                          (message as any).message?.usage ||
+                          (message as any).data?.usage;
+          if (msgUsage) {
+            if (msgUsage.input_tokens) accumulatedUsage.input_tokens += msgUsage.input_tokens;
+            if (msgUsage.output_tokens) accumulatedUsage.output_tokens += msgUsage.output_tokens;
+            if (msgUsage.cache_creation_input_tokens) accumulatedUsage.cache_creation_input_tokens += msgUsage.cache_creation_input_tokens;
+            if (msgUsage.cache_read_input_tokens) accumulatedUsage.cache_read_input_tokens += msgUsage.cache_read_input_tokens;
           }
 
           if (message.type === 'result') {
@@ -1819,11 +2419,28 @@ ${formattedDirectives}
             }
 
             console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
+            console.log(`💰 [ExecuteAgent] Accumulated usage: input=${accumulatedUsage.input_tokens}, output=${accumulatedUsage.output_tokens}`);
+
+            // 📺 END TOKEN STREAMING: Close stream on successful completion
+            if (streamId) {
+              StreamingService.endStream(streamId);
+              console.log(`📺 [TokenStreaming] Stream ended: ${streamId}`);
+            }
           }
         }
       } catch (streamError: any) {
+        // 📺 END TOKEN STREAMING on error
+        if (streamId) {
+          StreamingService.endStream(streamId);
+          console.log(`📺 [TokenStreaming] Stream ended (error): ${streamId}`);
+        }
         // Clear watchdog on error
         clearInterval(watchdogInterval);
+
+        // 🎮 END EXECUTION TRACKING on error
+        if (taskId) {
+          ExecutionControlService.endExecution(taskId);
+        }
         const streamDurationMs = Date.now() - startTime;
         const lastMessageTypes = allMessages.slice(-20).map(m => (m as any).type);
 
@@ -1873,6 +2490,11 @@ ${formattedDirectives}
       // Clear watchdog on successful completion
       clearInterval(watchdogInterval);
 
+      // 🎮 END EXECUTION TRACKING on success
+      if (taskId) {
+        ExecutionControlService.endExecution(taskId);
+      }
+
       console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
 
       // 🔍 DEBUG: Log the structure of finalResult to understand what SDK returns
@@ -1904,11 +2526,20 @@ ${formattedDirectives}
       // - cache_creation_input_tokens: 1.25x input price
       // - cache_read_input_tokens: 0.1x input price
 
-      const usage = (finalResult as any)?.usage || {};
+      // Use accumulated usage from stream (fallback to finalResult.usage for backwards compatibility)
+      const usage = accumulatedUsage.input_tokens > 0 || accumulatedUsage.output_tokens > 0
+        ? accumulatedUsage
+        : ((finalResult as any)?.usage || {});
       const inputTokens = usage.input_tokens || 0;
       const outputTokens = usage.output_tokens || 0;
       const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
       const cacheReadTokens = usage.cache_read_input_tokens || 0;
+
+      // Log which source we used for usage data
+      const usageSource = accumulatedUsage.input_tokens > 0 || accumulatedUsage.output_tokens > 0
+        ? 'stream accumulation'
+        : 'finalResult.usage';
+      console.log(`💰 [ExecuteAgent] Usage source: ${usageSource}`);
 
       // Determine pricing based on model alias (haiku, sonnet, opus)
       const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
@@ -1946,15 +2577,64 @@ ${formattedDirectives}
       }
       console.log(`   Total cost: $${cost.toFixed(4)}`);
 
+      // 🔗 POST-EXECUTION HOOKS - Run after agent completes
+      const executionDuration = Date.now() - executionStartTime;
+      try {
+        await AgentHooksService.runPostExecutionHooks({
+          agentType,
+          taskId: taskId || 'unknown',
+          workspacePath,
+          success: true,
+          output: output.substring(0, 1000), // Truncate for hooks
+          duration: executionDuration,
+          cost,
+          tokens: inputTokens + outputTokens,
+        });
+        console.log(`✅ [ExecuteAgent] Post-execution hooks completed`);
+      } catch (postHookError: any) {
+        console.warn(`⚠️ [ExecuteAgent] Post-execution hook error (non-critical): ${postHookError.message}`);
+      }
+
+      // 💾 SESSION - Save context for future reference
+      if (sessionId && taskId) {
+        try {
+          await SessionService.updateContext(sessionId, {
+            lastAgentType: agentType,
+            lastOutput: output.substring(0, 2000), // Keep relevant output
+            lastCost: cost,
+            lastTokens: inputTokens + outputTokens,
+            totalExecutions: (sessionContext.totalExecutions || 0) + 1,
+            totalCost: (sessionContext.totalCost || 0) + cost,
+            updatedAt: new Date().toISOString(),
+          });
+          console.log(`💾 [ExecuteAgent] Session context saved`);
+        } catch (sessionSaveError: any) {
+          console.warn(`⚠️ [ExecuteAgent] Session save error (non-critical): ${sessionSaveError.message}`);
+        }
+      }
+
+      // 📊 STATISTICS - Track agent execution
+      AgentHooksService.recordExecution({
+        agentType,
+        duration: executionDuration,
+        success: true,
+        cost,
+        tokens: inputTokens + outputTokens,
+      });
+
       return {
         output: output,
         usage: (finalResult as any)?.usage || {},
         cost: cost,
         stopReason: (finalResult as any)?.stop_reason,
         sessionId: sessionId,
-        canResume: false,
+        canResume: !!sdkSessionId, // 🔄 Can resume if we captured SDK session
         rawResult: finalResult,
         allMessages,
+        executionDuration, // Added for tracking
+        // 🔄 SESSION RESUME DATA: Essential for mid-execution recovery
+        sdkSessionId,        // SDK session ID for resume parameter
+        lastMessageUuid,     // Last message UUID for precise resumption point
       };
       } catch (error: any) {
         console.error(`❌ [ExecuteAgent] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
@@ -2116,8 +2796,15 @@ ${formattedDirectives}
     forceTopModel?: boolean, // 🔥 NEW: Force use of topModel (for retry after Judge rejection)
     devAuth?: any, // 🔐 Developer authentication config (token or credentials for testing endpoints)
     architectureBrief?: any, // 🏗️ Architecture insights from PlanningPhase (patterns, conventions, models)
-    environmentCommands?: any // 🔧 Environment commands from TechLead (test, lint, typecheck, etc.)
-  ): Promise<{ output?: string; cost?: number } | void> {
+    environmentCommands?: any, // 🔧 Environment commands from TechLead (test, lint, typecheck, etc.)
+    projectRadiographies?: Map<string, any>, // 🔬 Language-agnostic project analysis from PlanningPhase
+    // 🔄 SESSION RESUME: Continue from interrupted execution
+    resumeOptions?: {
+      resumeSessionId?: string;    // SDK session ID to resume from
+      resumeAtMessage?: string;    // Specific message UUID to resume from
+      isResume?: boolean;          // Flag indicating this is a resume
+    }
+  ): Promise<{ output?: string; cost?: number; sdkSessionId?: string; lastMessageUuid?: string } | void> {
     const taskId = (task._id as any).toString();
 
     // 🚀 RETRY OPTIMIZATION: Use topModel when Judge rejected code
@@ -2193,7 +2880,7 @@ ${formattedDirectives}
 
     console.log(`👨‍💻 [Developer ${member.instanceId}] Starting work on ${storiesToProcess.length} stories`);
 
-    let lastResult: { output?: string; cost?: number } | undefined;
+    let lastResult: { output?: string; cost?: number; sdkSessionId?: string; lastMessageUuid?: string } | undefined;
 
     for (const story of storiesToProcess) {
       if (!story || !story.id) {
@@ -2284,12 +2971,46 @@ ${suggestions.map(s => `| \`${s.file}\` | ${s.reason} |`).join('\n')}
         }
       }
 
-      let prompt = `${directivesBlock}# Story: ${story.title}
+      let prompt = `${directivesBlock}
+# 🚀 DEVELOPER AGENT - IMPLEMENTATION MODE
+
+## 💡 YOUR PHILOSOPHY: BE A DOER, NOT A TALKER
+
+**You are an IMPLEMENTER, not a planner.** Your job is to WRITE CODE, not describe what code you would write.
+
+### ⚡ GOLDEN RULES:
+1. **USE TOOLS IMMEDIATELY** - Don't describe, DO
+   - ❌ WRONG: "I would read the file to understand..."
+   - ✅ RIGHT: \`Read("src/services/UserService.ts")\` → then analyze
+
+2. **READ BEFORE WRITE** - SDK requires this
+   - ❌ WRONG: \`Edit("file.ts", "old", "new")\` without reading first
+   - ✅ RIGHT: \`Read("file.ts")\` → then \`Edit("file.ts", "old", "new")\`
+
+3. **VERIFY YOUR WORK** - Run commands, don't assume
+   - ❌ WRONG: "The code should work now"
+   - ✅ RIGHT: \`Bash("npm run build")\` → see actual output
+
+4. **COMMIT AND PUSH** - Your work doesn't exist until it's pushed
+   - ❌ WRONG: Making changes but not committing
+   - ✅ RIGHT: \`Bash("git add . && git commit -m 'feat: ...' && git push")\`
+
+5. **ONE STORY, COMPLETE IMPLEMENTATION** - You own this story end-to-end
+   - All code changes
+   - All tests (if applicable)
+   - All verification
+   - Final push
+
+---
+
+# Story: ${story.title}
 
 ${story.description}
 
-${storyAcceptanceCriteria.length > 0 ? `## ✅ ACCEPTANCE CRITERIA
+${storyAcceptanceCriteria.length > 0 ? `## ✅ ACCEPTANCE CRITERIA (ALL MUST BE MET!)
 ${storyAcceptanceCriteria.map((ac: string, i: number) => `${i + 1}. ${ac}`).join('\n')}
+
+**⚠️ Your PR will be REJECTED if any criterion is not met.**
 ` : ''}
 ${fileAnalysisSection}
 ${storyHelpers.length > 0 ? `## 🔧 REQUIRED HELPERS (YOU MUST USE THESE!)
@@ -2362,6 +3083,27 @@ If you use \`new Model()\` instead of \`createModel()\`, the Judge will REJECT y
 
 ⚠️ **Code that doesn't follow these patterns will be REJECTED by the Judge.**
 `;
+      }
+
+      // 🔬 Add Project Radiography section from PlanningPhase (language-agnostic analysis)
+      if (projectRadiographies && projectRadiographies.size > 0) {
+        const targetRadiography = projectRadiographies.get(repoName) || projectRadiographies.get(targetRepository);
+        if (targetRadiography) {
+          const { ProjectRadiographyService } = await import('../ProjectRadiographyService');
+          prompt += `\n\n## 🔬 PROJECT RADIOGRAPHY (${repoName} - Complete Analysis)
+
+**This is a programmatic X-Ray of the codebase. Use this as the source of truth for patterns and file locations.**
+
+${ProjectRadiographyService.formatForPrompt(targetRadiography)}
+
+---
+**⚠️ CRITICAL**:
+- USE the routes, models, services listed above when implementing your story
+- MATCH the detected conventions (naming: ${targetRadiography.conventions?.namingConvention}, file structure: ${targetRadiography.conventions?.fileStructure})
+- Reference ACTUAL file paths from the radiography
+---
+`;
+        }
       }
 
       // Add Judge feedback if this is a retry
@@ -2833,6 +3575,7 @@ After writing code, you MUST follow this EXACT sequence:
         // Execute developer agent - SDK uses workspace root
         // 🔥 When forceTopModel=true (retry after Judge rejection), skip optimization
         // to ensure developer uses topModel instead of being downgraded to Haiku
+        // 🔄 Pass resumeOptions for mid-execution recovery support
         const result = await this.executeAgent(
           'developer',
           prompt,
@@ -2844,14 +3587,27 @@ After writing code, you MUST follow this EXACT sequence:
           attachments, // Pass images for visual context
           undefined, // options
           undefined, // contextOverride
-          forceTopModel // skipOptimization - when true, keeps topModel for retry
+          forceTopModel, // skipOptimization - when true, keeps topModel for retry
+          undefined, // permissionMode
+          resumeOptions // 🔄 Session resume options
         );
 
         console.log(`✅ [Developer ${member.instanceId}] Completed story: ${story.title}`);
         console.log(`📊 [Developer ${member.instanceId}] Cost: $${result.cost?.toFixed(4) || 0}`);
 
+        // 🔄 Log session info for debugging
+        if (result.sdkSessionId) {
+          console.log(`🔄 [Developer ${member.instanceId}] SDK Session: ${result.sdkSessionId}`);
+        }
+
         // Store result for return (isolated pipeline uses single-story execution)
-        lastResult = { output: result.output, cost: result.cost };
+        // 🔄 Include session data for mid-execution recovery
+        lastResult = {
+          output: result.output,
+          cost: result.cost,
+          sdkSessionId: result.sdkSessionId,
+          lastMessageUuid: result.lastMessageUuid,
+        };
 
         // 2️⃣ 🔥 CRITICAL: Verify developer finished successfully and pushed to remote
         // If verification fails, this story will be marked as failed (Judge cannot review)

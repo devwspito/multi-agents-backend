@@ -1,9 +1,13 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import { RealisticCostEstimator } from '../RealisticCostEstimator';
 import { CryptoService } from '../CryptoService';
+import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
+import { sessionCheckpointService } from '../SessionCheckpointService';
+import { granularMemoryService } from '../GranularMemoryService';
 
 /**
  * Tech Lead Phase
@@ -24,9 +28,21 @@ export class TechLeadPhase extends BasePhase {
 
   /**
    * Skip if Tech Lead already completed
+   *
+   * 🔥 CRITICAL: In multi-team mode, each team has its OWN epic!
+   * We must check if TechLead was completed for THIS SPECIFIC EPIC,
+   * not globally for any epic.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
+
+    // 🔥 CRITICAL FIX: Detect multi-team mode FIRST
+    const teamEpic = context.getData<any>('teamEpic');
+    const multiTeamMode = !!teamEpic;
+
+    if (multiTeamMode) {
+      console.log(`\n🎯 [TechLead.shouldSkip] Multi-team mode detected - Epic: ${teamEpic.id}`);
+    }
 
     // Refresh task from DB to get latest state
     const Task = require('../../models/Task').Task;
@@ -45,22 +61,147 @@ export class TechLeadPhase extends BasePhase {
     }
 
     // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
+    // 🔥 CRITICAL FIX: In multi-team mode, techLead.status is GLOBAL, not per-epic!
+    // We need to check EventStore for TechLeadCompleted event WITH THIS EPIC's ID
     if (context.task.orchestration.techLead?.status === 'completed') {
+      if (multiTeamMode) {
+        // In multi-team mode, check if TechLead was completed FOR THIS SPECIFIC EPIC
+        console.log(`   ⚠️ Global techLead.status is 'completed', but checking if this specific epic (${teamEpic.id}) was completed...`);
+
+        try {
+          const { eventStore } = await import('../EventStore');
+          const events = await eventStore.getEvents(context.task._id as any);
+          const techLeadForThisEpic = events.find((e: any) =>
+            e.eventType === 'TechLeadCompleted' &&
+            !e.payload?.failed &&
+            e.payload?.epicId === teamEpic.id
+          );
+
+          if (!techLeadForThisEpic) {
+            console.log(`   ✅ No TechLeadCompleted event found for epic ${teamEpic.id} - will execute TechLead`);
+            return false; // DO NOT SKIP - this epic hasn't had TechLead run yet
+          }
+
+          console.log(`   ✅ Found TechLeadCompleted for epic ${teamEpic.id} - will skip`);
+        } catch (error: any) {
+          console.log(`   ⚠️ Error checking EventStore: ${error.message} - will NOT skip to be safe`);
+          return false;
+        }
+      }
+
       console.log(`[SKIP] Tech Lead already completed - skipping re-execution (recovery mode)`);
 
       // Restore phase data from previous execution for next phases
-      if (context.task.orchestration.techLead.output) {
-        context.setData('techLeadOutput', context.task.orchestration.techLead.output);
-      }
-      // TODO: Add epics and storiesMap to IAgentStep if needed
-      // if (context.task.orchestration.techLead.epics) {
-      //   context.setData('epics', context.task.orchestration.techLead.epics);
-      // }
-      // if (context.task.orchestration.techLead.storiesMap) {
-      //   context.setData('storiesMap', context.task.orchestration.techLead.storiesMap);
-      // }
+      await this.restoreTechLeadData(context);
 
       return true;
+    }
+
+    // 🔥 SMART RECOVERY: If techLead was in_progress but has valid output + storyAssignments,
+    // the agent finished but status wasn't saved before crash. Use the existing output.
+    // 🔥 CRITICAL: In multi-team mode, techLead is GLOBAL - skip this check for subsequent teams
+    const techLead = context.task.orchestration.techLead;
+    if (!multiTeamMode && techLead?.status === 'in_progress' && techLead.storyAssignments && techLead.storyAssignments.length > 0 && techLead.output) {
+      console.log(`\n🔄🔄🔄 [SMART RECOVERY] TechLead was in_progress but has ${techLead.storyAssignments.length} story assignment(s) + output`);
+      console.log(`   → Using existing output instead of re-executing (saves ~5 min + $$)`);
+      console.log(`   → Story assignments found: ${techLead.storyAssignments.map((a: any) => `${a.storyId} → ${a.assignedTo}`).join(', ')}`);
+
+      // Mark as completed since we have valid output
+      const Task = require('../../models/Task').Task;
+      await Task.findByIdAndUpdate(context.task._id, {
+        $set: {
+          'orchestration.techLead.status': 'completed',
+          'orchestration.techLead.completedAt': new Date(),
+        }
+      });
+
+      // Restore phase data for next phases
+      await this.restoreTechLeadData(context);
+
+      NotificationService.emitConsoleLog(
+        (context.task._id as any).toString(),
+        'info',
+        `🔄 SMART RECOVERY: TechLead already finished (${techLead.storyAssignments.length} story assignments) - skipping re-execution`
+      );
+
+      return true; // Skip re-execution
+    }
+
+    // 🔥 SMART RECOVERY: Check EventStore for TechLeadCompleted event (even if DB not updated)
+    // 🔥 CRITICAL FIX: In multi-team mode, filter by epicId!
+    try {
+      const { eventStore } = await import('../EventStore');
+      const events = await eventStore.getEvents(context.task._id as any);
+
+      // 🔥 CRITICAL: In multi-team mode, only match events for THIS epic
+      const techLeadCompletedEvent = multiTeamMode
+        ? events.find((e: any) =>
+            e.eventType === 'TechLeadCompleted' &&
+            !e.payload?.failed &&
+            e.payload?.epicId === teamEpic?.id
+          )
+        : events.find((e: any) => e.eventType === 'TechLeadCompleted' && !e.payload?.failed);
+
+      if (techLeadCompletedEvent && techLeadCompletedEvent.payload?.epicsCount > 0) {
+        const epicInfo = multiTeamMode ? ` (epic: ${teamEpic?.id})` : '';
+        console.log(`\n🔄🔄🔄 [SMART RECOVERY] Found TechLeadCompleted event in EventStore${epicInfo}!`);
+        console.log(`   → Epics: ${techLeadCompletedEvent.payload.epicsCount}, Stories: ${techLeadCompletedEvent.payload.storiesCount}`);
+        console.log(`   → DB status: ${techLead?.status || 'not set'} - updating to completed`);
+
+        // Mark as completed in DB
+        const Task = require('../../models/Task').Task;
+        await Task.findByIdAndUpdate(context.task._id, {
+          $set: {
+            'orchestration.techLead.status': 'completed',
+            'orchestration.techLead.completedAt': new Date(),
+          }
+        });
+
+        // Restore from events
+        const epicEvents = events.filter((e: any) => e.eventType === 'EpicCreated');
+        const storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
+        const teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
+
+        if (epicEvents.length > 0) {
+          const epics = epicEvents.map((e: any) => e.payload);
+          context.setData('epics', epics);
+          console.log(`   → Restored ${epics.length} epics from EventStore`);
+        }
+
+        if (storyEvents.length > 0) {
+          const storiesMap: { [id: string]: any } = {};
+          storyEvents.forEach((e: any) => {
+            storiesMap[e.payload.id] = e.payload;
+          });
+          context.setData('storiesMap', storiesMap);
+
+          // Build storyAssignments from story events
+          const storyAssignments = storyEvents
+            .filter(e => e.payload.assignedTo)
+            .map(e => ({ storyId: e.payload.id, assignedTo: e.payload.assignedTo }));
+          context.setData('storyAssignments', storyAssignments);
+          console.log(`   → Restored ${Object.keys(storiesMap).length} stories, ${storyAssignments.length} assignments from EventStore`);
+        }
+
+        if (teamEvent) {
+          context.setData('teamComposition', teamEvent.payload);
+          console.log(`   → Restored teamComposition: ${teamEvent.payload.developers} developers`);
+        }
+
+        if (techLead?.output) {
+          context.setData('techLeadOutput', techLead.output);
+        }
+
+        NotificationService.emitConsoleLog(
+          (context.task._id as any).toString(),
+          'info',
+          `🔄 SMART RECOVERY: Restored TechLead from EventStore - ${epicEvents.length} epics, ${storyEvents.length} stories`
+        );
+
+        return true; // Skip re-execution
+      }
+    } catch (error: any) {
+      console.log(`   ⚠️ EventStore recovery check failed: ${error.message}`);
     }
 
     return false;
@@ -78,16 +219,40 @@ export class TechLeadPhase extends BasePhase {
     const teamEpic = context.getData<any>('teamEpic');
     const multiTeamMode = !!teamEpic;
 
-    // Update task status (skip in multi-team mode to avoid conflicts)
+    // Update task status
     const startTime = new Date();
     if (!multiTeamMode) {
+      // Single-team mode: update in-memory and save
+      if (!task.orchestration.techLead) {
+        task.orchestration.techLead = { agent: 'tech-lead', status: 'pending' } as any;
+      }
       task.orchestration.techLead.status = 'in_progress';
       task.orchestration.techLead.startedAt = startTime;
       await task.save();
+    } else {
+      // 🔥 MULTI-TEAM: Use atomic $set to initialize techLead without version conflicts
+      // This ensures the field exists for approval endpoint
+      const Task = require('../../models/Task').Task;
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
+          'orchestration.techLead.agent': 'tech-lead',
+          'orchestration.techLead.status': 'in_progress',
+          'orchestration.techLead.startedAt': startTime,
+        },
+      });
+      console.log(`📝 [TechLead] Initialized orchestration.techLead atomically for multi-team mode`);
     }
 
     // Notify agent started
     NotificationService.emitAgentStarted(taskId, 'Tech Lead');
+
+    // 🎯 ACTIVITY: Emit phase start for Activity tab
+    const agentLabel = multiTeamMode ? `Tech Lead (Epic: ${teamEpic?.id || 'unknown'})` : 'Tech Lead';
+    AgentActivityService.emitMessage(
+      taskId,
+      agentLabel,
+      `🏗️ Starting architecture design${multiTeamMode ? ` for epic: ${teamEpic?.title}` : ''}...`
+    );
 
     await LogService.agentStarted('tech-lead', taskId, {
       phase: 'architecture',
@@ -185,10 +350,13 @@ export class TechLeadPhase extends BasePhase {
               envVarsSection = `\n   **Environment Variables (platform-configured)**:\n${envVarNames}`;
             }
 
+            // 🔥 CRITICAL: Include LOCAL PATH so agent knows where files actually are
+            const localPath = `${workspacePath || process.cwd()}/${repo.name}`;
             return `${i + 1}. **${repo.name}** (${typeEmoji} ${repo.type.toUpperCase()})${isDefault}
    - GitHub: ${repo.githubRepoName}
    - Branch: ${repo.githubBranch}
-   - Execution Order: ${repo.executionOrder || 'not set'}${envVarsSection}`;
+   - Execution Order: ${repo.executionOrder || 'not set'}
+   - **LOCAL PATH**: \`${localPath}\` ← USE THIS for Glob/Read/Grep!${envVarsSection}`;
           }).join('\n')}\n`
         : '';
 
@@ -220,6 +388,9 @@ ${previousOutput}
 
       // 🏗️ Get Architecture Brief from PlanningPhase (if available)
       const architectureBrief = context.getData<any>('architectureBrief');
+
+      // 🔬 Get Project Radiography from PlanningPhase (LANGUAGE AGNOSTIC analysis)
+      const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
 
       // 🔄 RETRY FEEDBACK: Add error feedback if this is a retry
       let retrySection = '';
@@ -289,13 +460,56 @@ ${lastError.conflicts?.map((c: any) =>
 ---
 
 `;
+        } else if (lastError.violationType === 'TECHLEAD_JUDGE_REJECTION') {
+          // ⚖️ TechLead Judge rejection - stories don't properly cover the epic
+          const judgeFeedback = lastError.feedback || lastError.message?.replace('TECHLEAD_JUDGE_REJECTION:', '').trim() || '';
+          const judgeReason = lastError.reason || lastError.message || '';
+
+          retrySection = `
+
+# 🚨🚨🚨 JUDGE REJECTED YOUR PLANNING - READ CAREFULLY! 🚨🚨🚨
+
+## ❌ WHY YOU WERE REJECTED:
+
+${judgeReason}
+
+## 📋 SPECIFIC ISSUES TO FIX:
+
+${judgeFeedback}
+
+---
+
+## 🔴 CRITICAL RULES (YOU VIOLATED THESE):
+
+1. **FOLLOW THE EPIC'S FILE GUIDANCE:**
+   - If epic says \`filesToCreate: []\` → DO NOT create new files!
+   - If epic says \`filesToModify: ["models/X.js"]\` → ONLY modify that file!
+
+2. **FOLLOW THE EPIC'S ARCHITECTURE PATTERN:**
+   - If epic says "subdocument pattern" → Use subdocuments, NOT new collections
+   - If epic says "extend existing model" → Modify the existing file, NOT create new
+
+3. **USE THE EPIC'S PRE-DEFINED STORIES:**
+   - The epic already has stories defined by Planning
+   - Your job is to EXPAND them with details, NOT replace them
+
+## ⚡ HOW TO FIX:
+
+1. READ the epic specification at the start of this prompt
+2. USE the exact files listed in \`filesToModify\`
+3. DO NOT create files if \`filesToCreate: []\` is empty
+4. FOLLOW the \`followsPatterns\` directive exactly
+
+---
+
+`;
         }
       }
 
-      const projectId = task.projectId?.toString() || '';
+      const memoryProjectId = task.projectId?.toString() || '';
       const memoryContext = `
 ## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
-- **Project ID**: \`${projectId}\`
+- **Project ID**: \`${memoryProjectId}\`
 - **Task ID**: \`${taskId}\`
 
 Use these when calling \`recall()\` and \`remember()\` tools.
@@ -343,9 +557,41 @@ ${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | \`${r.m
 `;
       }
 
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories, architectureBrief) : `${retrySection}Act as the tech-lead agent.
+      // 🔬 Build Project Radiography section (LANGUAGE AGNOSTIC)
+      let radiographySection = '';
+      if (projectRadiographies && projectRadiographies.size > 0) {
+        radiographySection = `
+## 🔬 PROJECT RADIOGRAPHY (Complete Codebase Analysis - READ CAREFULLY!)
+
+**This is a programmatic X-Ray of the codebase. This data is MORE RELIABLE than exploration.**
+
+`;
+        for (const [repoName, radiography] of projectRadiographies.entries()) {
+          radiographySection += `
+### 📁 ${repoName}
+${ProjectRadiographyService.formatForPrompt(radiography)}
+`;
+        }
+
+        radiographySection += `
+---
+**⚠️ CRITICAL FOR STORY CREATION**:
+- USE the routes, models, services listed above when writing stories
+- MATCH the detected conventions (naming, file structure)
+- INCLUDE the entry points in dependencies when relevant
+- Reference ACTUAL file paths from the radiography
+---
+`;
+      }
+
+      // 💡 USER DIRECTIVES - Incorporate any user-injected instructions
+      const directivesBlock = context.getDirectivesBlock('tech-lead');
+
+      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories, architectureBrief, projectRadiographies) : `${retrySection}Act as the tech-lead agent.
 ${memoryContext}
 ${architectureBriefSection}
+${radiographySection}
+${directivesBlock}
 # Architecture & Planning
 ${revisionSection}
 ## Task: ${task.title}
@@ -353,6 +599,44 @@ ${task.description ? `Description: ${task.description}` : ''}
 
 ## Workspace: ${workspacePath}
 ${repoInfo}
+
+## 🔍 CRITICAL: VALIDATE & EXPAND REQUIREMENTS (DO THIS FIRST!)
+
+**Before creating stories, VALIDATE that the task is well-defined:**
+
+### If the Task Description is VAGUE:
+1. **Search for existing implementations:**
+   \`\`\`bash
+   # Find related code to understand what already exists
+   Grep("related-keyword|feature-name")
+   Glob("**/related-folder/**")
+   \`\`\`
+
+2. **Expand into a COMPREHENSIVE feature list:**
+   - What data models are needed? (not just one - ALL of them)
+   - What APIs/endpoints? (CRUD at minimum)
+   - What UI components? (list, detail, forms, etc.)
+   - What validations? (input, business rules)
+   - What error handling?
+   - What tests?
+
+3. **Document your expansion:**
+   Add an "inferredRequirements" section to your output explaining what you added.
+
+### ⚠️ YOUR STORIES ARE TOO SHALLOW IF:
+- You only create 1-2 stories for a complex feature
+- A backend story has no corresponding frontend story
+- No validation or error handling mentioned
+- No tests specified
+- You didn't include acceptance criteria
+
+### ✅ A COMPLETE STORY BREAKDOWN INCLUDES:
+- **Data Layer**: Models, schemas, migrations
+- **API Layer**: Endpoints, validation, error responses
+- **Service Layer**: Business logic, helpers
+- **UI Layer**: Components, pages, forms
+- **Integration**: How parts connect to each other
+- **Testing**: Unit, integration, e2e tests
 
 ## 🎯 INSTRUCTIONS (Be concise and efficient):
 
@@ -362,12 +646,8 @@ ${repoInfo}
 4. **CREATE 3-5 STORIES PER EPIC**: Each 1-3 hours of work with PATTERNS included
 
 ## 🔍 MANDATORY: PATTERN DISCOVERY (Before Creating Stories)
-\`\`\`bash
-# Find existing helper functions for entity creation:
-Grep("createProject|createUser|createTeam|new Project")
-Grep("export.*function.*create|export.*class.*Service")
-\`\`\`
-**If you find createX() functions, stories MUST tell developers to use them instead of new Model().**
+${this.getPatternDiscoveryCommands(context.repositories)}
+**Stories MUST tell developers to use existing patterns/helpers instead of reinventing the wheel.**
 
 ## STORY FORMAT (MUST include all sections):
 - **Acceptance Criteria**: Given/When/Then format
@@ -456,8 +736,7 @@ Grep("export.*function.*create|export.*class.*Service")
   story-2: filesToModify: ["src/app.ts"]  ← SAME FILE!
 
 ✅ CORRECT (no overlap):
-  story-1: filesToModify: ["src/routes/users.ts"]
-  story-2: filesToModify: ["src/routes/products.ts"]
+${this.getFileOverlapExamples(context.repositories)}
 
 **RULES**:
 - EXPLORE FIRST: Use ls, find, Read to get real file paths
@@ -486,6 +765,19 @@ Grep("export.*function.*create|export.*class.*Service")
         'Designing architecture and building team...'
       );
 
+      // 🔄 SESSION RESUME: Check for existing checkpoint
+      const existingCheckpoint = await sessionCheckpointService.loadCheckpoint(taskId, 'tech-lead');
+      const resumeOptions = sessionCheckpointService.buildResumeOptions(existingCheckpoint);
+
+      if (resumeOptions?.isResume) {
+        console.log(`\n🔄🔄🔄 [TechLead] RESUMING from previous session...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 Tech Lead: Resuming from previous session checkpoint`
+        );
+      }
+
       // Execute agent
       const result = await this.executeAgentFn(
         'tech-lead',
@@ -493,10 +785,26 @@ Grep("export.*function.*create|export.*class.*Service")
         workspacePath || process.cwd(),
         taskId,
         'Tech Lead',
-        undefined, // resumeSessionId
-        undefined, // forkSession
-        attachments.length > 0 ? attachments : undefined // Pass attachments
+        undefined, // sessionId
+        undefined, // fork
+        attachments.length > 0 ? attachments : undefined, // attachments
+        undefined, // options
+        undefined, // contextOverride
+        undefined, // skipOptimization
+        undefined, // permissionMode
+        resumeOptions // 🔄 Session resume options
       );
+
+      // 🔄 Save checkpoint after agent starts (for mid-execution recovery)
+      if (result.sdkSessionId) {
+        await sessionCheckpointService.saveCheckpoint(
+          taskId,
+          'tech-lead',
+          result.sdkSessionId,
+          undefined, // No entityId for tech-lead phase
+          result.lastMessageUuid
+        );
+      }
 
       // Parse response - now using plain text with markers + optional JSON for structured data
       let parsed: any = null;
@@ -875,6 +1183,68 @@ Grep("export.*function.*create|export.*class.*Service")
         console.log(`⚠️  [TechLead] No environmentConfig in output - using defaults`);
       }
 
+      // ⚖️ TECHLEAD JUDGE: Validate stories cover the EPIC (not the full requirement)
+      // This is different from Supervisor - we only check if THIS epic is well broken down
+      const techLeadJudgeResult = await this.judgeTechLeadOutput(parsed, multiTeamMode ? teamEpic : null, taskId, task);
+
+      if (!techLeadJudgeResult.approved) {
+        console.error(`\n🚨 [TechLead] Judge rejected: ${techLeadJudgeResult.reason}`);
+
+        // 🎯 ACTIVITY: Emit Judge rejection for Activity tab
+        AgentActivityService.emitToolUse(taskId, 'TechLead', 'StoryValidation', {
+          verdict: 'REJECTED',
+          reason: techLeadJudgeResult.reason,
+          storiesCount: techLeadJudgeResult.storiesCount,
+          epicsCount: techLeadJudgeResult.epicsCount,
+        });
+        AgentActivityService.emitError(
+          taskId,
+          'TechLead',
+          `⚖️ Judge rejected: ${techLeadJudgeResult.reason}`
+        );
+        NotificationService.emitAgentMessage(
+          taskId,
+          'TechLead',
+          `⚖️ JUDGE REJECTED: ${techLeadJudgeResult.reason}\n${techLeadJudgeResult.feedback || ''}`
+        );
+
+        const error = new Error(`TECHLEAD_JUDGE_REJECTION: ${techLeadJudgeResult.reason}`);
+        (error as any).retryable = true;
+        (error as any).violationType = 'TECHLEAD_JUDGE_REJECTION';
+        (error as any).feedback = techLeadJudgeResult.feedback;
+        (error as any).reason = techLeadJudgeResult.reason; // Pass full rejection reason
+        throw error;
+      }
+
+      // 🎯 ACTIVITY: Emit Judge approval with AI evaluation details for Activity tab
+      const aiEval = techLeadJudgeResult.aiEvaluation;
+      AgentActivityService.emitToolUse(taskId, 'TechLead', 'StoryValidation', {
+        verdict: 'APPROVED',
+        storiesCount: techLeadJudgeResult.storiesCount,
+        epicsCount: techLeadJudgeResult.epicsCount,
+        aiScore: aiEval?.score,
+      });
+
+      // Build detailed message showing AI evaluation results
+      const checksMessage = aiEval ? [
+        `🤖 AI Score: ${aiEval.score}/100`,
+        `📝 ${aiEval.reasoning}`,
+        aiEval.suggestions?.length > 0 ? `💡 Suggestions: ${aiEval.suggestions.slice(0, 2).join(', ')}` : null,
+      ].filter(Boolean).join('\n') : `✅ ${techLeadJudgeResult.storiesCount} stories, ${techLeadJudgeResult.epicsCount} epic(s)`;
+
+      AgentActivityService.emitMessage(
+        taskId,
+        'TechLead',
+        `⚖️ Judge approved: ${techLeadJudgeResult.storiesCount} stories for ${techLeadJudgeResult.epicsCount} epic(s)\n${checksMessage}`
+      );
+      NotificationService.emitAgentMessage(
+        taskId,
+        'TechLead',
+        `⚖️ JUDGE APPROVED\n${checksMessage}`
+      );
+
+      console.log(`✅ [TechLead] Judge approved - ${techLeadJudgeResult.storiesCount} stories for ${techLeadJudgeResult.epicsCount} epic(s)`);
+
       // ✅ BACKWARD COMPATIBILITY: Also store in Task model (will remove later)
       const epicsWithStringIds = parsed.epics.map((epic: any) => ({
         ...epic,
@@ -968,6 +1338,7 @@ Grep("export.*function.*create|export.*class.*Service")
       }
 
       // 🔥 EVENT SOURCING: Emit completion event
+      // 🔥 CRITICAL FIX: Include epicId in multi-team mode so shouldSkip can filter correctly
       await eventStore.append({
         taskId: task._id as any,
         eventType: 'TechLeadCompleted',
@@ -976,6 +1347,9 @@ Grep("export.*function.*create|export.*class.*Service")
           output: result.output,
           epicsCount: parsed.epics.length,
           storiesCount: Object.keys(storiesMap).length,
+          // 🔥 CRITICAL: Include epicId for multi-team mode filtering
+          epicId: multiTeamMode ? teamEpic?.id : undefined,
+          multiTeamMode,
         },
         metadata: {
           cost: result.cost,
@@ -990,6 +1364,18 @@ Grep("export.*function.*create|export.*class.*Service")
         taskId,
         'info',
         `\n${'='.repeat(80)}\n🏗️ TECH LEAD - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
+      );
+
+      // 🎯 ACTIVITY: Emit result for Activity tab (shows in UI)
+      AgentActivityService.emitToolUse(taskId, agentLabel, 'ArchitectureDesign', {
+        epics: parsed.epics.length,
+        stories: Object.keys(storiesMap).length,
+        developers: parsed.teamComposition.developers,
+      });
+      AgentActivityService.emitMessage(
+        taskId,
+        agentLabel,
+        `✅ Architecture completed: ${parsed.epics.length} epic(s), ${Object.keys(storiesMap).length} stories, ${parsed.teamComposition.developers} developer(s)`
       );
 
       // Send output to chat
@@ -1020,6 +1406,62 @@ Grep("export.*function.*create|export.*class.*Service")
       context.setData('teamComposition', parsed.teamComposition);
       context.setData('storyAssignments', parsed.storyAssignments);
       context.setData('architectureDesign', parsed.architectureDesign);
+
+      // 🔄 Mark checkpoint as completed (no resume needed)
+      await sessionCheckpointService.markCompleted(taskId, 'tech-lead');
+
+      // 🧠 GRANULAR MEMORY: Store TechLead decisions
+      const projectId = task.projectId?.toString();
+      if (projectId) {
+        try {
+          // Store progress marker
+          await granularMemoryService.storeProgress({
+            projectId,
+            taskId,
+            phaseType: 'tech-lead',
+            agentType: 'tech-lead',
+            epicId: multiTeamMode ? teamEpic?.id : undefined,
+            status: 'completed',
+            details: `Created ${Object.keys(storiesMap).length} stories, assigned to ${parsed.teamComposition.developers} developer(s)`,
+          });
+
+          // Store each story as a decision
+          for (const [storyId, story] of Object.entries(storiesMap)) {
+            const storyData = story as any;
+            await granularMemoryService.storeDecision({
+              projectId,
+              taskId,
+              phaseType: 'tech-lead',
+              agentType: 'tech-lead',
+              epicId: multiTeamMode ? teamEpic?.id : undefined,
+              storyId,
+              title: `Story: ${storyData.title || storyId}`,
+              content: `Assigned to: ${storyData.assignedTo || 'unassigned'}\nComplexity: ${storyData.complexity || 'N/A'}\nFiles: ${storyData.filesToModify?.join(', ') || 'none'}`,
+              importance: 'high',
+            });
+          }
+
+          // Store architecture decision
+          if (parsed.architectureDesign) {
+            await granularMemoryService.storeDecision({
+              projectId,
+              taskId,
+              phaseType: 'tech-lead',
+              agentType: 'tech-lead',
+              epicId: multiTeamMode ? teamEpic?.id : undefined,
+              title: 'Architecture Design',
+              content: typeof parsed.architectureDesign === 'string'
+                ? parsed.architectureDesign.substring(0, 1000)
+                : JSON.stringify(parsed.architectureDesign).substring(0, 1000),
+              importance: 'critical',
+            });
+          }
+
+          console.log(`🧠 [TechLead] Stored ${Object.keys(storiesMap).length + 2} memories (progress, stories, architecture)`);
+        } catch (memError: any) {
+          console.warn(`⚠️ [TechLead] Failed to store memories: ${memError.message}`);
+        }
+      }
 
       return {
         success: true,
@@ -1096,6 +1538,9 @@ Grep("export.*function.*create|export.*class.*Service")
 
       console.log(`📝 [TechLead] Emitted TechLeadCompleted event (error state)`);
 
+      // 🔄 Mark checkpoint as failed
+      await sessionCheckpointService.markFailed(taskId, 'tech-lead', undefined, error.message);
+
       return {
         success: false,
         error: error.message,
@@ -1115,7 +1560,7 @@ Grep("export.*function.*create|export.*class.*Service")
    * 🔥 NEW: Includes Master Epic context for contract awareness
    * 🏗️ NEW: Includes Architecture Brief from PlanningPhase
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[], architectureBrief?: any): string {
+  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[], architectureBrief?: any, projectRadiographies?: Map<string, ProjectRadiography>): string {
     // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
     if (!epic.targetRepository) {
       console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository in buildMultiTeamPrompt!`);
@@ -1244,9 +1689,33 @@ ${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | \`${r.m
 `;
     }
 
+    // 🔬 Build Project Radiography section for the TARGET repository
+    let radiographySection = '';
+    if (projectRadiographies) {
+      // In multi-team mode, show ONLY the target repository's radiography
+      const targetRadiography = projectRadiographies.get(targetRepo);
+      if (targetRadiography) {
+        radiographySection = `
+## 🔬 PROJECT RADIOGRAPHY (${targetRepo} - Complete Analysis)
+
+**This is a programmatic X-Ray of the codebase. This data is MORE RELIABLE than exploration.**
+
+${ProjectRadiographyService.formatForPrompt(targetRadiography)}
+
+---
+**⚠️ CRITICAL FOR STORY CREATION**:
+- USE the routes, models, services listed above when writing stories
+- MATCH the detected conventions (naming, file structure)
+- Reference ACTUAL file paths from the radiography
+---
+`;
+      }
+    }
+
     return `TECH LEAD - MULTI-TEAM MODE
 ${masterEpicContext}
 ${archBriefSection}
+${radiographySection}
 ## Epic: ${epic.id} - ${epic.title}
 **Complexity**: ${epic.estimatedComplexity}
 **Target**: ${repoTypeEmoji} ${targetRepo} (${repoType})
@@ -1255,6 +1724,53 @@ ${archBriefSection}
 ## Workspace: ${workspacePath}/${targetRepo}
 ${repoInfo}
 ${repoGuidance}
+
+## 📋 EPIC SPECIFICATION (FROM PLANNING - FOLLOW EXACTLY!)
+
+**CRITICAL: Planning has already defined the scope of this epic. You MUST follow it!**
+
+${epic.stories?.length > 0 ? `### Pre-Defined Stories (IMPLEMENT THESE EXACTLY):
+${epic.stories.map((s: any, i: number) => `
+**Story ${i + 1}: ${s.id || s.title}**
+- Title: ${s.title || 'N/A'}
+- Description: ${s.description || 'N/A'}
+${s.acceptanceCriteria?.length > 0 ? `- Acceptance Criteria:\n${s.acceptanceCriteria.map((ac: string) => `  • ${ac}`).join('\n')}` : ''}
+`).join('\n')}
+` : ''}
+
+### File Guidance (MANDATORY):
+${epic.filesToModify?.length > 0 ? `**FILES TO MODIFY (EXISTING):** ${epic.filesToModify.join(', ')}` : '**FILES TO MODIFY:** None specified'}
+${epic.filesToCreate?.length > 0 ? `**FILES TO CREATE (NEW):** ${epic.filesToCreate.join(', ')}` : '**FILES TO CREATE:** [] (DO NOT create new files - only modify existing!)'}
+${epic.filesToRead?.length > 0 ? `**FILES TO READ (for context):** ${epic.filesToRead.join(', ')}` : ''}
+
+${epic.followsPatterns ? `### Architecture Pattern (MANDATORY):
+**${epic.followsPatterns}**
+
+You MUST follow this pattern. The Judge will REJECT any plan that deviates from it.
+` : ''}
+
+${epic.technicalNotes ? `### Technical Notes:
+${epic.technicalNotes}
+` : ''}
+
+---
+
+## 🔍 VALIDATE THE EPIC (DO THIS FIRST!)
+
+**The epic has pre-defined stories above. Your job is to:**
+1. **VERIFY** the stories are complete (add missing details if needed)
+2. **EXPAND** only if the stories are too shallow (add acceptance criteria, file targets)
+3. **DO NOT** change the architecture approach (follow filesToModify/filesToCreate)
+
+### ⚠️ JUDGE WILL REJECT IF:
+- You create files when \`filesToCreate: []\` (empty)
+- You create a new model when epic says "modify existing model"
+- You ignore the \`followsPatterns\` directive
+
+### ✅ JUDGE WILL APPROVE IF:
+- Stories match the epic's pre-defined scope
+- Files modified/created match the epic's guidance
+- Architecture follows the specified pattern
 
 ## 🎯 INSTRUCTIONS:
 1. EXPLORE codebase (max 2 min): cd ${workspacePath}/${targetRepo} && find src
@@ -1280,7 +1796,7 @@ ${repoGuidance}
       {
         "id": "${epic.id}-story-1",
         "title": "Story title",
-        "description": "Complete with: Acceptance Criteria, Files, Functions/APIs, 🔧 PATTERNS TO USE, ⚠️ ANTI-PATTERNS TO AVOID, Tests, Done criteria",
+        "description": "Technical details: Functions/APIs to implement, 🔧 PATTERNS TO USE, ⚠️ ANTI-PATTERNS TO AVOID",
         "epicId": "${epic.id}",
         "priority": 1,
         "estimatedComplexity": "simple|moderate|complex",
@@ -1288,7 +1804,11 @@ ${repoGuidance}
         "status": "pending",
         "filesToRead": ["real/path.ts"],
         "filesToModify": ["real/path2.ts"],
-        "filesToCreate": ["real/new.ts"]
+        "filesToCreate": ["real/new.ts"],
+        "acceptanceCriteria": [
+          "Given X, When Y, Then Z",
+          "Given A, When B, Then C"
+        ]
       }
     ],
     "status": "pending"
@@ -1301,10 +1821,407 @@ ${repoGuidance}
 }
 \`\`\`
 
+**⚠️ REQUIRED FIELDS (Judge will reject if missing):**
+- \`acceptanceCriteria\`: Array of Given/When/Then statements (REQUIRED)
+- \`filesToModify\` or \`filesToCreate\`: At least one must have files (REQUIRED)
+
 **🔥🔥🔥 CRITICAL RULES 🔥🔥🔥**
 1. **1 DEV = 1 STORY**: Number of developers = Number of stories
 2. **NO FILE OVERLAPS**: Each file in only ONE story (prevents merge conflicts)
 
 Explore first, then output JSON.`;
+  }
+
+  /**
+   * ⚖️ TECHLEAD JUDGE: AI-powered evaluation of TechLead's work
+   *
+   * This Judge uses AI (haiku - cheap) to ACTUALLY EVALUATE:
+   * - Is the architecture coherent and appropriate?
+   * - Does the tech stack make sense for the project?
+   * - Do the stories fully cover the epic requirements?
+   * - Are dependencies correctly defined?
+   * - Is there anything obviously wrong or missing?
+   *
+   * First does fast programmatic checks (fail fast, no cost).
+   * Then uses AI to evaluate the quality of the work.
+   */
+  private async judgeTechLeadOutput(
+    parsed: any,
+    epicContext: any,
+    taskId: string,
+    task?: any
+  ): Promise<{
+    approved: boolean;
+    reason?: string;
+    feedback?: string;
+    storiesCount: number;
+    epicsCount: number;
+    aiEvaluation?: {
+      verdict: 'APPROVE' | 'REJECT';
+      reasoning: string;
+      issues: string[];
+      suggestions: string[];
+      score: number; // 0-100
+    };
+  }> {
+    const epics = parsed.epics || [];
+    const allStories = epics.flatMap((e: any) => e.stories || []);
+    const epicContextTitle = epicContext?.title || epicContext?.name || 'all epics';
+
+    AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `⚖️ Starting AI evaluation for: "${epicContextTitle}"`);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 1: Fast programmatic checks (fail fast, no AI cost)
+    // ═══════════════════════════════════════════════════════════════════
+    AgentActivityService.emitToolUse(taskId, 'TechLead-Judge', 'BasicChecks', {
+      phase: 'Fast validation',
+      epicsCount: epics.length,
+      storiesCount: allStories.length,
+    });
+
+    // Basic existence checks
+    if (epics.length === 0) {
+      AgentActivityService.emitError(taskId, 'TechLead-Judge', '❌ FAST CHECK FAILED: No epics');
+      return { approved: false, reason: 'No epics created', storiesCount: 0, epicsCount: 0 };
+    }
+    if (allStories.length === 0) {
+      AgentActivityService.emitError(taskId, 'TechLead-Judge', '❌ FAST CHECK FAILED: No stories');
+      return { approved: false, reason: 'No stories created', storiesCount: 0, epicsCount: epics.length };
+    }
+    if (!parsed.architectureDesign) {
+      AgentActivityService.emitError(taskId, 'TechLead-Judge', '❌ FAST CHECK FAILED: No architecture');
+      return { approved: false, reason: 'Missing architectureDesign', storiesCount: allStories.length, epicsCount: epics.length };
+    }
+    if (!parsed.teamComposition?.developers) {
+      AgentActivityService.emitError(taskId, 'TechLead-Judge', '❌ FAST CHECK FAILED: No team composition');
+      return { approved: false, reason: 'Missing teamComposition.developers', storiesCount: allStories.length, epicsCount: epics.length };
+    }
+
+    AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `✅ Basic checks passed - proceeding to AI evaluation WITH TOOLS`);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 2: AI Evaluation AS AGENT (with Read, Glob, Grep tools!)
+    // 🔥 CRITICAL: Judge MUST have same tools as TechLead Agent
+    // Without tools, Judge cannot verify if file paths exist or read code
+    // ═══════════════════════════════════════════════════════════════════
+
+    AgentActivityService.emitToolUse(taskId, 'TechLead-Judge', 'AIEvaluation', {
+      phase: 'AI-powered quality assessment WITH TOOLS',
+      evaluating: ['architecture', 'tech stack', 'story coverage', 'dependencies', 'file paths'],
+      hasTools: true,
+    });
+
+    // Get workspace path for Judge to read files
+    const workspacePath = task?.orchestration?.workspacePath || process.cwd();
+
+    // Build repository paths for Judge
+    const repositories = task?.repositories || [];
+    const repoPathsInfo = repositories.map((repo: any) => {
+      return `- ${repo.name} (${repo.type}): ${workspacePath}/${repo.name}`;
+    }).join('\n');
+
+    // Determine if this is a multi-epic task
+    const totalEpicsInTask = task?.orchestration?.planning?.epics?.length || 1;
+    const isMultiEpicTask = totalEpicsInTask > 1;
+    const currentEpicIndex = epicContext ? (task?.orchestration?.planning?.epics?.findIndex((e: any) => e.id === epicContext.id) + 1) || 1 : 1;
+
+    try {
+      const evaluationPrompt = `You are a STRICT TechLead Judge with access to READ THE ACTUAL CODEBASE.
+
+## YOUR MISSION
+Evaluate if the Tech Lead's architecture and stories are valid and implementable.
+
+## 🔥 CRITICAL: YOU HAVE TOOLS!
+You have access to Read, Glob, and Grep tools. USE THEM to:
+1. VERIFY if file paths in stories actually exist (filesToModify should exist, filesToCreate should NOT)
+2. READ relevant files to understand current architecture
+3. CHECK if proposed patterns match existing codebase conventions
+
+## WORKSPACE
+${repoPathsInfo || 'No repositories specified'}
+
+## 🎯 SCOPE OF THIS EVALUATION
+${isMultiEpicTask ? `⚠️ **IMPORTANT**: Evaluating EPIC ${currentEpicIndex} of ${totalEpicsInTask} total.
+**DO NOT** expect this single epic to solve the ENTIRE task.
+**DO** evaluate if this epic makes sense as PART of the larger solution.` : 'This is a single-epic task - the plan should cover all requirements.'}
+
+## EPIC BEING EVALUATED
+${epicContext ? JSON.stringify(epicContext, null, 2) : 'Full project implementation'}
+
+${task ? `## ORIGINAL TASK (for context)
+Title: ${task.title}
+Description: ${task.description || 'No description'}` : ''}
+
+## TECHLEAD'S OUTPUT TO EVALUATE
+\`\`\`json
+${JSON.stringify(parsed, null, 2)}
+\`\`\`
+
+## YOUR EVALUATION PROCESS
+1. **VERIFY FILE PATHS** - Use Glob/Read to check files in filesToModify exist
+2. **CHECK ARCHITECTURE** - Read existing code to verify proposed architecture fits
+3. **VALIDATE PATTERNS** - Read similar files to ensure consistency
+4. **EVALUATE COVERAGE** - Does the plan cover this epic's requirements?
+
+## EVALUATION CRITERIA
+
+### 1. FILE PATH ACCURACY (USE TOOLS TO VERIFY!)
+- Do filesToModify actually exist? (Read them to confirm)
+- Are filesToCreate truly new? (Glob to verify they don't exist)
+- Are the paths correct for this codebase structure?
+
+### 2. ARCHITECTURE QUALITY
+- Is the architecture coherent for this epic's scope?
+- Does it match existing patterns in the codebase?
+- Are there obvious architectural flaws?
+
+### 3. STORY COVERAGE
+- Do stories fully cover this epic's requirements?
+- Are acceptance criteria testable?
+- Is technical guidance sufficient for developers?
+
+### 4. DEPENDENCIES & ORDER
+- Are story dependencies correct?
+- Is the execution order logical?
+
+## YOUR OUTPUT
+After reading relevant files to verify, output your verdict:
+
+\`\`\`json
+{
+  "verdict": "APPROVE" or "REJECT",
+  "score": 0-100,
+  "reasoning": "Brief explanation based on what you READ in the codebase",
+  "filesVerified": ["List of files you actually read to verify"],
+  "issues": ["Only REAL issues - verified by reading code"],
+  "suggestions": ["Improvements based on actual code you read"],
+  "architectureAssessment": "Is architecture sound? Based on what you read.",
+  "coverageAssessment": "Do stories cover this epic? Based on verification."
+}
+\`\`\`
+
+## ⚠️ IMPORTANT
+- DO NOT reject for "invalid file paths" without first trying to READ them
+- If a file exists (you can read it), the path is VALID
+- Only reject for REAL issues verified by reading code
+- Be thorough but fair - especially for multi-epic tasks
+
+START by using Glob to verify file paths in the stories, then Read key ones.`;
+
+      const startTime = Date.now();
+
+      // 🔥 Execute Judge as AGENT with tools (not just API call)
+      const judgeResult = await this.executeAgentFn(
+        'techlead-judge',
+        evaluationPrompt,
+        workspacePath,
+        taskId,
+        'TechLead Judge',
+        undefined, // sessionId
+        undefined, // fork
+        undefined, // attachments
+        undefined, // options
+        undefined, // contextOverride
+        undefined, // skipOptimization
+        'bypassPermissions' // Same permissions as TechLead Agent
+      );
+
+      const duration = Date.now() - startTime;
+      console.log(`   💰 [TechLead Judge] Agent evaluation completed in ${duration}ms, cost: $${judgeResult.cost?.toFixed(4) || '?'}`);
+
+      // Parse Judge output
+      const jsonMatch = judgeResult.output.match(/```json\n([\s\S]*?)\n```/) || judgeResult.output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
+
+      if (!jsonMatch) {
+        console.warn(`⚠️ [TechLead Judge] No JSON verdict found in output, defaulting to approve`);
+        AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `⚠️ Judge output inconclusive - approving by default`);
+        return {
+          approved: true,
+          storiesCount: allStories.length,
+          epicsCount: epics.length,
+        };
+      }
+
+      const aiResult = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+
+      // Emit detailed evaluation results
+      AgentActivityService.emitToolUse(taskId, 'TechLead-Judge', 'AIVerdict', {
+        verdict: aiResult.verdict,
+        score: aiResult.score,
+        filesVerified: aiResult.filesVerified?.length || 0,
+        issuesCount: aiResult.issues?.length || 0,
+        cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
+      });
+
+      // Emit reasoning
+      AgentActivityService.emitMessage(taskId, 'TechLead-Judge',
+        `🤖 Judge Evaluation (score: ${aiResult.score}/100):\n` +
+        `${aiResult.reasoning}\n\n` +
+        (aiResult.filesVerified?.length > 0 ? `📁 Files Verified: ${aiResult.filesVerified.slice(0, 5).join(', ')}${aiResult.filesVerified.length > 5 ? '...' : ''}\n` : '') +
+        (aiResult.architectureAssessment ? `📐 Architecture: ${aiResult.architectureAssessment}\n` : '') +
+        (aiResult.coverageAssessment ? `📋 Coverage: ${aiResult.coverageAssessment}\n` : '') +
+        (aiResult.issues?.length > 0 ? `\n❌ Issues:\n${aiResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
+        (aiResult.suggestions?.length > 0 ? `\n💡 Suggestions:\n${aiResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
+      );
+
+      const approved = aiResult.verdict === 'APPROVE' && aiResult.score >= 60;
+
+      if (approved) {
+        console.log(`   ✅ [TechLead Judge] APPROVED (score: ${aiResult.score}/100)`);
+        AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `✅ APPROVED with score ${aiResult.score}/100`);
+      } else {
+        console.log(`   ❌ [TechLead Judge] REJECTED (score: ${aiResult.score}/100)`);
+        AgentActivityService.emitError(taskId, 'TechLead-Judge',
+          `❌ REJECTED (score: ${aiResult.score}/100)\n` +
+          `Reason: ${aiResult.reasoning}\n` +
+          `Issues: ${aiResult.issues?.join(', ')}`
+        );
+      }
+
+      return {
+        approved,
+        reason: approved ? undefined : aiResult.reasoning,
+        feedback: approved ? undefined : (aiResult.issues || []).concat(aiResult.suggestions || []).join('\n'),
+        storiesCount: allStories.length,
+        epicsCount: epics.length,
+        aiEvaluation: {
+          verdict: aiResult.verdict,
+          reasoning: aiResult.reasoning,
+          issues: aiResult.issues || [],
+          suggestions: aiResult.suggestions || [],
+          score: aiResult.score,
+        },
+      };
+    } catch (error: any) {
+      console.warn(`⚠️ [TechLead Judge] Agent evaluation failed: ${error.message} - falling back to approval`);
+      AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `⚠️ Judge evaluation failed - using fallback approval`);
+
+      // Fallback: approve to not block progress
+      return {
+        approved: true,
+        storiesCount: allStories.length,
+        epicsCount: epics.length,
+      };
+    }
+  }
+
+  /**
+   * Generate repository-specific pattern discovery commands
+   * Shows relevant search patterns based on repo type
+   */
+  private getPatternDiscoveryCommands(repositories: any[]): string {
+    const hasBackend = repositories.some(r => r.type === 'backend');
+    const hasFrontend = repositories.some(r => r.type === 'frontend');
+
+    let commands = '```bash\n';
+
+    if (hasBackend) {
+      commands += `# 🔧 BACKEND helper functions for entity creation:
+Grep("createProject|createUser|createTeam|new Project")
+Grep("export.*function.*create|export.*class.*Service")
+`;
+    }
+
+    if (hasFrontend) {
+      commands += `# 🎨 FRONTEND patterns (hooks, contexts, services):
+Grep("export.*function.*use[A-Z]|export.*const.*use[A-Z]")  # Custom hooks
+Grep("createContext|useContext")  # Context patterns
+Grep("export.*api|export.*fetch|axios")  # API service patterns
+`;
+    }
+
+    commands += '```';
+    return commands;
+  }
+
+  /**
+   * Generate repository-specific file overlap examples
+   * Shows frontend examples for frontend repos, backend for backend repos
+   */
+  private getFileOverlapExamples(repositories: any[]): string {
+    const hasBackend = repositories.some(r => r.type === 'backend');
+    const hasFrontend = repositories.some(r => r.type === 'frontend');
+
+    if (hasFrontend && !hasBackend) {
+      // Frontend only
+      return `  story-1: filesToModify: ["src/components/UserList.tsx"]
+  story-2: filesToModify: ["src/components/ProductList.tsx"]`;
+    } else if (hasBackend && !hasFrontend) {
+      // Backend only
+      return `  story-1: filesToModify: ["src/routes/users.ts"]
+  story-2: filesToModify: ["src/routes/products.ts"]`;
+    } else {
+      // Both or unknown - show mixed examples
+      return `  story-1: filesToModify: ["src/routes/users.ts"]  ← backend story
+  story-2: filesToModify: ["src/components/UserList.tsx"]  ← frontend story`;
+    }
+  }
+
+  /**
+   * Helper to restore TechLead data from task or EventStore for recovery
+   */
+  private async restoreTechLeadData(context: OrchestrationContext): Promise<void> {
+    const techLead = context.task.orchestration.techLead;
+
+    // Restore output if available
+    if (techLead?.output) {
+      context.setData('techLeadOutput', techLead.output);
+    }
+
+    // Restore storyAssignments if available
+    if (techLead?.storyAssignments) {
+      context.setData('storyAssignments', techLead.storyAssignments);
+    }
+
+    // Restore teamComposition if available
+    if (techLead?.teamComposition) {
+      context.setData('teamComposition', techLead.teamComposition);
+    }
+
+    // Restore architectureDesign if available
+    if (techLead?.architectureDesign) {
+      context.setData('architectureDesign', techLead.architectureDesign);
+    }
+
+    // Try to restore epics and storiesMap from EventStore
+    try {
+      const { eventStore } = await import('../EventStore');
+      const events = await eventStore.getEvents(context.task._id as any);
+
+      const epicEvents = events.filter((e: any) => e.eventType === 'EpicCreated');
+      const storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
+      const teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
+
+      if (epicEvents.length > 0) {
+        const epics = epicEvents.map((e: any) => e.payload);
+        context.setData('epics', epics);
+        console.log(`   🔄 Restored ${epics.length} epic(s) from EventStore`);
+      }
+
+      if (storyEvents.length > 0) {
+        const storiesMap: { [id: string]: any } = {};
+        storyEvents.forEach((e: any) => {
+          storiesMap[e.payload.id] = e.payload;
+        });
+        context.setData('storiesMap', storiesMap);
+        console.log(`   🔄 Restored ${Object.keys(storiesMap).length} stories from EventStore`);
+
+        // Also rebuild storyAssignments if not in DB
+        if (!techLead?.storyAssignments || techLead.storyAssignments.length === 0) {
+          const storyAssignments = storyEvents
+            .filter((e: any) => e.payload.assignedTo)
+            .map((e: any) => ({ storyId: e.payload.id, assignedTo: e.payload.assignedTo }));
+          context.setData('storyAssignments', storyAssignments);
+          console.log(`   🔄 Rebuilt ${storyAssignments.length} story assignments from EventStore`);
+        }
+      }
+
+      if (teamEvent && !techLead?.teamComposition) {
+        context.setData('teamComposition', teamEvent.payload);
+        console.log(`   🔄 Restored teamComposition from EventStore: ${teamEvent.payload.developers} devs`);
+      }
+    } catch (error: any) {
+      console.log(`   ⚠️ EventStore recovery failed: ${error.message}`);
+    }
   }
 }

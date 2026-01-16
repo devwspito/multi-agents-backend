@@ -60,6 +60,8 @@ export type EventType =
   | 'StoryCompleted'
   | 'StoryFailed'
   | 'DevelopersCompleted'
+  // 🔄 Session checkpoint for mid-execution recovery
+  | 'StorySessionCheckpoint'
 
   // QA events
   | 'QAStarted'

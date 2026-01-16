@@ -1,9 +1,14 @@
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { AgentActivityService } from '../AgentActivityService';
 import { validateStoryOverlap, logOverlapValidation } from './utils/StoryOverlapValidator';
 import { storageService } from '../storage/StorageService';
 import { CodebaseDiscoveryService, CodebaseKnowledge } from '../CodebaseDiscoveryService';
+import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
+// Anthropic SDK no longer needed - Judge now uses executeAgentFn with tools
+import { sessionCheckpointService } from '../SessionCheckpointService';
+import { granularMemoryService } from '../GranularMemoryService';
 import fs from 'fs';
 import path from 'path';
 
@@ -71,6 +76,39 @@ export class PlanningPhase extends BasePhase {
       return true;
     }
 
+    // 🔥 SMART RECOVERY: If planning was in_progress but has valid output + epics,
+    // the agent finished but status wasn't saved before crash. Use the existing output.
+    const planning = context.task.orchestration.planning;
+    if (planning?.status === 'in_progress' && planning.epics && planning.epics.length > 0 && planning.output) {
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`🔄 [SMART RECOVERY] Planning was in_progress but has ${planning.epics.length} epic(s) + output`);
+      console.log(`   → Agent likely finished but status wasn't saved before crash`);
+      console.log(`   → Using existing output instead of re-executing (saves ~5 min + $$$)`);
+      console.log(`${'='.repeat(80)}\n`);
+
+      // Mark as completed since we have valid output
+      const Task = require('../../models/Task').Task;
+      await Task.findByIdAndUpdate(context.task._id, {
+        $set: {
+          'orchestration.planning.status': 'completed',
+          'orchestration.planning.completedAt': new Date(),
+        }
+      });
+
+      // Restore phase data
+      context.setData('epics', planning.epics);
+      context.setData('totalTeamsNeeded', planning.epics.length);
+      if (planning.analysis) {
+        context.setData('problemAnalysis', planning.analysis);
+      }
+      // architectureBrief is stored as optional data, cast to access
+      if ((planning as any).architectureBrief) {
+        context.setData('architectureBrief', (planning as any).architectureBrief);
+      }
+
+      return true; // Skip re-execution
+    }
+
     return false;
   }
 
@@ -130,6 +168,13 @@ export class PlanningPhase extends BasePhase {
       'Planning Agent: Starting unified analysis (problem + epics + stories in ONE pass)...'
     );
 
+    // 🎯 ACTIVITY: Emit Planning start for Activity tab
+    AgentActivityService.emitMessage(
+      taskId,
+      'Planning',
+      `📋 Starting unified analysis: problem analysis + epics + stories...`
+    );
+
     await LogService.agentStarted('planning-agent', taskId, {
       phase: 'planning',
       metadata: {
@@ -147,12 +192,15 @@ export class PlanningPhase extends BasePhase {
         throw new Error(`CRITICAL: Repositories [${repoNames}] missing required 'type' field. Cannot proceed.`);
       }
 
-      // Build repository info for prompt
+      // Build repository info for prompt WITH LOCAL PATHS
+      const effectiveWorkspace = workspacePath || process.cwd();
       const repoInfo = repositories.map((repo: any, i: number) => {
         const typeEmoji = repo.type === 'backend' ? '' : repo.type === 'frontend' ? '' : '';
+        const localPath = `${effectiveWorkspace}/${repo.name}`;
         return `${i + 1}. **${repo.name}** (${typeEmoji} ${repo.type.toUpperCase()})
    - GitHub: ${repo.githubRepoName}
-   - Branch: ${repo.githubBranch}`;
+   - Branch: ${repo.githubBranch}
+   - **LOCAL PATH**: \`${localPath}\` ← USE THIS for Glob/Read/Grep!`;
       }).join('\n');
 
       // Previous context for continuations
@@ -229,22 +277,248 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         context.setData('attachments', attachments);
       }
 
-      // 🔥 PROGRAMMATIC CODEBASE DISCOVERY (find helpers, patterns BEFORE agent runs)
-      // This ensures we have RELIABLE knowledge about existing patterns
-      console.log(`\n🔍 [PlanningPhase] Running programmatic codebase discovery...`);
-      let codebaseKnowledge: CodebaseKnowledge | undefined;
+      // 🔄 RETRY LOGIC: Planning gets up to 3 attempts when Judge rejects
+      const MAX_RETRIES = 3;
+      let retryCount = 0;
+      let lastError: any = null;
       const effectiveWorkspacePath = workspacePath || process.cwd();
-      try {
-        codebaseKnowledge = await CodebaseDiscoveryService.discoverCodebase(effectiveWorkspacePath);
-        // Store for subsequent phases (TechLead, Developer will use this)
-        context.setData('codebaseKnowledge', codebaseKnowledge);
-        console.log(`✅ [PlanningPhase] Discovered ${codebaseKnowledge.helperFunctions.length} helper functions, ${codebaseKnowledge.entityCreationRules.length} entity rules`);
-      } catch (error: any) {
-        console.warn(`⚠️ [PlanningPhase] Codebase discovery failed (will continue): ${error.message}`);
+      const projectId = task.projectId?.toString();
+
+      // 🔥 PROGRAMMATIC CODEBASE DISCOVERY WITH CACHING
+      // Checks: 1) Context (retry) → 2) Granular Memory (restart) → 3) Fresh scan
+      console.log(`\n🔍 [PlanningPhase] Checking for cached codebase discovery...`);
+      let codebaseKnowledge: CodebaseKnowledge | undefined;
+
+      // 1️⃣ Check context first (from previous retry in same execution)
+      codebaseKnowledge = context.getData('codebaseKnowledge') as CodebaseKnowledge | undefined;
+
+      // 2️⃣ Check granular memory (from previous execution before restart)
+      // 🔥 CRITICAL: Use getTaskCache (STRICT) - only loads cache for THIS EXACT TASK
+      // This prevents loading stale cache from previous tasks where code may have changed
+      if (!codebaseKnowledge && projectId) {
+        try {
+          const discoveryCache = await granularMemoryService.getTaskCache({
+            projectId,
+            taskId,
+            phaseType: 'planning',
+            cacheTitle: 'CodebaseDiscovery Cache',
+          });
+          if (discoveryCache?.content) {
+            try {
+              codebaseKnowledge = JSON.parse(discoveryCache.content) as CodebaseKnowledge;
+              console.log(`✅ [Cache] Loaded codebaseKnowledge from granular memory (taskId: ${taskId})`);
+              console.log(`   → ${codebaseKnowledge.helperFunctions?.length || 0} helpers, ${codebaseKnowledge.entityCreationRules?.length || 0} rules`);
+              context.setData('codebaseKnowledge', codebaseKnowledge);
+            } catch (parseErr) {
+              console.warn(`⚠️ [Cache] Failed to parse cached discovery, will re-scan`);
+            }
+          }
+        } catch (memErr: any) {
+          console.warn(`⚠️ [Cache] Memory check failed: ${memErr.message}`);
+        }
       }
 
-      // Build the unified planning prompt (includes discovered patterns)
-      const prompt = this.buildPlanningPrompt(task, repositories, repoInfo, previousContextSection, codebaseKnowledge);
+      // 3️⃣ Fresh scan if no cache
+      if (!codebaseKnowledge) {
+        console.log(`🔍 [PlanningPhase] Running fresh codebase discovery...`);
+        try {
+          codebaseKnowledge = await CodebaseDiscoveryService.discoverCodebase(effectiveWorkspacePath);
+          context.setData('codebaseKnowledge', codebaseKnowledge);
+          console.log(`✅ [PlanningPhase] Discovered ${codebaseKnowledge.helperFunctions.length} helper functions, ${codebaseKnowledge.entityCreationRules.length} entity rules`);
+
+          // Cache to granular memory for future restarts
+          if (projectId) {
+            try {
+              await granularMemoryService.store({
+                projectId: new (await import('mongoose')).Types.ObjectId(projectId),
+                taskId: new (await import('mongoose')).Types.ObjectId(taskId),
+                scope: 'task',
+                phaseType: 'planning',
+                agentType: 'planning-agent',
+                type: 'context',
+                title: 'CodebaseDiscovery Cache',
+                content: JSON.stringify(codebaseKnowledge),
+                importance: 'medium',
+                confidence: 1.0,
+              });
+              console.log(`💾 [Cache] Stored codebaseKnowledge in granular memory`);
+            } catch (storeErr: any) {
+              console.warn(`⚠️ [Cache] Failed to store discovery: ${storeErr.message}`);
+            }
+          }
+        } catch (error: any) {
+          console.warn(`⚠️ [PlanningPhase] Codebase discovery failed (will continue): ${error.message}`);
+        }
+      } else {
+        console.log(`⏭️ [PlanningPhase] Using cached codebase discovery (skipped re-scan)`);
+      }
+
+      // 🔬 PROJECT RADIOGRAPHY WITH CACHING
+      console.log(`\n🔬 [PlanningPhase] Checking for cached project radiography...`);
+      let projectRadiographies: Map<string, ProjectRadiography> = new Map();
+
+      // 1️⃣ Check context first
+      const contextRadiographies = context.getData('projectRadiographies') as Map<string, ProjectRadiography> | undefined;
+      if (contextRadiographies && contextRadiographies.size > 0) {
+        projectRadiographies = contextRadiographies;
+        console.log(`✅ [Cache] Loaded ${projectRadiographies.size} radiographies from context`);
+      }
+
+      // 2️⃣ Check granular memory
+      // 🔥 CRITICAL: Use getTaskCaches (STRICT) - only loads cache for THIS EXACT TASK
+      // This prevents loading stale cache from previous tasks where code may have changed
+      if (projectRadiographies.size === 0 && projectId) {
+        try {
+          const radiographyCaches = await granularMemoryService.getTaskCaches({
+            projectId,
+            taskId,
+            phaseType: 'planning',
+            cacheTitlePrefix: 'ProjectRadiography:',
+            limit: 10,
+          });
+          if (radiographyCaches.length > 0) {
+            for (const cache of radiographyCaches) {
+              const repoName = cache.title?.replace('ProjectRadiography: ', '') || '';
+              if (repoName && cache.content) {
+                try {
+                  const radiography = JSON.parse(cache.content) as ProjectRadiography;
+                  projectRadiographies.set(repoName, radiography);
+                } catch (parseErr) {
+                  // Skip invalid cache
+                }
+              }
+            }
+            if (projectRadiographies.size > 0) {
+              console.log(`✅ [Cache] Loaded ${projectRadiographies.size} radiographies from granular memory (taskId: ${taskId})`);
+              context.setData('projectRadiographies', projectRadiographies);
+            }
+          }
+        } catch (memErr: any) {
+          console.warn(`⚠️ [Cache] Memory check failed: ${memErr.message}`);
+        }
+      }
+
+      // 3️⃣ Fresh scan for missing repositories
+      const missingRepos = repositories.filter((r: any) => !projectRadiographies.has(r.name));
+      if (missingRepos.length > 0) {
+        console.log(`🔬 [PlanningPhase] Scanning ${missingRepos.length} repository(s)...`);
+        for (const repo of missingRepos) {
+          const repoPath = path.join(effectiveWorkspacePath, repo.name);
+          if (fs.existsSync(repoPath)) {
+            try {
+              console.log(`  📊 Scanning ${repo.name} (${repo.type})...`);
+              const radiography = await ProjectRadiographyService.scan(repoPath);
+              projectRadiographies.set(repo.name, radiography);
+              console.log(`  ✅ ${repo.name}: ${radiography.language.primary}/${radiography.framework.name} - ${radiography.routes.length} routes, ${radiography.models.length} models, ${radiography.services.length} services`);
+
+              // Cache to granular memory
+              if (projectId) {
+                try {
+                  await granularMemoryService.store({
+                    projectId: new (await import('mongoose')).Types.ObjectId(projectId),
+                    taskId: new (await import('mongoose')).Types.ObjectId(taskId),
+                    scope: 'task',
+                    phaseType: 'planning',
+                    agentType: 'planning-agent',
+                    type: 'context',
+                    title: `ProjectRadiography: ${repo.name}`,
+                    content: JSON.stringify(radiography),
+                    importance: 'medium',
+                    confidence: 1.0,
+                  });
+                } catch (storeErr: any) {
+                  // Non-critical
+                }
+              }
+            } catch (error: any) {
+              console.warn(`  ⚠️ ${repo.name}: Radiography failed (will continue): ${error.message}`);
+            }
+          } else {
+            console.warn(`  ⚠️ ${repo.name}: Path not found at ${repoPath}`);
+          }
+        }
+      } else {
+        console.log(`⏭️ [PlanningPhase] Using cached radiography for all ${repositories.length} repositories (skipped re-scan)`);
+      }
+
+      // Store for subsequent phases (TechLead, Developer, etc.)
+      context.setData('projectRadiographies', projectRadiographies);
+      console.log(`✅ [PlanningPhase] Radiography complete: ${projectRadiographies.size}/${repositories.length} repositories`);
+      if (missingRepos.length < repositories.length) {
+        console.log(`   💾 ${repositories.length - missingRepos.length} from cache, ${missingRepos.length} freshly scanned`);
+      }
+
+      // 🔄 RETRY LOOP: Try up to MAX_RETRIES times
+      while (retryCount < MAX_RETRIES) {
+      try {
+        if (retryCount > 0) {
+          console.log(`\n🔄🔄🔄 [Planning] RETRY ${retryCount}/${MAX_RETRIES - 1} - Fixing Judge feedback 🔄🔄🔄`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `🔄 Planning Retry ${retryCount}/${MAX_RETRIES - 1}: ${lastError?.violationType || 'Judge rejection'}`
+          );
+        }
+
+        // 🔄 Build retry section if this is a retry attempt
+        let retrySection = '';
+        if (lastError && retryCount > 0) {
+          const judgeFeedback = lastError.feedback || '';
+          const judgeReason = lastError.reason || lastError.message || '';
+
+          retrySection = `
+
+# 🚨🚨🚨 JUDGE REJECTED YOUR PLANNING - FIX THE ISSUES BELOW! 🚨🚨🚨
+
+## ❌ WHY YOU WERE REJECTED:
+
+${judgeReason}
+
+## 📋 SPECIFIC ISSUES TO FIX:
+
+${judgeFeedback}
+
+---
+
+## 🎯 HOW TO FIX:
+
+1. **READ THE FEEDBACK CAREFULLY** - The Judge explained exactly what's missing
+2. **ADD MISSING EPICS** - If scoring system is missing, add an epic for it
+3. **COVER ALL ACTIVITY TYPES** - Tests, prácticos, miniquiz must be handled
+4. **DEFINE PASS/FAIL CRITERIA** - What score constitutes "failing" an activity?
+5. **INCLUDE RESET MECHANISM** - How do lives regenerate?
+
+---
+
+`;
+        }
+
+      // 💡 USER DIRECTIVES - Incorporate any user-injected instructions
+      const directivesBlock = context.getDirectivesBlock('planning-agent');
+
+      // Build the unified planning prompt (includes discovered patterns + radiography)
+      const basePrompt = this.buildPlanningPrompt(task, repositories, repoInfo, previousContextSection, codebaseKnowledge, projectRadiographies);
+
+      // Inject retry section and directives at the beginning of the prompt
+      let prompt = basePrompt;
+      if (retrySection) {
+        prompt = retrySection + prompt;
+      }
+      if (directivesBlock) {
+        prompt = prompt.replace(
+          '## ⛔ FORBIDDEN BEHAVIORS',
+          `${directivesBlock}\n## ⛔ FORBIDDEN BEHAVIORS`
+        );
+      }
+
+      // 🔄 SESSION RESUME: Check for existing checkpoint from interrupted execution
+      const existingCheckpoint = await sessionCheckpointService.loadCheckpoint(taskId, 'planning');
+      const resumeOptions = sessionCheckpointService.buildResumeOptions(existingCheckpoint);
+
+      if (resumeOptions?.isResume) {
+        console.log(`\n🔄🔄🔄 [Planning] RESUMING from previous session: ${resumeOptions.resumeSessionId?.substring(0, 20)}...`);
+        NotificationService.emitConsoleLog(taskId, 'info', `🔄 Planning Phase resuming from checkpoint`);
+      }
 
       // Execute with bypassPermissions (like TechLead)
       // Note: 'plan' mode causes interactive behavior (asks questions)
@@ -261,8 +535,20 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         undefined, // options
         undefined, // contextOverride
         undefined, // skipOptimization
-        'bypassPermissions' // Use bypassPermissions like TechLead - prompt restricts to read-only
+        'bypassPermissions', // Use bypassPermissions like TechLead - prompt restricts to read-only
+        resumeOptions // 🔄 Session resume options
       );
+
+      // 🔄 Save session checkpoint for recovery (even on success - marks as completed)
+      if (result.sdkSessionId) {
+        await sessionCheckpointService.saveCheckpoint(
+          taskId,
+          'planning',
+          result.sdkSessionId,
+          undefined,
+          result.lastMessageUuid
+        );
+      }
 
       console.log(`\nPlanning Agent completed. Parsing output...`);
 
@@ -302,6 +588,67 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         console.log(`  ${i + 1}. ${epic.title} (${epic.targetRepository || 'unknown'}) - ${filesCount} files`);
       });
       console.log(`${'='.repeat(60)}\n`);
+
+      // ⚖️ PLANNING JUDGE: Validate epics with AI evaluation AS AGENT (with tools!)
+      // 🔥 Judge now has Read/Glob/Grep tools - can verify files exist itself
+      const planningJudgeResult = await this.judgePlanningOutput(enrichedEpics, task, taskId);
+
+      if (!planningJudgeResult.approved) {
+        console.error(`\n🚨 [Planning] Judge rejected: ${planningJudgeResult.reason}`);
+
+        // 🎯 ACTIVITY: Emit Judge rejection for Activity tab
+        AgentActivityService.emitToolUse(taskId, 'Planning', 'EpicValidation', {
+          verdict: 'REJECTED',
+          reason: planningJudgeResult.reason,
+          epicsCount: planningJudgeResult.epicsCount,
+        });
+        AgentActivityService.emitError(
+          taskId,
+          'Planning',
+          `⚖️ Judge rejected: ${planningJudgeResult.reason}`
+        );
+        NotificationService.emitAgentMessage(
+          taskId,
+          'Planning',
+          `⚖️ JUDGE REJECTED: ${planningJudgeResult.reason}\n${planningJudgeResult.feedback || ''}`
+        );
+
+        const error = new Error(`PLANNING_JUDGE_REJECTION: ${planningJudgeResult.reason}`);
+        (error as any).retryable = true;
+        (error as any).violationType = 'PLANNING_JUDGE_REJECTION';
+        (error as any).feedback = planningJudgeResult.feedback;
+        (error as any).reason = planningJudgeResult.reason; // Pass full rejection reason for retry
+        throw error;
+      }
+
+      // 🎯 ACTIVITY: Emit Judge approval with validation details for Activity tab
+      AgentActivityService.emitToolUse(taskId, 'Planning', 'EpicValidation', {
+        verdict: 'APPROVED',
+        epicsCount: planningJudgeResult.epicsCount,
+        validations: planningJudgeResult.validations,
+      });
+      // Build detailed message showing what checks passed
+      const v = planningJudgeResult.validations;
+      const checksMessage = v ? [
+        `✅ Epics created: ${v.epicTitles.join(', ')}`,
+        `✅ Descriptions: ${v.hasDescriptions ? 'All have meaningful descriptions' : 'Some missing'}`,
+        `✅ Complexity: ${v.hasEnoughEpicsForComplexity ? 'Appropriate epic count' : 'May need more epics'}`,
+        v.hasFullStackCoverage !== 'N/A' ? `✅ Full-stack: ${v.hasFullStackCoverage ? 'Backend + Frontend covered' : 'Missing coverage'}` : null,
+        `📊 Alignment: ${v.keywordAlignment}`,
+      ].filter(Boolean).join('\n') : '';
+
+      AgentActivityService.emitMessage(
+        taskId,
+        'Planning',
+        `⚖️ Judge approved: ${planningJudgeResult.epicsCount} epic(s)\n${checksMessage}`
+      );
+      NotificationService.emitAgentMessage(
+        taskId,
+        'Planning',
+        `⚖️ JUDGE APPROVED\n${checksMessage}`
+      );
+
+      console.log(`✅ [Planning] Judge approved - ${planningJudgeResult.epicsCount} epic(s)`);
 
       // 🔥 CRITICAL: Re-fetch task from DB to avoid Mongoose version conflicts
       // During the agent execution (~2-3 min), WebSocket notifications may have updated the task
@@ -375,6 +722,19 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         `\n${'='.repeat(80)}\nPLANNING AGENT - FULL OUTPUT\n${'='.repeat(80)}\n\n${result.output}\n\n${'='.repeat(80)}`
       );
 
+      // 🎯 ACTIVITY: Emit Planning result for Activity tab
+      const totalStories = enrichedEpics.reduce((sum: number, e: any) => sum + (e.stories?.length || 0), 0);
+      AgentActivityService.emitToolUse(taskId, 'Planning', 'UnifiedPlanning', {
+        epics: enrichedEpics.length,
+        stories: totalStories,
+        repositories: repositories.length,
+      });
+      AgentActivityService.emitMessage(
+        taskId,
+        'Planning',
+        `✅ Planning complete: ${enrichedEpics.length} epic(s), ${totalStories} stories`
+      );
+
       NotificationService.emitAgentCompleted(taskId, 'Planning Agent', `Created ${enrichedEpics.length} epic(s)`);
 
       await LogService.agentCompleted('planning-agent', taskId, {
@@ -401,6 +761,65 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         },
       });
 
+      // 🔄 Mark checkpoint as completed (no resume needed)
+      await sessionCheckpointService.markCompleted(taskId, 'planning');
+
+      // 🧠 GRANULAR MEMORY: Store planning decisions and discoveries
+      const projectId = task.projectId?.toString();
+      if (projectId) {
+        try {
+          // Store progress marker
+          await granularMemoryService.storeProgress({
+            projectId,
+            taskId,
+            phaseType: 'planning',
+            agentType: 'planning-agent',
+            status: 'completed',
+            details: `Created ${enrichedEpics.length} epic(s): ${enrichedEpics.map((e: any) => e.title).join(', ')}`,
+          });
+
+          // Store each epic as a decision
+          for (const epic of enrichedEpics) {
+            await granularMemoryService.storeDecision({
+              projectId,
+              taskId,
+              phaseType: 'planning',
+              agentType: 'planning-agent',
+              epicId: epic.id,
+              title: `Epic: ${epic.title}`,
+              content: `Repository: ${epic.targetRepository}\nDescription: ${epic.description || 'N/A'}\nFiles to modify: ${epic.filesToModify?.join(', ') || 'none'}\nFiles to create: ${epic.filesToCreate?.join(', ') || 'none'}`,
+              importance: 'high',
+            });
+          }
+
+          // Store patterns from architectureBrief
+          if (parsed.architectureBrief?.codePatterns) {
+            const patterns = parsed.architectureBrief.codePatterns;
+            await granularMemoryService.storePattern({
+              projectId,
+              title: 'Code Patterns Discovered',
+              content: `Naming: ${patterns.namingConvention || 'N/A'}\nFile Structure: ${patterns.fileStructure || 'N/A'}\nError Handling: ${patterns.errorHandling || 'N/A'}\nTesting: ${patterns.testing || 'N/A'}`,
+              importance: 'high',
+            });
+          }
+
+          // Store conventions from codebaseKnowledge
+          if (codebaseKnowledge?.helperFunctions?.length) {
+            for (const helper of codebaseKnowledge.helperFunctions.slice(0, 5)) {
+              await granularMemoryService.storeConvention({
+                projectId,
+                title: `Use ${helper.name}()`,
+                content: `File: ${helper.file}\nUsage: ${helper.usage}\n${helper.antiPattern ? `Anti-pattern: ${helper.antiPattern}` : ''}`,
+              });
+            }
+          }
+
+          console.log(`🧠 [Planning] Stored ${enrichedEpics.length + 2} memories (progress, epics, patterns)`);
+        } catch (memError: any) {
+          console.warn(`⚠️ [Planning] Failed to store memories: ${memError.message}`);
+        }
+      }
+
       return {
         success: true,
         data: {
@@ -417,6 +836,31 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
       };
 
     } catch (error: any) {
+      // 🔄 RETRY: Check if this error is retryable
+      if (error.retryable && retryCount < MAX_RETRIES - 1) {
+        retryCount++;
+        lastError = error;
+        console.log(`\n⚠️  [Planning] Retryable error caught: ${error.violationType}`);
+        console.log(`   Will retry (${retryCount}/${MAX_RETRIES - 1})...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `⚠️ Planning Judge rejected. Retrying (${retryCount}/${MAX_RETRIES - 1})...`
+        );
+        continue; // Go back to while loop
+      }
+
+      // Non-retryable error OR max retries reached
+      if (error.retryable) {
+        console.error(`\n❌❌❌ [Planning] MAX RETRIES (${MAX_RETRIES}) REACHED - GIVING UP ❌❌❌`);
+        console.error(`   Last error: ${error.violationType}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'error',
+          `❌ Planning failed after ${MAX_RETRIES} attempts: ${error.violationType}`
+        );
+      }
+
       console.error(`\n[Planning] FAILED: ${error.message}`);
 
       task.orchestration.planning!.status = 'failed';
@@ -430,9 +874,44 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         phase: 'planning',
       });
 
+      // 🔄 Mark checkpoint as failed
+      await sessionCheckpointService.markFailed(taskId, 'planning', undefined, error.message);
+
       return {
         success: false,
         error: error.message,
+      };
+    }
+    } // End of while loop
+
+    // Should never reach here (while loop always returns)
+    return {
+      success: false,
+      error: 'Unexpected: Planning execution loop exited without result',
+    };
+
+    } catch (outerError: any) {
+      // Handle errors from setup phase (before while loop)
+      // e.g., missing repository type, codebase discovery critical failure
+      console.error(`\n[Planning] SETUP FAILED: ${outerError.message}`);
+
+      task.orchestration.planning!.status = 'failed';
+      task.orchestration.planning!.completedAt = new Date();
+      task.orchestration.planning!.error = outerError.message;
+      await task.save();
+
+      NotificationService.emitAgentFailed(taskId, 'Planning Agent', outerError.message);
+
+      await LogService.agentFailed('planning-agent', taskId, outerError, {
+        phase: 'planning',
+      });
+
+      // 🔄 Mark checkpoint as failed
+      await sessionCheckpointService.markFailed(taskId, 'planning', undefined, outerError.message);
+
+      return {
+        success: false,
+        error: outerError.message,
       };
     }
   }
@@ -446,7 +925,8 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
     repositories: any[],
     repoInfo: string,
     previousContextSection: string,
-    codebaseKnowledge?: CodebaseKnowledge
+    codebaseKnowledge?: CodebaseKnowledge,
+    projectRadiographies?: Map<string, ProjectRadiography>
   ): string {
     const projectId = task.projectId?.toString() || '';
     const taskId = task._id?.toString() || '';
@@ -455,6 +935,33 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
     const discoveredPatternsSection = codebaseKnowledge
       ? CodebaseDiscoveryService.formatForPrompt(codebaseKnowledge)
       : '';
+
+    // 🔬 PROJECT RADIOGRAPHY SECTION - Complete project X-Ray (LANGUAGE AGNOSTIC)
+    let radiographySection = '';
+    if (projectRadiographies && projectRadiographies.size > 0) {
+      radiographySection = `
+## 🔬 PROJECT RADIOGRAPHY (Complete Codebase X-Ray - READ THIS CAREFULLY!)
+
+**This section contains the COMPLETE analysis of each repository. USE THIS DATA - it's more reliable than exploration.**
+
+`;
+      for (const [repoName, radiography] of projectRadiographies.entries()) {
+        radiographySection += `
+### 📁 ${repoName}
+${ProjectRadiographyService.formatForPrompt(radiography)}
+`;
+      }
+
+      radiographySection += `
+---
+**⚠️ CRITICAL**: The radiography above is the TRUTH about the project structure.
+- DO NOT ignore this data and search blindly
+- DO NOT assume patterns that contradict the radiography
+- USE the routes, models, services listed above when planning epics
+- MATCH the conventions detected (naming, file structure, code style)
+---
+`;
+    }
 
     const memoryContext = `
 ## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
@@ -527,6 +1034,76 @@ Example: If unsure between Option A and Option B:
 
 ---
 
+## 🔍 CRITICAL: REQUIREMENT EXPANSION (DO THIS FIRST!)
+
+**If the task title/description is VAGUE (like "gaming v3", "add dashboard", "improve auth"), YOU MUST EXPAND IT:**
+
+### Step 1: Search for EXISTING Related Features
+\`\`\`bash
+# Find existing implementations of similar features
+Grep("gaming|game|match|score|leaderboard")  # Search for related code
+Glob("**/gaming/**", "**/game/**", "**/match/**")  # Find related directories
+\`\`\`
+
+### Step 2: Analyze What EXISTS vs What's MISSING
+Ask yourself:
+- What does v1/v2 have? What's the current state?
+- What would make this a COMPLETE v3?
+- What are users likely expecting?
+
+### Step 3: Create a COMPREHENSIVE Feature Breakdown
+A complete feature ALWAYS needs (check ALL that apply):
+
+**🔧 BACKEND Components:**
+- [ ] Data Models (database schemas, relationships)
+- [ ] REST/GraphQL APIs (CRUD endpoints)
+- [ ] Business Logic (services, validation rules)
+- [ ] Real-time (WebSockets if needed)
+- [ ] Background Jobs (if async processing needed)
+
+**🎨 FRONTEND Components:**
+- [ ] Pages/Views (main UI screens)
+- [ ] Components (reusable UI elements)
+- [ ] Forms (user input with validation)
+- [ ] State Management (local/global state)
+- [ ] API Integration (hooks, services)
+
+**🔒 Cross-Cutting Concerns:**
+- [ ] Authentication/Authorization (who can access?)
+- [ ] Validation (input validation, business rules)
+- [ ] Error Handling (user-friendly errors)
+- [ ] Logging/Monitoring (for debugging)
+- [ ] Tests (unit, integration, e2e)
+
+### Step 4: Document Your Expanded Requirements
+In your output JSON, include an "expandedRequirements" field:
+\`\`\`json
+{
+  "expandedRequirements": {
+    "originalRequest": "gaming v3",
+    "existingFeatures": ["basic match system", "score tracking"],
+    "inferredNeeds": [
+      "Lives system - users need limited attempts",
+      "Leaderboards - competitive ranking",
+      "Match history - users want to see past games",
+      "Rewards system - motivation to keep playing"
+    ],
+    "backendNeeds": ["Lives model", "Leaderboard API", "Match history API"],
+    "frontendNeeds": ["Lives display component", "Leaderboard page", "Match history page"],
+    "reasoning": "Analyzed existing gaming module and industry standards for gaming v3"
+  }
+}
+\`\`\`
+
+### ⚠️ RED FLAGS - Your plan is TOO SHALLOW if:
+- You only create 1-2 epics for a complex feature
+- Backend epic has no corresponding frontend epic (or vice versa)
+- No tests or validation mentioned
+- No error handling considered
+- You didn't search for existing related code first
+
+---
+
 # UNIFIED PLANNING AGENT
 
 You combine problem analysis and epic creation in ONE pass.
@@ -543,8 +1120,9 @@ ${repoInfo}
 ${repoGuidance}
 ${previousContextSection}
 ${discoveredPatternsSection}
+${radiographySection}
 
-## WORKFLOW
+## WORKFLOW (Radiography-Guided)
 
 ### Phase 1: DEEP ARCHITECTURE ANALYSIS (CRITICAL - 5-7 min)
 
@@ -582,13 +1160,7 @@ Grep("references|belongsTo|hasMany|@ManyToOne|@OneToMany|Schema.Types.ObjectId")
 - Indexes and constraints
 
 #### 1.3 Analyze Code Patterns & Conventions
-\`\`\`bash
-# Find existing patterns for similar features
-Glob("**/controllers/**/*.ts", "**/services/**/*.ts", "**/routes/**/*.ts")
-
-# Check for linting/formatting config
-Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
-\`\`\`
+${this.getRepoSpecificPatternDiscovery(repositories)}
 
 **Document**:
 - Naming conventions (camelCase, kebab-case, etc.)
@@ -596,15 +1168,6 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
 - Error handling patterns
 - Logging patterns
 - Testing patterns
-
-#### 1.4 Analyze API Patterns (if applicable)
-\`\`\`bash
-# Find existing API routes
-Grep("router.get|router.post|app.get|@Get|@Post")
-
-# Find middleware patterns
-Grep("middleware|authenticate|authorize|validate")
-\`\`\`
 
 ### Phase 2: Problem Analysis
 Consider:
@@ -825,6 +1388,43 @@ After exploring the codebase, output EXACTLY this structure (no text before or a
   }
 
   /**
+   * Generate repository-specific pattern discovery commands
+   * Based on actual repo types in the project
+   */
+  private getRepoSpecificPatternDiscovery(repositories: any[]): string {
+    const hasBackend = repositories.some(r => r.type === 'backend');
+    const hasFrontend = repositories.some(r => r.type === 'frontend');
+
+    let commands = '```bash\n';
+
+    if (hasBackend) {
+      commands += `# 🔧 BACKEND patterns (APIs, services, models)
+Glob("**/controllers/**/*.ts", "**/services/**/*.ts", "**/routes/**/*.ts")
+Glob("**/models/**/*.ts", "**/middleware/**/*.ts")
+Grep("router.get|router.post|app.get|@Get|@Post")
+Grep("middleware|authenticate|authorize|validate")
+`;
+    }
+
+    if (hasFrontend) {
+      commands += `# 🎨 FRONTEND patterns (components, hooks, pages)
+Glob("**/components/**/*.tsx", "**/pages/**/*.tsx", "**/hooks/**/*.ts")
+Glob("**/contexts/**/*.tsx", "**/services/**/*.ts", "**/utils/**/*.ts")
+Grep("useState|useEffect|useContext|useMemo|useCallback")
+Grep("export.*function|export.*const.*=.*\\(")
+`;
+    }
+
+    // Always check for config files
+    commands += `
+# Check for linting/formatting config
+Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
+\`\`\``;
+
+    return commands;
+  }
+
+  /**
    * Enrich epics with repository information
    *
    * Priority order for targetRepository:
@@ -896,5 +1496,264 @@ After exploring the codebase, output EXACTLY this structure (no text before or a
         repoType: targetRepo?.type,
       };
     });
+  }
+
+  /**
+   * ⚖️ PLANNING JUDGE: AI-powered validation of planning output
+   *
+   * Phase 1: Fast programmatic checks (fail fast, no AI cost)
+   * Phase 2: AI evaluation AS AGENT with Read/Glob/Grep tools
+   *
+   * 🔥 CRITICAL: Judge is now a FULL AGENT with tools!
+   * It can read files, search code, and verify everything itself.
+   * No need to pass context - Judge explores the codebase like Planning does.
+   */
+  private async judgePlanningOutput(
+    epics: any[],
+    task: any,
+    taskId: string
+  ): Promise<{
+    approved: boolean;
+    reason?: string;
+    feedback?: string;
+    epicsCount: number;
+    aiEvaluation?: {
+      verdict: 'APPROVE' | 'REJECT';
+      reasoning: string;
+      issues: string[];
+      suggestions: string[];
+      score: number;
+    };
+    validations?: {
+      hasEpics: boolean;
+      hasDescriptions: boolean;
+      hasEnoughEpicsForComplexity: boolean;
+      hasFullStackCoverage: boolean | 'N/A';
+      keywordAlignment: string;
+      taskTitle: string;
+      epicTitles: string[];
+    };
+  }> {
+    // 🎯 ACTIVITY: Judge starting
+    AgentActivityService.emitMessage(taskId, 'Planning-Judge', `⚖️ Starting validation of ${epics?.length || 0} epic(s)...`);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 1: Fast programmatic checks (fail fast, no AI cost)
+    // ═══════════════════════════════════════════════════════════════════
+    AgentActivityService.emitToolUse(taskId, 'Planning-Judge', 'BasicChecks', {
+      phase: 'Fast validation',
+      epicsCount: epics?.length || 0,
+    });
+
+    // CHECK 1: Must have epics
+    if (!epics || epics.length === 0) {
+      AgentActivityService.emitError(taskId, 'Planning-Judge', '❌ FAST CHECK FAILED: No epics created');
+      return {
+        approved: false,
+        reason: 'No epics created',
+        feedback: 'Planning must create at least one epic to proceed',
+        epicsCount: 0,
+      };
+    }
+
+    // CHECK 2: Epics must have descriptions
+    const epicsWithoutDescription = epics.filter((e: any) =>
+      !e.description || e.description.length < 20
+    );
+    if (epicsWithoutDescription.length > epics.length * 0.5) {
+      AgentActivityService.emitError(taskId, 'Planning-Judge', `❌ FAST CHECK FAILED: ${epicsWithoutDescription.length}/${epics.length} epics lack descriptions`);
+      return {
+        approved: false,
+        reason: 'Most epics lack proper descriptions',
+        feedback: `${epicsWithoutDescription.length}/${epics.length} epics have no description or descriptions too short (<20 chars).`,
+        epicsCount: epics.length,
+      };
+    }
+
+    AgentActivityService.emitMessage(taskId, 'Planning-Judge', `✅ Basic checks passed - proceeding to AI evaluation with tools`);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 2: AI Evaluation AS AGENT (with Read, Glob, Grep tools!)
+    // 🔥 CRITICAL: Judge MUST have same tools as Planning Agent
+    // Without tools, Judge cannot verify if files exist or read code
+    // ═══════════════════════════════════════════════════════════════════
+
+    AgentActivityService.emitToolUse(taskId, 'Planning-Judge', 'AIEvaluation', {
+      phase: 'AI-powered quality assessment WITH TOOLS',
+      evaluating: ['epic coverage', 'scope completeness', 'alignment with task', 'full-stack coverage', 'dependencies'],
+      hasTools: true,
+    });
+
+    // Get workspace path for Judge to read files
+    const workspacePath = task.orchestration?.workspacePath || process.cwd();
+
+    // Build repository paths for Judge
+    const repositories = task.repositories || [];
+    const repoPathsInfo = repositories.map((repo: any) => {
+      return `- ${repo.name} (${repo.type}): ${workspacePath}/${repo.name}`;
+    }).join('\n');
+
+    try {
+      const evaluationPrompt = `You are a STRICT Planning Judge with access to READ THE ACTUAL CODEBASE.
+
+## YOUR MISSION
+Evaluate if the Planning Agent's epics FULLY cover the user's requirements.
+
+## 🔥 CRITICAL: YOU HAVE TOOLS!
+You have access to Read, Glob, and Grep tools. USE THEM to:
+1. VERIFY if files mentioned in epics actually exist
+2. READ relevant files to understand current implementation
+3. CHECK if proposed changes make sense given existing code
+
+## WORKSPACE
+${repoPathsInfo || 'No repositories specified'}
+
+## ORIGINAL TASK FROM USER
+Title: ${task.title || 'No title'}
+Description: ${task.description || 'No description'}
+
+## PLANNING AGENT'S OUTPUT TO EVALUATE
+\`\`\`json
+${JSON.stringify(epics, null, 2)}
+\`\`\`
+
+## YOUR EVALUATION PROCESS
+1. **READ THE CODE** - Use Glob/Read to check files mentioned in filesToModify/filesToRead
+2. **VERIFY EXISTENCE** - Before saying "file X is missing", READ to confirm it doesn't exist
+3. **CHECK PATTERNS** - Read existing similar files to verify proposed approach fits
+4. **EVALUATE COVERAGE** - Does the plan cover ALL user requirements?
+
+## EVALUATION CRITERIA
+
+### 1. REQUIREMENT COVERAGE
+- Do the epics FULLY cover what the user asked for?
+- Are there missing pieces that would leave requirements unmet?
+
+### 2. FILE ACCURACY
+- Do filesToModify actually exist? (USE Read/Glob to verify!)
+- Are filesToCreate truly new files that don't exist?
+- Are the file paths correct?
+
+### 3. FULL-STACK COVERAGE
+- If task needs both backend and frontend, are both covered?
+- Are there API-UI mismatches?
+
+### 4. LOGICAL STRUCTURE
+- Do epics have proper dependencies?
+- Is the implementation order logical?
+
+## YOUR OUTPUT
+After reading relevant files to verify, output your verdict:
+
+\`\`\`json
+{
+  "verdict": "APPROVE" or "REJECT",
+  "score": 0-100,
+  "reasoning": "Brief explanation based on what you READ in the codebase",
+  "filesVerified": ["List of files you actually read to verify"],
+  "issues": ["Only REAL issues - not things you verified exist"],
+  "suggestions": ["Improvements based on actual code you read"],
+  "missingRequirements": ["Things the user asked for that aren't covered"]
+}
+\`\`\`
+
+## ⚠️ IMPORTANT
+- DO NOT reject for "missing files" without first trying to READ them
+- If a file exists (you can read it), it's NOT missing
+- Only reject for REAL issues verified by reading code
+- Be thorough but fair
+
+START by using Glob to find relevant files, then Read key ones to understand the codebase.`;
+
+      const startTime = Date.now();
+
+      // 🔥 Execute Judge as AGENT with tools (not just API call)
+      const judgeResult = await this.executeAgentFn(
+        'planning-judge',
+        evaluationPrompt,
+        workspacePath,
+        taskId,
+        'Planning Judge',
+        undefined, // sessionId
+        undefined, // fork
+        undefined, // attachments
+        undefined, // options
+        undefined, // contextOverride
+        undefined, // skipOptimization
+        'bypassPermissions' // Same permissions as Planning Agent
+      );
+
+      const duration = Date.now() - startTime;
+      console.log(`   💰 [Planning Judge] Agent evaluation completed in ${duration}ms, cost: $${judgeResult.cost?.toFixed(4) || '?'}`);
+
+      // Parse Judge output
+      const jsonMatch = judgeResult.output.match(/```json\n([\s\S]*?)\n```/) || judgeResult.output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
+
+      if (!jsonMatch) {
+        console.warn(`⚠️ [Planning Judge] No JSON verdict found in output, defaulting to approve`);
+        AgentActivityService.emitMessage(taskId, 'Planning-Judge', `⚠️ Judge output inconclusive - approving by default`);
+        return {
+          approved: true,
+          epicsCount: epics.length,
+        };
+      }
+
+      const aiResult = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+
+      // Emit detailed evaluation results
+      AgentActivityService.emitToolUse(taskId, 'Planning-Judge', 'AIVerdict', {
+        verdict: aiResult.verdict,
+        score: aiResult.score,
+        filesVerified: aiResult.filesVerified?.length || 0,
+        issuesCount: aiResult.issues?.length || 0,
+        cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
+      });
+
+      // Emit reasoning
+      AgentActivityService.emitMessage(taskId, 'Planning-Judge',
+        `🤖 Judge Evaluation (score: ${aiResult.score}/100):\n` +
+        `${aiResult.reasoning}\n\n` +
+        (aiResult.filesVerified?.length > 0 ? `📁 Files Verified: ${aiResult.filesVerified.join(', ')}\n` : '') +
+        (aiResult.issues?.length > 0 ? `\n❌ Issues:\n${aiResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
+        (aiResult.suggestions?.length > 0 ? `\n💡 Suggestions:\n${aiResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
+      );
+
+      const approved = aiResult.verdict === 'APPROVE' && aiResult.score >= 60;
+
+      if (approved) {
+        console.log(`   ✅ [Planning Judge] APPROVED (score: ${aiResult.score}/100)`);
+        AgentActivityService.emitMessage(taskId, 'Planning-Judge', `✅ APPROVED with score ${aiResult.score}/100`);
+      } else {
+        console.log(`   ❌ [Planning Judge] REJECTED (score: ${aiResult.score}/100)`);
+        AgentActivityService.emitError(taskId, 'Planning-Judge',
+          `❌ REJECTED (score: ${aiResult.score}/100)\n` +
+          `Reason: ${aiResult.reasoning}\n` +
+          `Issues: ${aiResult.issues?.join(', ')}`
+        );
+      }
+
+      return {
+        approved,
+        reason: approved ? undefined : aiResult.reasoning,
+        feedback: approved ? undefined : (aiResult.issues || []).concat(aiResult.suggestions || []).join('\n'),
+        epicsCount: epics.length,
+        aiEvaluation: {
+          verdict: aiResult.verdict,
+          reasoning: aiResult.reasoning,
+          issues: aiResult.issues || [],
+          suggestions: aiResult.suggestions || [],
+          score: aiResult.score,
+        },
+      };
+    } catch (error: any) {
+      console.warn(`⚠️ [Planning Judge] Agent evaluation failed: ${error.message} - falling back to approval`);
+      AgentActivityService.emitMessage(taskId, 'Planning-Judge', `⚠️ Judge evaluation failed - using fallback approval`);
+
+      // Fallback: approve to not block progress
+      return {
+        approved: true,
+        epicsCount: epics.length,
+      };
+    }
   }
 }
