@@ -1140,6 +1140,7 @@ export class JudgePhase extends BasePhase {
       taskId: task._id?.toString() || '',
       story,
       developer,
+      workspacePath: workspacePath || undefined, // 🔥 CRITICAL: Pass workspace so Judge uses correct paths
       targetRepository,
       storyBranchName,
       commitSHA,

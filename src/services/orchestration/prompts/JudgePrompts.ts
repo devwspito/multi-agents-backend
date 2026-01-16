@@ -34,14 +34,25 @@ export function buildPlanningJudgePrompt(ctx: PlanningJudgeContext): string {
 ## YOUR MISSION
 Evaluate if the Planning Agent's epics FULLY cover the user's requirements.
 
-## 🔥 CRITICAL: YOU HAVE TOOLS!
+## 🚨🚨🚨 CRITICAL: WORKSPACE PATH 🚨🚨🚨
+**ALL file operations MUST use this workspace path:**
+\`${ctx.workspacePath}\`
+
+**Repository paths:**
+${repoPathsInfo || 'No repositories specified'}
+
+## ⚠️ MANDATORY: USE ABSOLUTE PATHS
+When using Glob, Read, or Grep tools, you MUST use the full workspace path:
+- ✅ CORRECT: \`Glob({ pattern: "**/*.js", path: "${ctx.workspacePath}/v3_backend" })\`
+- ✅ CORRECT: \`Read({ file_path: "${ctx.workspacePath}/v3_backend/services/lives.service.js" })\`
+- ❌ WRONG: \`Glob({ pattern: "**/services/*.js" })\` (missing path!)
+- ❌ WRONG: \`Read({ file_path: "v3_backend/services/lives.service.js" })\` (relative path!)
+
+## 🔥 YOU HAVE TOOLS - USE THEM WITH WORKSPACE PATH!
 You have access to Read, Glob, and Grep tools. USE THEM to:
 1. VERIFY if files mentioned in epics actually exist
 2. READ relevant files to understand current implementation
 3. CHECK if proposed changes make sense given existing code
-
-## WORKSPACE
-${repoPathsInfo || 'No repositories specified'}
 
 ## ORIGINAL TASK FROM USER
 Title: ${ctx.taskTitle || 'No title'}
@@ -129,14 +140,25 @@ export function buildTechLeadJudgePrompt(ctx: TechLeadJudgeContext): string {
 ## YOUR MISSION
 Evaluate if the Tech Lead's architecture and stories are valid and implementable.
 
-## 🔥 CRITICAL: YOU HAVE TOOLS!
+## 🚨🚨🚨 CRITICAL: WORKSPACE PATH 🚨🚨🚨
+**ALL file operations MUST use this workspace path:**
+\`${ctx.workspacePath}\`
+
+**Repository paths:**
+${repoPathsInfo || 'No repositories specified'}
+
+## ⚠️ MANDATORY: USE ABSOLUTE PATHS
+When using Glob, Read, or Grep tools, you MUST use the full workspace path:
+- ✅ CORRECT: \`Glob({ pattern: "**/*.js", path: "${ctx.workspacePath}/v3_backend" })\`
+- ✅ CORRECT: \`Read({ file_path: "${ctx.workspacePath}/v3_backend/models/user.js" })\`
+- ❌ WRONG: \`Glob({ pattern: "**/models/*.js" })\` (missing path!)
+- ❌ WRONG: \`Read({ file_path: "v3_backend/models/user.js" })\` (relative path!)
+
+## 🔥 YOU HAVE TOOLS - USE THEM WITH WORKSPACE PATH!
 You have access to Read, Glob, and Grep tools. USE THEM to:
 1. VERIFY if file paths in stories actually exist (filesToModify should exist, filesToCreate should NOT)
 2. READ relevant files to understand current architecture
 3. CHECK if proposed patterns match existing codebase conventions
-
-## WORKSPACE
-${repoPathsInfo || 'No repositories specified'}
 
 ## 🎯 SCOPE OF THIS EVALUATION
 ${isMultiEpicTask ? `⚠️ **IMPORTANT**: Evaluating EPIC ${currentEpicIndex} of ${ctx.totalEpicsInTask} total.
@@ -216,6 +238,7 @@ export interface DeveloperJudgeContext {
   taskId: string;
   story: any;
   developer: any;
+  workspacePath?: string;
   targetRepository?: string;
   storyBranchName?: string;
   commitSHA?: string;
@@ -226,9 +249,25 @@ export interface DeveloperJudgeContext {
 }
 
 export function buildDeveloperJudgePrompt(ctx: DeveloperJudgeContext): string {
-  const { story, developer, targetRepository, storyBranchName, commitSHA, architectureBrief, projectRadiography, semanticVerificationSection, testResultsSection } = ctx;
+  const { story, developer, workspacePath, targetRepository, storyBranchName, commitSHA, architectureBrief, projectRadiography, semanticVerificationSection, testResultsSection } = ctx;
+
+  // Build full repository path
+  const fullRepoPath = workspacePath && targetRepository ? `${workspacePath}/${targetRepository}` : targetRepository || 'unknown';
 
   return `# ⚖️ JUDGE AGENT - CODE REVIEW
+
+## 🚨🚨🚨 CRITICAL: WORKSPACE PATH 🚨🚨🚨
+**ALL file operations MUST use this repository path:**
+\`${fullRepoPath}\`
+
+## ⚠️ MANDATORY: USE ABSOLUTE PATHS
+When using Glob, Read, or Grep tools, you MUST use the full path:
+- ✅ CORRECT: \`Read({ file_path: "${fullRepoPath}/services/lives.service.js" })\`
+- ✅ CORRECT: \`Glob({ pattern: "**/*.js", path: "${fullRepoPath}" })\`
+- ❌ WRONG: \`Read({ file_path: "services/lives.service.js" })\` (relative path!)
+- ❌ WRONG: \`Glob({ pattern: "**/services/*.js" })\` (missing path!)
+
+---
 
 ## 💡 YOUR PHILOSOPHY: BE A RIGOROUS REVIEWER
 
@@ -236,7 +275,7 @@ export function buildDeveloperJudgePrompt(ctx: DeveloperJudgeContext): string {
 
 ### ⚡ GOLDEN RULES:
 1. **READ THE CODE** - Don't assume, verify
-   - ✅ RIGHT: \`Read("src/services/UserService.ts")\` → then evaluate
+   - ✅ RIGHT: \`Read("${fullRepoPath}/services/UserService.js")\` → then evaluate
    - ❌ WRONG: "The code looks fine" without reading it
 
 2. **CHECK AGAINST REQUIREMENTS** - Every acceptance criterion must be met
