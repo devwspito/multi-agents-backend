@@ -188,13 +188,12 @@ export class JudgePhase extends BasePhase {
 
   /**
    * Get agent name for each judge type
+   * NOTE: All judges use the same 'judge' agent definition - prompts differentiate behavior
    */
-  private getAgentNameForType(type: JudgeType): string {
-    switch (type) {
-      case 'planning': return 'planning-judge';
-      case 'tech-lead': return 'techlead-judge';
-      case 'developer': return 'judge';
-    }
+  private getAgentNameForType(_type: JudgeType): string {
+    // All judge types use the same agent definition
+    // The prompt (from JudgePrompts.ts) determines behavior
+    return 'judge';
   }
 
   /**
