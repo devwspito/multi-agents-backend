@@ -20,6 +20,59 @@ import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
+import {
+  buildPlanningJudgePrompt,
+  buildTechLeadJudgePrompt,
+} from './prompts/JudgePrompts';
+
+/**
+ * Judge Types - Unified evaluation across all phases
+ */
+export type JudgeType = 'planning' | 'tech-lead' | 'developer';
+
+/**
+ * Judge Evaluation Context - Input for each judge type
+ */
+export interface JudgeEvaluationContext {
+  type: JudgeType;
+  workspacePath: string | null;
+  taskId: string;
+  repositories?: any[];
+
+  // Planning Judge context
+  epics?: any[];
+  taskTitle?: string;
+  taskDescription?: string;
+
+  // TechLead Judge context
+  architectureOutput?: any;
+  epicContext?: any;
+  totalEpicsInTask?: number;
+  currentEpicIndex?: number;
+
+  // Developer Judge context (uses existing executePhase)
+  story?: any;
+  developer?: any;
+  commitSHA?: string;
+  storyBranchName?: string;
+  targetRepository?: string;
+  architectureBrief?: any;
+  projectRadiographies?: Map<string, ProjectRadiography>;
+}
+
+/**
+ * Judge Result - Standardized output from all judges
+ */
+export interface JudgeResult {
+  approved: boolean;
+  score?: number;
+  feedback: string;
+  filesVerified?: string[];
+  issues?: string[];
+  suggestions?: string[];
+  cost?: number;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
 
 /**
  * Judge Phase
@@ -55,6 +108,165 @@ export class JudgePhase extends BasePhase {
   constructor(private executeAgentFn: Function) {
     super();
   }
+
+  // ============================================================================
+  // 🏛️ UNIFIED JUDGE API - All phases delegate here
+  // ============================================================================
+
+  /**
+   * Unified Judge Evaluation
+   *
+   * Use this method from PlanningPhase, TechLeadPhase, or any other phase
+   * that needs judge evaluation. This ensures consistent:
+   * - Tool access (Read, Glob, Grep)
+   * - Cost tracking
+   * - Logging
+   * - Error handling
+   *
+   * @param evalContext - Context with all data needed for evaluation
+   * @returns JudgeResult with approved/rejected status and feedback
+   */
+  async evaluateWithType(evalContext: JudgeEvaluationContext): Promise<JudgeResult> {
+    const { type, workspacePath, taskId } = evalContext;
+
+    console.log(`\n⚖️ [Judge] Starting ${type.toUpperCase()} evaluation...`);
+    AgentActivityService.emitMessage(taskId, `Judge-${type}`, `⚖️ Starting ${type} evaluation...`);
+
+    const prompt = this.buildPromptForType(evalContext);
+    const agentName = this.getAgentNameForType(type);
+
+    const startTime = Date.now();
+
+    try {
+      const result = await this.executeAgentFn(
+        agentName,
+        prompt,
+        workspacePath,
+        taskId,
+        `${type.charAt(0).toUpperCase() + type.slice(1)} Judge`,
+        undefined, // sessionId
+        undefined, // fork
+        undefined, // attachments
+        undefined, // options
+        undefined, // contextOverride
+        undefined, // skipOptimization
+        'bypassPermissions' // Same permissions as the phase being judged
+      );
+
+      const duration = Date.now() - startTime;
+      console.log(`   💰 [${type} Judge] Completed in ${duration}ms, cost: $${result.cost?.toFixed(4) || '?'}`);
+
+      // Parse result based on judge type
+      const parsed = this.parseJudgeResultForType(type, result.output);
+
+      // Emit activity
+      if (parsed.approved) {
+        AgentActivityService.emitMessage(taskId, `Judge-${type}`, `✅ APPROVED (score: ${parsed.score || 'N/A'})`);
+        console.log(`   ✅ [${type} Judge] APPROVED (score: ${parsed.score}/100)`);
+      } else {
+        AgentActivityService.emitMessage(taskId, `Judge-${type}`, `❌ REJECTED: ${parsed.feedback.substring(0, 100)}...`);
+        console.log(`   ❌ [${type} Judge] REJECTED (score: ${parsed.score}/100)`);
+      }
+
+      return {
+        ...parsed,
+        cost: result.cost || 0,
+        usage: result.usage || {},
+      };
+
+    } catch (error: any) {
+      console.warn(`⚠️ [${type} Judge] Evaluation failed: ${error.message} - falling back to approval`);
+      AgentActivityService.emitMessage(taskId, `Judge-${type}`, `⚠️ Evaluation failed, defaulting to approve`);
+      return {
+        approved: true,
+        feedback: `Judge evaluation failed (${error.message}), approved by default`,
+        score: 0,
+      };
+    }
+  }
+
+  /**
+   * Get agent name for each judge type
+   */
+  private getAgentNameForType(type: JudgeType): string {
+    switch (type) {
+      case 'planning': return 'planning-judge';
+      case 'tech-lead': return 'techlead-judge';
+      case 'developer': return 'judge';
+    }
+  }
+
+  /**
+   * Build prompt based on judge type (uses external prompt files)
+   */
+  private buildPromptForType(ctx: JudgeEvaluationContext): string {
+    switch (ctx.type) {
+      case 'planning':
+        return buildPlanningJudgePrompt({
+          workspacePath: ctx.workspacePath,
+          repositories: ctx.repositories || [],
+          taskTitle: ctx.taskTitle || '',
+          taskDescription: ctx.taskDescription || '',
+          epics: ctx.epics || [],
+        });
+      case 'tech-lead':
+        return buildTechLeadJudgePrompt({
+          workspacePath: ctx.workspacePath,
+          repositories: ctx.repositories || [],
+          taskTitle: ctx.taskTitle,
+          taskDescription: ctx.taskDescription,
+          epicContext: ctx.epicContext,
+          architectureOutput: ctx.architectureOutput,
+          totalEpicsInTask: ctx.totalEpicsInTask || 1,
+          currentEpicIndex: ctx.currentEpicIndex || 1,
+        });
+      case 'developer':
+        // Developer uses the existing detailed prompt (called from executePhase)
+        throw new Error('Developer judge should use executePhase() directly');
+    }
+  }
+
+  /**
+   * Parse judge output based on type
+   */
+  private parseJudgeResultForType(type: JudgeType, output: string): JudgeResult {
+    // Extract JSON from output
+    const jsonMatch = output.match(/```json\n([\s\S]*?)\n```/) || output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
+
+    if (!jsonMatch) {
+      console.warn(`⚠️ [${type} Judge] No JSON verdict found in output, defaulting to approve`);
+      return {
+        approved: true,
+        feedback: 'Judge output inconclusive - approved by default',
+        score: 0,
+      };
+    }
+
+    try {
+      const jsonStr = jsonMatch[1] || jsonMatch[0];
+      const parsed = JSON.parse(jsonStr);
+
+      return {
+        approved: parsed.verdict === 'APPROVE' || parsed.status === 'approved',
+        score: parsed.score || 0,
+        feedback: parsed.reasoning || parsed.feedback || '',
+        filesVerified: parsed.filesVerified || [],
+        issues: parsed.issues || [],
+        suggestions: parsed.suggestions || [],
+      };
+    } catch (parseError) {
+      console.warn(`⚠️ [${type} Judge] Failed to parse JSON: ${parseError}`);
+      return {
+        approved: true,
+        feedback: 'Judge output unparseable - approved by default',
+        score: 0,
+      };
+    }
+  }
+
+  // ============================================================================
+  // 🔧 LEGACY API - Developer Judge (maintains existing behavior)
+  // ============================================================================
 
   /**
    * Skip if Judge already evaluated all stories (ONLY for recovery, NOT for continuations)

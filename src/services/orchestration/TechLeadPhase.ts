@@ -6,6 +6,7 @@ import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import { RealisticCostEstimator } from '../RealisticCostEstimator';
 import { CryptoService } from '../CryptoService';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
+import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
 
@@ -1913,196 +1914,72 @@ Explore first, then output JSON.`;
 
     // Get workspace path for Judge to read files
     const workspacePath = task?.orchestration?.workspacePath || process.cwd();
-
-    // Build repository paths for Judge
     const repositories = task?.repositories || [];
-    const repoPathsInfo = repositories.map((repo: any) => {
-      return `- ${repo.name} (${repo.type}): ${workspacePath}/${repo.name}`;
-    }).join('\n');
 
     // Determine if this is a multi-epic task
     const totalEpicsInTask = task?.orchestration?.planning?.epics?.length || 1;
-    const isMultiEpicTask = totalEpicsInTask > 1;
     const currentEpicIndex = epicContext ? (task?.orchestration?.planning?.epics?.findIndex((e: any) => e.id === epicContext.id) + 1) || 1 : 1;
 
-    try {
-      const evaluationPrompt = `You are a STRICT TechLead Judge with access to READ THE ACTUAL CODEBASE.
+    // 🏛️ UNIFIED: Use JudgePhase.evaluateWithType() for consistent judge execution
+    const judgePhase = new JudgePhase(this.executeAgentFn);
+    const judgeResult = await judgePhase.evaluateWithType({
+      type: 'tech-lead',
+      workspacePath,
+      taskId,
+      repositories,
+      taskTitle: task?.title,
+      taskDescription: task?.description,
+      epicContext,
+      architectureOutput: parsed,
+      totalEpicsInTask,
+      currentEpicIndex,
+    });
 
-## YOUR MISSION
-Evaluate if the Tech Lead's architecture and stories are valid and implementable.
+    // Emit detailed evaluation results
+    AgentActivityService.emitToolUse(taskId, 'TechLead-Judge', 'AIVerdict', {
+      verdict: judgeResult.approved ? 'APPROVE' : 'REJECT',
+      score: judgeResult.score,
+      filesVerified: judgeResult.filesVerified?.length || 0,
+      issuesCount: judgeResult.issues?.length || 0,
+      cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
+    });
 
-## 🔥 CRITICAL: YOU HAVE TOOLS!
-You have access to Read, Glob, and Grep tools. USE THEM to:
-1. VERIFY if file paths in stories actually exist (filesToModify should exist, filesToCreate should NOT)
-2. READ relevant files to understand current architecture
-3. CHECK if proposed patterns match existing codebase conventions
+    // Emit reasoning
+    AgentActivityService.emitMessage(taskId, 'TechLead-Judge',
+      `🤖 Judge Evaluation (score: ${judgeResult.score || 0}/100):\n` +
+      `${judgeResult.feedback}\n\n` +
+      (judgeResult.filesVerified && judgeResult.filesVerified.length > 0 ? `📁 Files Verified: ${judgeResult.filesVerified.slice(0, 5).join(', ')}${judgeResult.filesVerified.length > 5 ? '...' : ''}\n` : '') +
+      (judgeResult.issues && judgeResult.issues.length > 0 ? `\n❌ Issues:\n${judgeResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
+      (judgeResult.suggestions && judgeResult.suggestions.length > 0 ? `\n💡 Suggestions:\n${judgeResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
+    );
 
-## WORKSPACE
-${repoPathsInfo || 'No repositories specified'}
+    // Approval requires both approved status AND score >= 60
+    const approved = judgeResult.approved && (judgeResult.score || 0) >= 60;
 
-## 🎯 SCOPE OF THIS EVALUATION
-${isMultiEpicTask ? `⚠️ **IMPORTANT**: Evaluating EPIC ${currentEpicIndex} of ${totalEpicsInTask} total.
-**DO NOT** expect this single epic to solve the ENTIRE task.
-**DO** evaluate if this epic makes sense as PART of the larger solution.` : 'This is a single-epic task - the plan should cover all requirements.'}
-
-## EPIC BEING EVALUATED
-${epicContext ? JSON.stringify(epicContext, null, 2) : 'Full project implementation'}
-
-${task ? `## ORIGINAL TASK (for context)
-Title: ${task.title}
-Description: ${task.description || 'No description'}` : ''}
-
-## TECHLEAD'S OUTPUT TO EVALUATE
-\`\`\`json
-${JSON.stringify(parsed, null, 2)}
-\`\`\`
-
-## YOUR EVALUATION PROCESS
-1. **VERIFY FILE PATHS** - Use Glob/Read to check files in filesToModify exist
-2. **CHECK ARCHITECTURE** - Read existing code to verify proposed architecture fits
-3. **VALIDATE PATTERNS** - Read similar files to ensure consistency
-4. **EVALUATE COVERAGE** - Does the plan cover this epic's requirements?
-
-## EVALUATION CRITERIA
-
-### 1. FILE PATH ACCURACY (USE TOOLS TO VERIFY!)
-- Do filesToModify actually exist? (Read them to confirm)
-- Are filesToCreate truly new? (Glob to verify they don't exist)
-- Are the paths correct for this codebase structure?
-
-### 2. ARCHITECTURE QUALITY
-- Is the architecture coherent for this epic's scope?
-- Does it match existing patterns in the codebase?
-- Are there obvious architectural flaws?
-
-### 3. STORY COVERAGE
-- Do stories fully cover this epic's requirements?
-- Are acceptance criteria testable?
-- Is technical guidance sufficient for developers?
-
-### 4. DEPENDENCIES & ORDER
-- Are story dependencies correct?
-- Is the execution order logical?
-
-## YOUR OUTPUT
-After reading relevant files to verify, output your verdict:
-
-\`\`\`json
-{
-  "verdict": "APPROVE" or "REJECT",
-  "score": 0-100,
-  "reasoning": "Brief explanation based on what you READ in the codebase",
-  "filesVerified": ["List of files you actually read to verify"],
-  "issues": ["Only REAL issues - verified by reading code"],
-  "suggestions": ["Improvements based on actual code you read"],
-  "architectureAssessment": "Is architecture sound? Based on what you read.",
-  "coverageAssessment": "Do stories cover this epic? Based on verification."
-}
-\`\`\`
-
-## ⚠️ IMPORTANT
-- DO NOT reject for "invalid file paths" without first trying to READ them
-- If a file exists (you can read it), the path is VALID
-- Only reject for REAL issues verified by reading code
-- Be thorough but fair - especially for multi-epic tasks
-
-START by using Glob to verify file paths in the stories, then Read key ones.`;
-
-      const startTime = Date.now();
-
-      // 🔥 Execute Judge as AGENT with tools (not just API call)
-      const judgeResult = await this.executeAgentFn(
-        'techlead-judge',
-        evaluationPrompt,
-        workspacePath,
-        taskId,
-        'TechLead Judge',
-        undefined, // sessionId
-        undefined, // fork
-        undefined, // attachments
-        undefined, // options
-        undefined, // contextOverride
-        undefined, // skipOptimization
-        'bypassPermissions' // Same permissions as TechLead Agent
+    if (approved) {
+      AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `✅ APPROVED with score ${judgeResult.score}/100`);
+    } else {
+      AgentActivityService.emitError(taskId, 'TechLead-Judge',
+        `❌ REJECTED (score: ${judgeResult.score}/100)\n` +
+        `Reason: ${judgeResult.feedback}\n` +
+        `Issues: ${judgeResult.issues?.join(', ')}`
       );
-
-      const duration = Date.now() - startTime;
-      console.log(`   💰 [TechLead Judge] Agent evaluation completed in ${duration}ms, cost: $${judgeResult.cost?.toFixed(4) || '?'}`);
-
-      // Parse Judge output
-      const jsonMatch = judgeResult.output.match(/```json\n([\s\S]*?)\n```/) || judgeResult.output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
-
-      if (!jsonMatch) {
-        console.warn(`⚠️ [TechLead Judge] No JSON verdict found in output, defaulting to approve`);
-        AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `⚠️ Judge output inconclusive - approving by default`);
-        return {
-          approved: true,
-          storiesCount: allStories.length,
-          epicsCount: epics.length,
-        };
-      }
-
-      const aiResult = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-
-      // Emit detailed evaluation results
-      AgentActivityService.emitToolUse(taskId, 'TechLead-Judge', 'AIVerdict', {
-        verdict: aiResult.verdict,
-        score: aiResult.score,
-        filesVerified: aiResult.filesVerified?.length || 0,
-        issuesCount: aiResult.issues?.length || 0,
-        cost: `$${judgeResult.cost?.toFixed(4) || '?'}`,
-      });
-
-      // Emit reasoning
-      AgentActivityService.emitMessage(taskId, 'TechLead-Judge',
-        `🤖 Judge Evaluation (score: ${aiResult.score}/100):\n` +
-        `${aiResult.reasoning}\n\n` +
-        (aiResult.filesVerified?.length > 0 ? `📁 Files Verified: ${aiResult.filesVerified.slice(0, 5).join(', ')}${aiResult.filesVerified.length > 5 ? '...' : ''}\n` : '') +
-        (aiResult.architectureAssessment ? `📐 Architecture: ${aiResult.architectureAssessment}\n` : '') +
-        (aiResult.coverageAssessment ? `📋 Coverage: ${aiResult.coverageAssessment}\n` : '') +
-        (aiResult.issues?.length > 0 ? `\n❌ Issues:\n${aiResult.issues.map((i: string) => `  • ${i}`).join('\n')}` : '') +
-        (aiResult.suggestions?.length > 0 ? `\n💡 Suggestions:\n${aiResult.suggestions.map((s: string) => `  • ${s}`).join('\n')}` : '')
-      );
-
-      const approved = aiResult.verdict === 'APPROVE' && aiResult.score >= 60;
-
-      if (approved) {
-        console.log(`   ✅ [TechLead Judge] APPROVED (score: ${aiResult.score}/100)`);
-        AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `✅ APPROVED with score ${aiResult.score}/100`);
-      } else {
-        console.log(`   ❌ [TechLead Judge] REJECTED (score: ${aiResult.score}/100)`);
-        AgentActivityService.emitError(taskId, 'TechLead-Judge',
-          `❌ REJECTED (score: ${aiResult.score}/100)\n` +
-          `Reason: ${aiResult.reasoning}\n` +
-          `Issues: ${aiResult.issues?.join(', ')}`
-        );
-      }
-
-      return {
-        approved,
-        reason: approved ? undefined : aiResult.reasoning,
-        feedback: approved ? undefined : (aiResult.issues || []).concat(aiResult.suggestions || []).join('\n'),
-        storiesCount: allStories.length,
-        epicsCount: epics.length,
-        aiEvaluation: {
-          verdict: aiResult.verdict,
-          reasoning: aiResult.reasoning,
-          issues: aiResult.issues || [],
-          suggestions: aiResult.suggestions || [],
-          score: aiResult.score,
-        },
-      };
-    } catch (error: any) {
-      console.warn(`⚠️ [TechLead Judge] Agent evaluation failed: ${error.message} - falling back to approval`);
-      AgentActivityService.emitMessage(taskId, 'TechLead-Judge', `⚠️ Judge evaluation failed - using fallback approval`);
-
-      // Fallback: approve to not block progress
-      return {
-        approved: true,
-        storiesCount: allStories.length,
-        epicsCount: epics.length,
-      };
     }
+
+    return {
+      approved,
+      reason: approved ? undefined : judgeResult.feedback,
+      feedback: approved ? undefined : (judgeResult.issues || []).concat(judgeResult.suggestions || []).join('\n'),
+      storiesCount: allStories.length,
+      epicsCount: epics.length,
+      aiEvaluation: {
+        verdict: judgeResult.approved ? 'APPROVE' : 'REJECT',
+        reasoning: judgeResult.feedback,
+        issues: judgeResult.issues || [],
+        suggestions: judgeResult.suggestions || [],
+        score: judgeResult.score || 0,
+      },
+    };
   }
 
   /**
