@@ -2,10 +2,9 @@ import { Task, ITask } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { FailedExecution, FailureType } from '../../models/FailedExecution';
 import { GitHubService } from '../GitHubService';
-// PRManagementService REMOVED - AutoMergePhase creates its own instance
-import { ContextCompactionService } from '../ContextCompactionService';
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
+import { AgentArtifactService } from '../AgentArtifactService';
 import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
 import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
@@ -25,9 +24,7 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 // 🔥 Best practice services
 import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
-
-// 🎯 Claude Code level services integration
-import { ServiceIntegrationHub, HubConfig } from '../ServiceIntegrationHub';
+import { eventStore } from '../EventStore';
 
 import path from 'path';
 import os from 'os';
@@ -56,27 +53,8 @@ import { StreamingService } from '../StreamingService';
 import { ExtendedThinkingService } from '../ExtendedThinkingService';
 import { DynamicModelRouter } from '../DynamicModelRouter';
 
-/**
- * DeveloperProgress - Tracks developer execution in real-time
- */
-interface DeveloperProgress {
-  turnCount: number;
-  toolCalls: {
-    reads: number;
-    edits: number;
-    writes: number;
-    gitCommits: number;
-    lastActionTurn: number;
-  };
-  fileActivity: {
-    filesModified: Set<string>;
-    filesRead: Set<string>;
-    lastGitDiff: string;
-    lastGitStatus: string;
-  };
-  warnings: string[];
-  startTime: number;
-}
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
 
 /**
  * OrchestrationCoordinator
@@ -95,7 +73,7 @@ interface DeveloperProgress {
  *
  * COMPLIANCE WITH SDK:
  * ✅ Subagents pattern (each phase = isolated context)
- * ✅ Context compaction (ContextCompactionService)
+ * ✅ Context compaction (SDK native /compact command)
  * ✅ Verification (JudgePhase evaluates developer work)
  * ✅ Human feedback loop (ApprovalPhase at each step)
  * ✅ Parallel execution (multi-repo support)
@@ -105,8 +83,6 @@ interface DeveloperProgress {
 export class OrchestrationCoordinator {
   private readonly workspaceDir: string;
   private readonly githubService: GitHubService;
-  // prManagementService REMOVED - AutoMergePhase creates its own instance
-  private readonly _compactionService: ContextCompactionService;
 
   /**
    * Ordered phases - executes sequentially with approval gates
@@ -129,141 +105,6 @@ export class OrchestrationCoordinator {
   constructor() {
     this.workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
     this.githubService = new GitHubService(this.workspaceDir);
-    // prManagementService REMOVED - AutoMergePhase creates its own instance
-    this._compactionService = new ContextCompactionService();
-    void this._compactionService; // Available for future use
-  }
-
-  /**
-   * Check developer progress to detect loops and inactivity
-   *
-   * Detects:
-   * - Read/Write ratio too high (only reading, not coding)
-   * - Idle time (many turns without Edit/Write)
-   * - No file changes in git
-   * - Execution timeout
-   *
-   * @deprecated - Not currently used, retained for future functionality
-   */
-  // @ts-ignore - Unused method retained for future functionality
-  private async _checkDeveloperProgress(
-    progress: DeveloperProgress,
-    workspacePath: string,
-    story: any,
-    taskId: string
-  ): Promise<void> {
-    const { turnCount, toolCalls, fileActivity, warnings } = progress;
-    const elapsedSeconds = Math.floor((Date.now() - progress.startTime) / 1000);
-
-    // 1. Read/Write ratio check
-    if (turnCount >= 20) {
-      const totalWrites = toolCalls.edits + toolCalls.writes;
-
-      // No writes at all after 20 turns
-      if (totalWrites === 0 && toolCalls.reads > 15) {
-        const message = `❌ Developer stuck: ${toolCalls.reads} reads, 0 writes after ${turnCount} turns`;
-        console.error(message);
-        NotificationService.emitConsoleLog(taskId, 'error', message);
-        throw new Error(message);
-      }
-
-      // High read/write ratio
-      if (totalWrites > 0) {
-        const ratio = toolCalls.reads / totalWrites;
-        if (ratio > 20 && turnCount > 30) {
-          const message = `❌ Developer stuck in read loop: ratio ${ratio.toFixed(1)}:1 (reads:writes) after ${turnCount} turns`;
-          console.error(message);
-          NotificationService.emitConsoleLog(taskId, 'error', message);
-          throw new Error(message);
-        }
-
-        // Warning at 10:1 ratio
-        if (ratio > 10 && !warnings.includes('high-ratio')) {
-          const warning = `⚠️  Turn ${turnCount}: High Read/Write ratio = ${ratio.toFixed(1)}:1 (developer reading too much, not coding enough)`;
-          console.warn(warning);
-          NotificationService.emitConsoleLog(taskId, 'warn', warning);
-          warnings.push('high-ratio');
-        }
-      }
-    }
-
-    // 2. Idle time check (no Edit/Write activity)
-    // SDK Philosophy: Let agents iterate naturally through their self-correcting loop
-    // Only intervene if TRULY stuck (80+ turns idle)
-    if (turnCount >= 80) {
-      const idleTurns = turnCount - toolCalls.lastActionTurn;
-      if (idleTurns > 80) {
-        const message = `❌ Developer idle: ${idleTurns} turns without Edit/Write (likely stuck in loop)`;
-        console.error(message);
-        NotificationService.emitConsoleLog(taskId, 'error', message);
-        throw new Error(message);
-      }
-
-      // Warning at 40 turns idle (gentle nudge, don't interrupt)
-      if (idleTurns > 40 && !warnings.includes('idle')) {
-        const warning = `⚠️  Turn ${turnCount}: ${idleTurns} turns without Edit/Write (still gathering context)`;
-        console.warn(warning);
-        NotificationService.emitConsoleLog(taskId, 'warn', warning);
-        warnings.push('idle');
-      }
-    }
-
-    // 3. Git diff check (verify real file changes)
-    if (turnCount % 20 === 0 && turnCount >= 40) {
-      try {
-        const gitDiff = safeGitExecSync('git diff --stat', {
-          cwd: workspacePath,
-          encoding: 'utf-8',
-          timeout: 5000
-        });
-
-        fileActivity.lastGitDiff = gitDiff;
-
-        // No changes after 60 turns = stuck
-        if (gitDiff.trim() === '' && turnCount > 60) {
-          const message = `❌ Developer produced no file changes after ${turnCount} turns`;
-          console.error(message);
-          NotificationService.emitConsoleLog(taskId, 'error', message);
-          throw new Error(message);
-        }
-
-        // Log progress
-        if (gitDiff.trim() !== '') {
-          console.log(`✅ [Developer] Turn ${turnCount}: Files modified:\n${gitDiff}`);
-          NotificationService.emitConsoleLog(taskId, 'info', `✅ Turn ${turnCount}: Files modified`);
-        } else {
-          const warning = `⚠️  Turn ${turnCount}: git diff is empty - no file changes yet`;
-          console.warn(warning);
-          NotificationService.emitConsoleLog(taskId, 'warn', warning);
-        }
-      } catch (error: any) {
-        console.warn(`⚠️  Turn ${turnCount}: git diff check failed - ${error.message}`);
-      }
-    }
-
-    // 4. Execution timeout (30 minutes - SDK needs time to iterate naturally)
-    const maxExecutionSeconds = 30 * 60; // 30 min (increased from 15)
-    if (elapsedSeconds > maxExecutionSeconds) {
-      const message = `❌ Developer timeout: exceeded ${maxExecutionSeconds}s (${Math.floor(maxExecutionSeconds/60)} minutes)`;
-      console.error(message);
-      NotificationService.emitConsoleLog(taskId, 'error', message);
-      throw new Error(message);
-    }
-
-    // 5. Expected files check
-    if (turnCount % 25 === 0 && story.filesToModify && story.filesToModify.length > 0) {
-      const expectedFiles = story.filesToModify;
-      const actualFiles = Array.from(fileActivity.filesModified);
-      const missingFiles = expectedFiles.filter((f: string) =>
-        !actualFiles.some(af => af.includes(f))
-      );
-
-      if (missingFiles.length > 0 && turnCount > 50) {
-        const warning = `⚠️  Turn ${turnCount}: Still missing ${missingFiles.length}/${expectedFiles.length} expected files`;
-        console.warn(warning);
-        NotificationService.emitConsoleLog(taskId, 'warn', warning);
-      }
-    }
   }
 
   /**
@@ -295,22 +136,33 @@ export class OrchestrationCoordinator {
         throw new Error(`Task ${taskId} not found`);
       }
 
-      // 🔄 RECOVERY DETECTION: Check if resuming from a previous execution
-      const isRecovery = task.status === 'in_progress' || task.status === 'paused';
-      const savedPhase = task.orchestration?.currentPhase;
+      // 🛑 CANCELLED CHECK: Do not orchestrate cancelled tasks
+      if (task.status === 'cancelled') {
+        console.log(`🛑 [Orchestration] Task ${taskId} is CANCELLED - skipping orchestration`);
+        NotificationService.emitConsoleLog(taskId, 'warn', `🛑 Task was cancelled - orchestration skipped`);
+        return;
+      }
 
-      if (isRecovery && savedPhase && savedPhase !== 'analysis') {
+      // 🔄 RECOVERY DETECTION: Check UNIFIED MEMORY for resumption point
+      // This is THE SINGLE SOURCE OF TRUTH - not task.status or task.orchestration
+      const resumptionPoint = await unifiedMemoryService.getResumptionPoint(taskId);
+      const isRecovery = resumptionPoint.shouldResume;
+
+      if (isRecovery) {
         console.log(`\n${'🔄'.repeat(30)}`);
-        console.log(`🔄 [RECOVERY MODE] Resuming task from previous execution`);
-        console.log(`🔄   Task status: ${task.status}`);
-        console.log(`🔄   Last phase: ${savedPhase}`);
-        console.log(`🔄   Phases will check if already completed and skip accordingly`);
+        console.log(`🔄 [RECOVERY MODE] Resuming task from UNIFIED MEMORY`);
+        console.log(`🔄   Resume from phase: ${resumptionPoint.resumeFromPhase || 'start'}`);
+        console.log(`🔄   Resume from epic: ${resumptionPoint.resumeFromEpic || 'none'}`);
+        console.log(`🔄   Resume from story: ${resumptionPoint.resumeFromStory || 'none'}`);
+        console.log(`🔄   Completed phases: ${resumptionPoint.completedPhases.join(', ') || 'none'}`);
+        console.log(`🔄   Completed epics: ${resumptionPoint.completedEpics.join(', ') || 'none'}`);
+        console.log(`🔄   Completed stories: ${resumptionPoint.completedStories.length} stories`);
         console.log(`${'🔄'.repeat(30)}\n`);
-
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `🔄 RECOVERY MODE: Resuming from ${savedPhase}. Completed phases will be skipped.`
+          `🔄 RECOVERY MODE: Resuming from ${resumptionPoint.resumeFromPhase || 'start'}. ` +
+          `${resumptionPoint.completedPhases.length} phases already completed.`
         );
 
         // Check for pending approval to re-emit
@@ -318,6 +170,8 @@ export class OrchestrationCoordinator {
           console.log(`🔄   Found pending approval: ${task.orchestration.pendingApproval.phase}`);
           console.log(`🔄   Will re-emit approval_required when ApprovalPhase executes`);
         }
+      } else {
+        console.log(`✨ [NEW TASK] No previous execution found - starting fresh`);
       }
 
       // 📋 EMIT TASK REQUEST TO ACTIVITY - First thing user sees
@@ -394,6 +248,40 @@ export class OrchestrationCoordinator {
       const workspacePath = await this.setupWorkspace(taskId, repositories, user.accessToken);
       const workspaceStructure = await this.getWorkspaceStructure(workspacePath);
 
+      // 🔥🔥🔥 CRITICAL VALIDATION: workspacePath MUST be valid after setup 🔥🔥🔥
+      // This validation ensures ALL downstream phases have correct workspace
+      console.log(`\n🔍 [OrchestrationCoordinator] Workspace validation after setup:`);
+      console.log(`   workspacePath: ${workspacePath || 'NULL/EMPTY ⚠️'}`);
+      console.log(`   workspaceDir config: ${this.workspaceDir}`);
+
+      if (!workspacePath || typeof workspacePath !== 'string' || workspacePath.length === 0) {
+        console.error(`\n❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌`);
+        console.error(`❌ [OrchestrationCoordinator] CRITICAL: workspacePath is invalid after setupWorkspace!`);
+        console.error(`   Expected format: ${this.workspaceDir}/task-${taskId}`);
+        console.error(`   Received: ${workspacePath} (${typeof workspacePath})`);
+        console.error(`\n   🚨 ALL PHASES WILL FAIL without valid workspace:`);
+        console.error(`   - Planning, TechLead will search in wrong directory`);
+        console.error(`   - Developers will write code to wrong location`);
+        console.error(`   - Judge will review wrong files`);
+        console.error(`   - Git operations will fail completely`);
+        console.error(`❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n`);
+
+        throw new Error(
+          `CRITICAL: Workspace setup failed - workspacePath is invalid. ` +
+          `Task ${taskId} cannot proceed. ` +
+          `Check AGENT_WORKSPACE_DIR environment variable (current: ${this.workspaceDir}) ` +
+          `and ensure the directory is writable.`
+        );
+      }
+
+      // Verify the path exists on disk
+      if (!fs.existsSync(workspacePath)) {
+        console.error(`❌ [OrchestrationCoordinator] Workspace path does not exist: ${workspacePath}`);
+        throw new Error(`Workspace directory does not exist: ${workspacePath}`);
+      }
+
+      console.log(`   ✅ Workspace path valid and exists: ${workspacePath}`);
+
       // 🔥 FIX: Enrich repositories with localPath after cloning
       repositories.forEach((repo: any) => {
         repo.localPath = path.join(workspacePath, repo.name);
@@ -401,6 +289,10 @@ export class OrchestrationCoordinator {
 
       // Create orchestration context (shared state for all phases)
       const context = new OrchestrationContext(task, repositories, workspacePath);
+      console.log(`   ✅ OrchestrationContext created with workspacePath: ${context.workspacePath}`);
+
+      // 🎯 Store resumption point in context for phases to use (from unified memory)
+      context.setData('resumptionPoint', resumptionPoint);
 
       // 🔑 Get project-specific API key with fallback chain:
       // 1. Project API key (if set)
@@ -472,30 +364,34 @@ export class OrchestrationCoordinator {
       context.setData('apiKeySource', apiKeySource);
       context.setData('workspaceStructure', workspaceStructure);
 
-      // 🎯 Initialize ServiceIntegrationHub for Claude Code level services
-      const hubConfig: HubConfig = {
-        workspacePath,
-        projectId: project?._id?.toString() || taskId,
-        enableMetrics: true,
-        enableLearning: true,
-        enableMemory: true,
-      };
-      const serviceHub = new ServiceIntegrationHub(hubConfig);
-
-      try {
-        await serviceHub.initialize();
-        context.setData('serviceHub', serviceHub);
-        console.log(`🎯 [Orchestration] ServiceIntegrationHub initialized with all services`);
-        NotificationService.emitConsoleLog(taskId, 'info', `🎯 All Claude Code level services initialized`);
-      } catch (hubError) {
-        console.warn(`⚠️  [Orchestration] ServiceIntegrationHub initialization warning: ${hubError}`);
-        // Continue without hub - graceful degradation
-      }
-
-      // Mark task as in progress
+      // Mark task as in progress (atomic update to avoid version conflicts)
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
+          status: 'in_progress',
+          'orchestration.currentPhase': 'planning',
+          'orchestration.startedAt': new Date(),
+        },
+      });
       task.status = 'in_progress';
-      task.orchestration.currentPhase = 'analysis';
-      await task.save();
+      task.orchestration.currentPhase = 'planning';
+
+      // 🎯 UNIFIED MEMORY: Initialize or update execution map
+      // This is THE source of truth for recovery - not task.orchestration
+      const targetRepo = repositories[0]?.name || 'unknown';
+      const projectId = task.projectId?.toString();
+      if (!projectId) {
+        throw new Error(`Task ${taskId} has no projectId - cannot initialize execution map`);
+      }
+      const executionMap = await unifiedMemoryService.initializeExecution({
+        taskId,
+        projectId,
+        targetRepository: targetRepo,
+        workspacePath,
+        taskTitle: task.title,
+        taskDescription: task.description,
+      });
+      context.setData('executionMap', executionMap);
+      console.log(`🎯 [UnifiedMemory] Execution map initialized - status: ${executionMap.status}`);
 
       NotificationService.emitTaskStarted(taskId, {
         repositoriesCount: repositories.length,
@@ -523,9 +419,15 @@ export class OrchestrationCoordinator {
         // Check if user requested cancellation
         if (task.orchestration.cancelRequested) {
           console.log(`🛑 [Orchestration] Task cancellation requested - stopping immediately`);
+          await Task.findByIdAndUpdate(task._id, {
+            $set: {
+              status: 'cancelled',
+              'orchestration.currentPhase': 'completed',
+              'orchestration.cancelledAt': new Date(),
+            },
+          });
           task.status = 'cancelled';
           task.orchestration.currentPhase = 'completed';
-          await task.save();
 
           NotificationService.emitConsoleLog(taskId, 'error', `🛑 Task cancelled by user`);
           NotificationService.emitTaskFailed(taskId, { error: 'Task cancelled by user' });
@@ -581,24 +483,52 @@ export class OrchestrationCoordinator {
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
-        // 🔥🔥🔥 CRITICAL FIX: CHECK IF PHASE SHOULD BE SKIPPED (RECOVERY MODE) 🔥🔥🔥
-        // This is what allows resuming from where we left off instead of starting over
+        // 🎯🎯🎯 UNIFIED MEMORY: CHECK IF PHASE SHOULD BE SKIPPED 🎯🎯🎯
+        // This is THE SINGLE SOURCE OF TRUTH for recovery - not task.orchestration
+        const shouldSkipFromMemory = await unifiedMemoryService.shouldSkipPhase(taskId, phaseName);
+        if (shouldSkipFromMemory) {
+          console.log(`\n${'='.repeat(60)}`);
+          console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed (UNIFIED MEMORY)`);
+          console.log(`${'='.repeat(60)}\n`);
+          NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed in unified memory)`);
+
+          // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
+          // TeamOrchestrationPhase checks task.orchestration.planning.status
+          await this.syncSkippedPhaseToDb(taskId, phaseName);
+
+          continue; // Move to next phase
+        }
+
+        // Also check phase's own shouldSkip logic
         if (phase.shouldSkip && typeof phase.shouldSkip === 'function') {
           const shouldSkipPhase = await phase.shouldSkip(context);
           if (shouldSkipPhase) {
             console.log(`\n${'='.repeat(60)}`);
-            console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed (recovery mode)`);
+            console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed`);
             console.log(`${'='.repeat(60)}\n`);
             NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed)`);
+
+            // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
+            await this.syncSkippedPhaseToDb(taskId, phaseName);
+
             continue; // Move to next phase
           }
         }
 
-        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing
+        // 🎯 UNIFIED MEMORY: Mark phase as STARTED
+        await unifiedMemoryService.markPhaseStarted(taskId, phaseName);
+
+        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing (atomic to avoid version conflicts)
         // This ensures recovery knows where to resume from if server crashes
-        task.orchestration.currentPhase = this.mapPhaseToEnum(phaseName);
-        await task.save();
-        console.log(`📍 [Orchestration] Phase tracking updated: ${phaseName} → ${task.orchestration.currentPhase}`);
+        const phaseEnum = this.mapPhaseToEnum(phaseName);
+        await Task.findByIdAndUpdate(task._id, {
+          $set: {
+            'orchestration.currentPhase': phaseEnum,
+            'orchestration.lastPhaseUpdate': new Date(),
+          },
+        });
+        task.orchestration.currentPhase = phaseEnum; // Keep local copy in sync
+        console.log(`📍 [Orchestration] Phase tracking updated: ${phaseName} → ${phaseEnum}`);
 
         // Execute phase with retry logic for transient failures
         // 🔥 TIMEOUT RETRY STRATEGY: If agent times out, retry once with Opus (most powerful model)
@@ -732,20 +662,8 @@ export class OrchestrationCoordinator {
             );
           }
 
-          // 🔥 ADDITIONAL CHECK: If this is ProjectManager failure, ENSURE we don't continue
-          if (phaseName === 'ProjectManager') {
-            console.error(`\n${'🛑'.repeat(60)}`);
-            console.error(`🛑 CRITICAL: ProjectManager phase failed`);
-            console.error(`🛑 Cannot proceed to TechLead without valid epics`);
-            console.error(`🛑 Remaining phases (TechLead, Developers, QA) will NOT execute`);
-            console.error(`${'🛑'.repeat(60)}\n`);
-
-            NotificationService.emitConsoleLog(
-              taskId,
-              'error',
-              `🛑 CRITICAL: ProjectManager failed - cannot create epics. Orchestration stopped.`
-            );
-          }
+          // 🎯 UNIFIED MEMORY: Mark phase as FAILED
+          await unifiedMemoryService.markPhaseFailed(taskId, phaseName, result.error || 'Unknown error');
 
           // Phase failed - mark task as failed
           NotificationService.emitConsoleLog(taskId, 'error', `❌ Phase ${phaseName} failed: ${result.error}`);
@@ -755,6 +673,9 @@ export class OrchestrationCoordinator {
 
         // Check if phase needs approval (paused, not failed)
         if (result.needsApproval) {
+          // 🎯 UNIFIED MEMORY: Mark phase as WAITING APPROVAL
+          await unifiedMemoryService.markPhaseWaitingApproval(taskId, phaseName);
+
           console.log(`⏸️  [${phaseName}] Paused - waiting for human approval`);
           NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Phase ${phaseName} paused - waiting for human approval`);
           return; // Exit orchestration, will resume when approval granted
@@ -775,8 +696,15 @@ export class OrchestrationCoordinator {
           console.log(`⏭️  [${phaseName}] Skipped`);
           NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Phase ${phaseName} skipped`);
         } else {
+          // 🎯 UNIFIED MEMORY: Mark phase as COMPLETED
+          await unifiedMemoryService.markPhaseCompleted(taskId, phaseName, result.data);
+
           console.log(`✅ [${phaseName}] Completed successfully`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Phase ${phaseName} completed successfully`);
+
+          // 📦 TIMELINE BACKUP: Save orchestration timeline to Local + GitHub
+          // This ensures we have a complete history even if server crashes
+          await this.saveOrchestrationTimeline(task, phaseName, context, workspacePath);
 
           // 🔥 RATE LIMIT PROTECTION: Wait 2 seconds between phases to avoid Anthropic rate limits
           // Each agent makes many API calls, waiting prevents hitting limits
@@ -960,19 +888,69 @@ export class OrchestrationCoordinator {
   /**
    * Map phase names to Task enum values
    */
-  private mapPhaseToEnum(phaseName: string): 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed' {
-    const phaseMap: Record<string, 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'completed'> = {
-      'ProblemAnalyst': 'analysis',
-      'ProductManager': 'analysis',
-      'Approval': 'analysis', // Approval after analysis
-      'ProjectManager': 'planning',
+  private mapPhaseToEnum(phaseName: string): 'planning' | 'architecture' | 'development' | 'merge' | 'auto-merge' | 'completed' | 'multi-team' {
+    const phaseMap: Record<string, 'planning' | 'architecture' | 'development' | 'merge' | 'auto-merge' | 'completed' | 'multi-team'> = {
+      // Planning phases
+      'Planning': 'planning',
+      'Approval': 'planning',
+      'TeamOrchestration': 'multi-team',
       'TechLead': 'architecture',
+
+      // Development phases
       'Developers': 'development',
       'Judge': 'development',
-      'QA': 'qa',
+
+      // Merge phases
       'Merge': 'merge',
+      'AutoMerge': 'auto-merge',
+      'Verification': 'merge',
     };
-    return phaseMap[phaseName] || 'analysis';
+    return phaseMap[phaseName] || 'planning';
+  }
+
+  /**
+   * 🔧 FIX: Sync skipped phase status to MongoDB
+   *
+   * When a phase is skipped (because Unified Memory says it's completed),
+   * we must also update the task.orchestration.[phase] field in MongoDB.
+   * This is necessary because downstream phases (like TeamOrchestration)
+   * validate phase completion by checking MongoDB, not Unified Memory.
+   */
+  private async syncSkippedPhaseToDb(taskId: string, phaseName: string): Promise<void> {
+    // Map phase names to their MongoDB field paths
+    const phaseFieldMap: Record<string, string> = {
+      'Planning': 'orchestration.planning',
+      'Approval': 'orchestration.approval',
+      'TechLead': 'orchestration.techLead',
+      'TeamOrchestration': 'orchestration.teamOrchestration',
+      'Development': 'orchestration.development',
+      'Developers': 'orchestration.development',
+      'Judge': 'orchestration.judge',
+      'AutoMerge': 'orchestration.autoMerge',
+      'Merge': 'orchestration.merge',
+      'Verification': 'orchestration.verification',
+    };
+
+    const fieldPath = phaseFieldMap[phaseName];
+    if (!fieldPath) {
+      console.log(`   ℹ️ No MongoDB field mapping for phase: ${phaseName}`);
+      return;
+    }
+
+    try {
+      // Update the phase status in MongoDB
+      const updateObj: Record<string, any> = {};
+      updateObj[`${fieldPath}.status`] = 'completed';
+      updateObj[`${fieldPath}.skippedOnRecovery`] = true;
+      updateObj[`${fieldPath}.skippedAt`] = new Date();
+
+      await Task.findByIdAndUpdate(taskId, { $set: updateObj });
+
+      console.log(`   ✅ [${phaseName}] Synced skipped phase to MongoDB: ${fieldPath}.status = 'completed'`);
+    } catch (error: any) {
+      console.warn(`   ⚠️ [${phaseName}] Failed to sync skipped phase to DB:`, error.message);
+      // Don't throw - this is a best-effort sync
+    }
   }
 
   /**
@@ -1463,8 +1441,7 @@ ${formattedDirectives}
 
     // Get agent configuration with specialization
     // - Developers: get repository-specific specialization (frontend/backend)
-    // - QA agents: get test-engineer specialization (always applied)
-    const needsSpecialization = agentType === 'developer' || agentType === 'qa-engineer' || agentType === 'contract-tester';
+    const needsSpecialization = agentType === 'developer';
     const agentDef = needsSpecialization
       ? getAgentDefinitionWithSpecialization(agentType, repositoryType)
       : getAgentDefinition(agentType);
@@ -1644,14 +1621,12 @@ ${formattedDirectives}
 
       // Map agent type to phase
       const phaseMapping: Record<string, AgentPhase> = {
-        'planning-agent': 'problem-analyst',
-        'product-manager': 'product-manager',
-        'project-manager': 'project-manager',
+        'planning-agent': 'planning-agent',
         'tech-lead': 'tech-lead',
         'developer': 'developer',
         'judge': 'judge',
-        'qa-engineer': 'qa-engineer',
-        'fixer': 'fixer',
+        'verification-fixer': 'verification-fixer',
+        'recovery-analyst': 'recovery-analyst',
         'auto-merge': 'auto-merge'
       };
 
@@ -2907,10 +2882,6 @@ ${formattedDirectives}
         const dbTask = await Task.findById(task._id);
         if (dbTask) {
           dbTask.status = 'failed';
-          dbTask.orchestration.developers = {
-            status: 'failed',
-            error: `Story ${story.id} missing targetRepository - data integrity issue`,
-          };
           await dbTask.save();
         }
 
@@ -3335,12 +3306,14 @@ git commit and push...
       const isRetry = !!branchName; // If branchName exists, this is a retry
 
       if (!branchName) {
-        // First attempt - create new branch
+        // First attempt - create DETERMINISTIC branch name
+        // 🔥 CRITICAL: Branch names must be DETERMINISTIC for predictable recovery
+        // Using only taskId + storyId (no Date.now() or Math.random())
         const taskShortId = taskId.slice(-8);
-        const timestamp = Date.now();
-        const randomSuffix = Math.random().toString(36).substring(2, 8);
-        const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-        branchName = `story/${taskShortId}-${storySlug}-${timestamp}-${randomSuffix}`;
+        const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 30);
+        // Use simple hash of storyId for uniqueness without randomness
+        const storyHash = story.id.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
+        branchName = `story/${taskShortId}-${storySlug}-${storyHash}`;
       }
 
       console.log(`\n🌿 [Developer ${member.instanceId}] ${isRetry ? 'Resuming' : 'Creating'} story branch: ${branchName}`);
@@ -3786,7 +3759,7 @@ After writing code, you MUST follow this EXACT sequence:
         story.status = 'completed';
         story.completedBy = member.instanceId;
         story.completedAt = new Date();
-        story.branchName = branchName; // Save branch name for QA
+        story.branchName = branchName; // Save branch name for downstream phases
 
         console.log(`🌿 [Developer ${member.instanceId}] Story branch confirmed: ${branchName}`);
 
@@ -3830,6 +3803,91 @@ After writing code, you MUST follow this EXACT sequence:
   }
 
   /**
+   * Save orchestration timeline to Local + GitHub
+   * Called after each phase completes to maintain execution history
+   */
+  private async saveOrchestrationTimeline(
+    task: ITask,
+    completedPhase: string,
+    context: OrchestrationContext,
+    workspacePath: string | null
+  ): Promise<void> {
+    try {
+      const taskId = (task._id as any).toString();
+      const repositories = context.repositories || [];
+      const primaryRepo = repositories[0]?.name;
+
+      if (!primaryRepo || !workspacePath) {
+        console.log(`⚠️ [Timeline] Skipping - no repository or workspace path`);
+        return;
+      }
+
+      // Build phases completed list
+      const phasesCompleted: Array<{
+        phase: string;
+        status: 'completed' | 'failed' | 'skipped';
+        completedAt?: Date;
+        cost?: number;
+      }> = [];
+
+      // Check each phase status from task.orchestration
+      const phaseMapping: { [key: string]: any } = {
+        'Planning': task.orchestration.planning,
+        'TechLead': task.orchestration.techLead,
+        'Judge': task.orchestration.judge,
+        'AutoMerge': task.orchestration.autoMerge,
+      };
+
+      for (const [phaseName, phaseData] of Object.entries(phaseMapping)) {
+        if (phaseData?.status === 'completed') {
+          phasesCompleted.push({
+            phase: phaseName,
+            status: 'completed',
+            completedAt: phaseData.completedAt,
+            cost: phaseData.cost_usd,
+          });
+        }
+      }
+
+      // Build epics summary
+      const epics = (task.orchestration.planning?.epics || []).map((epic: any) => ({
+        id: epic.id,
+        title: epic.title,
+        status: epic.status || 'pending',
+        storiesCount: epic.stories?.length || 0,
+      }));
+
+      // Save timeline
+      await AgentArtifactService.saveOrchestrationTimeline(
+        workspacePath,
+        primaryRepo,
+        taskId,
+        {
+          taskTitle: task.title,
+          taskDescription: task.description,
+          startedAt: (task as any).createdAt || new Date(),
+          currentPhase: completedPhase,
+          phasesCompleted,
+          epics,
+          totalCost: task.orchestration.totalCost,
+          totalTokens: task.orchestration.totalTokens,
+          lastUpdated: new Date(),
+        }
+      );
+
+      console.log(`📦 [Timeline] Saved after ${completedPhase} phase`);
+
+      // 📦 EVENTS BACKUP: Save all EventStore events to Local + GitHub
+      // This ensures MongoDB events are mirrored to Local for recovery
+      await eventStore.backupEvents(task._id, workspacePath, primaryRepo);
+      console.log(`📦 [EventStore] Events backed up after ${completedPhase} phase`);
+    } catch (error: any) {
+      // Non-blocking - timeline is backup, not critical
+      console.warn(`⚠️ [Timeline] Failed to save (non-blocking): ${error.message}`);
+    }
+  }
+
+  /**
    * Handle phase failure
    */
   private async handlePhaseFailed(task: ITask, phaseName: string, result: PhaseResult): Promise<void> {
@@ -3861,34 +3919,19 @@ After writing code, you MUST follow this EXACT sequence:
     let cacheCreationTokens = 0;
     let cacheReadTokens = 0;
 
-    // Product Manager
-    if (task.orchestration.productManager?.usage) {
-      const pm = task.orchestration.productManager;
+    // Planning
+    if (task.orchestration.planning?.usage) {
+      const planning = task.orchestration.planning;
       breakdown.push({
-        phase: 'Product Manager',
-        cost: pm.cost_usd || 0,
-        inputTokens: pm.usage?.input_tokens || 0,
-        outputTokens: pm.usage?.output_tokens || 0,
+        phase: 'Planning',
+        cost: planning.cost_usd || 0,
+        inputTokens: planning.usage?.input_tokens || 0,
+        outputTokens: planning.usage?.output_tokens || 0,
       });
-      totalInputTokens += pm.usage?.input_tokens || 0;
-      totalOutputTokens += pm.usage?.output_tokens || 0;
-      cacheCreationTokens += pm.usage?.cache_creation_input_tokens || 0;
-      cacheReadTokens += pm.usage?.cache_read_input_tokens || 0;
-    }
-
-    // Project Manager
-    if (task.orchestration.projectManager?.usage) {
-      const pjm = task.orchestration.projectManager;
-      breakdown.push({
-        phase: 'Project Manager',
-        cost: pjm.cost_usd || 0,
-        inputTokens: pjm.usage?.input_tokens || 0,
-        outputTokens: pjm.usage?.output_tokens || 0,
-      });
-      totalInputTokens += pjm.usage?.input_tokens || 0;
-      totalOutputTokens += pjm.usage?.output_tokens || 0;
-      cacheCreationTokens += pjm.usage?.cache_creation_input_tokens || 0;
-      cacheReadTokens += pjm.usage?.cache_read_input_tokens || 0;
+      totalInputTokens += planning.usage?.input_tokens || 0;
+      totalOutputTokens += planning.usage?.output_tokens || 0;
+      cacheCreationTokens += planning.usage?.cache_creation_input_tokens || 0;
+      cacheReadTokens += planning.usage?.cache_read_input_tokens || 0;
     }
 
     // Tech Lead
@@ -3937,36 +3980,6 @@ After writing code, you MUST follow this EXACT sequence:
       totalOutputTokens += judge.usage?.output_tokens || 0;
       cacheCreationTokens += judge.usage?.cache_creation_input_tokens || 0;
       cacheReadTokens += judge.usage?.cache_read_input_tokens || 0;
-    }
-
-    // Fixer
-    if (task.orchestration.fixer?.usage) {
-      const fixer = task.orchestration.fixer;
-      breakdown.push({
-        phase: 'Fixer',
-        cost: fixer.cost_usd || 0,
-        inputTokens: fixer.usage?.input_tokens || 0,
-        outputTokens: fixer.usage?.output_tokens || 0,
-      });
-      totalInputTokens += fixer.usage?.input_tokens || 0;
-      totalOutputTokens += fixer.usage?.output_tokens || 0;
-      cacheCreationTokens += fixer.usage?.cache_creation_input_tokens || 0;
-      cacheReadTokens += fixer.usage?.cache_read_input_tokens || 0;
-    }
-
-    // QA Engineer
-    if (task.orchestration.qaEngineer?.usage) {
-      const qa = task.orchestration.qaEngineer;
-      breakdown.push({
-        phase: 'QA Engineer',
-        cost: qa.cost_usd || 0,
-        inputTokens: qa.usage?.input_tokens || 0,
-        outputTokens: qa.usage?.output_tokens || 0,
-      });
-      totalInputTokens += qa.usage?.input_tokens || 0;
-      totalOutputTokens += qa.usage?.output_tokens || 0;
-      cacheCreationTokens += qa.usage?.cache_creation_input_tokens || 0;
-      cacheReadTokens += qa.usage?.cache_read_input_tokens || 0;
     }
 
     // Calculate breakdown total cost

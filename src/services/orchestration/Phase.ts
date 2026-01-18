@@ -7,14 +7,15 @@ import { ITask } from '../../models/Task';
  */
 export interface BranchInfo {
   name: string;           // Full branch name (e.g., 'epic/xxx' or 'story/xxx')
-  type: 'epic' | 'story'; // Branch type
+  type: 'epic' | 'story' | 'feature' | 'hotfix'; // Branch type
   epicId?: string;        // Epic ID if story branch
   storyId?: string;       // Story ID if story branch
   repository: string;     // Repository name
-  baseBranch: string;     // Base branch (usually 'main' or epic branch name)
-  created: boolean;       // Whether branch was created successfully
-  pushed: boolean;        // Whether branch was pushed to remote
-  merged: boolean;        // Whether branch was merged to base
+  baseBranch?: string;    // Base branch (usually 'main' or epic branch name)
+  createdAt?: Date;       // When branch was created (for persistence)
+  created?: boolean;      // Whether branch was created successfully (legacy)
+  pushed?: boolean;       // Whether branch was pushed to remote
+  merged?: boolean;       // Whether branch was merged to base
 }
 
 /**
@@ -99,32 +100,28 @@ export class OrchestrationContext {
   }
 
   /**
+   * Query branches matching a predicate
+   */
+  private queryBranches(predicate: (b: BranchInfo) => boolean): BranchInfo[] {
+    return Array.from(this.branchRegistry.values()).filter(predicate);
+  }
+
+  /**
    * Get epic branch for a repository
    */
   getEpicBranch(repository: string): BranchInfo | undefined {
-    const branches = Array.from(this.branchRegistry.values());
-    for (const branch of branches) {
-      if (branch.type === 'epic' && branch.repository === repository) {
-        return branch;
-      }
-    }
-    return undefined;
+    return this.queryBranches(b => b.type === 'epic' && b.repository === repository)[0];
   }
 
   /**
    * Get all story branches for an epic
    */
   getStoryBranches(epicId: string, repository?: string): BranchInfo[] {
-    const stories: BranchInfo[] = [];
-    const branches = Array.from(this.branchRegistry.values());
-    for (const branch of branches) {
-      if (branch.type === 'story' && branch.epicId === epicId) {
-        if (!repository || branch.repository === repository) {
-          stories.push(branch);
-        }
-      }
-    }
-    return stories;
+    return this.queryBranches(b =>
+      b.type === 'story' &&
+      b.epicId === epicId &&
+      (!repository || b.repository === repository)
+    );
   }
 
   /**
@@ -231,6 +228,84 @@ export interface PhaseResult {
   };
 }
 
+// ==================== PhaseResult Helpers ====================
+
+/**
+ * Create a successful phase result
+ */
+export function createSuccessResult(
+  phaseName: string,
+  startTime: number,
+  data?: any,
+  options?: {
+    warnings?: string[];
+    metrics?: Record<string, number | string>;
+    metadata?: Record<string, any>;
+  }
+): PhaseResult {
+  return {
+    success: true,
+    phaseName,
+    duration: Date.now() - startTime,
+    data,
+    warnings: options?.warnings,
+    metrics: options?.metrics,
+    metadata: options?.metadata,
+  };
+}
+
+/**
+ * Create a failed phase result
+ */
+export function createErrorResult(
+  phaseName: string,
+  startTime: number,
+  error: string | Error,
+  data?: any
+): PhaseResult {
+  return {
+    success: false,
+    phaseName,
+    duration: Date.now() - startTime,
+    error: typeof error === 'string' ? error : error.message,
+    data,
+  };
+}
+
+/**
+ * Create a skipped phase result
+ */
+export function createSkippedResult(
+  phaseName: string,
+  startTime: number,
+  reason?: string
+): PhaseResult {
+  return {
+    success: true,
+    phaseName,
+    duration: Date.now() - startTime,
+    warnings: [`Phase was skipped${reason ? `: ${reason}` : ''}`],
+    data: null,
+  };
+}
+
+/**
+ * Create a phase result that needs approval
+ */
+export function createApprovalResult(
+  phaseName: string,
+  startTime: number,
+  data?: any
+): PhaseResult {
+  return {
+    success: true,
+    phaseName,
+    duration: Date.now() - startTime,
+    needsApproval: true,
+    data,
+  };
+}
+
 /**
  * Phase Interface
  *
@@ -274,6 +349,37 @@ export abstract class BasePhase implements IPhase {
   abstract readonly description: string;
 
   /**
+   * Check if this is a continuation (requires re-execution)
+   * Common helper for shouldSkip implementations
+   */
+  protected isContinuation(context: OrchestrationContext): boolean {
+    const continuations = context.task.orchestration.continuations;
+    return !!(continuations && continuations.length > 0);
+  }
+
+  /**
+   * Get task ID as string (common pattern)
+   */
+  protected getTaskIdString(context: OrchestrationContext): string {
+    return (context.task._id as any).toString();
+  }
+
+  /**
+   * Log phase skip decision
+   * Common helper for shouldSkip implementations
+   */
+  protected logSkipDecision(skipped: boolean, reason?: string): void {
+    if (skipped) {
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`🎯 [UNIFIED MEMORY] ${this.name} phase already COMPLETED`);
+      if (reason) console.log(`   ${reason}`);
+      console.log(`${'='.repeat(80)}\n`);
+    } else {
+      console.log(`   ❌ Phase not completed - ${this.name} must execute`);
+    }
+  }
+
+  /**
    * Execute the phase with timing and error handling
    */
   async execute(context: OrchestrationContext): Promise<PhaseResult> {
@@ -281,15 +387,6 @@ export abstract class BasePhase implements IPhase {
 
     console.log(`\n🚀 [${this.name}] Starting phase...`);
     console.log(`   ${this.description}`);
-
-    // Special logging for Fixer phase
-    if (this.name === 'Fixer') {
-      console.log(`🔧 [BasePhase] Fixer execute() called - checking context:`, {
-        qaErrors: context.getData('qaErrors') ? 'present' : 'missing',
-        qaErrorType: context.getData('qaErrorType'),
-        qaAttempt: context.getData('qaAttempt')
-      });
-    }
 
     try {
       // 🛑 CHECK FOR CANCELLATION BEFORE EXECUTING PHASE
@@ -310,6 +407,12 @@ export abstract class BasePhase implements IPhase {
       if (this.shouldSkip && (await this.shouldSkip(context))) {
         const duration = Date.now() - startTime;
         console.log(`⏭️  [${this.name}] Phase skipped`);
+
+        // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
+        // TeamOrchestrationPhase checks task.orchestration.planning.status
+        // When phases are skipped on recovery, this field must also be set
+        await this.syncSkippedPhaseToDb(context);
+
         return {
           success: true,
           phaseName: this.name,
@@ -344,18 +447,88 @@ export abstract class BasePhase implements IPhase {
 
       return finalResult;
     } catch (error: any) {
-      const duration = Date.now() - startTime;
-      console.error(`❌ [${this.name}] Phase error:`, error.message);
+      return this.createErrorResult(error, Date.now() - startTime, context);
+    }
+  }
 
-      const errorResult: PhaseResult = {
-        success: false,
-        phaseName: this.name,
-        duration,
-        error: error.message,
-      };
+  /**
+   * Create a standardized error result for phase failures
+   */
+  private createErrorResult(
+    error: any,
+    duration: number,
+    context: OrchestrationContext
+  ): PhaseResult {
+    console.error(`❌ [${this.name}] Phase error: ${error.message}`);
 
-      context.setPhaseResult(this.name, errorResult);
-      return errorResult;
+    const errorResult: PhaseResult = {
+      success: false,
+      phaseName: this.name,
+      duration,
+      error: error.message,
+    };
+
+    context.setPhaseResult(this.name, errorResult);
+    return errorResult;
+  }
+
+  /**
+   * 🔧 FIX: Sync skipped phase status to MongoDB
+   *
+   * When a phase is skipped (because Unified Memory says it's completed),
+   * we must also update the task.orchestration.[phase] field in MongoDB.
+   * This is necessary because downstream phases (like TeamOrchestration)
+   * validate phase completion by checking MongoDB, not Unified Memory.
+   */
+  private async syncSkippedPhaseToDb(context: OrchestrationContext): Promise<void> {
+    const { Task } = await import('../../models/Task');
+    const taskId = (context.task._id as any).toString();
+
+    // Map phase names to their MongoDB field paths
+    const phaseFieldMap: Record<string, string> = {
+      'Planning': 'orchestration.planning',
+      'Approval': 'orchestration.approval',
+      'TechLead': 'orchestration.techLead',
+      'TeamOrchestration': 'orchestration.teamOrchestration',
+      'Development': 'orchestration.development',
+      'Judge': 'orchestration.judge',
+      'AutoMerge': 'orchestration.autoMerge',
+    };
+
+    const fieldPath = phaseFieldMap[this.name];
+    if (!fieldPath) {
+      console.log(`   ℹ️ No MongoDB field mapping for phase: ${this.name}`);
+      return;
+    }
+
+    try {
+      // Update the phase status in MongoDB
+      const updateObj: Record<string, any> = {};
+      updateObj[`${fieldPath}.status`] = 'completed';
+      updateObj[`${fieldPath}.skippedOnRecovery`] = true;
+      updateObj[`${fieldPath}.skippedAt`] = new Date();
+
+      await Task.findByIdAndUpdate(taskId, { $set: updateObj });
+
+      console.log(`   ✅ [${this.name}] Synced skipped phase status to MongoDB: ${fieldPath}.status = 'completed'`);
+
+      // 🌿 BRANCH REGISTRY RESTORATION: Restore branches from MongoDB on recovery
+      // When phases are skipped, the branchRegistry is empty but MongoDB may have branch info
+      const task = await Task.findById(taskId);
+      if (task?.orchestration?.branchRegistry) {
+        const storedBranches = task.orchestration.branchRegistry as BranchInfo[];
+        if (Array.isArray(storedBranches) && storedBranches.length > 0) {
+          for (const branch of storedBranches) {
+            if (branch.name && !context.branchRegistry.has(branch.name)) {
+              context.registerBranch(branch);
+            }
+          }
+          console.log(`   🌿 [${this.name}] Restored ${storedBranches.length} branch(es) from MongoDB to registry`);
+        }
+      }
+    } catch (error: any) {
+      console.warn(`   ⚠️ [${this.name}] Failed to sync skipped phase to DB:`, error.message);
+      // Don't throw - this is a best-effort sync
     }
   }
 
@@ -376,28 +549,42 @@ export abstract class BasePhase implements IPhase {
 
     let cancelled = false;
     let checkInterval: NodeJS.Timeout | null = null;
+    let inFlightCheck: Promise<void> | null = null; // 🔥 Track in-flight DB query
 
     // Single polling mechanism - check cancellation at configured interval
     const startCancellationChecker = () => {
-      checkInterval = setInterval(async () => {
-        try {
-          const task = await Task.findById(context.task._id, { 'orchestration.cancelRequested': 1 }).lean();
-          if (task?.orchestration?.cancelRequested) {
-            cancelled = true;
-            console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
-            if (checkInterval) clearInterval(checkInterval);
+      checkInterval = setInterval(() => {
+        // 🔥 FIX: Track the in-flight promise so cleanup can wait for it
+        inFlightCheck = (async () => {
+          try {
+            const task = await Task.findById(context.task._id, { 'orchestration.cancelRequested': 1 }).lean();
+            if (task?.orchestration?.cancelRequested) {
+              cancelled = true;
+              console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
+              if (checkInterval) clearInterval(checkInterval);
+            }
+          } catch (err) {
+            // Log but don't crash - cancellation check is non-critical
+            console.warn(`[${this.name}] Error checking cancellation (non-critical):`, err);
           }
-        } catch (err) {
-          // Log but don't crash - cancellation check is non-critical
-          console.warn(`[${this.name}] Error checking cancellation (non-critical):`, err);
-        }
+        })();
       }, CANCELLATION_CHECK_INTERVAL_MS);
     };
 
-    const cleanup = () => {
+    // 🔥 FIX: Async cleanup that waits for in-flight checks to complete
+    const cleanup = async () => {
       if (checkInterval) {
         clearInterval(checkInterval);
         checkInterval = null;
+      }
+      // Wait for any in-flight database query to complete
+      if (inFlightCheck) {
+        try {
+          await inFlightCheck;
+        } catch {
+          // Ignore errors during cleanup - query may have failed
+        }
+        inFlightCheck = null;
       }
     };
 
@@ -410,14 +597,14 @@ export abstract class BasePhase implements IPhase {
 
       // Check one final time if cancelled during execution
       if (cancelled) {
-        cleanup();
+        await cleanup();
         throw new Error('Task cancelled by user during phase execution');
       }
 
-      cleanup();
+      await cleanup();
       return result;
     } catch (error) {
-      cleanup();
+      await cleanup();
       throw error;
     }
   }

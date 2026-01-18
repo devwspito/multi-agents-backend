@@ -28,7 +28,6 @@ interface RepositoryAnalysis {
 interface HistoricalCosts {
   avgCostPerStory: number;
   avgDeveloperCost: number;
-  avgQACost: number;
   avgTotalCost: number;
   avgDuration: number;
   sampleSize: number;
@@ -39,13 +38,11 @@ interface RealisticCostEstimate {
   totalMinimum: number;
   totalMaximum: number;
   breakdown: {
-    productManager: number;
-    projectManager: number;
+    planning: number;
     techLead: number;
     developers: number;
     judge: number;
-    qa: number;
-    mergeCoordinator: number;
+    autoMerge: number;
   };
   perStoryEstimate: number;
   storiesCount: number;
@@ -220,7 +217,7 @@ export class RealisticCostEstimator {
       })
         .sort({ completedAt: -1 })
         .limit(20)
-        .select('orchestration.totalCost orchestration.team orchestration.productManager orchestration.techLead orchestration.qaEngineer createdAt completedAt')
+        .select('orchestration.totalCost orchestration.team orchestration.planning orchestration.techLead createdAt completedAt')
         .lean();
 
       if (completedTasks.length === 0) {
@@ -233,7 +230,6 @@ export class RealisticCostEstimator {
       let totalStories = 0;
       let totalDuration = 0;
       let developerCosts = 0;
-      let qaCosts = 0;
 
       for (const task of completedTasks) {
         totalCost += task.orchestration.totalCost;
@@ -250,9 +246,6 @@ export class RealisticCostEstimator {
         }, 0) || 0;
         developerCosts += devCost;
 
-        // Sumar costos de QA
-        qaCosts += task.orchestration.qaEngineer?.cost_usd || 0;
-
         // Calcular duración
         if (task.completedAt && task.createdAt) {
           const duration = (new Date(task.completedAt).getTime() - new Date(task.createdAt).getTime()) / 1000 / 60;
@@ -262,21 +255,18 @@ export class RealisticCostEstimator {
 
       const avgCostPerStory = totalStories > 0 ? totalCost / totalStories : 0;
       const avgDeveloperCost = completedTasks.length > 0 ? developerCosts / completedTasks.length : 0;
-      const avgQACost = completedTasks.length > 0 ? qaCosts / completedTasks.length : 0;
       const avgTotalCost = totalCost / completedTasks.length;
       const avgDuration = totalDuration / completedTasks.length;
 
       console.log(`📈 Historical Data (${completedTasks.length} completed tasks):`);
       console.log(`   Avg cost per story: $${avgCostPerStory.toFixed(2)}`);
       console.log(`   Avg developer cost: $${avgDeveloperCost.toFixed(2)}`);
-      console.log(`   Avg QA cost: $${avgQACost.toFixed(2)}`);
       console.log(`   Avg total cost: $${avgTotalCost.toFixed(2)}`);
       console.log(`   Avg duration: ${Math.round(avgDuration)} minutes\n`);
 
       return {
         avgCostPerStory,
         avgDeveloperCost,
-        avgQACost,
         avgTotalCost,
         avgDuration,
         sampleSize: completedTasks.length
@@ -299,13 +289,11 @@ export class RealisticCostEstimator {
     if (historicalCosts && historicalCosts.sampleSize >= 5) {
       // Usar promedios históricos ajustados por número de stories
       return {
-        productManager: 0.05, // Fijo
-        projectManager: 0.05, // Fijo
-        techLead: 0.15, // Fijo
+        planning: 0.10, // Unified planning phase
+        techLead: 0.15,
         developers: historicalCosts.avgCostPerStory * totalStories,
         judge: (historicalCosts.avgCostPerStory * 0.3) * totalStories, // Judge ≈ 30% del developer
-        qa: historicalCosts.avgQACost,
-        mergeCoordinator: 0.10 // Fijo
+        autoMerge: 0.10
       };
     }
 
@@ -320,13 +308,11 @@ export class RealisticCostEstimator {
     );
 
     return {
-      productManager: 0.05,
-      projectManager: 0.05,
+      planning: 0.10, // Unified planning phase
       techLead: 0.15,
       developers: costPerStoryDeveloper * totalStories,
       judge: (costPerStoryDeveloper * 0.3) * totalStories, // Judge revisa código
-      qa: 0.30, // QA revisa todo
-      mergeCoordinator: totalStories > 3 ? 0.10 : 0
+      autoMerge: totalStories > 3 ? 0.10 : 0
     };
   }
 
@@ -345,7 +331,7 @@ export class RealisticCostEstimator {
     }
 
     // Agregar overhead fijo
-    duration += 15; // Product Manager + Project Manager + Tech Lead + QA
+    duration += 15; // Planning + Tech Lead + Judge + Verification
 
     return duration;
   }

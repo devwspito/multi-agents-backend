@@ -147,15 +147,14 @@ export class CostBudgetService {
    * Based on typical token usage patterns
    */
   static getPhaseEstimate(phaseName: string): number {
+    // Active phases only (legacy ProductManager, ProjectManager, QA, Fixer removed)
     const estimates: Record<string, number> = {
-      'ProductManager': 0.15,     // ~30k tokens typical
-      'ProjectManager': 0.20,      // ~40k tokens typical
+      'Planning': 0.25,           // ~50k tokens typical (unified planning)
       'TechLead': 0.25,           // ~50k tokens typical
       'Developer': 0.30,          // ~60k tokens typical
       'Judge': 0.10,              // ~20k tokens typical
-      'QA': 0.35,                 // ~70k tokens typical
-      'Fixer': 0.20,              // ~40k tokens typical
-      'TeamOrchestration': 50.00,  // Multiple agents running in parallel (increased from $1.50)
+      'TeamOrchestration': 50.00, // Multiple agents running in parallel
+      'AutoMerge': 0.05,          // ~10k tokens typical
     };
 
     return estimates[phaseName] || 0.25; // Default estimate

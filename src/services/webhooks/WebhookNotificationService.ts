@@ -372,11 +372,11 @@ export class WebhookNotificationService {
 
     <h3 style="color: #333;">What Happens Next?</h3>
     <ol style="padding-left: 20px;">
-      <li><strong>Analysis:</strong> Our Product Manager agent analyzes the error</li>
-      <li><strong>Planning:</strong> Project Manager breaks it into actionable tasks</li>
-      <li><strong>Development:</strong> Senior & Junior developers implement the fix</li>
-      <li><strong>Quality:</strong> QA Engineer validates the solution</li>
-      <li><strong>Deployment:</strong> Auto-merge to production (if tests pass)</li>
+      <li><strong>Planning:</strong> Our planning agent analyzes the error and creates tasks</li>
+      <li><strong>Architecture:</strong> Tech Lead designs the solution</li>
+      <li><strong>Development:</strong> Developers implement the fix</li>
+      <li><strong>Review:</strong> Judge validates code quality</li>
+      <li><strong>Deployment:</strong> Auto-merge to production (if verification passes)</li>
     </ol>
 
     <p style="color: #666; font-size: 12px; text-align: center; margin-top: 30px;">

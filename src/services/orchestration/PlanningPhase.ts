@@ -9,6 +9,13 @@ import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiogr
 import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
+import { AgentArtifactService } from '../AgentArtifactService';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 📦 Utility helpers
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { isEmpty } from './utils/ArrayHelpers';
+import { getEpicId } from './utils/IdNormalizer';
 import fs from 'fs';
 import path from 'path';
 
@@ -39,77 +46,44 @@ export class PlanningPhase extends BasePhase {
   }
 
   /**
-   * Skip if Planning already completed (ONLY for recovery, NOT for continuations)
+   * 🎯 UNIFIED MEMORY: Skip if Planning already completed
+   * Uses SkipLogicHelper for consistent skip behavior
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
-    const task = context.task;
+    const taskId = this.getTaskIdString(context);
 
-    // Refresh task from DB to get latest state
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
+    // Use centralized skip logic
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'Planning' });
 
-    // CONTINUATION: Never skip - always re-execute with new context
-    const isContinuation = context.task.orchestration.continuations &&
-                          context.task.orchestration.continuations.length > 0;
-
-    if (isContinuation) {
-      console.log(`\n[Planning] This is a CONTINUATION - will re-execute with additional requirements`);
-      return false;
-    }
-
-    // RECOVERY: Skip if already completed
-    if (context.task.orchestration.planning?.status === 'completed') {
-      console.log(`[SKIP] Planning already completed - restoring context from previous execution`);
-
-      // Restore phase data
-      if (context.task.orchestration.planning.epics) {
-        context.setData('epics', context.task.orchestration.planning.epics);
-        context.setData('totalTeamsNeeded', context.task.orchestration.planning.epics.length);
-      }
-      if (context.task.orchestration.planning.analysis) {
-        context.setData('problemAnalysis', context.task.orchestration.planning.analysis);
-      }
-
+    if (skipResult.shouldSkip) {
+      // Restore epics from unified memory or MongoDB
+      await this.restoreEpicsOnSkip(context, taskId);
       return true;
     }
 
-    // 🔥 SMART RECOVERY: If planning was in_progress but has valid output + epics,
-    // the agent finished but status wasn't saved before crash. Use the existing output.
-    const planning = context.task.orchestration.planning;
-    if (planning?.status === 'in_progress' && planning.epics && planning.epics.length > 0 && planning.output) {
-      console.log(`\n${'='.repeat(80)}`);
-      console.log(`🔄 [SMART RECOVERY] Planning was in_progress but has ${planning.epics.length} epic(s) + output`);
-      console.log(`   → Agent likely finished but status wasn't saved before crash`);
-      console.log(`   → Using existing output instead of re-executing (saves ~5 min + $$$)`);
-      console.log(`${'='.repeat(80)}\n`);
-
-      // Mark as completed since we have valid output
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(context.task._id, {
-        $set: {
-          'orchestration.planning.status': 'completed',
-          'orchestration.planning.completedAt': new Date(),
-        }
-      });
-
-      // Restore phase data
-      context.setData('epics', planning.epics);
-      context.setData('totalTeamsNeeded', planning.epics.length);
-      if (planning.analysis) {
-        context.setData('problemAnalysis', planning.analysis);
-      }
-      // architectureBrief is stored as optional data, cast to access
-      if ((planning as any).architectureBrief) {
-        context.setData('architectureBrief', (planning as any).architectureBrief);
-      }
-
-      return true; // Skip re-execution
-    }
-
+    console.log(`   ❌ Phase not completed - Planning must execute`);
     return false;
+  }
+
+  /**
+   * Restore epics data when skipping (for downstream phases)
+   */
+  private async restoreEpicsOnSkip(context: OrchestrationContext, taskId: string): Promise<void> {
+    const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+    const memoryEpics = resumption.executionMap?.epics;
+
+    if (!isEmpty(memoryEpics)) {
+      const epics = memoryEpics!.map(e => ({ id: e.epicId, title: e.title }));
+      context.setData('epics', epics);
+      context.setData('totalTeamsNeeded', epics.length);
+      console.log(`   ✅ Restored ${epics.length} epics from unified memory`);
+    } else if (context.task.orchestration.planning?.epics) {
+      // Fallback to MongoDB
+      const dbEpics = context.task.orchestration.planning.epics;
+      context.setData('epics', dbEpics);
+      context.setData('totalTeamsNeeded', dbEpics.length);
+      console.log(`   ✅ Restored ${dbEpics.length} epics from MongoDB fallback`);
+    }
   }
 
   protected async executePhase(
@@ -137,19 +111,6 @@ export class PlanningPhase extends BasePhase {
       } as any;
     }
 
-    // Initialize legacy fields for backward compatibility with TeamOrchestrationPhase
-    if (!task.orchestration.productManager) {
-      task.orchestration.productManager = {
-        agent: 'planning-agent',
-        status: 'pending',
-      } as any;
-    }
-    if (!task.orchestration.projectManager) {
-      task.orchestration.projectManager = {
-        agent: 'planning-agent',
-        status: 'pending',
-      } as any;
-    }
     if (!task.orchestration.techLead) {
       task.orchestration.techLead = {
         agent: 'tech-lead',
@@ -591,7 +552,9 @@ ${judgeFeedback}
 
       // ⚖️ PLANNING JUDGE: Validate epics with AI evaluation AS AGENT (with tools!)
       // 🔥 Judge now has Read/Glob/Grep tools - can verify files exist itself
-      const planningJudgeResult = await this.judgePlanningOutput(enrichedEpics, task, taskId);
+      // 🔥 CRITICAL: Pass effectiveWorkspacePath (context.workspacePath), NOT task.orchestration?.workspacePath
+      //    task.orchestration?.workspacePath is often null, causing fallback to process.cwd() (WRONG!)
+      const planningJudgeResult = await this.judgePlanningOutput(enrichedEpics, task, taskId, effectiveWorkspacePath, repositories);
 
       if (!planningJudgeResult.approved) {
         console.error(`\n🚨 [Planning] Judge rejected: ${planningJudgeResult.reason}`);
@@ -679,18 +642,6 @@ ${judgeFeedback}
       freshTask.orchestration.planning.usage = result.usage;
       freshTask.orchestration.planning.cost_usd = result.cost;
 
-      // Update legacy fields for backward compatibility with TeamOrchestrationPhase
-      freshTask.orchestration.productManager = freshTask.orchestration.productManager || {};
-      freshTask.orchestration.productManager.status = 'completed';
-      freshTask.orchestration.productManager.completedAt = new Date();
-      freshTask.orchestration.productManager.output = result.output;
-
-      freshTask.orchestration.projectManager = freshTask.orchestration.projectManager || {};
-      freshTask.orchestration.projectManager.status = 'completed';
-      freshTask.orchestration.projectManager.completedAt = new Date();
-      freshTask.orchestration.projectManager.epics = enrichedEpics;
-      freshTask.orchestration.projectManager.stories = enrichedEpics.flatMap((e: any) => e.stories || []);
-
       // NOTE: TechLead is NOT marked as completed here!
       // TechLead must still run to:
       // 1. Break epics into stories (with file paths)
@@ -704,6 +655,48 @@ ${judgeFeedback}
         (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
 
       await freshTask.save();
+
+      // 📦 GITHUB BACKUP: Save epics to GitHub as backup
+      // MongoDB has the data (above), now push to GitHub for disaster recovery
+      // 🔥 NOTE: Use effectiveWorkspacePath declared at line ~285 (already exists in scope)
+      const primaryRepo = enrichedEpics[0]?.targetRepository || repositories[0]?.name;
+      if (primaryRepo) {
+        try {
+          // Save epics artifact
+          const artifactResult = await AgentArtifactService.savePlanningArtifact(
+            effectiveWorkspacePath,
+            primaryRepo,
+            taskId,
+            enrichedEpics,
+            task.title,
+            task.description
+          );
+          if (artifactResult.success) {
+            console.log(`📦 [Planning] Artifacts saved to GitHub: ${artifactResult.filePath}`);
+          }
+
+          // Save Judge evaluation artifact
+          const aiEval = planningJudgeResult.aiEvaluation;
+          await AgentArtifactService.saveJudgeArtifact(
+            effectiveWorkspacePath,
+            primaryRepo,
+            taskId,
+            'planning',
+            'planning-epics', // entityId for planning is the epics validation
+            {
+              verdict: planningJudgeResult.approved ? 'approved' : 'rejected',
+              score: aiEval?.score,
+              feedback: planningJudgeResult.feedback || aiEval?.reasoning || checksMessage,
+              issues: aiEval?.issues,
+              suggestions: aiEval?.suggestions,
+            }
+          );
+          console.log(`📦 [Planning] Judge evaluation saved to GitHub`);
+        } catch (artifactError: any) {
+          // Non-blocking - local save and MongoDB are the source of truth
+          console.warn(`⚠️ [Planning] GitHub backup failed (non-blocking): ${artifactError.message}`);
+        }
+      }
 
       // Update context.task reference to fresh task
       context.task = freshTask;
@@ -785,7 +778,7 @@ ${judgeFeedback}
               taskId,
               phaseType: 'planning',
               agentType: 'planning-agent',
-              epicId: epic.id,
+              epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
               title: `Epic: ${epic.title}`,
               content: `Repository: ${epic.targetRepository}\nDescription: ${epic.description || 'N/A'}\nFiles to modify: ${epic.filesToModify?.join(', ') || 'none'}\nFiles to create: ${epic.filesToCreate?.join(', ') || 'none'}`,
               importance: 'high',
@@ -1506,12 +1499,18 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
    *
    * 🔥 CRITICAL: Judge is now a FULL AGENT with tools!
    * It can read files, search code, and verify everything itself.
-   * No need to pass context - Judge explores the codebase like Planning does.
+   *
+   * 🔥 CRITICAL BUG FIX (2024-01): workspacePath MUST be passed from caller!
+   * Previously, this method used task.orchestration?.workspacePath || process.cwd()
+   * which resulted in Judge searching in the project directory instead of agent workspace.
+   * Now we receive workspacePath explicitly from executePhase which has context.workspacePath.
    */
   private async judgePlanningOutput(
     epics: any[],
     task: any,
-    taskId: string
+    taskId: string,
+    workspacePath: string,  // 🔥 FIX: Must be passed from caller (context.workspacePath)
+    repositories: any[]     // 🔥 FIX: Also pass repositories directly
   ): Promise<{
     approved: boolean;
     reason?: string;
@@ -1584,9 +1583,12 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
       hasTools: true,
     });
 
-    // Get workspace path for Judge to read files
-    const workspacePath = task.orchestration?.workspacePath || process.cwd();
-    const repositories = task.repositories || [];
+    // 🔥 FIX: workspacePath and repositories are now passed as parameters from executePhase
+    // Previously used: task.orchestration?.workspacePath || process.cwd() (BUG: fell back to project dir!)
+    // Now uses: context.workspacePath passed explicitly from caller
+    console.log(`\n🔍 [Planning-Judge] Using workspace: ${workspacePath}`);
+    console.log(`   Repositories: ${repositories.map((r: any) => r.name).join(', ')}`);
+    console.log(`   ✅ This should be the AGENT workspace, not the project directory!`);
 
     // 🏛️ UNIFIED: Use JudgePhase.evaluateWithType() for consistent judge execution
     const judgePhase = new JudgePhase(this.executeAgentFn);

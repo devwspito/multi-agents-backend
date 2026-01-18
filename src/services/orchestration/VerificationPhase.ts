@@ -15,7 +15,8 @@
  * - Loop: Verification → Fix → Verification until pass or max attempts
  */
 
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, createSuccessResult, createErrorResult } from './Phase';
+import { isEmpty, isNotEmpty } from './utils/ArrayHelpers';
 import { CompletenessValidator, CompletenessReport } from '../verification/CompletenessValidator';
 import { CoherenceChecker, CoherenceReport } from '../verification/CoherenceChecker';
 import { QualityGates, QualityGateResult } from '../QualityGates';
@@ -23,6 +24,9 @@ import { LogService } from '../logging/LogService';
 import { NotificationService } from '../NotificationService';
 import { OutputParser } from './utils/OutputParser';
 import { IStory, IEpic } from '../../models/Task';
+// 📦 Utility helpers
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { getEpicId } from './utils/IdNormalizer';
 
 export interface VerificationResult {
   epicId: string;
@@ -59,6 +63,30 @@ export class VerificationPhase extends BasePhase {
   }
 
   /**
+   * 🎯 UNIFIED MEMORY: Skip if verification already completed
+   *
+   * Uses SkipLogicHelper for consistent skip behavior.
+   */
+  async shouldSkip(context: OrchestrationContext): Promise<boolean> {
+    // Use centralized skip logic
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'Verification' });
+
+    if (skipResult.shouldSkip) {
+      return true;
+    }
+
+    // Check if TeamOrchestration completed (prerequisite)
+    const teamOrchStatus = (context.task.orchestration as any).teamOrchestration?.status;
+    if (teamOrchStatus !== 'completed' && teamOrchStatus !== 'partial') {
+      console.log(`   ⏭️ TeamOrchestration must complete before Verification (current: ${teamOrchStatus || 'not started'})`);
+      return true;
+    }
+
+    console.log(`   ❌ Phase not completed - Verification must execute`);
+    return false;
+  }
+
+  /**
    * Main execution method with Fixer loop
    *
    * Flow:
@@ -80,21 +108,20 @@ export class VerificationPhase extends BasePhase {
 
     const workspacePath = context.workspacePath;
     if (!workspacePath) {
-      return this.createFailureResult(startTime, 'No workspace path available');
+      return createErrorResult(this.name, startTime, 'No workspace path available');
     }
 
     // Get completed epics from TeamOrchestration
     const teamOrchResult = context.getPhaseResult('TeamOrchestration');
     if (!teamOrchResult || !teamOrchResult.success) {
-      return this.createFailureResult(startTime, 'TeamOrchestration phase did not complete successfully');
+      return createErrorResult(this.name, startTime, 'TeamOrchestration phase did not complete successfully');
     }
 
-    // Get epics from planning phase or legacy projectManager
-    const epics: IEpic[] = context.task.orchestration.planning?.epics ||
-                           context.task.orchestration.projectManager?.epics || [];
-    if (epics.length === 0) {
+    // Get epics from planning phase
+    const epics: IEpic[] = context.task.orchestration.planning?.epics || [];
+    if (isEmpty(epics)) {
       console.log(`⚠️ [Verification] No epics to verify`);
-      return this.createSuccessResult(startTime, {
+      return createSuccessResult(this.name, startTime, {
         totalEpics: 0,
         verifiedEpics: 0,
         passedEpics: 0,
@@ -150,7 +177,7 @@ export class VerificationPhase extends BasePhase {
           },
         });
 
-        return this.createSuccessResult(startTime, verificationResult);
+        return createSuccessResult(this.name, startTime, verificationResult);
       }
 
       // ❌ FAILED: Some checks failed
@@ -182,21 +209,17 @@ export class VerificationPhase extends BasePhase {
         });
 
         // ⚡ SOFT-FAIL: Return success with warnings to allow AutoMerge
-        return {
-          success: true, // ← Critical: allow AutoMerge to proceed
-          phaseName: this.name,
-          duration: Date.now() - startTime,
-          data: {
-            ...verificationResult,
-            softFail: true,
-            warnings: [
-              `Verification found ${verificationResult.failedEpics} issue(s) but proceeding for human review`,
-              ...verificationResult.results.filter(r => !r.passed).map(r =>
-                `Epic ${r.epicId}: ${r.issues.length} issue(s)`
-              ),
-            ],
-          },
-        };
+        return createSuccessResult(this.name, startTime, {
+          ...verificationResult,
+          softFail: true,
+        }, {
+          warnings: [
+            `Verification found ${verificationResult.failedEpics} issue(s) but proceeding for human review`,
+            ...verificationResult.results.filter(r => !r.passed).map(r =>
+              `Epic ${r.epicId}: ${r.issues.length} issue(s)`
+            ),
+          ],
+        });
       }
 
       // 🔧 FIXER: Attempt to fix issues
@@ -224,7 +247,7 @@ export class VerificationPhase extends BasePhase {
     }
 
     // Should never reach here, but return last result just in case
-    return this.createSuccessResult(startTime, lastVerificationResult!);
+    return createSuccessResult(this.name, startTime, lastVerificationResult!);
   }
 
   /**
@@ -493,7 +516,40 @@ Then read key files to understand:
    - Ensure frontend API URLs match backend routes exactly
    - Check field names match between frontend and backend
 
-### Step 3: Validate Your Fixes
+### Step 3: 🧹 UNUSED CODE CLEANER (MANDATORY)
+
+After making fixes, scan for and remove unused code:
+
+\`\`\`bash
+cd ${repoName}
+
+# 1. Find unused imports (JavaScript/TypeScript)
+grep -rn "^import" src/ | head -20
+# Then check if each imported item is actually used
+
+# 2. Look for unused variables (lint will catch most)
+npm run lint 2>&1 | grep -i "unused" || true
+
+# 3. Find TODO/FIXME that should be addressed
+grep -rn "TODO\|FIXME\|HACK\|XXX" src/ | head -10 || true
+\`\`\`
+
+**REMOVE UNUSED CODE PATTERNS:**
+| Pattern | Action |
+|---------|--------|
+| \`import { X } from 'y'\` where X is never used | Remove import or unused specifier |
+| \`const x = ...\` where x is never used | Remove entire statement |
+| \`function foo() {}\` that is never called | Remove entire function |
+| Dead code after \`return\`, \`throw\`, \`break\` | Remove unreachable code |
+| Commented-out code blocks | Remove entirely (use git history) |
+| Empty try/catch blocks | Add proper error handling or remove |
+
+**⚠️ DO NOT remove:**
+- Exports that might be used by other modules
+- Public API methods even if unused internally
+- Type definitions/interfaces (they have no runtime cost)
+
+### Step 4: Validate Your Fixes
 \`\`\`bash
 cd ${repoName}
 
@@ -509,7 +565,7 @@ npm test 2>&1 || npm run test 2>&1 || true
 
 **⚠️ IMPORTANT**: If build/lint fails, FIX those errors before committing!
 
-### Step 4: Commit & Push (Only if validation passes)
+### Step 5: Commit & Push (Only if validation passes)
 \`\`\`bash
 cd ${repoName}
 git add .
@@ -639,12 +695,24 @@ If validation fails:
 
     // Find repository path for this epic
     const repoName = epic.targetRepository || context.repositories[0]?.name;
+    const normalizedEpicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
+    if (!repoName) {
+      console.error(`❌ [Verification] Cannot verify epic ${normalizedEpicId} - no targetRepository and no repositories in context`);
+      return {
+        epicId: normalizedEpicId,
+        passed: false,
+        completeness: null,
+        coherence: null,
+        qualityGates: null,
+        issues: ['No repository specified for verification'],
+        feedback: 'Cannot verify epic - no repository found in context or epic configuration.',
+      };
+    }
     const repoPath = `${workspacePath}/${repoName}`;
 
-    // Get all stories from planning phase or legacy phases
+    // Get all stories from planning or techLead phase
     const allStories: IStory[] = context.task.orchestration.planning?.stories ||
-                                 context.task.orchestration.techLead?.stories ||
-                                 context.task.orchestration.projectManager?.stories || [];
+                                 context.task.orchestration.techLead?.stories || [];
 
     // 1. Run Completeness Check on each story in this epic
     const epicStoryIds = epic.stories || []; // These are string IDs
@@ -713,7 +781,7 @@ If validation fails:
     }
 
     // Determine if epic passed
-    const passed = issues.length === 0;
+    const passed = isEmpty(issues);
 
     // Generate feedback
     let feedback = '';
@@ -724,11 +792,11 @@ If validation fails:
         feedback += `\n\n${QualityGates.formatForPrompt(qualityGatesReport)}`;
       }
     } else {
-      feedback = `✅ Epic ${epic.id} passed all verification checks (score: ${qualityGatesReport?.overallScore || 100}/100).`;
+      feedback = `✅ Epic ${normalizedEpicId} passed all verification checks (score: ${qualityGatesReport?.overallScore || 100}/100).`;
     }
 
     return {
-      epicId: epic.id,
+      epicId: normalizedEpicId,
       completeness: completenessReport,
       coherence: coherenceReport,
       qualityGates: qualityGatesReport,
@@ -752,7 +820,7 @@ If validation fails:
     lines.push(`\n🚨 VERIFICATION FAILED for Epic: ${epic.id} - ${epic.title}`);
     lines.push(`${'─'.repeat(50)}`);
 
-    if (issues.length > 0) {
+    if (isNotEmpty(issues)) {
       lines.push(`\n❌ ${issues.length} issue(s) found:\n`);
       for (const issue of issues) {
         lines.push(`  • ${issue}`);
@@ -805,29 +873,4 @@ If validation fails:
 
     return lines.join('\n');
   }
-
-  /**
-   * Create a failure result
-   */
-  private createFailureResult(startTime: number, error: string): PhaseResult {
-    return {
-      success: false,
-      phaseName: this.name,
-      duration: Date.now() - startTime,
-      error,
-    };
-  }
-
-  /**
-   * Create a success result
-   */
-  private createSuccessResult(startTime: number, data: VerificationPhaseData): PhaseResult {
-    return {
-      success: true,
-      phaseName: this.name,
-      duration: Date.now() - startTime,
-      data,
-    };
-  }
-
 }

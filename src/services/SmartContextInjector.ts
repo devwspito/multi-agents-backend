@@ -19,14 +19,12 @@ import { CodebaseIndexer } from './CodebaseIndexer';
 // ==================== TYPES ====================
 
 export type AgentPhase =
-  | 'problem-analyst'
-  | 'product-manager'
-  | 'project-manager'
+  | 'planning-agent'
   | 'tech-lead'
   | 'developer'
   | 'judge'
-  | 'qa-engineer'
-  | 'fixer'
+  | 'verification-fixer'
+  | 'recovery-analyst'
   | 'auto-merge';
 
 export interface ContextRequest {
@@ -82,26 +80,14 @@ export interface PreviousFinding {
 // ==================== PHASE CONFIGURATIONS ====================
 
 const PHASE_GUIDELINES: Record<AgentPhase, string[]> = {
-  'problem-analyst': [
+  'planning-agent': [
     'Focus on understanding the ROOT CAUSE, not just symptoms',
-    'Consider edge cases and failure scenarios',
-    'Document assumptions clearly',
-    'Identify potential risks early',
-    'Look for existing patterns that might help'
-  ],
-  'product-manager': [
     'Break down features into ATOMIC user stories',
     'Each story must have clear acceptance criteria',
     'Consider MVP vs full feature scope',
-    'Think about user experience flow',
-    'Identify dependencies between stories'
-  ],
-  'project-manager': [
+    'Identify dependencies between stories',
     'Prioritize by value and dependencies',
-    'Identify critical path items',
-    'Consider team skill requirements',
-    'Flag potential blockers early',
-    'Create realistic but ambitious timelines'
+    'Document assumptions and risks clearly'
   ],
   'tech-lead': [
     'Favor composition over inheritance',
@@ -125,19 +111,18 @@ const PHASE_GUIDELINES: Record<AgentPhase, string[]> = {
     'Check for code duplication',
     'Ensure consistency with existing patterns'
   ],
-  'qa-engineer': [
-    'Test edge cases, not just happy path',
-    'Verify error messages are helpful',
-    'Check for race conditions',
-    'Test with realistic data volumes',
-    'Verify backwards compatibility'
-  ],
-  'fixer': [
+  'verification-fixer': [
     'Understand the issue BEFORE attempting fix',
     'Make minimal changes to fix the issue',
     'Verify fix doesn\'t break other tests',
     'Consider root cause vs symptom fix',
     'Document what was changed and why'
+  ],
+  'recovery-analyst': [
+    'Analyze error patterns systematically',
+    'Determine if errors are automatable',
+    'Provide actionable recovery strategies',
+    'Consider similar past failures'
   ],
   'auto-merge': [
     'Verify all tests pass',
@@ -149,21 +134,12 @@ const PHASE_GUIDELINES: Record<AgentPhase, string[]> = {
 };
 
 const PHASE_TOOLS: Record<AgentPhase, string[]> = {
-  'problem-analyst': [
+  'planning-agent': [
     'generate_exploration_script (pattern-discovery)',
     'get_codebase_overview',
     'search_codebase_index',
-    'parallel_explore (breadth-first)'
-  ],
-  'product-manager': [
-    'get_codebase_overview',
-    'search_codebase_index (file)',
-    'parallel_explore (cross-reference)'
-  ],
-  'project-manager': [
-    'analyze_dependencies',
-    'parallel_explore (dependency-map)',
-    'get_codebase_overview'
+    'parallel_explore (breadth-first)',
+    'analyze_dependencies'
   ],
   'tech-lead': [
     'analyze_dependencies',
@@ -184,17 +160,16 @@ const PHASE_TOOLS: Record<AgentPhase, string[]> = {
     'analyze_code_quality',
     'search_codebase_index'
   ],
-  'qa-engineer': [
-    'find_related_tests',
-    'generate_exploration_script (test-finder)',
-    'run_integration_tests',
-    'analyze_code_quality'
-  ],
-  'fixer': [
+  'verification-fixer': [
     'find_related_tests',
     'analyze_dependencies',
     'search_codebase_index',
     'analyze_change_impact'
+  ],
+  'recovery-analyst': [
+    'analyze_error_patterns',
+    'search_codebase_index',
+    'get_codebase_overview'
   ],
   'auto-merge': [
     'run_integration_tests',
@@ -204,23 +179,14 @@ const PHASE_TOOLS: Record<AgentPhase, string[]> = {
 };
 
 const QUALITY_CHECKLISTS: Record<AgentPhase, string[]> = {
-  'problem-analyst': [
+  'planning-agent': [
     '[ ] Problem clearly defined',
     '[ ] Root cause identified',
-    '[ ] Scope boundaries established',
-    '[ ] Risks documented'
-  ],
-  'product-manager': [
     '[ ] Stories follow INVEST criteria',
     '[ ] Acceptance criteria are testable',
     '[ ] Dependencies identified',
-    '[ ] MVP scope defined'
-  ],
-  'project-manager': [
-    '[ ] Tasks are properly sequenced',
-    '[ ] Critical path identified',
-    '[ ] Resources allocated',
-    '[ ] Blockers flagged'
+    '[ ] MVP scope defined',
+    '[ ] Risks documented'
   ],
   'tech-lead': [
     '[ ] Design is testable',
@@ -242,17 +208,16 @@ const QUALITY_CHECKLISTS: Record<AgentPhase, string[]> = {
     '[ ] Performance considered',
     '[ ] Code style consistent'
   ],
-  'qa-engineer': [
-    '[ ] Edge cases tested',
-    '[ ] Integration tests pass',
-    '[ ] Performance acceptable',
-    '[ ] Error scenarios covered'
-  ],
-  'fixer': [
+  'verification-fixer': [
     '[ ] Root cause addressed',
     '[ ] Fix is minimal',
     '[ ] Tests updated/added',
     '[ ] No regressions'
+  ],
+  'recovery-analyst': [
+    '[ ] Error pattern identified',
+    '[ ] Automation feasibility assessed',
+    '[ ] Recovery strategy defined'
   ],
   'auto-merge': [
     '[ ] All tests pass',

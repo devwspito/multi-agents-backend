@@ -1,0 +1,76 @@
+# ============================================================================
+# Multi-Agent Platform - Con MongoDB Local (Máxima Privacidad)
+# ============================================================================
+# Para clientes que requieren todos los datos en su infraestructura
+#
+# Datos en: Docker volume local (NO sale de la máquina)
+# ============================================================================
+
+version: '3.8'
+
+services:
+  # MongoDB Local
+  mongodb:
+    image: mongo:6
+    container_name: agents-mongodb
+    restart: always
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Backend
+  agents-backend:
+    image: ${DOCKER_IMAGE:-multiagents/backend:latest}
+    container_name: agents-backend
+    restart: always
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      MONGODB_URI: mongodb://mongodb:27017/agents-prod
+      AGENT_WORKSPACE_DIR: /data/agent-workspace
+      GIT_CLONE_TIMEOUT: 600000
+      GIT_PUSH_TIMEOUT: 600000
+      GIT_COMMIT_TIMEOUT: 300000
+      AUTO_RECOVER_ON_STARTUP: "true"
+      CANCELLATION_CHECK_INTERVAL_MS: 5000
+      WORKSPACE_AUTO_CLEANUP_ENABLED: "${WORKSPACE_AUTO_CLEANUP_ENABLED:-false}"
+      WORKSPACE_MAX_AGE_HOURS: "${WORKSPACE_MAX_AGE_HOURS:-168}"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_PRIVATE_KEY: ${GITHUB_PRIVATE_KEY:-}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-${JWT_SECRET}}
+      SESSION_SECRET: ${SESSION_SECRET:-${JWT_SECRET}}
+      BASE_URL: ${BASE_URL:-http://localhost:3001}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ENABLE_PERFORMANCE_CACHE: "true"
+      ENABLE_FILE_CONTENT_CACHE: "true"
+      ENABLE_ENHANCED_GIT_EXECUTION: "true"
+    volumes:
+      - agents-workspace:/data/agent-workspace
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  mongodb-data:
+    name: agents-mongodb-data
+  agents-workspace:
+    name: agents-workspace

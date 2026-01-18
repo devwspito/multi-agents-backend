@@ -12,7 +12,7 @@ import { PREMIUM_CONFIG } from '../config/ModelConfigurations';
  * 1. External system sends error via webhook
  * 2. ErrorDetective analyzes error (this service)
  * 3. Analysis is used to create a Task
- * 4. Task runs through normal orchestration (starting from ProblemAnalyst)
+ * 4. Task runs through normal orchestration (starting from Planning)
  *
  * WHY NOT A PHASE:
  * - Phases run WITHIN a task
@@ -72,11 +72,11 @@ export class ErrorDetectiveService {
       console.log(`   Error type: ${input.errorType || 'unknown'}`);
 
       // Get agent definition and model
-      const agentDef = getAgentDefinition('error-detective');
+      const agentDef = getAgentDefinition('recovery-analyst');
       if (!agentDef) {
-        throw new Error('Agent definition not found for error-detective');
+        throw new Error('Agent definition not found for recovery-analyst');
       }
-      const model = PREMIUM_CONFIG['error-detective'];
+      const model = PREMIUM_CONFIG['recovery-analyst'];
 
       // Build analysis prompt
       const prompt = this.buildAnalysisPrompt(input);
@@ -103,7 +103,7 @@ export class ErrorDetectiveService {
       // Extract text response
       const textContent = response.content.find((c) => c.type === 'text');
       if (!textContent || textContent.type !== 'text') {
-        throw new Error('No text response from error-detective agent');
+        throw new Error('No text response from recovery-analyst agent');
       }
 
       const output = textContent.text;

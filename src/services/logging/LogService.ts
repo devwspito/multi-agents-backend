@@ -18,8 +18,8 @@ export interface LogContext {
   taskId: string | mongoose.Types.ObjectId;
   level?: LogLevel;
   category?: LogCategory;
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'contract-testing' | 'completed' | 'multi-team' | 'error-resolution';
-  agentType?: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'judge' | 'merge' | 'auto-merge' | 'completed' | 'multi-team' | 'error-resolution';
+  agentType?: 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'verification-fixer' | 'recovery-analyst' | 'team-orchestration' | 'auto-merge' | 'story-merge-agent' | 'git-flow-manager' | 'conflict-resolver';
   agentInstanceId?: string;
   epicId?: string;
   epicName?: string;
@@ -323,7 +323,7 @@ export class LogService {
    * Convenience: Log agent started
    */
   static async agentStarted(
-    agentType: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester',
+    agentType: 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'verification-fixer' | 'recovery-analyst' | 'team-orchestration' | 'auto-merge' | 'story-merge-agent' | 'git-flow-manager' | 'conflict-resolver',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -339,7 +339,7 @@ export class LogService {
    * Convenience: Log agent completed
    */
   static async agentCompleted(
-    agentType: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester',
+    agentType: 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'verification-fixer' | 'recovery-analyst' | 'team-orchestration' | 'auto-merge' | 'story-merge-agent' | 'git-flow-manager' | 'conflict-resolver',
     taskId: string,
     context?: Partial<LogContext>
   ): Promise<void> {
@@ -355,7 +355,7 @@ export class LogService {
    * Convenience: Log agent failed
    */
   static async agentFailed(
-    agentType: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'test-creator' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'contract-tester',
+    agentType: 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'verification-fixer' | 'recovery-analyst' | 'team-orchestration' | 'auto-merge' | 'story-merge-agent' | 'git-flow-manager' | 'conflict-resolver',
     taskId: string,
     error: Error | string,
     context?: Partial<LogContext>

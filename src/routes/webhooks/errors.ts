@@ -296,10 +296,10 @@ router.post(
 
         console.log(`📋 Creating task with config: ${taskConfig}`);
         console.log(`   Model config:`, {
-          problemAnalyst: modelConfig['problem-analyst'],
-          productManager: modelConfig['product-manager'],
+          planningAgent: modelConfig['planning-agent'],
+          techLead: modelConfig['tech-lead'],
           developer: modelConfig.developer,
-          errorDetective: modelConfig['error-detective'],
+          judge: modelConfig.judge,
         });
 
         task = await Task.create({
@@ -311,26 +311,19 @@ router.post(
           status: 'pending',
           tags: ['webhook', 'auto-generated', analysisResult.analysis?.severity || severity, 'error-detective'],
           orchestration: {
-            productManager: { agent: 'product-manager', status: 'pending' },
-            projectManager: { agent: 'project-manager', status: 'pending' },
+            planning: { agent: 'planning-agent', status: 'pending' },
             totalCost: analysisResult.cost_usd || 0, // Start with ErrorDetective cost
             totalTokens: analysisResult.usage?.total_tokens || 0,
 
             // Auto-approval configuration (no human approval needed for webhook errors)
             autoApprovalEnabled: true,
             autoApprovalPhases: [
-              'problem-analyst',
-              'product-manager',
-              'project-manager',
+              'planning-agent',
               'tech-lead',
               'team-orchestration',
               'development',
               'judge',
-              'test-creator',
-              'qa-engineer',
-              'contract-testing',
-              'contract-fixer',
-              'merge-coordinator',
+              'auto-merge',
             ],
 
             // Model configuration from API key

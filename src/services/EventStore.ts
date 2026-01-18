@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 import { Event, EventType, IEvent } from '../models/Event';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * EventCounter - Atomic counter for event versioning
@@ -17,17 +19,13 @@ const EventCounter = mongoose.models.EventCounter || mongoose.model('EventCounte
  * Task State - Reconstructed from events
  */
 export interface TaskState {
-  // Agent completion flags
-  productManagerCompleted: boolean;
-  productManagerApproved: boolean;
-  projectManagerCompleted: boolean;
-  projectManagerApproved: boolean;
+  // Agent completion flags (active phases)
+  planningCompleted: boolean;
+  planningApproved: boolean;
   techLeadCompleted: boolean;
   techLeadApproved: boolean;
   branchSetupCompleted: boolean;
   developersCompleted: boolean;
-  qaCompleted: boolean;
-  qaApproved: boolean;
   prApproved: boolean;
   mergeCompleted: boolean;
 
@@ -77,10 +75,8 @@ export interface TaskState {
   currentPhase: string;
 
   // Agent outputs (for chat display)
-  productManagerOutput?: string;
-  projectManagerOutput?: string;
+  planningOutput?: string;
   techLeadOutput?: string;
-  qaOutput?: string;
 
   // Costs
   totalCost: number;
@@ -191,21 +187,17 @@ export class EventStore {
    */
   buildState(events: any[]): TaskState {
     const initialState: TaskState = {
-      productManagerCompleted: false,
-      productManagerApproved: false,
-      projectManagerCompleted: false,
-      projectManagerApproved: false,
+      planningCompleted: false,
+      planningApproved: false,
       techLeadCompleted: false,
       techLeadApproved: false,
       branchSetupCompleted: false,
       developersCompleted: false,
-      qaCompleted: false,
-      qaApproved: false,
       prApproved: false,
       mergeCompleted: false,
       epics: [],
       stories: [],
-      currentPhase: 'analysis',
+      currentPhase: 'planning',
       totalCost: 0,
     };
 
@@ -218,33 +210,37 @@ export class EventStore {
       }
 
       switch (eventType) {
-        // Product Manager
+        // Planning (new unified phase)
+        case 'PlanningCompleted':
+          state.planningCompleted = true;
+          state.planningOutput = payload.output;
+          state.currentPhase = 'planning';
+          break;
+
+        case 'PlanningApproved':
+          state.planningApproved = true;
+          break;
+
+        case 'PlanningRejected':
+          state.planningApproved = false;
+          break;
+
+        // Legacy ProductManager/ProjectManager events → map to planning
         case 'ProductManagerCompleted':
-          state.productManagerCompleted = true;
-          state.productManagerOutput = payload.output;
+        case 'ProjectManagerCompleted':
+          state.planningCompleted = true;
+          state.planningOutput = payload.output;
           state.currentPhase = 'planning';
           break;
 
         case 'ProductManagerApproved':
-          state.productManagerApproved = true;
+        case 'ProjectManagerApproved':
+          state.planningApproved = true;
           break;
 
         case 'ProductManagerRejected':
-          state.productManagerApproved = false;
-          break;
-
-        // Project Manager
-        case 'ProjectManagerCompleted':
-          state.projectManagerCompleted = true;
-          state.projectManagerOutput = payload.output;
-          break;
-
-        case 'ProjectManagerApproved':
-          state.projectManagerApproved = true;
-          break;
-
         case 'ProjectManagerRejected':
-          state.projectManagerApproved = false;
+          state.planningApproved = false;
           break;
 
         // Tech Lead
@@ -339,19 +335,6 @@ export class EventStore {
           state.teamComposition = payload;
           break;
 
-        // Branch Setup (DEPRECATED - BranchSetupPhase removed)
-        // case 'BranchPushed':
-        //   const epic = state.epics.find((e: any) => e.id === payload.epicId);
-        //   if (epic) {
-        //     epic.branchesCreated = true;
-        //   }
-        //   break;
-
-        // case 'BranchSetupCompleted':
-        //   state.branchSetupCompleted = true;
-        //   state.currentPhase = 'development';
-        //   break;
-
         // Developers
         case 'StoryStarted':
           const story = state.stories.find((s: any) => s.id === payload.storyId);
@@ -394,21 +377,14 @@ export class EventStore {
 
         case 'DevelopersCompleted':
           state.developersCompleted = true;
-          state.currentPhase = 'qa';
+          state.currentPhase = 'merge';
           break;
 
-        // QA
+        // Legacy QA events (no longer active, but kept for reading old events)
         case 'QACompleted':
-          state.qaCompleted = true;
-          state.qaOutput = payload.output;
-          break;
-
         case 'QAApproved':
-          state.qaApproved = true;
-          break;
-
         case 'QARejected':
-          state.qaApproved = false;
+          // Legacy events - ignored in new state
           break;
 
         // PR
@@ -482,19 +458,269 @@ export class EventStore {
     }
 
     // Check phase progression
-    // BranchSetup phase removed - no longer needed
-    // if (state.developersCompleted && !state.branchSetupCompleted) {
-    //   errors.push('Developers completed but BranchSetup never completed');
-    // }
-
-    if (state.qaCompleted && !state.developersCompleted) {
-      errors.push('QA completed but Developers never completed');
+    if (state.mergeCompleted && !state.developersCompleted) {
+      errors.push('Merge completed but Developers never completed');
     }
 
     return {
       valid: errors.length === 0,
       errors,
     };
+  }
+
+  // ============================================================================
+  // 📦 LOCAL BACKUP - Save events to local file system
+  // ============================================================================
+
+  private static readonly EVENTS_DIR = '.agents/events';
+
+  /**
+   * Save all events for a task to a local file
+   * Called after each phase to maintain a local backup of MongoDB events
+   * Format: JSONL (one JSON object per line) for easy append and read
+   */
+  async saveEventsToLocal(
+    taskId: mongoose.Types.ObjectId | string,
+    workspacePath: string,
+    targetRepository: string
+  ): Promise<{ success: boolean; filePath: string; eventsCount: number }> {
+    try {
+      const events = await this.getEvents(taskId);
+
+      if (events.length === 0) {
+        return { success: true, filePath: '', eventsCount: 0 };
+      }
+
+      // Build paths
+      const repoPath = path.join(workspacePath, targetRepository);
+      const eventsDir = path.join(repoPath, EventStore.EVENTS_DIR);
+      const taskIdStr = typeof taskId === 'string' ? taskId : taskId.toString();
+      const filePath = path.join(eventsDir, `task-${taskIdStr}-events.jsonl`);
+
+      // Ensure directory exists
+      if (!fs.existsSync(eventsDir)) {
+        fs.mkdirSync(eventsDir, { recursive: true });
+      }
+
+      // Convert events to JSONL format
+      const jsonlContent = events.map(event => JSON.stringify({
+        version: event.version,
+        eventType: event.eventType,
+        payload: event.payload,
+        agentName: event.agentName,
+        metadata: event.metadata,
+        timestamp: event.timestamp,
+      })).join('\n');
+
+      // Write to file (overwrite to ensure consistency)
+      fs.writeFileSync(filePath, jsonlContent, 'utf8');
+
+      console.log(`📦 [EventStore] Saved ${events.length} events to local: ${filePath}`);
+
+      return { success: true, filePath, eventsCount: events.length };
+    } catch (error: any) {
+      console.warn(`⚠️ [EventStore] Failed to save events to local: ${error.message}`);
+      return { success: false, filePath: '', eventsCount: 0 };
+    }
+  }
+
+  /**
+   * Load events from local file (for recovery)
+   * Returns events in chronological order
+   */
+  loadEventsFromLocal(
+    taskId: string,
+    workspacePath: string,
+    targetRepository: string
+  ): any[] | null {
+    try {
+      const repoPath = path.join(workspacePath, targetRepository);
+      const filePath = path.join(repoPath, EventStore.EVENTS_DIR, `task-${taskId}-events.jsonl`);
+
+      if (!fs.existsSync(filePath)) {
+        return null;
+      }
+
+      const content = fs.readFileSync(filePath, 'utf8');
+      const events = content.split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(line => JSON.parse(line));
+
+      console.log(`📦 [EventStore] Loaded ${events.length} events from local`);
+      return events;
+    } catch (error: any) {
+      console.warn(`⚠️ [EventStore] Failed to load events from local: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Push events file to GitHub
+   * Called after saving events to local
+   */
+  async pushEventsToGitHub(
+    workspacePath: string,
+    targetRepository: string,
+    taskId: string
+  ): Promise<boolean> {
+    try {
+      const { execSync } = require('child_process');
+      const repoPath = path.join(workspacePath, targetRepository);
+      const filePath = path.join(repoPath, EventStore.EVENTS_DIR, `task-${taskId}-events.jsonl`);
+
+      if (!fs.existsSync(filePath)) {
+        return false;
+      }
+
+      // Git add, commit, push (generous timeouts for large projects)
+      execSync(`git add "${filePath}"`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 120000 }); // 2 min
+
+      const status = execSync('git status --porcelain', { cwd: repoPath, encoding: 'utf8', timeout: 120000 }); // 2 min
+      if (status.trim().length > 0) {
+        execSync(`git commit -m "[EventStore] Backup events for task ${taskId}"`, {
+          cwd: repoPath,
+          encoding: 'utf8',
+          stdio: 'pipe',
+          timeout: 300000 // 5 min for hooks
+        });
+
+        const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+          cwd: repoPath,
+          encoding: 'utf8',
+          timeout: 30000 // 30 sec
+        }).trim();
+
+        execSync(`git push origin ${currentBranch}`, {
+          cwd: repoPath,
+          encoding: 'utf8',
+          stdio: 'pipe',
+          timeout: 600000 // 10 min for large repos
+        });
+
+        console.log(`📦 [EventStore] Events pushed to GitHub`);
+      }
+
+      return true;
+    } catch (error: any) {
+      console.warn(`⚠️ [EventStore] Failed to push events to GitHub: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Full backup: Save to local + push to GitHub
+   * Convenience method that does both operations
+   */
+  async backupEvents(
+    taskId: mongoose.Types.ObjectId | string,
+    workspacePath: string,
+    targetRepository: string
+  ): Promise<{ success: boolean; filePath: string; eventsCount: number }> {
+    const taskIdStr = typeof taskId === 'string' ? taskId : taskId.toString();
+
+    // Save to local
+    const result = await this.saveEventsToLocal(taskId, workspacePath, targetRepository);
+
+    if (result.success && result.eventsCount > 0) {
+      // Push to GitHub (non-blocking failure)
+      await this.pushEventsToGitHub(workspacePath, targetRepository, taskIdStr);
+    }
+
+    return result;
+  }
+
+  // ============================================================================
+  // 🔄 RECOVERY: Restore events from Local to MongoDB
+  // ============================================================================
+
+  /**
+   * Sync events from local file to MongoDB
+   * Used for recovery when MongoDB is empty but Local has events
+   *
+   * @returns Number of events restored, or -1 if local file not found
+   */
+  async syncFromLocal(
+    taskId: string,
+    workspacePath: string,
+    targetRepository: string
+  ): Promise<{ success: boolean; eventsRestored: number; error?: string }> {
+    try {
+      console.log(`🔄 [EventStore] Attempting to sync events from Local to MongoDB for task ${taskId}`);
+
+      // Check if MongoDB already has events
+      const existingEvents = await this.getEvents(taskId);
+      if (existingEvents.length > 0) {
+        console.log(`✅ [EventStore] MongoDB already has ${existingEvents.length} events, skipping sync`);
+        return { success: true, eventsRestored: 0 };
+      }
+
+      // Load events from local
+      const localEvents = this.loadEventsFromLocal(taskId, workspacePath, targetRepository);
+      if (!localEvents || localEvents.length === 0) {
+        console.log(`⚠️ [EventStore] No local events found for task ${taskId}`);
+        return { success: false, eventsRestored: -1, error: 'No local events found' };
+      }
+
+      console.log(`📦 [EventStore] Found ${localEvents.length} events in local, restoring to MongoDB...`);
+
+      // Restore each event to MongoDB
+      let restored = 0;
+      for (const event of localEvents) {
+        try {
+          await this.append({
+            taskId,
+            eventType: event.eventType,
+            payload: event.payload,
+            agentName: event.agentName,
+            metadata: event.metadata,
+          });
+          restored++;
+        } catch (err: any) {
+          console.warn(`⚠️ [EventStore] Failed to restore event ${event.eventType}: ${err.message}`);
+        }
+      }
+
+      console.log(`✅ [EventStore] Restored ${restored}/${localEvents.length} events from Local to MongoDB`);
+      return { success: true, eventsRestored: restored };
+
+    } catch (error: any) {
+      console.error(`❌ [EventStore] syncFromLocal failed: ${error.message}`);
+      return { success: false, eventsRestored: 0, error: error.message };
+    }
+  }
+
+  /**
+   * Get state with Local fallback
+   * First tries MongoDB, if empty tries to sync from Local
+   */
+  async getCurrentStateWithLocalFallback(
+    taskId: string,
+    workspacePath?: string,
+    targetRepository?: string
+  ): Promise<TaskState> {
+    // First try MongoDB
+    const mongoEvents = await this.getEvents(taskId);
+
+    if (mongoEvents.length > 0) {
+      return this.buildState(mongoEvents);
+    }
+
+    // MongoDB empty - try Local fallback if workspace info provided
+    if (workspacePath && targetRepository) {
+      console.log(`⚠️ [EventStore] MongoDB empty for task ${taskId}, trying Local fallback...`);
+
+      const syncResult = await this.syncFromLocal(taskId, workspacePath, targetRepository);
+
+      if (syncResult.success && syncResult.eventsRestored > 0) {
+        // Re-fetch from MongoDB after sync
+        const restoredEvents = await this.getEvents(taskId);
+        return this.buildState(restoredEvents);
+      }
+    }
+
+    // No events found anywhere - return initial state
+    console.log(`⚠️ [EventStore] No events found for task ${taskId} in MongoDB or Local`);
+    return this.buildState([]);
   }
 }
 

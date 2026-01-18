@@ -1,0 +1,38 @@
+# ============================================================================
+# Multi-Agent Platform - Client Inventory
+# ============================================================================
+# Inventario de todos los clientes desplegados
+# Mantener actualizado después de cada deployment
+# ============================================================================
+
+clients:
+  # Ejemplo de entrada
+  # - name: acme
+  #   company: "ACME Corporation"
+  #   project_id: acme-agents
+  #   vm_name: acme-agents
+  #   zone: us-central1-a
+  #   vm_ip: 35.xxx.xxx.xxx
+  #   mongodb_cluster: agents-cluster.xxx.mongodb.net
+  #   deployed_version: v2.0.0
+  #   deployed_date: "2025-01-15"
+  #   contract_start: "2025-01-15"
+  #   monthly_fee: 1500
+  #   setup_fee: 5000
+  #   status: active  # active, suspended, cancelled
+  #   notes: ""
+
+  - name: demo
+    company: "Demo Internal"
+    project_id: demo-agents
+    vm_name: demo-agents
+    zone: us-central1-a
+    vm_ip: 127.0.0.1
+    mongodb_cluster: localhost
+    deployed_version: v2.0.0
+    deployed_date: "2025-01-16"
+    contract_start: "2025-01-16"
+    monthly_fee: 0
+    setup_fee: 0
+    status: active
+    notes: "Internal testing"

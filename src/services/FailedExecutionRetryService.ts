@@ -73,9 +73,33 @@ export class FailedExecutionRetryService {
         return 0;
       }
 
-      console.log(`[FailedExecutionRetry] Found ${retryable.length} executions to retry`);
+      console.log(`[FailedExecutionRetry] Found ${retryable.length} executions to check`);
 
+      // 🛑 Pre-filter: Get task IDs and check which are still active
+      const taskIds = retryable.map(e => e.taskId).filter(Boolean);
+      const activeTasks = await Task.find({
+        _id: { $in: taskIds },
+        status: { $nin: ['completed', 'failed'] }  // Only active tasks
+      }).select('_id');
+      const activeTaskIds = new Set(activeTasks.map(t => t._id.toString()));
+
+      // Mark executions for completed/failed tasks as abandoned
       for (const execution of retryable) {
+        const taskIdStr = execution.taskId?.toString();
+        if (taskIdStr && !activeTaskIds.has(taskIdStr)) {
+          console.log(`⏹️  [FailedExecutionRetry] Task ${taskIdStr} is completed/failed, abandoning execution ${execution._id}`);
+          execution.retryStatus = 'abandoned';
+          execution.retryHistory.push({
+            attemptedAt: new Date(),
+            modelId: execution.modelId,
+            result: 'failed',
+            errorMessage: 'Task is completed or failed - no retry needed',
+            durationMs: 0
+          });
+          await execution.save();
+          continue;
+        }
+
         try {
           await this.retryExecution(execution);
           processed++;
@@ -126,6 +150,21 @@ export class FailedExecutionRetryService {
       const task = await Task.findById(execution.taskId);
       if (!task) {
         throw new Error(`Task ${execution.taskId} not found`);
+      }
+
+      // 🛑 DON'T retry if task is already completed or failed
+      if (task.status === 'completed' || task.status === 'failed') {
+        console.log(`⏹️  [FailedExecutionRetry] Task ${execution.taskId} is ${task.status}, skipping retry`);
+        execution.retryStatus = 'abandoned';
+        execution.retryHistory.push({
+          attemptedAt: new Date(),
+          modelId: execution.modelId,
+          result: 'failed',
+          errorMessage: `Task is ${task.status} - no retry needed`,
+          durationMs: 0
+        });
+        await execution.save();
+        return false;
       }
 
       // Create coordinator and execute

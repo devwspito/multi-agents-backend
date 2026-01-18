@@ -251,8 +251,26 @@ export interface DeveloperJudgeContext {
 export function buildDeveloperJudgePrompt(ctx: DeveloperJudgeContext): string {
   const { story, developer, workspacePath, targetRepository, storyBranchName, commitSHA, architectureBrief, projectRadiography, semanticVerificationSection, testResultsSection } = ctx;
 
-  // Build full repository path
-  const fullRepoPath = workspacePath && targetRepository ? `${workspacePath}/${targetRepository}` : targetRepository || 'unknown';
+  // 🔥🔥🔥 CRITICAL VALIDATION: workspacePath MUST exist for Judge to work correctly 🔥🔥🔥
+  // Without proper workspacePath, Judge will search in the project directory instead of agent workspace
+  if (!workspacePath) {
+    console.error(`\n❌❌❌ [JudgePrompts] CRITICAL: buildDeveloperJudgePrompt called with NULL workspacePath!`);
+    console.error(`   targetRepository: ${targetRepository}`);
+    console.error(`   story: ${story?.title || story?.id}`);
+    console.error(`\n   🚨 This will cause Judge to search in the WRONG directory!`);
+    console.error(`   🚨 Without workspacePath, Judge uses relative paths from project directory`);
+    console.error(`   🚨 Judge MUST have workspacePath to: /var/folders/.../agent-workspace/task-.../\n`);
+
+    // THROW ERROR - DO NOT ALLOW JUDGE TO RUN WITH WRONG PATH
+    throw new Error(
+      `CRITICAL: Judge prompt cannot be built without workspacePath. ` +
+      `This would cause Judge to search in the project directory instead of agent workspace. ` +
+      `Story: ${story?.title || story?.id}, targetRepository: ${targetRepository}`
+    );
+  }
+
+  // Build full repository path - now we know workspacePath is valid
+  const fullRepoPath = `${workspacePath}/${targetRepository}`;
 
   return `# ⚖️ JUDGE AGENT - CODE REVIEW
 
@@ -352,6 +370,52 @@ ${testResultsSection || ''}
 | 4. PATTERNS | Follows project conventions | Uses \`new Model()\` instead of \`createModel()\` |
 | 5. QUALITY | No bugs, has error handling | Try-catch without handling, null pointer risks |
 | 6. TESTS | Tests pass (if they exist) | Tests fail or were broken |
+| 7. PERFORMANCE | Meets performance targets | Obvious performance anti-patterns |
+
+## 📊 PERFORMANCE PROFILER (CHECK FOR ANTI-PATTERNS)
+
+### Frontend Performance Checks:
+| Anti-Pattern | What to Look For | Impact |
+|-------------|------------------|--------|
+| Unnecessary re-renders | Missing useMemo/useCallback for expensive ops | Blocks main thread |
+| Large bundle imports | \`import lodash\` instead of \`import { debounce } from 'lodash'\` | Increases bundle size |
+| Missing lazy loading | Large components not wrapped in React.lazy | Slow initial load |
+| Inline styles/objects | Objects created in render: \`style={{ ... }}\` | Creates new refs each render |
+| Missing list keys | Lists without key prop or using index as key | React diffing performance |
+| Unoptimized images | Large images without lazy loading/sizing | LCP > 2.5s |
+
+### Backend Performance Checks:
+| Anti-Pattern | What to Look For | Impact |
+|-------------|------------------|--------|
+| N+1 queries | Loops with individual DB calls | Response time > 200ms |
+| Missing indexes | Query without indexed field in WHERE/find | Slow queries |
+| Unbounded queries | \`.find({})\` without limit | Memory exhaustion |
+| Sync in async context | fs.readFileSync in request handlers | Blocks event loop |
+| Missing caching | Repeated expensive operations | Unnecessary DB load |
+| Large payload responses | Returning entire documents when only ID needed | Network latency |
+
+### Performance Verification Commands:
+\`\`\`bash
+# Frontend - Check for anti-patterns
+Grep("import lodash|import _ from")  # Should use specific imports
+Grep("useState.*useState.*useState")  # Excessive state (consider reducer)
+Grep("useEffect.*\\[\\]")  # Empty deps - runs only once (intentional?)
+
+# Backend - Check for anti-patterns
+Grep("for.*await.*find|while.*await.*find")  # N+1 query pattern
+Grep("\\.find\\(\\{\\}\\)")  # Unbounded queries
+Grep("readFileSync|writeFileSync")  # Sync in async context
+\`\`\`
+
+### ⚠️ Performance Targets (Flag if violated):
+**Frontend:**
+- First Contentful Paint (FCP): < 1.8s
+- Largest Contentful Paint (LCP): < 2.5s
+- Bundle size per route: < 200KB gzipped
+
+**Backend:**
+- API response time (p95): < 200ms for simple queries
+- Database query time: < 100ms per query
 
 ## 📋 YOUR WORKFLOW (Follow This Order):
 
@@ -408,10 +472,12 @@ Grep("createProject|createUser|createTeam|new Project|new User")
     "requirementsMet": true | false,
     "followsPatterns": true | false,
     "qualityOk": true | false,
-    "testsPassing": true | false
+    "testsPassing": true | false,
+    "performanceOk": true | false
   },
   "filesReviewed": ["List of files you actually read"],
   "issues": ["Specific issues found, with line numbers where possible"],
+  "performanceIssues": ["Any performance anti-patterns found (optional)"],
   "suggestions": ["Improvements for next iteration"]
 }
 \`\`\`

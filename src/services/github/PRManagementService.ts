@@ -1,10 +1,8 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-// @ts-ignore - IEpic is deprecated, file needs refactoring to use IStory
 import { ITask, IEpic } from '../../models/Task';
 import { Repository } from '../../models/Repository';
 import { GitHubService } from '../GitHubService';
-// import { AutoHealingService, IHealingContext } from '../quality/AutoHealingService'; // DEPRECATED - Service removed
 import { NotificationService } from '../NotificationService';
 import { AutoMergeService, IMergeResult } from './AutoMergeService';
 import { BranchCleanupService } from '../cleanup/BranchCleanupService';
@@ -30,22 +28,20 @@ export interface IPRCreationResult {
  * - Creates PRs after all developers complete
  * - Validates changes exist
  * - Searches for existing PRs
- * - Auto-merges PRs to main after QA approval (NEW)
+ * - Auto-merges PRs to main after verification
  * Note: Auto-healing feature temporarily disabled
  */
 export class PRManagementService {
-  // private autoHealingService: AutoHealingService; // DEPRECATED
   private autoMergeService: AutoMergeService;
 
   constructor(private githubService: GitHubService) {
-    // this.autoHealingService = new AutoHealingService(githubService); // DEPRECATED
-    this.autoMergeService = new AutoMergeService(githubService);
+    this.autoMergeService = new AutoMergeService();
   }
 
   /**
    * Create PRs for all completed epics (Multi-Repo Support)
    *
-   * This should be called AFTER QA completes
+   * This should be called AFTER verification completes
    * Follows: 1 Epic = 1 Team = 1 Branch = 1 PR
    * Each epic creates PR in its targetRepository
    */
@@ -345,11 +341,11 @@ export class PRManagementService {
   /**
    * Attempt automatic merge for all open PRs to main
    *
-   * This should be called AFTER all PRs are created and QA approves
+   * This should be called AFTER all PRs are created and verification passes
    * Will automatically merge PRs that:
    * - Have no complex conflicts
    * - Pass all tests
-   * - Are approved by QA
+   * - Pass verification checks
    *
    * @param task - Task with epics containing PR information
    * @param repositories - Repository objects with owner/name

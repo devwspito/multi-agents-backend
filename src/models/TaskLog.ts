@@ -10,7 +10,7 @@ export type LogLevel = 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR' | 'DEBUG';
  */
 export type LogCategory =
   | 'orchestration'    // General orchestration flow
-  | 'agent'           // Agent execution (PM, TL, Dev, QA, MC)
+  | 'agent'           // Agent execution (Planning, TL, Dev, Judge, AutoMerge)
   | 'developer'       // Developer-specific actions
   | 'story'           // Story-level events
   | 'epic'            // Epic-level events
@@ -46,8 +46,8 @@ export interface ITaskLog extends Document {
   message: string;
 
   // Context (optional but recommended)
-  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed' | 'multi-team' | 'error-resolution' | 'contract-testing';
-  agentType?: 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'qa-engineer' | 'merge-coordinator' | 'judge' | 'fixer' | 'team-orchestration' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
+  phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'judge' | 'merge' | 'auto-merge' | 'completed' | 'multi-team' | 'error-resolution';
+  agentType?: 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'verification-fixer' | 'recovery-analyst' | 'team-orchestration' | 'auto-merge' | 'story-merge-agent' | 'git-flow-manager' | 'conflict-resolver';
   agentInstanceId?: string; // For developers: "dev-1", "dev-2", etc.
 
   epicId?: string;
@@ -131,11 +131,11 @@ const taskLogSchema = new Schema<ITaskLog>(
     },
     phase: {
       type: String,
-      enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'e2e', 'completed', 'multi-team', 'error-resolution', 'contract-testing'],
+      enum: ['analysis', 'planning', 'architecture', 'development', 'judge', 'merge', 'auto-merge', 'completed', 'multi-team', 'error-resolution'],
     },
     agentType: {
       type: String,
-      enum: ['planning-agent', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'qa-engineer', 'merge-coordinator', 'judge', 'fixer', 'team-orchestration', 'auto-merge', 'e2e-tester', 'contract-fixer', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
+      enum: ['planning-agent', 'tech-lead', 'developer', 'judge', 'verification-fixer', 'recovery-analyst', 'team-orchestration', 'auto-merge', 'story-merge-agent', 'git-flow-manager', 'conflict-resolver'],
     },
     agentInstanceId: String,
     epicId: String,

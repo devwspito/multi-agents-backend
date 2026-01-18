@@ -1,7 +1,8 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'paused';
-export type AgentType = 'planning-agent' | 'problem-analyst' | 'product-manager' | 'project-manager' | 'tech-lead' | 'developer' | 'judge' | 'qa-engineer' | 'merge-coordinator' | 'fixer' | 'auto-merge' | 'e2e-tester' | 'contract-fixer' | 'team-orchestration' | 'test-creator' | 'contract-tester' | 'error-detective' | 'story-merge-agent' | 'git-flow-manager';
+// Active agent types (legacy types removed: problem-analyst, product-manager, project-manager, qa-engineer, fixer, merge-coordinator, e2e-tester, contract-fixer, test-creator, contract-tester, error-detective)
+export type AgentType = 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'auto-merge' | 'team-orchestration' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -41,10 +42,9 @@ export interface IStory {
   judgeIterations?: number; // Retry count
 
   // 🔥 Cost tracking per story
-  cost_usd?: number; // Total cost for this story (dev + judge iterations + fixer)
+  cost_usd?: number; // Total cost for this story (dev + judge iterations)
   developerCost_usd?: number; // Cost of developer agent
   judgeCost_usd?: number; // Total cost of judge iterations
-  fixerCost_usd?: number; // Cost of fixer agent (if used)
   judgeIterationCosts?: Array<{
     iteration: number;
     cost_usd: number;
@@ -54,7 +54,7 @@ export interface IStory {
 
 /**
  * Epic - Group of related stories
- * Created by ProductManager and used throughout orchestration
+ * Created by Planning phase and used throughout orchestration
  */
 export interface IEpic {
   id: string;
@@ -99,7 +99,7 @@ export interface ITeamMember {
 }
 
 /**
- * AgentStep - Para agentes únicos (PM, PjM, TL, QA, MC)
+ * AgentStep - Para agentes únicos (Planning, TL, Judge, AutoMerge)
  */
 export interface IAgentStep {
   agent: AgentType;
@@ -127,17 +127,6 @@ export interface IAgentStep {
   };
 }
 
-/**
- * Conflict Detection
- */
-export interface IPRConflict {
-  pr1: number;
-  pr2: number;
-  overlappingFiles: string[];
-  severity: 'low' | 'medium' | 'high' | 'critical';
-  autoResolvable: boolean;
-  resolution?: string;
-}
 
 /**
  * Directive - User instruction injected mid-execution
@@ -168,28 +157,6 @@ export interface IOrchestration {
     contextSummary?: string;  // Codebase exploration summary
   };
 
-  // Legacy phases (kept for backward compatibility)
-  // Fase 0: Problem Analyst (único) - Deep problem analysis
-  problemAnalyst?: IAgentStep & {
-    analysis?: any; // Structured analysis data
-  };
-
-  // Fase 1: Product Manager (único) - Legacy, but required for TeamOrchestrationPhase
-  productManager: IAgentStep & {
-    taskComplexity?: 'small' | 'medium' | 'large' | 'epic';
-    recommendedApproach?: string;
-  };
-
-  // Fase 2: Project Manager (único) - Legacy, but required for compatibility
-  projectManager: IAgentStep & {
-    stories?: IStory[]; // Stories creadas dinámicamente
-    totalStories?: number;
-    recommendedTeamSize?: {
-      developers: number;
-      reasoning: string;
-    };
-    epics?: IEpic[]; // Epics from ProductManager
-  };
 
   // Fase 3: Tech Lead (único) - Used by TeamOrchestrationPhase
   techLead: IAgentStep & {
@@ -209,7 +176,7 @@ export interface IOrchestration {
       repositoryName: string;
       branchName: string;
     }[];
-    stories?: IStory[]; // Stories passed from ProjectManager
+    stories?: IStory[]; // Stories passed from Planning phase
   };
 
   // Fase 4: Development Team (MÚLTIPLES - dinámico)
@@ -226,52 +193,8 @@ export interface IOrchestration {
     }[];
   };
 
-  // Fase 4.7: Fixer (arregla errores reportados por QA)
-  fixer?: IAgentStep & {
-    errorType?: string; // lint, build, test
-    filesModified?: string[];
-    changes?: string[];
-    fixed?: boolean;
-    // Last Chance Mode (attempt 2) tracking
-    lastChanceMode?: boolean;
-    lastChanceAnalysis?: {
-      automatable: boolean;
-      fixes?: any[];
-      totalEstimatedCost?: number;
-      reasoning?: string;
-      recommendation?: string;
-    };
-    analysisCost?: number;
-    fixerCost?: number;
-    totalCost?: number;
-    escalated?: boolean;
-    budgetExceeded?: boolean;
-  };
 
-  // Fase 5: QA Engineer (único)
-  qaEngineer?: IAgentStep & {
-    integrationBranch?: string; // Rama temporal con todos los PRs mergeados
-    integrationTestResults?: any;
-    totalPRsTested?: number;
-    previousAttempt?: {
-      output?: string;
-      error?: string;
-      completedAt?: Date;
-    };
-  };
-
-  // Fase 6: Merge Coordinator (único pero observa múltiples PRs)
-  mergeCoordinator?: IAgentStep & {
-    conflictsDetected?: IPRConflict[];
-    resolutionStrategy?: string;
-    finalPR?: {
-      number: number;
-      url: string;
-      branch: string;
-    };
-  };
-
-  // Fase 7: Auto Merge (automático - merge PRs a main después de QA) - NEW
+  // Fase 7: Auto Merge (automático - merge PRs a main después de verificación)
   autoMerge?: IAgentStep & {
     results?: {
       success: boolean;
@@ -284,58 +207,9 @@ export interface IOrchestration {
     }[];
   };
 
-  // Fase 7.5: Test Creator (creates comprehensive test suites before QA validation)
-  testCreator?: IAgentStep & {
-    testsCreated?: number; // Total test files created
-    coveragePercentage?: number | string; // Code coverage achieved (target: >85%) or "N/A" message
-    unitTests?: number;
-    integrationTests?: number;
-    e2eTests?: number;
-  };
-
-  // Fase 8: Contract Testing (verifies API contracts through static analysis)
-  contractTesting?: IAgentStep & {
-    contractsValid?: boolean;
-    backendEndpoints?: number;
-    frontendCalls?: number;
-    contractIssues?: number;
-  };
-
-  // Fase 8.5: Contract Fixer (fixes integration issues detected by Contract Testing)
-  contractFixer?: IAgentStep & {
-    errorType?: string; // endpoint-not-found, cors, payload-mismatch, etc.
-    filesModified?: string[];
-    changes?: string[];
-    fixed?: boolean;
-    attempts?: number; // Number of fix attempts
-    lastErrorHash?: string; // Hash of last error to detect if error changed
-    errorHistory?: Array<{
-      errorHash: string;
-      errorType: string;
-      attempt: number;
-      timestamp: Date;
-    }>;
-  };
-
-  // Fase 9: Error Detective (analyzes runtime errors and provides fix recommendations)
-  errorDetective?: IAgentStep & {
-    errorsAnalyzed?: number;
-    fixesRecommended?: number;
-    automationPossible?: boolean;
-    errorType?: string;
-    severity?: string;
-    rootCauseConfidence?: number;
-    actionableInsights?: string[];
-  };
-
-  // Legacy: Developer phase (used by optimized phases)
-  developers?: IAgentStep & {
-    storiesCompleted?: number;
-    filesModified?: number;
-  };
 
   // Métricas globales
-  currentPhase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'qa' | 'merge' | 'auto-merge' | 'e2e' | 'completed';
+  currentPhase?: 'planning' | 'architecture' | 'development' | 'merge' | 'auto-merge' | 'completed' | 'multi-team';
   phases?: any[]; // Array of phase objects with name, status, startedAt, approval
   totalCost: number;
   totalTokens: number;
@@ -347,8 +221,6 @@ export interface IOrchestration {
     techLead?: { cost_usd: number; tokens: number };
     developers?: { cost_usd: number; tokens: number };
     judge?: { cost_usd: number; tokens: number };
-    fixer?: { cost_usd: number; tokens: number };
-    qa?: { cost_usd: number; tokens: number };
     autoMerge?: { cost_usd: number; tokens: number };
   };
 
@@ -369,7 +241,7 @@ export interface IOrchestration {
   // Auto-aprobación opcional
   // Phases: planning, tech-lead (architecture), team-orchestration, verification, auto-merge
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('planning' | 'tech-lead' | 'team-orchestration' | 'verification' | 'auto-merge' | 'development' | 'judge' | 'fixer')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('planning' | 'tech-lead' | 'team-orchestration' | 'verification' | 'auto-merge' | 'development' | 'judge')[]; // Fases que se auto-aprueban
   supervisorThreshold?: number; // 0-100: Auto-approve when Supervisor score >= threshold (default 80)
   // 📌 Pending approval data for re-emit on socket reconnect
   pendingApproval?: {
@@ -389,7 +261,6 @@ export interface IOrchestration {
       techLead?: string;
       developer?: string;
       judge?: string;
-      fixer?: string;
       verification?: string;
       autoMerge?: string;
     };
@@ -468,6 +339,19 @@ export interface IOrchestration {
     humanGuidance?: string;  // Additional instructions from human
     resolvedBy?: mongoose.Types.ObjectId;
   };
+
+  // 🌿 BRANCH REGISTRY: Persisted branch info for recovery across restarts
+  // Stores all branches created during orchestration (epic, story, feature branches)
+  branchRegistry?: {
+    name: string;
+    type: 'epic' | 'story' | 'feature' | 'hotfix';
+    repository: string;
+    epicId?: string;
+    storyId?: string;
+    createdAt: Date;
+    pushed?: boolean;
+    merged?: boolean;
+  }[];
 }
 
 /**
@@ -535,53 +419,6 @@ export interface ITask extends Document {
 
 // Schemas
 
-const storySchema = new Schema<IStory>(
-  {
-    id: { type: String, required: true },
-    title: { type: String, required: true },
-    description: { type: String, required: true },
-    acceptanceCriteria: [String],
-    assignedTo: String,
-    priority: { type: Number, default: 1 },
-    estimatedComplexity: {
-      type: String,
-      enum: ['trivial', 'simple', 'moderate', 'complex', 'epic'],
-      default: 'moderate',
-    },
-    status: {
-      type: String,
-      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled'],
-      default: 'pending',
-    },
-    dependencies: [String],
-    branchName: String,
-    pullRequestNumber: Number,
-    pullRequestUrl: String,
-    output: String,
-    error: String,
-    startedAt: Date,
-    completedAt: Date,
-    judgeStatus: {
-      type: String,
-      enum: ['pending', 'approved', 'changes_requested', 'not_required'],
-      default: 'not_required',
-    },
-    judgeComments: String,
-    judgeIterations: { type: Number, default: 0 },
-    // 🔥 Cost tracking per story
-    cost_usd: { type: Number, default: 0 }, // Total cost for this story
-    developerCost_usd: { type: Number, default: 0 }, // Cost of developer agent
-    judgeCost_usd: { type: Number, default: 0 }, // Total cost of judge iterations
-    fixerCost_usd: { type: Number, default: 0 }, // Cost of fixer agent (if used)
-    judgeIterationCosts: [{
-      iteration: Number,
-      cost_usd: Number,
-      verdict: { type: String, enum: ['approved', 'rejected'] },
-    }],
-  },
-  { _id: false }
-);
-
 const teamMemberSchema = new Schema<ITeamMember>(
   {
     agentType: {
@@ -607,50 +444,6 @@ const teamMemberSchema = new Schema<ITeamMember>(
     cost_usd: Number,
     startedAt: Date,
     completedAt: Date,
-  },
-  { _id: false }
-);
-
-const agentStepSchema = new Schema<IAgentStep>(
-  {
-    agent: {
-      type: String,
-      enum: ['planning-agent', 'problem-analyst', 'product-manager', 'project-manager', 'tech-lead', 'developer', 'judge', 'qa-engineer', 'merge-coordinator', 'fixer', 'auto-merge', 'e2e-tester', 'contract-fixer', 'team-orchestration', 'test-creator', 'contract-tester', 'error-detective', 'story-merge-agent', 'git-flow-manager'],
-      required: true,
-    },
-    status: {
-      type: String,
-      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled'],
-      default: 'pending',
-    },
-    startedAt: Date,
-    completedAt: Date,
-    output: String,
-    error: String,
-    sessionId: String,
-    usage: {
-      input_tokens: Number,
-      output_tokens: Number,
-      cache_creation_input_tokens: Number,
-      cache_read_input_tokens: Number,
-    },
-    cost_usd: Number,
-  },
-  { _id: false }
-);
-
-const prConflictSchema = new Schema<IPRConflict>(
-  {
-    pr1: { type: Number, required: true },
-    pr2: { type: Number, required: true },
-    overlappingFiles: [String],
-    severity: {
-      type: String,
-      enum: ['low', 'medium', 'high', 'critical'],
-      required: true,
-    },
-    autoResolvable: { type: Boolean, default: false },
-    resolution: String,
   },
   { _id: false }
 );
@@ -692,49 +485,8 @@ const taskSchema = new Schema<ITask>(
       default: 'medium',
     },
     orchestration: {
-      problemAnalyst: {
-        agent: { type: String, default: 'problem-analyst' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        analysis: Schema.Types.Mixed, // Structured analysis data
-      },
-      productManager: {
-        type: agentStepSchema,
-        default: () => ({ agent: 'product-manager', status: 'pending' }),
-      },
-      projectManager: {
-        agent: { type: String, default: 'project-manager' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        stories: [storySchema],
-        totalStories: Number,
-        recommendedTeamSize: {
-          developers: Number,
-          reasoning: String,
-        },
-      },
+      // NOTE: planning field is defined dynamically (Schema.Types.Mixed)
+      // Active phases: planning, techLead, team, judge, autoMerge
       techLead: {
         agent: { type: String, default: 'tech-lead' },
         status: { type: String, default: 'pending' },
@@ -785,68 +537,6 @@ const taskSchema = new Schema<ITask>(
           timestamp: Date,
         }],
       },
-      fixer: {
-        agent: { type: String, default: 'fixer' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        errorType: String,
-        filesModified: [String],
-        changes: [String],
-        fixed: Boolean,
-      },
-      qaEngineer: {
-        agent: { type: String, default: 'qa-engineer' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        integrationBranch: String,
-        integrationTestResults: Schema.Types.Mixed,
-        totalPRsTested: Number,
-      },
-      mergeCoordinator: {
-        agent: { type: String, default: 'merge-coordinator' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        conflictsDetected: [prConflictSchema],
-        resolutionStrategy: String,
-        finalPR: {
-          number: Number,
-          url: String,
-          branch: String,
-        },
-      },
       autoMerge: {
         agent: { type: String, default: 'auto-merge' },
         status: { type: String, default: 'pending' },
@@ -872,79 +562,10 @@ const taskSchema = new Schema<ITask>(
           mergeCommitSha: String,
         }],
       },
-      testCreator: {
-        agent: { type: String, default: 'test-creator' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        testsCreated: Number,
-        coveragePercentage: Schema.Types.Mixed, // Can be Number or String ("N/A" message)
-        unitTests: Number,
-        integrationTests: Number,
-        e2eTests: Number,
-      },
-      contractTesting: {
-        agent: { type: String, default: 'contract-tester' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        contractsValid: Boolean,
-        backendEndpoints: Number,
-        frontendCalls: Number,
-        contractIssues: Number,
-      },
-      contractFixer: {
-        agent: { type: String, default: 'contract-fixer' },
-        status: { type: String, default: 'pending' },
-        startedAt: Date,
-        completedAt: Date,
-        output: String,
-        error: String,
-        sessionId: String,
-        usage: {
-          input_tokens: Number,
-          output_tokens: Number,
-          cache_creation_input_tokens: Number,
-          cache_read_input_tokens: Number,
-        },
-        cost_usd: Number,
-        errorType: String,
-        filesModified: [String],
-        changes: [String],
-        fixed: Boolean,
-        attempts: Number,
-        lastErrorHash: String,
-        errorHistory: [{
-          errorHash: String,
-          errorType: String,
-          attempt: Number,
-          timestamp: Date,
-        }],
-      },
       currentPhase: {
         type: String,
-        enum: ['analysis', 'planning', 'architecture', 'development', 'qa', 'merge', 'auto-merge', 'e2e', 'completed', 'multi-team', 'error-resolution', 'contract-testing'],
-        default: 'analysis',
+        enum: ['planning', 'architecture', 'development', 'merge', 'auto-merge', 'completed', 'multi-team'],
+        default: 'planning',
       },
       totalCost: {
         type: Number,
@@ -961,8 +582,6 @@ const taskSchema = new Schema<ITask>(
         techLead: { cost_usd: Number, tokens: Number },
         developers: { cost_usd: Number, tokens: Number },
         judge: { cost_usd: Number, tokens: Number },
-        fixer: { cost_usd: Number, tokens: Number },
-        qa: { cost_usd: Number, tokens: Number },
         autoMerge: { cost_usd: Number, tokens: Number },
       },
       paused: {
@@ -1050,7 +669,6 @@ const taskSchema = new Schema<ITask>(
           techLead: String,
           developer: String,
           judge: String,
-          fixer: String,
           verification: String,
           autoMerge: String,
         },

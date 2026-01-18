@@ -3,14 +3,19 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { PRManagementService } from '../github/PRManagementService';
 import { GitHubService } from '../GitHubService';
+// 📦 Utility helpers
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { isEmpty, isNotEmpty } from './utils/ArrayHelpers';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
 
 /**
  * Auto Merge Phase
  *
- * Automatically merges all PRs to main after QA approval.
+ * Automatically merges all PRs to main after verification passes.
  *
  * Flow:
- * 1. QA completes successfully
+ * 1. Verification completes successfully
  * 2. Auto-Merge Phase runs
  * 3. For each PR:
  *    a. Detect conflicts
@@ -35,51 +40,101 @@ export class AutoMergePhase extends BasePhase {
   }
 
   /**
-   * Skip if auto-merge is disabled or no PRs exist
+   * 🎯 UNIFIED MEMORY: Skip if auto-merge is disabled, already completed, or no PRs exist
+   *
+   * Uses SkipLogicHelper for consistent skip behavior.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
 
-    // Refresh task from DB
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
-
-    // Check if AutoMerge step exists and is completed
-    const autoMerge = (context.task.orchestration as any).autoMerge;
-    if (autoMerge?.status === 'completed') {
-      console.log(`[SKIP] AutoMerge already completed`);
+    // Use centralized skip logic first
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'AutoMerge' });
+    if (skipResult.shouldSkip) {
       return true;
     }
 
     // Check if auto-merge is disabled
     const autoMergeEnabled = context.getData<boolean>('autoMergeEnabled') ?? true;
     if (!autoMergeEnabled) {
-      console.log(`[SKIP] Auto-merge is disabled`);
+      console.log(`   ⏭️ Auto-merge is disabled`);
       return true;
     }
 
-    // Check if TeamOrchestration completed (where Developers + Judge run)
-    // Note: QA Phase was removed - Judge now validates code quality per story
+    // Check if TeamOrchestration completed (prerequisite)
     const teamOrchStatus = (context.task.orchestration as any).teamOrchestration?.status;
     if (teamOrchStatus !== 'completed' && teamOrchStatus !== 'partial') {
-      console.log(`[SKIP] TeamOrchestration must complete before auto-merge (current: ${teamOrchStatus || 'not started'})`);
+      console.log(`   ⏭️ TeamOrchestration must complete before auto-merge (current: ${teamOrchStatus || 'not started'})`);
       return true;
     }
 
     // Check if there are PRs to merge
+    // 🔥 RECOVERY: Check BOTH EventStore and UnifiedMemory for PR info
     const { eventStore } = await import('../EventStore');
     const state = await eventStore.getCurrentState(task._id as any);
     const epics = state.epics || [];
-    const epicsWithPRs = epics.filter((epic: any) => epic.pullRequestNumber);
+    const taskId = (task._id as any).toString();
 
-    if (epicsWithPRs.length === 0) {
-      console.log(`[SKIP] No PRs found to merge`);
+    // Type for epic with PR info
+    interface EpicWithPR {
+      id: string;
+      pullRequestNumber?: number;
+      pullRequestUrl?: string;
+      source?: string;
+    }
+
+    // Collect all epics with PRs
+    const epicsWithPRs: EpicWithPR[] = [];
+
+    // First, add EventStore epics that have PRs
+    for (const epic of epics) {
+      if (epic.pullRequestNumber) {
+        epicsWithPRs.push({
+          id: epic.id,
+          pullRequestNumber: epic.pullRequestNumber,
+          pullRequestUrl: epic.pullRequestUrl,
+          source: 'EventStore',
+        });
+      }
+    }
+
+    // 🔥 UNIFIED MEMORY FALLBACK: If EventStore has no PRs, check UnifiedMemory
+    if (isEmpty(epicsWithPRs)) {
+      console.log(`   🔄 [AutoMerge] EventStore has no PRs - checking UnifiedMemory...`);
+      try {
+        const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+        if (resumption.completedEpics && resumption.completedEpics.length > 0) {
+          // For each completed epic, check if we have PR info in UnifiedMemory
+          for (const epicId of resumption.completedEpics) {
+            const prInfo = await unifiedMemoryService.getEpicPR(taskId, epicId);
+            if (prInfo?.prUrl && prInfo?.prNumber) {
+              // Add to epics array with PR info for merge processing
+              (epicsWithPRs as EpicWithPR[]).push({
+                id: epicId,
+                pullRequestNumber: prInfo.prNumber,
+                pullRequestUrl: prInfo.prUrl,
+                source: 'UnifiedMemory',
+              });
+              console.log(`   🔄 [AutoMerge] Restored PR from UnifiedMemory: Epic ${epicId} -> PR #${prInfo.prNumber}`);
+            }
+          }
+        }
+      } catch (error: any) {
+        console.log(`   ⚠️ [AutoMerge] UnifiedMemory PR recovery failed: ${error.message}`);
+      }
+    }
+
+    if (isEmpty(epicsWithPRs)) {
+      console.log(`   ⏭️ No PRs found to merge`);
       return true;
     }
 
+    // 🔥 Store recovered PRs in context for executePhase to use
+    if (epicsWithPRs.some((e) => e.source === 'UnifiedMemory')) {
+      context.setData('recoveredEpicsWithPRs', epicsWithPRs);
+      console.log(`   ✅ [AutoMerge] Recovered ${epicsWithPRs.length} PR(s) total`);
+    }
+
+    console.log(`   ❌ Phase not completed - AutoMerge must execute`);
     return false;
   }
 
@@ -114,7 +169,7 @@ export class AutoMergePhase extends BasePhase {
       const repositories = context.getData<any[]>('repositories') || [];
       const workspacePath = context.getData<string>('workspacePath');
 
-      if (repositories.length === 0 || !workspacePath) {
+      if (isEmpty(repositories) || !workspacePath) {
         throw new Error('No repositories or workspace path available');
       }
 
@@ -164,7 +219,7 @@ export class AutoMergePhase extends BasePhase {
       });
 
       // If any PRs need human review, notify
-      if (needsReview.length > 0) {
+      if (isNotEmpty(needsReview)) {
         const message = `⚠️  ${needsReview.length} PR(s) need human review due to complex conflicts or test failures`;
         NotificationService.emitConsoleLog(taskId, 'warn', message);
 
@@ -184,7 +239,7 @@ export class AutoMergePhase extends BasePhase {
       // 🔌 INTEGRATION TASK PATTERN: Create follow-up task if needed
       const pendingIntegration = (task.orchestration as any).pendingIntegrationTask;
       if (pendingIntegration && pendingIntegration.status === 'pending') {
-        const allMergedSuccessfully = successfulMerges.length === mergeResults.length && failed.length === 0;
+        const allMergedSuccessfully = successfulMerges.length === mergeResults.length && isEmpty(failed);
 
         if (allMergedSuccessfully) {
           // ✅ All PRs merged - Create Integration Task automatically
