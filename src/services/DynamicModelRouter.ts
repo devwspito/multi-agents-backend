@@ -86,16 +86,15 @@ class DynamicModelRouterClass extends EventEmitter {
   // Agent minimum tiers (some agents should never use Haiku)
   private readonly AGENT_MIN_TIERS: Record<string, ModelTier> = {
     'planning-agent': 'sonnet',
-    'problem-analyst': 'sonnet',
     'tech-lead': 'sonnet',
     'judge': 'sonnet',
-    'fixer': 'sonnet',
+    'verification-fixer': 'sonnet',
+    'recovery-analyst': 'sonnet',
   };
 
   // Agents that can use Haiku for simple tasks
   private readonly HAIKU_ELIGIBLE_AGENTS = [
     'developer',      // Simple file operations
-    'qa-engineer',    // Basic test execution
     'auto-merge',     // Git operations
   ];
 

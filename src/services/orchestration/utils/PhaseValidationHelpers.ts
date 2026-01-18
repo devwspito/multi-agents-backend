@@ -15,7 +15,7 @@ import { validateGitRemoteUrl } from '../../../utils/safeGitExecution';
  * Validate retry limit hasn't been exceeded
  *
  * @param context - Orchestration context
- * @param phaseName - Name of the phase (e.g., 'productManager', 'techLead')
+ * @param phaseName - Name of the phase (e.g., 'planning', 'techLead', 'developers')
  * @param maxRetries - Maximum allowed retries (default: 3)
  * @throws Error if retry limit exceeded
  */

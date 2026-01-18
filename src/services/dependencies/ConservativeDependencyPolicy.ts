@@ -14,7 +14,6 @@
  * actual code dependencies and only adds necessary constraints.
  */
 
-// @ts-ignore - IEpic is deprecated, file needs refactoring to use IStory
 import { IEpic } from '../../models/Task';
 
 export interface PolicyApplicationResult {

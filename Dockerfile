@@ -1,16 +1,23 @@
+# ============================================================================
 # Multi-Agent Platform - Production Dockerfile
-# Multi-stage build for smaller final image
+# ============================================================================
+# Multi-stage build for optimal image size and security
+#
+# Build: docker build -t multi-agents-backend .
+# Run:   docker-compose -f docker-compose.prod.yml up -d
+# ============================================================================
 
+# ============================================================================
 # Stage 1: Build
+# ============================================================================
 FROM node:20-alpine AS builder
 
-# Install git (required for GitHub operations)
-RUN apk add --no-cache git
-
-# Create app directory
 WORKDIR /app
 
-# Copy package files
+# Install build dependencies (needed for bcrypt native module)
+RUN apk add --no-cache python3 make g++ git
+
+# Copy package files first for better caching
 COPY package*.json ./
 
 # Install ALL dependencies (including devDependencies for build)
@@ -22,36 +29,56 @@ COPY . .
 # Build TypeScript
 RUN npm run build
 
-# Stage 2: Production
-FROM node:20-alpine
+# Prune devDependencies for production
+RUN npm prune --production
 
-# Install git (required for GitHub operations at runtime)
-RUN apk add --no-cache git
+# ============================================================================
+# Stage 2: Production Runtime
+# ============================================================================
+FROM node:20-alpine AS production
 
-# Create app directory
+# Labels for image metadata
+LABEL org.opencontainers.image.title="Multi-Agent Platform Backend"
+LABEL org.opencontainers.image.description="Autonomous software development with Claude Agent SDK"
+LABEL org.opencontainers.image.version="2.0.0"
+
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Install runtime dependencies only
+# - git: Required for agent git operations
+# - openssh-client: For git SSH operations (optional)
+RUN apk add --no-cache git openssh-client
 
-# Install only production dependencies
-RUN npm ci --only=production
+# Create non-root user for security
+RUN addgroup -g 1001 -S agents && \
+    adduser -S -D -H -u 1001 -h /app -s /sbin/nologin -G agents agents
 
-# Copy built code from builder stage
+# Copy built artifacts from builder
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
 
-# Copy necessary runtime files (if any .env files exist, they'll be copied)
-COPY --from=builder /app/.env* ./ 2>/dev/null || true
+# Copy any additional required files
+COPY --from=builder /app/CLAUDE.md ./CLAUDE.md
 
-# Create workspaces directory
-RUN mkdir -p /app/workspaces
+# Create workspace directory with correct permissions
+RUN mkdir -p /mnt/data/agent-workspace && \
+    chown -R agents:agents /mnt/data/agent-workspace
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV AGENT_WORKSPACE_DIR=/mnt/data/agent-workspace
 
 # Expose port
 EXPOSE 3001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3001/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD node -e "require('http').get('http://localhost:3001/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+
+# Switch to non-root user
+USER agents
 
 # Start application
-CMD ["npm", "start"]
+CMD ["node", "dist/index.js"]

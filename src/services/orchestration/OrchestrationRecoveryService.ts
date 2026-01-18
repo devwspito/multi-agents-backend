@@ -2,6 +2,11 @@ import { Task, ITask } from '../../models/Task';
 import { OrchestrationCoordinator } from './OrchestrationCoordinator';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { eventStore } from '../EventStore';
+import { AgentArtifactService } from '../AgentArtifactService';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 /**
  * OrchestrationRecoveryService
@@ -11,8 +16,13 @@ import { LogService } from '../logging/LogService';
  * Estrategia de recuperación:
  * 1. Buscar tasks con status='in_progress' al iniciar servidor
  * 2. Verificar integridad de workspace y repositorios
- * 3. Reconstruir contexto desde MongoDB y EventStore
+ * 3. Reconstruir contexto desde MongoDB, Local y EventStore (con fallback)
  * 4. Reanudar desde la última fase completada
+ *
+ * Fuentes de datos (en orden de prioridad):
+ * - MongoDB: Principal y en tiempo real
+ * - Local: Fallback si MongoDB está vacío/incompleto
+ * - GitHub: Último recurso (clone del repo con .agents/)
  *
  * Manejo de fases:
  * - Fases completadas: Skip (ya tienen output en DB)
@@ -42,9 +52,11 @@ export class OrchestrationRecoveryService {
       console.log('🔄 [Recovery] Starting orchestration recovery...');
 
       // Buscar tasks interrumpidas usando lean() para evitar validación de esquema
+      // Explicitly exclude cancelled tasks for safety
       const interruptedTasksRaw = await Task.find({
         status: 'in_progress',
         'orchestration.paused': { $ne: true }, // Excluir tasks pausadas manualmente
+        'orchestration.cancelRequested': { $ne: true }, // Excluir tasks canceladas
       })
         .lean()
         .exec();
@@ -156,9 +168,14 @@ export class OrchestrationRecoveryService {
       );
 
       // Verificar integridad del workspace
-      const workspaceExists = await this.verifyWorkspace(task);
-      if (!workspaceExists) {
+      const workspaceInfo = await this.getWorkspaceInfo(task);
+
+      if (!workspaceInfo.exists) {
         console.log(`⚠️  [Recovery] Workspace missing for task ${taskId} - will re-clone`);
+      } else {
+        // 🔄 LOCAL FALLBACK: Sync events from Local to MongoDB if MongoDB is empty
+        console.log(`📦 [Recovery] Checking for Local backup data...`);
+        await this.syncFromLocalIfNeeded(taskId, workspaceInfo.path, workspaceInfo.primaryRepo);
       }
 
       console.log(`✅ [Recovery] Starting orchestration for task ${taskId}`);
@@ -211,20 +228,100 @@ export class OrchestrationRecoveryService {
   }
 
   /**
-   * Verifica si el workspace aún existe
+   * Get workspace information including path and primary repository
    */
-  private async verifyWorkspace(task: ITask): Promise<boolean> {
+  private async getWorkspaceInfo(task: ITask): Promise<{
+    exists: boolean;
+    path: string;
+    primaryRepo: string | null;
+  }> {
     try {
-      const fs = require('fs');
-      const path = require('path');
-      const os = require('os');
-
       const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
       const taskWorkspace = path.join(workspaceDir, `task-${task._id}`);
 
-      return fs.existsSync(taskWorkspace);
-    } catch {
-      return false;
+      const exists = fs.existsSync(taskWorkspace);
+
+      // Find primary repository (first repo in the workspace)
+      let primaryRepo: string | null = null;
+      if (exists) {
+        const contents = fs.readdirSync(taskWorkspace);
+        // Look for directories that could be repos (exclude hidden folders)
+        for (const item of contents) {
+          const itemPath = path.join(taskWorkspace, item);
+          if (fs.statSync(itemPath).isDirectory() && !item.startsWith('.')) {
+            // Check if it's a git repo
+            if (fs.existsSync(path.join(itemPath, '.git'))) {
+              primaryRepo = item;
+              break;
+            }
+          }
+        }
+      }
+
+      return { exists, path: taskWorkspace, primaryRepo };
+    } catch (error: any) {
+      // 🔥 FIX: Log error instead of silently swallowing
+      console.warn(`⚠️ [Recovery] Error checking workspace for task ${task._id}: ${error.message}`);
+      return { exists: false, path: '', primaryRepo: null };
+    }
+  }
+
+  /**
+   * Sync data from Local files to MongoDB if MongoDB is empty
+   * This is the Local → MongoDB fallback for recovery
+   */
+  private async syncFromLocalIfNeeded(
+    taskId: string,
+    workspacePath: string,
+    primaryRepo: string | null
+  ): Promise<void> {
+    if (!primaryRepo) {
+      console.log(`⚠️ [Recovery] No repository found in workspace, skipping Local sync`);
+      return;
+    }
+
+    try {
+      // 1. Sync EventStore events from Local to MongoDB
+      const eventSyncResult = await eventStore.syncFromLocal(taskId, workspacePath, primaryRepo);
+      if (eventSyncResult.eventsRestored > 0) {
+        console.log(`✅ [Recovery] Restored ${eventSyncResult.eventsRestored} events from Local`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📦 Restored ${eventSyncResult.eventsRestored} events from Local backup`
+        );
+      }
+
+      // 2. Load orchestration timeline from Local and log info
+      const timeline = AgentArtifactService.loadOrchestrationTimeline(workspacePath, primaryRepo);
+      if (timeline) {
+        console.log(`📦 [Recovery] Found Local timeline:`);
+        console.log(`   - Last phase: ${timeline.data?.currentPhase || 'unknown'}`);
+        console.log(`   - Phases completed: ${timeline.data?.phasesCompleted?.length || 0}`);
+        console.log(`   - Epics: ${timeline.data?.epics?.length || 0}`);
+        console.log(`   - Last updated: ${timeline._metadata?.savedAt || 'unknown'}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📦 Local timeline: ${timeline.data?.phasesCompleted?.length || 0} phases completed, last phase: ${timeline.data?.currentPhase || 'unknown'}`
+        );
+      }
+
+      // 3. Check for agent artifacts (epics, architecture, etc.)
+      const planningArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'planning');
+      const techleadArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'techlead');
+      const judgeArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'judge');
+
+      if (planningArtifacts.length > 0 || techleadArtifacts.length > 0 || judgeArtifacts.length > 0) {
+        console.log(`📦 [Recovery] Found Local artifacts:`);
+        console.log(`   - Planning: ${planningArtifacts.length} files`);
+        console.log(`   - TechLead: ${techleadArtifacts.length} files`);
+        console.log(`   - Judge: ${judgeArtifacts.length} files`);
+      }
+
+    } catch (error: any) {
+      console.warn(`⚠️ [Recovery] Local sync failed (non-blocking): ${error.message}`);
     }
   }
 

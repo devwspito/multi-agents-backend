@@ -241,3 +241,162 @@ export function detectUncommittedWork(developerOutput: string): boolean {
   // Work done but not committed
   return hasCodeChanges && (!hasFinishedMarker || !hasCommitSHA || !hasGitCommands);
 }
+
+// ============================================================================
+// GIT FETCH WITH RETRY - Exponential backoff for network operations
+// ============================================================================
+
+import { GIT_TIMEOUTS, RETRY_CONFIG, calculateBackoffDelay } from '../constants/Timeouts';
+
+export interface GitFetchResult {
+  success: boolean;
+  attempt: number;
+  error?: string;
+}
+
+/**
+ * Git fetch with exponential backoff retry
+ *
+ * Replaces scattered retry logic in DevelopersPhase, JudgePhase, etc.
+ */
+export async function gitFetchWithRetry(
+  repoPath: string,
+  options: {
+    maxRetries?: number;
+    timeout?: number;
+    prune?: boolean;
+  } = {}
+): Promise<GitFetchResult> {
+  const {
+    maxRetries = RETRY_CONFIG.GIT_FETCH_MAX_RETRIES,
+    timeout = GIT_TIMEOUTS.FETCH,
+    prune = true,
+  } = options;
+
+  const fetchCommand = prune ? 'git fetch origin --prune' : 'git fetch origin';
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      safeGitExecSync(`cd "${repoPath}" && ${fetchCommand}`, {
+        encoding: 'utf8',
+        timeout,
+      });
+
+      return { success: true, attempt };
+    } catch (error: any) {
+      console.warn(`⚠️ [Git Fetch] Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
+
+      if (attempt < maxRetries) {
+        const waitMs = calculateBackoffDelay(attempt);
+        console.log(`   ⏳ Waiting ${waitMs}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      } else {
+        return {
+          success: false,
+          attempt,
+          error: `Git fetch failed after ${maxRetries} attempts: ${error.message}`,
+        };
+      }
+    }
+  }
+
+  return { success: false, attempt: maxRetries, error: 'Unexpected exit from retry loop' };
+}
+
+// ============================================================================
+// ENSURE BRANCH ON REMOTE - Push and verify branch exists
+// ============================================================================
+
+export interface EnsureBranchResult {
+  success: boolean;
+  existed: boolean;
+  pushed: boolean;
+  error?: string;
+}
+
+/**
+ * Ensure branch exists on remote, pushing if necessary
+ *
+ * Replaces verbose multi-step branch verification logic in DevelopersPhase
+ */
+export async function ensureBranchOnRemote(
+  repoPath: string,
+  branchName: string,
+  options: {
+    force?: boolean;
+    setUpstream?: boolean;
+    timeout?: number;
+  } = {}
+): Promise<EnsureBranchResult> {
+  const {
+    force = false,
+    setUpstream = true,
+    timeout = GIT_TIMEOUTS.PUSH,
+  } = options;
+
+  try {
+    // Check if branch exists on remote
+    let existed = false;
+    try {
+      safeGitExecSync(`cd "${repoPath}" && git ls-remote --heads origin ${branchName}`, {
+        encoding: 'utf8',
+        timeout: GIT_TIMEOUTS.LS_REMOTE,
+      });
+      existed = true;
+      console.log(`   📌 Branch ${branchName} already exists on remote`);
+    } catch {
+      console.log(`   📌 Branch ${branchName} not on remote - will push`);
+    }
+
+    // Push branch
+    const forceFlag = force ? '--force' : '';
+    const upstreamFlag = setUpstream ? '-u' : '';
+    const pushCommand = `cd "${repoPath}" && git push ${forceFlag} ${upstreamFlag} origin ${branchName}`.replace(/\s+/g, ' ');
+
+    safeGitExecSync(pushCommand, {
+      encoding: 'utf8',
+      timeout,
+    });
+
+    console.log(`   ✅ Branch ${branchName} pushed to remote`);
+
+    return {
+      success: true,
+      existed,
+      pushed: true,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      existed: false,
+      pushed: false,
+      error: `Failed to ensure branch on remote: ${error.message}`,
+    };
+  }
+}
+
+/**
+ * Get current branch name
+ */
+export function getCurrentBranch(repoPath: string): string | null {
+  try {
+    return safeGitExecSync(`cd "${repoPath}" && git rev-parse --abbrev-ref HEAD`, {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get current commit SHA
+ */
+export function getCurrentCommitSHA(repoPath: string): string | null {
+  try {
+    return safeGitExecSync(`cd "${repoPath}" && git rev-parse HEAD`, {
+      encoding: 'utf8',
+    }).trim();
+  } catch {
+    return null;
+  }
+}

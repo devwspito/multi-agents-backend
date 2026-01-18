@@ -247,14 +247,12 @@ export class AgentMemoryBridge {
   recallForPhase(phase: string, limit: number = 10): MemoryEntry[] {
     // Get relevant memories for this phase
     const phaseRelevance: Record<string, MemoryType[]> = {
-      'problem-analyst': ['pattern', 'context', 'error'],
-      'product-manager': ['decision', 'convention', 'context'],
-      'project-manager': ['dependency', 'decision'],
+      'planning-agent': ['pattern', 'context', 'error', 'decision', 'convention', 'dependency'],
       'tech-lead': ['pattern', 'decision', 'security', 'performance'],
       'developer': ['pattern', 'convention', 'error', 'success', 'test'],
       'judge': ['pattern', 'security', 'error', 'convention'],
-      'qa-engineer': ['test', 'error', 'pattern'],
-      'fixer': ['error', 'success', 'pattern'],
+      'verification-fixer': ['error', 'success', 'pattern'],
+      'recovery-analyst': ['error', 'pattern', 'context'],
       'auto-merge': ['convention', 'decision']
     };
 

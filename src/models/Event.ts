@@ -2,6 +2,10 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 /**
  * Event Types - All possible events in the orchestration flow
+ *
+ * NOTE: Legacy event types (ProductManager*, ProjectManager*, QA*, Fixer*, etc.)
+ * are kept for backwards compatibility with existing events in the database.
+ * New events should use the active types only.
  */
 export type EventType =
   // Task lifecycle
@@ -14,92 +18,79 @@ export type EventType =
   | 'TaskResumed'
   | 'OrchestrationFailed'
 
-  // Unified Planning events (replaces ProductManager + ProjectManager)
+  // Unified Planning events (ACTIVE)
   | 'PlanningStarted'
   | 'PlanningCompleted'
   | 'PlanningFailed'
   | 'PlanningApproved'
   | 'PlanningRejected'
 
-  // Product Manager events (legacy)
-  | 'ProductManagerStarted'
-  | 'ProductManagerCompleted'
-  | 'ProductManagerFailed'
-  | 'ProductManagerApproved'
-  | 'ProductManagerRejected'
-
-  // Project Manager events
-  | 'ProjectManagerStarted'
-  | 'ProjectManagerCompleted'
-  | 'ProjectManagerFailed'
-  | 'ProjectManagerApproved'
-  | 'ProjectManagerRejected'
-
-  // Tech Lead events
+  // Tech Lead events (ACTIVE)
   | 'TechLeadStarted'
   | 'TechLeadCompleted'
   | 'TechLeadFailed'
   | 'TechLeadApproved'
   | 'TechLeadRejected'
   | 'EpicCreated'
+  | 'EpicBranchCreated'
   | 'StoryCreated'
   | 'TeamCompositionDefined'
   | 'EnvironmentConfigDefined'
 
-  // Branch setup events (DEPRECATED - BranchSetupPhase removed, incompatible with IStory)
-  // | 'BranchSetupStarted'
-  // | 'BranchCreated'
-  // | 'BranchPushed'
-  // | 'BranchSetupCompleted'
-  // | 'BranchSetupFailed'
-
-  // Developer events
+  // Developer events (ACTIVE)
   | 'DeveloperStarted'
   | 'StoryStarted'
   | 'StoryBranchCreated'
   | 'StoryCompleted'
   | 'StoryFailed'
   | 'DevelopersCompleted'
-  // 🔄 Session checkpoint for mid-execution recovery
   | 'StorySessionCheckpoint'
 
-  // QA events
-  | 'QAStarted'
-  | 'QACompleted'
-  | 'QAFailed'
-  | 'QAApproved'
-  | 'QARejected'
-
-  // PR events
+  // PR events (ACTIVE)
   | 'PRCreated'
   | 'PRApprovalRequested'
   | 'PRApproved'
   | 'PRRejected'
   | 'PRMerged'
 
-  // Merge events
+  // Auto-Merge events (ACTIVE)
+  | 'AutoMergeStarted'
+  | 'AutoMergeCompleted'
+  | 'AutoMergeFailed'
+
+  // Team/Developer events (ACTIVE - optimized phases)
+  | 'TeamDevelopersCompleted'
+  | 'TechLeadTeamCompleted'
+
+  // ==== LEGACY EVENT TYPES (kept for backwards compatibility) ====
+  // These are no longer created but may exist in the database
+  | 'ProductManagerStarted'
+  | 'ProductManagerCompleted'
+  | 'ProductManagerFailed'
+  | 'ProductManagerApproved'
+  | 'ProductManagerRejected'
+  | 'ProjectManagerStarted'
+  | 'ProjectManagerCompleted'
+  | 'ProjectManagerFailed'
+  | 'ProjectManagerApproved'
+  | 'ProjectManagerRejected'
+  | 'QAStarted'
+  | 'QACompleted'
+  | 'QAFailed'
+  | 'QAApproved'
+  | 'QARejected'
   | 'MergeCoordinatorStarted'
   | 'MergeCoordinatorCompleted'
   | 'MergeCoordinatorFailed'
-
-  // Fixer events
   | 'FixerStarted'
   | 'FixerCompleted'
   | 'FixerFailed'
-
-  // Test Creator events
   | 'TestCreatorStarted'
   | 'TestCreatorCompleted'
   | 'TestCreatorFailed'
-
-  // Error Detective events
   | 'ErrorDetectiveStarted'
   | 'ErrorDetectiveCompleted'
-  | 'ErrorDetectiveFailed'
-
-  // Team/Developer events (optimized phases)
-  | 'TeamDevelopersCompleted'
-  | 'TechLeadTeamCompleted';
+  | 'ErrorDetectiveFailed';
 
 /**
  * Event - Immutable record of something that happened

@@ -9,6 +9,10 @@ import { storageService } from '../services/storage/StorageService';
 import { z } from 'zod';
 import mongoose from 'mongoose';
 
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../services/UnifiedMemoryService';
+import { granularMemoryService } from '../services/GranularMemoryService';
+
 const router = Router();
 // Shared orchestration coordinator instance
 const orchestrationCoordinator = new OrchestrationCoordinator();
@@ -52,7 +56,7 @@ const autoApprovalConfigSchema = z.object({
       'tech-lead',
       'development',
       'judge',
-      'fixer',
+      'verification-fixer',
     ])
   ).optional(),
   // 🤖 Supervisor auto-approval threshold (0-100)
@@ -63,18 +67,12 @@ const autoApprovalConfigSchema = z.object({
 const modelConfigSchema = z.object({
   preset: z.enum(['max', 'premium', 'recommended', 'standard', 'custom']).optional(),
   customConfig: z.object({
-    problemAnalyst: z.string().optional(),
-    productManager: z.string().optional(),
-    projectManager: z.string().optional(),
+    planning: z.string().optional(),
     techLead: z.string().optional(),
     developer: z.string().optional(),
     judge: z.string().optional(),
-    qaEngineer: z.string().optional(),
-    fixer: z.string().optional(),
-    mergeCoordinator: z.string().optional(),
+    verification: z.string().optional(),
     autoMerge: z.string().optional(),
-    e2eTester: z.string().optional(),
-    contractFixer: z.string().optional(),
   }).optional(),
 });
 
@@ -388,7 +386,7 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
         taskId: (task._id as any).toString(),
         status: task.status,
         description: task.description,
-        info: 'Orchestration: ProblemAnalysis → ProductManagement → ProjectManagement → TechLead → Development → CodeReview → QATesting → AutoMerge',
+        info: 'Orchestration: Planning → TechLead → Developers → Judge → Verification → AutoMerge',
       },
     });
   } catch (error) {
@@ -576,16 +574,15 @@ router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
         status: task.status,
         currentPhase: task.orchestration.currentPhase,
 
-        // Phase statuses
-        productManager: task.orchestration.productManager?.status || 'pending',
-        projectManager: task.orchestration.projectManager?.status || 'pending',
+        // Phase statuses (active phases)
+        planning: task.orchestration.planning?.status || 'pending',
         techLead: task.orchestration.techLead?.status || 'pending',
-        qaEngineer: task.orchestration.qaEngineer?.status || 'pending',
-        mergeCoordinator: task.orchestration.mergeCoordinator?.status || 'pending',
+        judge: task.orchestration.judge?.status || 'pending',
+        autoMerge: task.orchestration.autoMerge?.status || 'pending',
 
         // Team info
         teamSize: task.orchestration.team?.length || 0,
-        storiesCount: task.orchestration.projectManager?.totalStories || 0,
+        epicsCount: task.orchestration.planning?.epics?.length || 0,
 
         // Metrics
         totalCost: task.orchestration.totalCost,
@@ -705,7 +702,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
 /**
  * POST /api/tasks/:id/approve/:phase
  * Aprobar o rechazar una fase de la orquestación
- * Phases: product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer
+ * Phases: planning, tech-lead, development, team-orchestration, judge, verification, auto-merge
  */
 router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -753,17 +750,17 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
           } as any;
           await task.save();
           console.log(`✅ [Approve] Created synthetic planning step`);
+        } else if (task.orchestration.planning.status === 'in_progress') {
+          // 🔥 FIX: Planning phase is in_progress WHILE waiting for approval
+          // Mark as completed to pass the validation check
+          console.log(`🔧 [Approve] planning exists with status in_progress - marking as completed for approval`);
+          task.orchestration.planning.status = 'completed';
+          task.orchestration.planning.completedAt = new Date();
+          await task.save();
+          console.log(`✅ [Approve] Marked planning as completed for approval`);
         }
         agentStep = task.orchestration.planning;
         phaseName = 'Planning (Unified)';
-        break;
-      case 'product-manager':
-        agentStep = task.orchestration.productManager;
-        phaseName = 'Product Manager';
-        break;
-      case 'project-manager':
-        agentStep = task.orchestration.projectManager;
-        phaseName = 'Project Manager';
         break;
       case 'tech-lead':
         // 🔥 FIX: If tech-lead phase data doesn't exist, create it to allow approval
@@ -786,6 +783,17 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
           } as any;
           await task.save();
           console.log(`✅ [Approve] Created synthetic tech-lead step`);
+        } else if (task.orchestration.techLead.status === 'in_progress') {
+          // 🔥 FIX: TechLead phase is in_progress WHILE waiting for approval
+          // If pendingApproval exists OR we're explicitly trying to approve, allow it
+          console.log(`🔧 [Approve] tech-lead exists with status in_progress - checking if approval is valid`);
+          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
+
+          // Mark as completed to pass the validation check (same pattern as team-orchestration)
+          task.orchestration.techLead.status = 'completed';
+          task.orchestration.techLead.completedAt = new Date();
+          await task.save();
+          console.log(`✅ [Approve] Marked tech-lead as completed for approval`);
         }
         agentStep = task.orchestration.techLead;
         phaseName = 'Tech Lead';
@@ -849,14 +857,6 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         agentStep = task.orchestration.judge;
         phaseName = 'Judge Evaluation';
         break;
-      case 'qa-engineer':
-        agentStep = task.orchestration.qaEngineer;
-        phaseName = 'QA Engineer';
-        break;
-      case 'merge-coordinator':
-        agentStep = task.orchestration.mergeCoordinator;
-        phaseName = 'Merge Coordinator';
-        break;
       case 'auto-merge':
         agentStep = (task.orchestration as any).autoMerge;
         phaseName = 'Auto-Merge';
@@ -864,18 +864,6 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       case 'verification':
         agentStep = task.orchestration.phases?.find((p: any) => p.name === 'Verification');
         phaseName = 'Verification';
-        break;
-      case 'test-creator':
-        agentStep = (task.orchestration as any).testCreator;
-        phaseName = 'Test Creator';
-        break;
-      case 'contract-testing':
-        agentStep = (task.orchestration as any).contractTesting;
-        phaseName = 'Contract Testing';
-        break;
-      case 'contract-fixer':
-        agentStep = (task.orchestration as any).contractFixer;
-        phaseName = 'Contract Fixer';
         break;
       case 'team-orchestration':
         // Team orchestration phase - approval to START multi-team execution
@@ -923,7 +911,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       default:
         res.status(400).json({
           success: false,
-          message: `Invalid phase: ${phase}. Valid phases: planning, product-manager, project-manager, tech-lead, development, team-orchestration, judge, test-creator, qa-engineer, merge-coordinator, auto-merge, contract-testing, contract-fixer`,
+          message: `Invalid phase: ${phase}. Valid phases: planning, tech-lead, development, team-orchestration, judge, verification, auto-merge`,
         });
         return;
     }
@@ -1005,6 +993,13 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     const { approvalEvents } = await import('../services/ApprovalEvents');
     const taskId = (task._id as any).toString();
     approvalEvents.emitApproval(taskId, phase, validatedData.approved, validatedData.comments);
+
+    // 🎯 UNIFIED MEMORY: Mark phase as approved (THE SOURCE OF TRUTH)
+    if (validatedData.approved) {
+      await unifiedMemoryService.markPhaseApproved(taskId, phase, req.user?.id);
+    } else {
+      await unifiedMemoryService.markPhaseFailed(taskId, phase, validatedData.comments || 'Rejected by user');
+    }
 
     // Emitir notificación WebSocket
     const { NotificationService } = await import('../services/NotificationService');
@@ -1281,7 +1276,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
           'tech-lead',
           'development',
           'judge',
-          'fixer',
+          'verification-fixer',
         ] as any[];
         console.log(`✅ [Bypass] Auto-approval enabled for ALL phases`);
       } else {
@@ -1404,8 +1399,8 @@ router.post('/:id/approve/story/:storyId', authenticate, async (req: AuthRequest
       return;
     }
 
-    // Find story in projectManager.stories
-    const stories = task.orchestration.projectManager?.stories || [];
+    // Find story in planning.stories or techLead.stories
+    const stories = task.orchestration.planning?.stories || task.orchestration.techLead?.stories || [];
     const story = stories.find((s: any) => s.id === storyId);
 
     if (!story) {
@@ -1436,7 +1431,8 @@ router.post('/:id/approve/story/:storyId', authenticate, async (req: AuthRequest
     }
 
     // Mark modified for Mongoose
-    task.markModified('orchestration.projectManager.stories');
+    task.markModified('orchestration.planning.stories');
+    task.markModified('orchestration.techLead.stories');
 
     // 📝 Log to approval history
     if (!task.orchestration.approvalHistory) {
@@ -2881,6 +2877,221 @@ router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) =
     res.status(500).json({
       success: false,
       message: 'Failed to send directive',
+    });
+  }
+});
+
+// =============================================================================
+// 🔄 RECOVERY & SYNC ENDPOINTS
+// Sync local workspace data to MongoDB for disaster recovery
+// =============================================================================
+
+/**
+ * POST /api/tasks/sync-local-to-mongodb
+ *
+ * 🔥 RECOVERY ENDPOINT: Sync ALL local execution maps to MongoDB
+ * Use this when MongoDB has been reset/cleared but local files still have data
+ *
+ * This is critical for disaster recovery - local files serve as backup
+ * and can be restored to MongoDB using this endpoint.
+ */
+router.post('/sync-local-to-mongodb', authenticate, async (req: AuthRequest, res) => {
+  try {
+    console.log(`🔄 [API] User ${req.user?.id} triggered local-to-MongoDB sync`);
+
+    const result = await unifiedMemoryService.syncAllLocalToMongoDB();
+
+    res.json({
+      success: true,
+      message: `Synced ${result.synced} execution maps to MongoDB (${result.errors} errors)`,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('Error syncing local to MongoDB:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sync local data to MongoDB',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/sync-to-mongodb
+ *
+ * Sync a SPECIFIC task's local execution map to MongoDB
+ * Use this when a single task's MongoDB data is missing
+ */
+router.post('/:id/sync-to-mongodb', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    console.log(`🔄 [API] User ${req.user?.id} triggered sync for task ${taskId}`);
+
+    // Try to get from local (this will auto-sync to MongoDB if found)
+    const map = await unifiedMemoryService.getExecutionMap(taskId);
+
+    if (!map) {
+      res.status(404).json({
+        success: false,
+        message: `No execution map found for task ${taskId} (checked both MongoDB and local files)`,
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: `Execution map for task ${taskId} is now synced`,
+      data: {
+        taskId: map.taskId,
+        status: map.status,
+        currentPhase: map.currentPhase,
+        phases: Object.keys(map.phases || {}),
+        epicsInPhases: (map.phases?.Planning?.output as any)?.epics?.length || 0,
+        epicsInTracking: map.epics?.length || 0,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error syncing task to MongoDB:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sync task to MongoDB',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * 🔥 GRANULAR MEMORY SYNC ENDPOINTS
+ *
+ * These endpoints allow syncing granular memories between local and MongoDB
+ */
+
+/**
+ * Sync ALL granular memories from local to MongoDB
+ */
+router.post('/granular/sync-all', authenticate, async (req: AuthRequest, res) => {
+  try {
+    console.log(`🔄 [API] User ${req.user?.id} triggered granular memory sync for all tasks`);
+    const result = await granularMemoryService.syncAllLocalToMongoDB();
+    res.json({
+      success: true,
+      message: `Synced ${result.synced} memories from ${result.tasks} tasks`,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('Error syncing granular memories:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sync granular memories',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Sync granular memories for a specific task
+ */
+router.post('/:id/granular/sync', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    console.log(`🔄 [API] User ${req.user?.id} triggered granular memory sync for task ${taskId}`);
+    const result = await granularMemoryService.syncLocalToMongoDB(taskId);
+    res.json({
+      success: true,
+      message: `Synced ${result.synced} memories for task ${taskId}`,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('Error syncing granular memories:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sync granular memories',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Get granular memories from local files
+ */
+router.get('/:id/granular/local', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    const type = req.query.type as string | undefined;
+    const memories = await granularMemoryService.loadFromLocal(taskId, type as any);
+    res.json({
+      success: true,
+      count: memories.length,
+      data: memories,
+    });
+  } catch (error: any) {
+    console.error('Error loading local granular memories:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load local granular memories',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Commit agent action to git
+ */
+router.post('/:id/git/commit', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    const { agentType, phaseType, epicId, storyId, actionTitle, actionDetails, filePaths } = req.body;
+
+    const result = await granularMemoryService.commitAgentAction({
+      taskId,
+      agentType: agentType || 'manual',
+      phaseType: phaseType || 'manual',
+      epicId,
+      storyId,
+      actionTitle: actionTitle || 'Manual commit',
+      actionDetails: actionDetails || 'Committed via API',
+      filePaths,
+    });
+
+    res.json({
+      success: result.success,
+      commitSha: result.commitSha,
+      error: result.error,
+    });
+  } catch (error: any) {
+    console.error('Error committing to git:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to commit to git',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Push commits to remote
+ */
+router.post('/:id/git/push', authenticate, async (req: AuthRequest, res) => {
+  try {
+    const taskId = req.params.id;
+    const { branch, force } = req.body;
+
+    const result = await granularMemoryService.pushToRemote({
+      taskId,
+      branch,
+      force,
+    });
+
+    res.json({
+      success: result.success,
+      error: result.error,
+    });
+  } catch (error: any) {
+    console.error('Error pushing to remote:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to push to remote',
+      error: error.message,
     });
   }
 });

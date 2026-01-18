@@ -48,7 +48,7 @@ export class BranchCleanupService {
 
   /**
    * Clean up all story branches after epic PR is merged
-   * Called by QA phase after successful epic merge
+   * Called after successful epic merge during auto-merge phase
    */
   async cleanupStoriesAfterEpicMerge(
     taskId: string,
@@ -183,7 +183,7 @@ export class BranchCleanupService {
 
   /**
    * Full cleanup: Delete all branches (stories + epic) after epic merge
-   * This is the main entry point called by QA phase
+   * This is the main entry point called by auto-merge phase
    */
   async cleanupAllBranchesForEpic(
     taskId: string,

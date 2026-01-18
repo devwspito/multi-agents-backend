@@ -14,6 +14,14 @@ import {
   validateRequiredPhaseContext,
 } from './utils/PhaseValidationHelpers';
 import { isBillingError, BillingError } from './RetryService';
+import { logCheckpointRecovery, logCriticalError } from './utils/LogHelpers';
+import { assertValidWorkspacePath } from './utils/WorkspaceValidator';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 📦 Centralized skip logic
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { CostAccumulator } from './utils/CostAccumulator';
+import { getEpicId, getEpicIdSafe, validateEpicIds } from './utils/IdNormalizer';
 
 // TechLead approval timeout (1 hour)
 const TECH_LEAD_APPROVAL_TIMEOUT_MS = 1 * 60 * 60 * 1000;
@@ -25,9 +33,9 @@ const TECH_LEAD_APPROVAL_TIMEOUT_MS = 1 * 60 * 60 * 1000;
  * for complex problem-solving with Claude agents.
  *
  * Architecture:
- * - Receives epics from Project Manager (Sonnet orchestrator)
+ * - Receives epics from Planning phase (Sonnet orchestrator)
  * - Creates isolated team per epic
- * - Each team runs: TechLead → Developers → Judge → QA
+ * - Each team runs: TechLead → Developers → Judge
  * - All teams execute in parallel (Promise.allSettled)
  * - Aggregates results from all teams
  *
@@ -50,48 +58,96 @@ export class TeamOrchestrationPhase extends BasePhase {
   }
 
   /**
-   * Skip if all teams already completed (ONLY for recovery, NOT for continuations)
+   * 🎯 SINGLE SOURCE OF TRUTH: Get completed epic IDs from all sources
+   *
+   * This is THE ONLY method that should be used to read completed epics.
+   * It reads from:
+   * 1. UnifiedMemory (primary source)
+   * 2. MongoDB (backup/fast access)
+   * 3. Context (in-memory cache for current execution)
+   *
+   * Returns a deduplicated, merged list of all completed epic IDs.
+   */
+  private async getCompletedEpicIds(
+    taskIdStr: string,
+    task: any,
+    context?: OrchestrationContext
+  ): Promise<string[]> {
+    const sources: { name: string; ids: string[] }[] = [];
+
+    // 1️⃣ UnifiedMemory (primary)
+    try {
+      const resumption = await unifiedMemoryService.getResumptionPoint(taskIdStr);
+      if (resumption.completedEpics && resumption.completedEpics.length > 0) {
+        sources.push({ name: 'UnifiedMemory', ids: resumption.completedEpics });
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ [CHECKPOINT] Failed to read UnifiedMemory: ${error.message}`);
+    }
+
+    // 2️⃣ MongoDB (backup)
+    const mongoCompleted = (task.orchestration as any)?.teamOrchestration?.completedEpicIds || [];
+    if (mongoCompleted.length > 0) {
+      sources.push({ name: 'MongoDB', ids: mongoCompleted });
+    }
+
+    // 3️⃣ Context (in-memory, if available)
+    if (context) {
+      const contextCompleted = context.getData<string[]>('completedEpicIds') || [];
+      if (contextCompleted.length > 0) {
+        sources.push({ name: 'Context', ids: contextCompleted });
+      }
+    }
+
+    // Merge all sources (deduplicated)
+    const allIds = sources.flatMap(s => s.ids);
+    const merged = [...new Set(allIds)];
+
+    // Log if sources differ (indicates sync issue)
+    if (sources.length > 1) {
+      const allSame = sources.every(s =>
+        s.ids.length === merged.length &&
+        s.ids.every(id => merged.includes(id))
+      );
+      if (!allSame) {
+        console.log(`🔧 [CHECKPOINT] Merged completed epics from ${sources.length} sources:`);
+        for (const source of sources) {
+          console.log(`   ${source.name}: [${source.ids.join(', ')}]`);
+        }
+        console.log(`   Merged result: [${merged.join(', ')}]`);
+      }
+    }
+
+    return merged;
+  }
+
+  /**
+   * 🎯 UNIFIED MEMORY: Skip if all teams already completed
+   *
+   * Uses checkPhaseSkip helper for centralized skip logic.
+   * Also tracks which epics are already completed for partial recovery.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
+    const taskId = (task._id as any).toString();
 
-    // Refresh task from DB
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
-
-    // 🔄 CONTINUATION: Never skip - always re-execute to create new teams for new epics
-    const isContinuation = context.task.orchestration.continuations &&
-                          context.task.orchestration.continuations.length > 0;
-
-    if (isContinuation) {
-      console.log(`🔄 [TeamOrchestration] This is a CONTINUATION - will re-execute to create new teams`);
-      return false; // DO NOT SKIP
-    }
-
-    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
-    const teamOrchestration = (context.task.orchestration as any).teamOrchestration;
-    if (teamOrchestration?.status === 'completed') {
-      console.log(`[SKIP] TeamOrchestration already completed - skipping re-execution (recovery mode)`);
+    // Use centralized skip logic (handles continuation check + unified memory)
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'TeamOrchestration' });
+    if (skipResult.shouldSkip) {
       return true;
     }
 
-    // 🔥 CHECKPOINT RECOVERY: Check if some epics already completed
-    // Instead of skipping the whole phase, we'll filter out completed epics in executePhase
-    const completedEpicIds = teamOrchestration?.completedEpicIds || [];
-    if (completedEpicIds.length > 0) {
-      console.log(`\n${'='.repeat(60)}`);
-      console.log(`🔄 [CHECKPOINT RECOVERY] Found ${completedEpicIds.length} completed epic(s)`);
-      console.log(`   Completed: ${completedEpicIds.join(', ')}`);
-      console.log(`   Will resume with remaining epics only`);
-      console.log(`${'='.repeat(60)}\n`);
+    // 🔥 CHECKPOINT RECOVERY: Use SINGLE SOURCE OF TRUTH for completed epics
+    // Even if phase is not skipped, we may have partial progress
+    const completedEpicIds = await this.getCompletedEpicIds(taskId, task, context);
 
+    if (completedEpicIds.length > 0) {
+      logCheckpointRecovery('epic', completedEpicIds.length, completedEpicIds);
       // Store in context for executePhase to use
       context.setData('completedEpicIds', completedEpicIds);
     }
 
+    console.log(`   ❌ Phase not completed - TeamOrchestration must execute`);
     return false;
   }
 
@@ -128,33 +184,85 @@ export class TeamOrchestrationPhase extends BasePhase {
       // 🔥 CRITICAL FIX: Validate required context from previous phases
       validateRequiredPhaseContext(context, 'teamOrchestration', ['repositories']);
 
-      // Get EPICS from Project Manager - MUST support recovery after restart
-      let projectManagerEpics = context.getData<any[]>('epics') || [];
+      // Get EPICS from Planning phase - MUST support recovery after restart
+      let planningEpics = context.getData<any[]>('epics') || [];
 
       // CRITICAL: Always check task model for epics (recovery after restart)
-      if (projectManagerEpics.length === 0) {
-        const epicsFromTask = (task.orchestration.projectManager as any)?.epics || [];
+      if (planningEpics.length === 0) {
+        const epicsFromTask = (task.orchestration.planning as any)?.epics || [];
         if (epicsFromTask && epicsFromTask.length > 0) {
           // Restore epics to context for this execution
           context.setData('epics', epicsFromTask);
-          projectManagerEpics = [...epicsFromTask]; // Create new array
+          planningEpics = [...epicsFromTask]; // Create new array
           console.log(`🔄 [TeamOrchestration] RECOVERY: Restored ${epicsFromTask.length} epic(s) from database after restart`);
         }
       }
 
       // Final validation - MUST have epics to proceed
-      if (!projectManagerEpics || projectManagerEpics.length === 0) {
-        // Check if ProjectManager phase completed
-        const pmStatus = task.orchestration.projectManager?.status;
-        if (pmStatus !== 'completed') {
-          throw new Error(`Cannot start TeamOrchestration: Project Manager phase is ${pmStatus || 'not started'}. Must complete Project Manager first.`);
+      if (!planningEpics || planningEpics.length === 0) {
+        const planningStatus = task.orchestration.planning?.status;
+
+        // 🔧 FIX: Also check Unified Memory (the source of truth for recovery scenarios)
+        // MongoDB might not have planning.status set if the phase was skipped on recovery
+        const planningCompletedInMemory = await unifiedMemoryService.shouldSkipPhase(taskId, 'Planning');
+
+        if (planningStatus !== 'completed' && !planningCompletedInMemory) {
+          throw new Error(`Cannot start TeamOrchestration: Planning phase is ${planningStatus || 'not started'}. Must complete Planning first.`);
         }
-        throw new Error('No epics found from Project Manager - cannot create teams. Database may be corrupted or Project Manager output was invalid.');
+
+        // If Planning is completed but no epics, try to restore from Unified Memory
+        if (planningCompletedInMemory) {
+          console.log(`🔄 [TeamOrchestration] Planning completed in Unified Memory but no epics in context - attempting recovery...`);
+          const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+
+          // 🔥 FIX: Epics are stored in phases.Planning.output.epics, NOT in executionMap.epics
+          // executionMap.epics is for tracking epic execution status (EpicExecution[])
+          // phases.Planning.output.epics contains the ORIGINAL epic data from Planning phase
+          const planningOutput = resumption.executionMap?.phases?.Planning?.output;
+          const planningEpicsFromMemory = planningOutput?.epics || [];
+
+          if (planningEpicsFromMemory.length > 0) {
+            planningEpics = planningEpicsFromMemory.map((e: any) => ({
+              id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
+              title: e.title,
+              ...e, // Keep all epic data (filesToModify, filesToCreate, targetRepository, etc.)
+            }));
+            context.setData('epics', planningEpics);
+            console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (phases.Planning.output)`);
+
+            // Also restore to task model for consistency (atomic to avoid version conflicts)
+            const Task = require('../../models/Task').Task;
+            await Task.findByIdAndUpdate(task._id, {
+              $set: {
+                'orchestration.planning.epics': planningEpics,
+                'orchestration.planning.restoredFromUnifiedMemory': true,
+                'orchestration.planning.restoredAt': new Date(),
+              },
+            });
+            console.log(`   💾 Synced restored epics to task model (atomic)`);
+          } else {
+            // Fallback: Check if executionMap.epics has data (for backwards compatibility)
+            if (resumption.executionMap?.epics && resumption.executionMap.epics.length > 0) {
+              planningEpics = resumption.executionMap.epics.map((e: any) => ({
+                id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
+                title: e.title,
+                ...e,
+              }));
+              context.setData('epics', planningEpics);
+              console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (executionMap.epics fallback)`);
+            }
+          }
+        }
+
+        // Final check after recovery attempt
+        if (!planningEpics || planningEpics.length === 0) {
+          throw new Error('No epics found from Planning phase - cannot create teams. Database may be corrupted or Planning output was invalid.');
+        }
       }
 
       // 🚨 CRITICAL VALIDATION: Check epic quality
-      // If Project Manager somehow passed invalid epics, BLOCK execution here
-      const invalidEpics = projectManagerEpics.filter(epic => {
+      // If Planning somehow passed invalid epics, BLOCK execution here
+      const invalidEpics = planningEpics.filter(epic => {
         const hasFiles = (epic.filesToModify && epic.filesToModify.length > 0) ||
                         (epic.filesToCreate && epic.filesToCreate.length > 0);
         return !hasFiles;
@@ -162,13 +270,12 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       if (invalidEpics.length > 0) {
         const invalidTitles = invalidEpics.map((e: any) => e.title || e.id).join(', ');
-        console.error(`\n${'🚨'.repeat(40)}`);
-        console.error(`🚨 CRITICAL: INVALID EPICS DETECTED`);
-        console.error(`🚨 ${invalidEpics.length} epic(s) have NO file paths`);
-        console.error(`🚨 Invalid epics: ${invalidTitles}`);
-        console.error(`🚨 This should have been caught by Project Manager validation`);
-        console.error(`🚨 BLOCKING EXECUTION - Cannot proceed without file paths`);
-        console.error(`${'🚨'.repeat(40)}\n`);
+        logCriticalError('INVALID EPICS DETECTED', [
+          `${invalidEpics.length} epic(s) have NO file paths`,
+          `Invalid epics: ${invalidTitles}`,
+          `This should have been caught by Planning validation`,
+          `BLOCKING EXECUTION - Cannot proceed without file paths`,
+        ]);
 
         NotificationService.emitConsoleLog(
           taskId,
@@ -183,22 +290,21 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         throw new Error(
           `🚨 CRITICAL VALIDATION FAILURE: ${invalidEpics.length} epic(s) missing file paths: ${invalidTitles}. ` +
-          `Project Manager must specify filesToModify or filesToCreate for each epic. ` +
+          `Planning must specify filesToModify or filesToCreate for each epic. ` +
           `This error indicates a validation bypass - execution blocked.`
         );
       }
 
       // 🔥 FIX: Validate targetRepository EARLY (before any processing)
-      const epicsWithoutRepo = projectManagerEpics.filter(epic => !epic.targetRepository);
+      const epicsWithoutRepo = planningEpics.filter(epic => !epic.targetRepository);
       if (epicsWithoutRepo.length > 0) {
-        const epicIds = epicsWithoutRepo.map((e: any) => e.id || e.title).join(', ');
-        console.error(`\n${'🚨'.repeat(40)}`);
-        console.error(`🚨 CRITICAL: EPICS WITHOUT TARGET REPOSITORY`);
-        console.error(`🚨 ${epicsWithoutRepo.length} epic(s) have NO targetRepository assigned`);
-        console.error(`🚨 Invalid epics: ${epicIds}`);
-        console.error(`🚨 Each epic MUST specify which repository it belongs to`);
-        console.error(`🚨 BLOCKING EXECUTION - Cannot proceed without repository assignment`);
-        console.error(`${'🚨'.repeat(40)}\n`);
+        const epicIds = epicsWithoutRepo.map((e: any) => getEpicIdSafe(e)).join(', ');
+        logCriticalError('EPICS WITHOUT TARGET REPOSITORY', [
+          `${epicsWithoutRepo.length} epic(s) have NO targetRepository assigned`,
+          `Invalid epics: ${epicIds}`,
+          `Each epic MUST specify which repository it belongs to`,
+          `BLOCKING EXECUTION - Cannot proceed without repository assignment`,
+        ]);
 
         NotificationService.emitConsoleLog(
           taskId,
@@ -208,20 +314,35 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         throw new Error(
           `🚨 CRITICAL VALIDATION FAILURE: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}. ` +
-          `Project Manager must assign a target repository to each epic. ` +
+          `Planning must assign a target repository to each epic. ` +
           `Available repositories: ${context.repositories.map(r => r.name).join(', ')}`
         );
       }
 
-      console.log(`\n🎯 [TeamOrchestration] Found ${projectManagerEpics.length} epic(s) from Project Manager`);
+      console.log(`\n🎯 [TeamOrchestration] Found ${planningEpics.length} epic(s) from Planning`);
       console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths and target repositories`);
 
-      // 🔥🔥🔥 CHECKPOINT RECOVERY: Filter out already completed epics 🔥🔥🔥
-      const completedEpicIds = context.getData<string[]>('completedEpicIds') || [];
+      // 🔥 CRITICAL FIX: Register epics in Unified Memory for recovery tracking
+      // This was missing! Without this call, getResumptionPoint() returns empty completedEpics
+      // because the epics array in execution map was never populated.
+      // 🔥 VALIDATE FIRST: Fail fast if any epic has no extractable ID
+      validateEpicIds(planningEpics);
+      await unifiedMemoryService.registerEpics(
+        taskId,
+        planningEpics.map((e: any) => ({
+          id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
+          title: e.title,
+        }))
+      );
+      console.log(`📋 [TeamOrchestration] Registered ${planningEpics.length} epics in Unified Memory for recovery tracking`);
+
+      // 🔥🔥🔥 CHECKPOINT RECOVERY: Use SINGLE SOURCE OF TRUTH for completed epics 🔥🔥🔥
+      const completedEpicIds = await this.getCompletedEpicIds(taskId, task, context);
+
       if (completedEpicIds.length > 0) {
-        const originalCount = projectManagerEpics.length;
-        projectManagerEpics = projectManagerEpics.filter((epic: any) => {
-          const epicId = epic.id || epic.title;
+        const originalCount = planningEpics.length;
+        planningEpics = planningEpics.filter((epic: any) => {
+          const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
           const alreadyCompleted = completedEpicIds.includes(epicId);
           if (alreadyCompleted) {
             console.log(`   ⏭️  SKIPPING epic "${epicId}" - already completed (checkpoint recovery)`);
@@ -230,19 +351,19 @@ export class TeamOrchestrationPhase extends BasePhase {
         });
 
         console.log(`\n${'🔄'.repeat(30)}`);
-        console.log(`🔄 [CHECKPOINT RECOVERY] Filtered epics: ${originalCount} → ${projectManagerEpics.length} remaining`);
+        console.log(`🔄 [CHECKPOINT RECOVERY] Filtered epics: ${originalCount} → ${planningEpics.length} remaining`);
         console.log(`   Skipped: ${completedEpicIds.length} already completed epic(s)`);
-        console.log(`   Remaining: ${projectManagerEpics.map((e: any) => e.id || e.title).join(', ') || 'none'}`);
+        console.log(`   Remaining: ${planningEpics.map((e: any) => getEpicIdSafe(e)).join(', ') || 'none'}`);
         console.log(`${'🔄'.repeat(30)}\n`);
 
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `🔄 CHECKPOINT RECOVERY: Skipping ${completedEpicIds.length} completed epic(s), processing ${projectManagerEpics.length} remaining`
+          `🔄 CHECKPOINT RECOVERY: Skipping ${completedEpicIds.length} completed epic(s), processing ${planningEpics.length} remaining`
         );
 
         // If all epics already completed, return success
-        if (projectManagerEpics.length === 0) {
+        if (planningEpics.length === 0) {
           console.log(`✅ [TeamOrchestration] ALL EPICS ALREADY COMPLETED - nothing to do`);
           return {
             success: true,
@@ -265,7 +386,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       // 🔥 SEQUENTIAL EXECUTION BY EXECUTION ORDER
       // Group epics by executionOrder
       const epicsByOrder = new Map<number, any[]>();
-      for (const epic of projectManagerEpics) {
+      for (const epic of planningEpics) {
         const order = epic.executionOrder || 1;
         if (!epicsByOrder.has(order)) {
           epicsByOrder.set(order, []);
@@ -288,7 +409,14 @@ export class TeamOrchestrationPhase extends BasePhase {
         `🎯 Sequential multi-repo execution: ${orderedGroups.length} phase(s)`
       );
 
-      let teamResults: PromiseSettledResult<any>[] = [];
+      // 🔥 FIX: Wrapper type to carry epic info with result (prevents index mismatch)
+      interface TeamResultWithEpic {
+        result: PromiseSettledResult<any>;
+        epicId: string;
+        epicTitle: string;
+        targetRepository: string;
+      }
+      let teamResults: TeamResultWithEpic[] = [];
       let teamCounter = 0;
 
       // Execute groups sequentially
@@ -300,8 +428,6 @@ export class TeamOrchestrationPhase extends BasePhase {
         const reposInGroup = epics.map((e: any) => e.targetRepository);
         const uniqueRepos = new Set(reposInGroup);
         const hasGitConflict = uniqueRepos.size !== epics.length;
-
-        let groupResults: PromiseSettledResult<any>[] = [];
 
         if (hasGitConflict) {
           console.warn(`\n⚠️  [RACE CONDITION PREVENTION] Multiple epics targeting SAME repository detected!`);
@@ -318,18 +444,30 @@ export class TeamOrchestrationPhase extends BasePhase {
 
           // SEQUENTIAL execution (safe - no git conflicts)
           for (const epic of epics) {
-            const epicId = epic.id || epic.title;
+            const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
             console.log(`   🔧 Executing epic: ${epicId} → ${epic.targetRepository} (sequential mode)`);
             try {
               const result = await this.executeTeam(epic, ++teamCounter, context);
-              groupResults.push({ status: 'fulfilled', value: result });
+              // 🔥 FIX: Wrap result with epic info to prevent index mismatch
+              teamResults.push({
+                result: { status: 'fulfilled', value: result },
+                epicId: epicId,
+                epicTitle: epic.title || epicId,
+                targetRepository: epic.targetRepository,
+              });
 
               // 🔥🔥🔥 CHECKPOINT: Save epic completion to DB immediately 🔥🔥🔥
               if (result.success) {
                 await this.saveEpicCheckpoint(task._id, epicId, taskId);
               }
             } catch (error) {
-              groupResults.push({ status: 'rejected', reason: error });
+              // 🔥 FIX: Wrap error with epic info
+              teamResults.push({
+                result: { status: 'rejected', reason: error },
+                epicId: epicId,
+                epicTitle: epic.title || epicId,
+                targetRepository: epic.targetRepository,
+              });
             }
           }
         } else {
@@ -343,24 +481,29 @@ export class TeamOrchestrationPhase extends BasePhase {
             this.executeTeam(epic, ++teamCounter, context)
           );
 
-          groupResults = await Promise.allSettled(groupPromises);
+          const groupResults = await Promise.allSettled(groupPromises);
 
           // 🔥🔥🔥 CHECKPOINT: Save all successful epics from parallel batch 🔥🔥🔥
           for (let i = 0; i < groupResults.length; i++) {
             const result = groupResults[i];
             const epic = epics[i];
-            const epicId = epic.id || epic.title;
+            const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
             if (result.status === 'fulfilled' && result.value.success) {
               await this.saveEpicCheckpoint(task._id, epicId, taskId);
             }
+            // 🔥 FIX: Wrap result with epic info
+            teamResults.push({
+              result: result,
+              epicId: epicId,
+              epicTitle: epic.title || epicId,
+              targetRepository: epic.targetRepository,
+            });
           }
         }
 
-        teamResults.push(...groupResults);
-
-        // Check if this phase failed
-        const groupFailed = groupResults.filter((r: PromiseSettledResult<any>) =>
-          r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)
+        // Check if this phase failed (use wrapped results)
+        const groupFailed = teamResults.slice(-epics.length).filter((r) =>
+          r.result.status === 'rejected' || (r.result.status === 'fulfilled' && !r.result.value.success)
         ).length;
 
         if (groupFailed > 0) {
@@ -375,24 +518,24 @@ export class TeamOrchestrationPhase extends BasePhase {
         }
       }
 
-      // Aggregate results
-      const successfulTeams = teamResults.filter(r => r.status === 'fulfilled' && r.value.success);
-      const failedTeams = teamResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success));
+      // Aggregate results (use wrapped .result for status checks)
+      const successfulTeams = teamResults.filter(r => r.result.status === 'fulfilled' && r.result.value.success);
+      const failedTeams = teamResults.filter(r => r.result.status === 'rejected' || (r.result.status === 'fulfilled' && !r.result.value.success));
 
       // 🔥 BILLING ERROR DETECTION: Check if any failures are billing-related
       // Billing errors should NOT trigger Circuit Breaker - they're recoverable
-      const billingFailedTeams: PromiseSettledResult<any>[] = [];
-      const actualFailedTeams: PromiseSettledResult<any>[] = [];
+      const billingFailedTeams: typeof teamResults = [];
+      const actualFailedTeams: typeof teamResults = [];
 
-      for (const result of failedTeams) {
-        const errorMessage = result.status === 'rejected'
-          ? result.reason?.message || result.reason
-          : result.value?.error || '';
+      for (const wrappedResult of failedTeams) {
+        const errorMessage = wrappedResult.result.status === 'rejected'
+          ? (wrappedResult.result as PromiseRejectedResult).reason?.message || (wrappedResult.result as PromiseRejectedResult).reason
+          : wrappedResult.result.value?.error || '';
 
         if (isBillingError({ message: errorMessage })) {
-          billingFailedTeams.push(result);
+          billingFailedTeams.push(wrappedResult);
         } else {
-          actualFailedTeams.push(result);
+          actualFailedTeams.push(wrappedResult);
         }
       }
 
@@ -412,11 +555,8 @@ export class TeamOrchestrationPhase extends BasePhase {
         (context.task.orchestration as any).teamOrchestration.completedTeams = successfulTeams.length;
         (context.task.orchestration as any).teamOrchestration.pendingTeams = billingFailedTeams.length;
 
-        // Store which epics need to be retried
-        const pendingEpicIds = billingFailedTeams.map((result) => {
-          const epicIdx = teamResults.indexOf(result);
-          return projectManagerEpics[epicIdx]?.id;
-        }).filter(Boolean);
+        // 🔥 FIX: Use epicId directly from wrapped result instead of indexOf()
+        const pendingEpicIds = billingFailedTeams.map((wrappedResult) => wrappedResult.epicId);
         (context.task.orchestration as any).teamOrchestration.pendingEpicIds = pendingEpicIds;
 
         task.status = 'paused';
@@ -481,64 +621,40 @@ export class TeamOrchestrationPhase extends BasePhase {
       (context.task.orchestration as any).teamOrchestration.status = failedTeams.length === 0 ? 'completed' : 'partial';
       (context.task.orchestration as any).teamOrchestration.completedAt = new Date();
 
-      // 🔥 CRITICAL: Aggregate costs AND token usage from all teams for proper breakdown display
-      let totalTechLeadCost = 0;
-      let totalJudgeCost = 0;
-      let totalDevelopersCost = 0;
-      let totalQACost = 0;
+      // 🔥 CRITICAL: Aggregate costs AND token usage from all teams using CostAccumulator
+      const teamCostsAccum = new CostAccumulator();
 
-      // Token tracking for each agent type
-      let techLeadTokens = { input: 0, output: 0 };
-      let judgeTokens = { input: 0, output: 0 };
-      let developersTokens = { input: 0, output: 0 };
-      let qaTokens = { input: 0, output: 0 };
+      // 🔥 FIX: Use epicId/epicTitle from wrapped result instead of planningEpics[idx]
+      // This prevents index mismatch when epics are filtered during checkpoint recovery
+      (context.task.orchestration as any).teamOrchestration.teams = teamResults.map((wrappedResult) => {
+        const { result, epicId, epicTitle } = wrappedResult;
 
-      (context.task.orchestration as any).teamOrchestration.teams = teamResults.map((result, idx) => {
         if (result.status === 'fulfilled' && result.value.teamCosts) {
           const costs = result.value.teamCosts;
 
-          // Accumulate costs and tokens from each team
-          totalTechLeadCost += costs.techLead || 0;
-          totalJudgeCost += costs.judge || 0;
-          totalDevelopersCost += costs.developers || 0;
-          totalQACost += costs.qa || 0;
-
-          // Accumulate token usage
-          if (costs.techLeadUsage) {
-            techLeadTokens.input += costs.techLeadUsage.input || 0;
-            techLeadTokens.output += costs.techLeadUsage.output || 0;
-          }
-          if (costs.judgeUsage) {
-            judgeTokens.input += costs.judgeUsage.input || 0;
-            judgeTokens.output += costs.judgeUsage.output || 0;
-          }
-          if (costs.developersUsage) {
-            developersTokens.input += costs.developersUsage.input || 0;
-            developersTokens.output += costs.developersUsage.output || 0;
-          }
-          if (costs.qaUsage) {
-            qaTokens.input += costs.qaUsage.input || 0;
-            qaTokens.output += costs.qaUsage.output || 0;
-          }
+          // Accumulate costs and tokens from each team using CostAccumulator
+          teamCostsAccum.add('techLead', costs.techLead || 0, costs.techLeadUsage);
+          teamCostsAccum.add('judge', costs.judge || 0, costs.judgeUsage);
+          teamCostsAccum.add('developer', costs.developers || 0, costs.developersUsage);
 
           return {
-            epicId: projectManagerEpics[idx].id,
-            epicTitle: projectManagerEpics[idx].title,
+            epicId: epicId,
+            epicTitle: epicTitle,
             status: result.value.success ? 'completed' : 'failed',
             error: result.value.error,
             costs: costs, // Store individual team costs
           };
         } else if (result.status === 'fulfilled') {
           return {
-            epicId: projectManagerEpics[idx].id,
-            epicTitle: projectManagerEpics[idx].title,
+            epicId: epicId,
+            epicTitle: epicTitle,
             status: result.value.success ? 'completed' : 'failed',
             error: result.value.error,
           };
         } else {
           return {
-            epicId: projectManagerEpics[idx].id,
-            epicTitle: projectManagerEpics[idx].title,
+            epicId: epicId,
+            epicTitle: epicTitle,
             status: 'failed',
             error: (result as PromiseRejectedResult).reason?.message || 'Unknown error',
           };
@@ -546,7 +662,13 @@ export class TeamOrchestrationPhase extends BasePhase {
       });
 
       // Update aggregated costs AND token usage in the main orchestration fields for breakdown display
-      if (totalTechLeadCost > 0) {
+      const techLeadCost = teamCostsAccum.getCost('techLead');
+      const judgeCost = teamCostsAccum.getCost('judge');
+      const developersCost = teamCostsAccum.getCost('developer');
+      const techLeadTokens = teamCostsAccum.getTokens('techLead');
+      const judgeTokens = teamCostsAccum.getTokens('judge');
+
+      if (techLeadCost > 0) {
         if (!task.orchestration.techLead) {
           task.orchestration.techLead = { agent: 'tech-lead', status: 'completed' } as any;
         }
@@ -557,11 +679,11 @@ export class TeamOrchestrationPhase extends BasePhase {
             output_tokens: techLeadTokens.output,
           };
         }
-        task.orchestration.techLead.cost_usd = totalTechLeadCost;
-        console.log(`💰 Total Tech Lead cost across all teams: $${totalTechLeadCost.toFixed(4)}`);
+        task.orchestration.techLead.cost_usd = techLeadCost;
+        console.log(`💰 Total Tech Lead cost across all teams: ${CostAccumulator.formatCost(techLeadCost)}`);
       }
 
-      if (totalJudgeCost > 0) {
+      if (judgeCost > 0) {
         if (!task.orchestration.judge) {
           task.orchestration.judge = { agent: 'judge', status: 'completed' } as any;
         }
@@ -571,38 +693,24 @@ export class TeamOrchestrationPhase extends BasePhase {
             output_tokens: judgeTokens.output,
           };
         }
-        task.orchestration.judge!.cost_usd = totalJudgeCost;
-        console.log(`💰 Total Judge cost across all teams: $${totalJudgeCost.toFixed(4)}`);
+        task.orchestration.judge!.cost_usd = judgeCost;
+        console.log(`💰 Total Judge cost across all teams: ${CostAccumulator.formatCost(judgeCost)}`);
       }
 
-      if (totalQACost > 0) {
-        if (!task.orchestration.qaEngineer) {
-          task.orchestration.qaEngineer = { agent: 'qa-engineer', status: 'completed' } as any;
-        }
-        if (!task.orchestration.qaEngineer!.usage) {
-          task.orchestration.qaEngineer!.usage = {
-            input_tokens: qaTokens.input,
-            output_tokens: qaTokens.output,
-          };
-        }
-        task.orchestration.qaEngineer!.cost_usd = totalQACost;
-        console.log(`💰 Total QA cost across all teams: $${totalQACost.toFixed(4)}`);
-      }
-
-      // Also track developers cost separately
-      if (totalDevelopersCost > 0) {
-        console.log(`💰 Total Developers cost across all teams: $${totalDevelopersCost.toFixed(4)}`);
+      // Track developers cost separately
+      if (developersCost > 0) {
+        console.log(`💰 Total Developers cost across all teams: ${CostAccumulator.formatCost(developersCost)}`);
         // Note: Developers cost is not shown separately in the breakdown UI
       }
 
       // For developers, add to team array
-      if (totalDevelopersCost > 0 && !task.orchestration.team) {
+      if (developersCost > 0 && !task.orchestration.team) {
         task.orchestration.team = [];
       }
 
       // 🔥 CRITICAL: Accumulate ALL team costs using ATOMIC operation to prevent race conditions
       // When multiple teams run in parallel, using $inc ensures no lost updates
-      const totalTeamsCost = totalTechLeadCost + totalJudgeCost + totalDevelopersCost + totalQACost;
+      const totalTeamsCost = teamCostsAccum.getTotalCost();
       if (totalTeamsCost > 0) {
         const Task = require('../../models/Task').Task;
 
@@ -616,9 +724,8 @@ export class TeamOrchestrationPhase extends BasePhase {
               'orchestration.teamOrchestration.completedAt': (context.task.orchestration as any).teamOrchestration.completedAt,
               'orchestration.teamOrchestration.teams': (context.task.orchestration as any).teamOrchestration.teams,
               // Update agent costs
-              ...(totalTechLeadCost > 0 ? { 'orchestration.techLead.cost_usd': totalTechLeadCost } : {}),
-              ...(totalJudgeCost > 0 ? { 'orchestration.judge.cost_usd': totalJudgeCost } : {}),
-              ...(totalQACost > 0 ? { 'orchestration.qaEngineer.cost_usd': totalQACost } : {}),
+              ...(techLeadCost > 0 ? { 'orchestration.techLead.cost_usd': techLeadCost } : {}),
+              ...(judgeCost > 0 ? { 'orchestration.judge.cost_usd': judgeCost } : {}),
             }
           },
           { new: true }
@@ -629,7 +736,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           task.orchestration.totalCost = updatedTask.orchestration.totalCost;
         }
 
-        console.log(`💰 [TeamOrchestration] Total cost from all teams: $${totalTeamsCost.toFixed(4)} (atomic $inc)`);
+        console.log(`💰 [TeamOrchestration] Total cost from all teams: ${CostAccumulator.formatCost(totalTeamsCost)} (atomic $inc)`);
         console.log(`💰 [TeamOrchestration] Running orchestration total: $${task.orchestration.totalCost?.toFixed(4) || 'N/A'}`);
       } else {
         await task.save();
@@ -653,11 +760,12 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Collect error messages from failed teams
       const failedTeamErrors: string[] = [];
-      for (const teamResult of failedTeams) {
+      for (const wrappedResult of failedTeams) {
+        const teamResult = wrappedResult.result;
         if (teamResult.status === 'rejected') {
-          failedTeamErrors.push(`Team rejected: ${teamResult.reason?.message || teamResult.reason}`);
+          failedTeamErrors.push(`Team [${wrappedResult.epicId}] rejected: ${teamResult.reason?.message || teamResult.reason}`);
         } else if (teamResult.status === 'fulfilled' && !teamResult.value.success) {
-          failedTeamErrors.push(`Team failed: ${teamResult.value.error || 'Unknown error'}`);
+          failedTeamErrors.push(`Team [${wrappedResult.epicId}] failed: ${teamResult.value.error || 'Unknown error'}`);
         }
       }
 
@@ -697,8 +805,7 @@ export class TeamOrchestrationPhase extends BasePhase {
    * 1. Create branch for epic
    * 2. TechLead divides epic into stories + assigns devs
    * 3. Developers implement (each dev works on 1 story)
-   * 4. Judge reviews code
-   * 5. QA tests integration
+   * 4. Judge reviews code and validates quality
    */
   private async executeTeam(
     epic: any,
@@ -735,31 +842,43 @@ export class TeamOrchestrationPhase extends BasePhase {
 
     try {
       // 1️⃣ Get or create branch for this epic
-      // Priority: epic.branchName (if already set) > generate unique name
+      // Priority: epic.branchName (if already set) > UnifiedMemory > generate DETERMINISTIC name
+      // 🔥 CRITICAL: Branch names must be DETERMINISTIC for predictable recovery
+      // Using only taskId + epicId (no Date.now() or Math.random())
       let branchName: string;
+
+      // 🔥 RECOVERY: Try to restore branch from UnifiedMemory if not on epic object
+      if (!epic.branchName) {
+        try {
+          const epicId = getEpicId(epic);
+          const unifiedBranch = await unifiedMemoryService.getEpicBranch(taskId, epicId);
+          if (unifiedBranch?.branchName) {
+            epic.branchName = unifiedBranch.branchName;
+            console.log(`   🔄 [Team ${teamNumber}] Restored epic branch from UnifiedMemory: ${epic.branchName}`);
+          }
+        } catch (error: any) {
+          console.log(`   ⚠️ [Team ${teamNumber}] UnifiedMemory branch recovery failed: ${error.message}`);
+        }
+      }
+
       if (epic.branchName) {
-        // Use existing branch name from EventStore/context
+        // Use existing branch name from EventStore/context/UnifiedMemory
         branchName = epic.branchName;
         console.log(`   📌 [Team ${teamNumber}] Using EXISTING epic branch: ${branchName}`);
       } else {
-        // Generate unique branch name (first time creating this epic's branch)
+        // Generate DETERMINISTIC branch name (same inputs = same branch name)
         const taskShortId = (parentContext.task._id as any).toString().slice(-8);
-        const timestamp = Date.now();
-        const randomSuffix = Math.random().toString(36).substring(2, 8);
-        const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-        branchName = `epic/${taskShortId}-${epicSlug}-${timestamp}-${randomSuffix}`;
-        console.log(`   📌 [Team ${teamNumber}] Creating NEW epic branch: ${branchName}`);
+        const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 30);
+        // Use simple hash of epicId for uniqueness without randomness
+        const epicHash = epic.id.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
+        branchName = `epic/${taskShortId}-${epicSlug}-${epicHash}`;
+        console.log(`   📌 [Team ${teamNumber}] Creating DETERMINISTIC epic branch: ${branchName}`);
       }
       const workspacePath = parentContext.workspacePath;
 
-      // 🔥 DEFENSIVE VALIDATION: Check workspacePath type at team creation
-      if (typeof workspacePath !== 'string' && workspacePath !== null) {
-        console.error(`❌❌❌ [Team ${teamNumber}] CRITICAL: workspacePath is not a string!`);
-        console.error(`   Type: ${typeof workspacePath}`);
-        console.error(`   Value: ${JSON.stringify(workspacePath)}`);
-        console.error(`   parentContext.workspacePath: ${JSON.stringify(parentContext.workspacePath)}`);
-        throw new Error(`CRITICAL: workspacePath must be a string, received ${typeof workspacePath}`);
-      }
+      // 🔥 CRITICAL VALIDATION: workspacePath MUST be valid for team operations
+      assertValidWorkspacePath(workspacePath, `Team ${teamNumber}`);
+      console.log(`   ✅ [Team ${teamNumber}] Workspace path valid: ${workspacePath}`);
 
       // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
       if (!epic.targetRepository) {
@@ -771,7 +890,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository in createEpicBranch`);
       }
 
-      // 🔥 NORMALIZE: Remove .git suffix if present (ProjectManager may add it, but DB doesn't have it)
+      // 🔥 NORMALIZE: Remove .git suffix if present (Planning may add it, but DB doesn't have it)
       const targetRepository = normalizeRepoName(epic.targetRepository);
       let pushSuccessful = false;
 
@@ -958,12 +1077,22 @@ export class TeamOrchestrationPhase extends BasePhase {
         eventType: 'EpicBranchCreated' as any,
         agentName: 'team-orchestration',
         payload: {
-          epicId: epic.id,
+          epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
           branchName: branchName,
           targetRepository: targetRepository,
         },
       });
       console.log(`📝 [Team ${teamNumber}] Stored epic branch in EventStore: ${branchName}`);
+
+      // 🔥 CRITICAL FOR RECOVERY: Save epic branch to Unified Memory
+      // This ensures Developers phase knows which branch to work on after restart
+      await unifiedMemoryService.saveEpicBranch(
+        this.getTaskIdString(parentContext),
+        getEpicId(epic),
+        branchName,
+        targetRepository
+      );
+      console.log(`💾 [Team ${teamNumber}] Saved epic branch to Unified Memory: ${branchName}`);
 
       // Execute team pipeline
       // SIMPLIFIED: TechLead → Developers (includes Judge per-story) → PR
@@ -1023,6 +1152,15 @@ export class TeamOrchestrationPhase extends BasePhase {
           (teamCosts as any).techLead = ((teamCosts as any).techLead || 0) + techLeadCost;
           (teamCosts as any).techLeadUsage = techLeadUsage;
           console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
+        }
+
+        // 🔥 FIX: If TechLead was SKIPPED (already completed), don't require approval
+        // Phase was skipped = already approved in a previous run
+        if (techLeadResult.warnings?.includes('Phase was skipped')) {
+          console.log(`✅ [Team ${teamNumber}] Tech Lead was skipped (already completed) - no approval needed`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead skipped (already completed) for epic: ${epic.title}`);
+          techLeadApproved = true;
+          break; // Exit loop - no need to wait for approval
         }
 
         // 🛑 TECH LEAD APPROVAL GATE - Check auto-approval AFTER execution
@@ -1277,6 +1415,14 @@ export class TeamOrchestrationPhase extends BasePhase {
       teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge;
       console.log(`💰 [Team ${teamNumber}] Total team cost: $${teamCosts.total.toFixed(4)}`);
 
+      // 🔥 CRITICAL FOR RECOVERY: Save cost to Unified Memory
+      // This ensures cost tracking is persisted for recovery and reporting
+      await unifiedMemoryService.addEpicCost(
+        taskId,
+        getEpicId(epic),
+        teamCosts.total
+      );
+
       console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);
       NotificationService.emitConsoleLog(
         taskId,
@@ -1291,7 +1437,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       return {
         success: true,
         teamCosts: teamCosts,
-        epicId: epic.id
+        epicId: getEpicId(epic) // 🔥 CENTRALIZED: Use IdNormalizer
       };
     } catch (error: any) {
       console.error(`\n❌ [Team ${teamNumber}] Failed for epic ${epic.title}: ${error.message}\n`);
@@ -1384,7 +1530,6 @@ ${epic.description || 'No description provided'}
 ## ✅ Validation
 
 - ✅ Code reviewed by Judge (per story)
-- ✅ Integration tested by QA Engineer
 - ✅ All stories merged to epic branch
 
 ## 📝 Instructions
@@ -1411,7 +1556,7 @@ ${epic.description || 'No description provided'}
         // Check if epic branch exists locally
         let epicBranchExists = false;
         try {
-          execSync(`git rev-parse --verify ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+          execSync(`git rev-parse --verify ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
           epicBranchExists = true;
           console.log(`   ✅ Epic branch exists locally: ${epicBranch}`);
         } catch {
@@ -1422,7 +1567,7 @@ ${epic.description || 'No description provided'}
         let epicBranchExistsRemote = false;
         try {
           safeGitExecSync('git fetch origin', { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
-          execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+          execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
           epicBranchExistsRemote = true;
           console.log(`   ✅ Epic branch exists on remote: origin/${epicBranch}`);
         } catch {
@@ -1455,7 +1600,7 @@ ${epic.description || 'No description provided'}
           if (!storyBranch) continue;
           try {
             // Check if story branch exists
-            execSync(`git rev-parse --verify origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe' });
+            execSync(`git rev-parse --verify origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
             console.log(`   🔀 Merging ${storyBranch}...`);
             safeGitExecSync(`git merge origin/${storyBranch} --no-edit -m "Merge ${storyBranch} into epic"`, {
               cwd: repoPath,
@@ -1528,8 +1673,9 @@ ${epic.description || 'No description provided'}
             prUrl = prData.url;
             prNumber = prData.number;
             console.log(`✅ [PR] PR already exists: ${prUrl}`);
-          } catch {
-            // Continue to agent recovery
+          } catch (error: any) {
+            // 🔥 FIX: Log instead of silent swallow - helps debugging
+            console.log(`   ℹ️ [PR] No existing PR found for ${epicBranch} (expected if new): ${error.message?.slice(0, 50)}`);
           }
         }
       }
@@ -1658,13 +1804,25 @@ Or if you cannot fix it:
         eventType: 'PRCreated' as any,  // <-- EventStore expects this, NOT 'TeamCompleted'
         agentName: 'team-orchestration',
         payload: {
-          epicId: epic.id,
+          epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
           epicTitle: epic.title,
           prUrl: prUrl,
           prNumber: prNumber,
           epicBranch: epicBranch
         }
       });
+
+      // 🔥 CRITICAL FOR RECOVERY: Save PR info to Unified Memory
+      // This ensures AutoMerge phase knows which PR to merge after restart
+      if (prUrl && prNumber) {
+        await unifiedMemoryService.saveEpicPR(
+          taskId,
+          getEpicId(epic),
+          prUrl,
+          prNumber
+        );
+        console.log(`💾 [PR] Saved PR info to Unified Memory: ${prUrl} (#${prNumber})`);
+      }
 
     } catch (error: any) {
       console.error(`❌ [PR] Unexpected error creating PR: ${error.message}`);
@@ -1741,14 +1899,18 @@ Or if you cannot fix it:
   }
 
   /**
-   * 🔥 CHECKPOINT: Save epic completion to DB for recovery
+   * 🔥 CHECKPOINT: Save epic completion to DB AND UnifiedMemory for recovery
    * This allows resuming from exactly where we left off instead of re-executing all epics
+   *
+   * Saves to BOTH:
+   * 1. MongoDB (task.orchestration.teamOrchestration.completedEpicIds) - fast access
+   * 2. UnifiedMemory (executionMap.epics[].status) - single source of truth for recovery
    */
   private async saveEpicCheckpoint(taskId: any, epicId: string, taskIdStr: string): Promise<void> {
     try {
       const Task = require('../../models/Task').Task;
 
-      // Atomic $addToSet to prevent duplicates
+      // 1️⃣ Save to MongoDB (atomic $addToSet to prevent duplicates)
       await Task.findByIdAndUpdate(taskId, {
         $addToSet: {
           'orchestration.teamOrchestration.completedEpicIds': epicId,
@@ -1759,12 +1921,35 @@ Or if you cannot fix it:
         },
       });
 
+      // 2️⃣ Also update UnifiedMemory for recovery consistency
+      // This ensures getResumptionPoint() returns accurate completedEpics
+      try {
+        const map = await unifiedMemoryService.getExecutionMap(taskIdStr);
+        if (map && map.epics) {
+          const epicIndex = map.epics.findIndex(e => e.epicId === epicId);
+          if (epicIndex >= 0) {
+            map.epics[epicIndex].status = 'completed';
+            await unifiedMemoryService.updateExecutionMap(taskIdStr, {
+              epics: map.epics,
+            });
+            console.log(`   🧠 [UNIFIED MEMORY] Epic "${epicId}" marked as completed`);
+          }
+        }
+      } catch (memError: any) {
+        // Non-critical - MongoDB is primary
+        console.warn(`   ⚠️  [UNIFIED MEMORY] Could not update: ${memError.message}`);
+      }
+
       console.log(`   💾 [CHECKPOINT] Epic "${epicId}" saved to DB - can resume from here if interrupted`);
+
+      // Note: Git commits for memory are no longer needed
+      // Memory is stored in Local + MongoDB (not in client repos)
+      // Git is only for actual code work by developers
 
       NotificationService.emitConsoleLog(
         taskIdStr,
         'info',
-        `💾 CHECKPOINT: Epic "${epicId}" completed and saved`
+        `💾 CHECKPOINT: Epic "${epicId}" completed and saved [Local + MongoDB]`
       );
     } catch (error: any) {
       console.error(`   ⚠️  [CHECKPOINT] Failed to save checkpoint for epic "${epicId}": ${error.message}`);

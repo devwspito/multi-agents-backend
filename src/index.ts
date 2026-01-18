@@ -184,10 +184,10 @@ class AgentPlatformApp {
     // MongoDB injection prevention
     this.app.use(mongoSanitize());
 
-    // Rate limiting
+    // Rate limiting - Increased for real-time polling and approval workflows
     const limiter = rateLimit({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 100,
+      max: 1000, // Increased from 100 to support polling + approvals
       message: {
         success: false,
         message: 'Too many requests from this IP. Please try again later.',
@@ -195,7 +195,15 @@ class AgentPlatformApp {
       standardHeaders: true,
       legacyHeaders: false,
       skip: (req) => {
-        return req.path === '/health' || req.path === '/api/health';
+        // Skip rate limiting for health checks and high-frequency endpoints
+        const skipEndpoints = [
+          '/health',
+          '/api/health',
+          '/status',           // Task status polling
+          '/user-code-edit',   // Auto-accept polling
+          '/approve/',         // Approval endpoints (critical path)
+        ];
+        return skipEndpoints.some(ep => req.path.includes(ep));
       },
     });
 

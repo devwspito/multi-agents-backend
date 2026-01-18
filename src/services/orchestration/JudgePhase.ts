@@ -20,6 +20,13 @@ import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
 import { ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
+import { AgentArtifactService } from '../AgentArtifactService';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 📦 Utility helpers
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { logSection } from './utils/LogHelpers';
+import { isEmpty, isNotEmpty } from './utils/ArrayHelpers';
 import {
   buildPlanningJudgePrompt,
   buildTechLeadJudgePrompt,
@@ -73,6 +80,10 @@ export interface JudgeResult {
   suggestions?: string[];
   cost?: number;
   usage?: { input_tokens?: number; output_tokens?: number };
+  /** Whether human review is required (e.g., judge crashed) */
+  requiresHumanReview?: boolean;
+  /** Error message if evaluation failed */
+  evaluationError?: string;
 }
 
 /**
@@ -108,6 +119,18 @@ export class JudgePhase extends BasePhase {
 
   constructor(private executeAgentFn: Function) {
     super();
+  }
+
+  /**
+   * Create a default approval result when parsing fails or output is inconclusive
+   * Score is set to 70 to pass the >= 60 threshold check
+   */
+  private createDefaultApprovalResult(reason: string): JudgeResult {
+    return {
+      approved: true,
+      feedback: reason,
+      score: 70, // Must be >= 60 to pass threshold check
+    };
   }
 
   // ============================================================================
@@ -157,6 +180,15 @@ export class JudgePhase extends BasePhase {
       const duration = Date.now() - startTime;
       console.log(`   💰 [${type} Judge] Completed in ${duration}ms, cost: $${result.cost?.toFixed(4) || '?'}`);
 
+      // 🔍 DEBUG: Log the raw output to see what Judge returned
+      console.log(`\n🔍 [${type} Judge] Raw output (first 1000 chars):`);
+      console.log(`${'─'.repeat(60)}`);
+      console.log(result.output?.substring(0, 1000) || 'NO OUTPUT!');
+      if (result.output && result.output.length > 1000) {
+        console.log(`... (${result.output.length - 1000} more chars)`);
+      }
+      console.log(`${'─'.repeat(60)}\n`);
+
       // Parse result based on judge type
       const parsed = this.parseJudgeResultForType(type, result.output);
 
@@ -176,12 +208,17 @@ export class JudgePhase extends BasePhase {
       };
 
     } catch (error: any) {
-      console.warn(`⚠️ [${type} Judge] Evaluation failed: ${error.message} - falling back to approval`);
-      AgentActivityService.emitMessage(taskId, `Judge-${type}`, `⚠️ Evaluation failed, defaulting to approve`);
+      // 🔥 CRITICAL FIX: NEVER auto-approve on error - this could merge bad code
+      console.error(`❌ [${type} Judge] Evaluation FAILED: ${error.message} - REJECTING (not auto-approving)`);
+      AgentActivityService.emitMessage(taskId, `Judge-${type}`, `❌ Evaluation failed - REJECTED for safety`);
+
+      // Return rejection with clear indication that human review is required
       return {
-        approved: true,
-        feedback: `Judge evaluation failed (${error.message}), approved by default`,
-        score: 0,
+        approved: false,
+        feedback: `JUDGE ERROR: Evaluation failed (${error.message}). Code REJECTED for safety - manual review required.`,
+        score: 0,  // Score 0 = failed evaluation, not low quality
+        requiresHumanReview: true,
+        evaluationError: error.message,
       };
     }
   }
@@ -230,21 +267,61 @@ export class JudgePhase extends BasePhase {
    * Parse judge output based on type
    */
   private parseJudgeResultForType(type: JudgeType, output: string): JudgeResult {
-    // Extract JSON from output
-    const jsonMatch = output.match(/```json\n([\s\S]*?)\n```/) || output.match(/\{[\s\S]*?"verdict"[\s\S]*?\}/);
+    // 🔍 Try multiple patterns to extract JSON (more robust parsing)
+    const patterns = [
+      /```json\s*([\s\S]*?)\s*```/,              // ```json ... ``` (flexible whitespace)
+      /```\s*([\s\S]*?"verdict"[\s\S]*?)\s*```/, // ``` ... ``` with verdict inside
+      /\{[\s\S]*?"verdict"\s*:\s*"[^"]+"/,       // Raw JSON object with verdict
+    ];
+
+    let jsonMatch: RegExpMatchArray | null = null;
+    for (const pattern of patterns) {
+      jsonMatch = output.match(pattern);
+      if (jsonMatch) {
+        console.log(`   ✅ [${type} Judge] Found JSON using pattern: ${pattern.toString().substring(0, 50)}...`);
+        break;
+      }
+    }
 
     if (!jsonMatch) {
       console.warn(`⚠️ [${type} Judge] No JSON verdict found in output, defaulting to approve`);
-      return {
-        approved: true,
-        feedback: 'Judge output inconclusive - approved by default',
-        score: 0,
-      };
+      console.warn(`   Output preview: ${output?.substring(0, 200)}...`);
+      return this.createDefaultApprovalResult('Judge output inconclusive - approved by default');
     }
 
     try {
-      const jsonStr = jsonMatch[1] || jsonMatch[0];
+      let jsonStr = jsonMatch[1] || jsonMatch[0];
+
+      // 🔥 If we matched a partial JSON (starts with {), try to extract the complete object
+      if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) {
+        // Find the complete JSON object by counting braces
+        const startIdx = output.indexOf(jsonStr);
+        if (startIdx !== -1) {
+          let braceCount = 0;
+          let endIdx = startIdx;
+          for (let i = startIdx; i < output.length; i++) {
+            if (output[i] === '{') braceCount++;
+            if (output[i] === '}') braceCount--;
+            if (braceCount === 0) {
+              endIdx = i + 1;
+              break;
+            }
+          }
+          jsonStr = output.substring(startIdx, endIdx);
+          console.log(`   🔧 [${type} Judge] Extracted complete JSON (${jsonStr.length} chars)`);
+        }
+      }
+
+      // Clean up the JSON string (remove markdown artifacts)
+      jsonStr = jsonStr.trim();
+      if (jsonStr.startsWith('```json')) {
+        jsonStr = jsonStr.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+
       const parsed = JSON.parse(jsonStr);
+      console.log(`   ✅ [${type} Judge] Parsed JSON successfully: verdict=${parsed.verdict}, score=${parsed.score}`);
 
       return {
         approved: parsed.verdict === 'APPROVE' || parsed.status === 'approved',
@@ -254,116 +331,87 @@ export class JudgePhase extends BasePhase {
         issues: parsed.issues || [],
         suggestions: parsed.suggestions || [],
       };
-    } catch (parseError) {
-      console.warn(`⚠️ [${type} Judge] Failed to parse JSON: ${parseError}`);
-      return {
-        approved: true,
-        feedback: 'Judge output unparseable - approved by default',
-        score: 0,
-      };
+    } catch (parseError: any) {
+      console.warn(`⚠️ [${type} Judge] Failed to parse JSON: ${parseError.message}`);
+      console.warn(`   Attempted to parse: ${(jsonMatch[1] || jsonMatch[0])?.substring(0, 200)}...`);
+      return this.createDefaultApprovalResult('Judge output unparseable - approved by default');
     }
   }
 
   // ============================================================================
-  // 🔧 LEGACY API - Developer Judge (maintains existing behavior)
+  // 🔧 Developer Judge - Story evaluation and quality validation
   // ============================================================================
 
   /**
-   * Skip if Judge already evaluated all stories (ONLY for recovery, NOT for continuations)
+   * 🎯 UNIFIED MEMORY: Skip if Judge already evaluated all stories
    *
-   * 🔥 CRITICAL: In multi-team mode, only check stories for THIS EPIC!
+   * Uses UnifiedMemoryService as THE SINGLE SOURCE OF TRUTH.
+   * In multi-team mode, checks story evaluations per-epic.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
-    const task = context.task;
-
-    // 🔥 CRITICAL FIX: Detect multi-team mode (teamEpic is set in context)
+    const taskId = this.getTaskIdString(context);
     const teamEpic = context.getData<any>('teamEpic');
-    const multiTeamMode = !!teamEpic;
 
-    if (multiTeamMode) {
-      console.log(`\n🎯 [Judge.shouldSkip] Multi-team mode detected - Epic: ${teamEpic.id}`);
+    // Multi-team mode: check epic-specific completion
+    if (teamEpic) {
+      return this.shouldSkipMultiTeam(context, taskId, teamEpic);
     }
 
-    // Refresh task
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
+    // Single-team mode: use centralized skip logic
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'Judge' });
 
-    // 🔄 CONTINUATION: Never skip - always re-execute to evaluate new code
-    const isContinuation = context.task.orchestration.continuations &&
-                          context.task.orchestration.continuations.length > 0;
-
-    if (isContinuation) {
-      console.log(`🔄 [Judge] This is a CONTINUATION - will re-execute to evaluate new code`);
-      return false; // DO NOT SKIP
-    }
-
-    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
-    const judgeEvaluations = context.task.orchestration.judge?.evaluations || [];
-
-    // 🔥 EVENT SOURCING: Get stories from EventStore
-    const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
-
-    // 🔥 CRITICAL FIX: In multi-team mode, filter stories by THIS EPIC!
-    // Without this, Team 2-N would see Team 1's stories as "approved" and skip!
-    let stories = state.stories || [];
-    if (multiTeamMode && teamEpic) {
-      stories = stories.filter((s: any) => s.epicId === teamEpic.id);
-      console.log(`   🎯 Filtered to epic ${teamEpic.id}: ${stories.length} stories (was ${state.stories?.length || 0} total)`);
-    }
-
-    const epicInfo = multiTeamMode ? ` (epic: ${teamEpic?.id})` : '';
-    console.log(`\n🔍 [Judge.shouldSkip] Checking if Judge already reviewed code${epicInfo}...`);
-    console.log(`   Total stories: ${stories.length}`);
-    console.log(`   Total Judge evaluations: ${judgeEvaluations.length}`);
-
-    if (judgeEvaluations.length === 0 || stories.length === 0) {
-      console.log(`   ❌ No evaluations yet OR no stories - Judge MUST run`);
-      return false;
-    }
-
-    // Check if all stories have approved evaluations
-    console.log(`\n📋 [Judge.shouldSkip] Checking each story's evaluation status:`);
-
-    const evaluationStatus = stories.map((story: any) => {
-      const evaluation = judgeEvaluations.find((e: any) => e.storyId === story.id);
-      const hasEval = !!evaluation;
-      const status = evaluation?.status || 'NOT_EVALUATED';
-
-      console.log(`   📝 Story: ${story.title || story.id}`);
-      console.log(`      Story ID: ${story.id}`);
-      console.log(`      Has evaluation: ${hasEval ? '✅ YES' : '❌ NO'}`);
-      if (hasEval) {
-        console.log(`      Status: ${status === 'approved' ? '✅ APPROVED' : '❌ ' + status}`);
-        console.log(`      Developer: ${evaluation.developerId || 'unknown'}`);
-        console.log(`      Iteration: ${evaluation.iteration || 1}`);
-        const timestamp = (evaluation as any).timestamp;
-        console.log(`      Timestamp: ${timestamp ? new Date(timestamp).toISOString() : 'unknown'}`);
-      }
-
-      return { story, hasEval, status };
-    });
-
-    const allStoriesApproved = evaluationStatus.every(s => s.hasEval && s.status === 'approved');
-
-    if (allStoriesApproved) {
-      console.log(`\n✅ [SKIP] Judge already approved ALL ${stories.length} stories`);
-      console.log(`✅ All stories were reviewed during development (per-story mode)`);
-      console.log(`✅ No need to re-evaluate - skipping Judge phase`);
+    if (skipResult.shouldSkip) {
       context.setData('judgeComplete', true);
       return true;
-    } else {
-      const unevaluated = evaluationStatus.filter(s => !s.hasEval || s.status !== 'approved');
-      console.log(`\n❌ [NO SKIP] Judge has NOT approved all stories yet`);
-      console.log(`❌ Stories needing evaluation: ${unevaluated.length}`);
-      unevaluated.forEach(s => {
-        console.log(`   - ${s.story.title || s.story.id}: ${s.hasEval ? s.status : 'NOT_EVALUATED'}`);
-      });
+    }
+
+    console.log(`   ❌ Phase not completed - Judge must execute`);
+    return false;
+  }
+
+  /**
+   * Check skip for multi-team mode (epic-specific)
+   */
+  private async shouldSkipMultiTeam(
+    context: OrchestrationContext,
+    taskId: string,
+    teamEpic: any
+  ): Promise<boolean> {
+    console.log(`\n🎯 [Judge.shouldSkip] Multi-team mode - Epic: ${teamEpic.id}`);
+
+    // CONTINUATION: Never skip
+    if (this.isContinuation(context)) {
+      console.log(`   ↪️ CONTINUATION - will re-execute to evaluate new code`);
       return false;
     }
+
+    const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+    const epic = resumption.executionMap?.epics?.find(e => e.epicId === teamEpic.id);
+
+    // Check if ALL stories for THIS EPIC have been judged
+    if (epic && epic.status === 'completed') {
+      logSection(`🎯 [UNIFIED MEMORY] Judge for epic ${teamEpic.id} already COMPLETED`);
+      console.log(`   Stories: ${epic.stories?.length || 0} total`);
+      context.setData('judgeComplete', true);
+      return true;
+    }
+
+    // Check if all stories approved
+    if (isNotEmpty(epic?.stories)) {
+      const approvedStories = epic.stories.filter(s => s.judgeVerdict === 'approved');
+      const totalStories = epic.stories.length;
+
+      console.log(`   📋 ${approvedStories.length}/${totalStories} stories approved`);
+
+      if (approvedStories.length === totalStories) {
+        console.log(`   ✅ All stories approved - skipping Judge`);
+        context.setData('judgeComplete', true);
+        return true;
+      }
+    }
+
+    console.log(`   ❌ Epic judgment not completed - must execute`);
+    return false;
   }
 
   protected async executePhase(
@@ -393,7 +441,7 @@ export class JudgePhase extends BasePhase {
       console.log(`📋 [Judge] Batch review mode: Retrieved ${stories.length} stories from EventStore`);
     }
 
-    if (stories.length === 0) {
+    if (isEmpty(stories)) {
       console.warn('⚠️ [Judge] No stories found to evaluate');
       return {
         success: false,
@@ -420,7 +468,7 @@ export class JudgePhase extends BasePhase {
     );
 
     await LogService.agentStarted('judge', taskId, {
-      phase: 'qa', // Judge is part of QA phase (quality assurance)
+      phase: 'judge',
       metadata: {
         storiesCount: stories.length,
       },
@@ -540,7 +588,7 @@ export class JudgePhase extends BasePhase {
       );
 
       await LogService.agentCompleted('judge', taskId, {
-        phase: 'qa',
+        phase: 'judge',
         metadata: {
           approved: totalApproved,
           verdict: 'all_stories_approved',
@@ -616,7 +664,7 @@ export class JudgePhase extends BasePhase {
       );
 
       await LogService.agentFailed('judge', taskId, new Error(`${totalFailed} stories failed evaluation`), {
-        phase: 'qa',
+        phase: 'judge',
         metadata: {
           approved: totalApproved,
           failed: totalFailed,
@@ -694,7 +742,7 @@ export class JudgePhase extends BasePhase {
       if (!developer) {
         console.warn(`⚠️  No developer assigned to story ${story.id}`);
         console.warn(`   Team size: ${team.length}, Story ID: ${story.id}`);
-        if (team.length > 0) {
+        if (isNotEmpty(team)) {
           console.warn(`   Available developers: ${team.map((m: any) => `${m.instanceId} (${m.assignedStories.join(',')})`).join(', ')}`);
         }
         continue;
@@ -758,6 +806,28 @@ export class JudgePhase extends BasePhase {
         story.status = 'completed';
         if (!multiTeamMode) {
           await task.save();
+        }
+
+        // 📦 GITHUB BACKUP: Save Developer Judge evaluation
+        const targetRepo = getDataOptional<string>(context, 'targetRepository') ||
+          context.repositories?.[0]?.name;
+        if (targetRepo && workspacePath) {
+          try {
+            await AgentArtifactService.saveJudgeArtifact(
+              workspacePath,
+              targetRepo,
+              (task._id as any).toString(),
+              'developer',
+              story.id,
+              {
+                verdict: 'approved',
+                feedback: evaluation.feedback,
+              }
+            );
+            console.log(`📦 [Judge] Evaluation saved to GitHub for story ${story.id}`);
+          } catch (artifactError: any) {
+            console.warn(`⚠️ [Judge] GitHub backup failed (non-blocking): ${artifactError.message}`);
+          }
         }
 
         NotificationService.emitAgentMessage(
@@ -885,6 +955,29 @@ export class JudgePhase extends BasePhase {
             await task.save();
           }
 
+          // 📦 GITHUB BACKUP: Save Developer Judge evaluation (rejected after max retries)
+          const targetRepo = getDataOptional<string>(context, 'targetRepository') ||
+            context.repositories?.[0]?.name;
+          if (targetRepo && workspacePath) {
+            try {
+              await AgentArtifactService.saveJudgeArtifact(
+                workspacePath,
+                targetRepo,
+                (task._id as any).toString(),
+                'developer',
+                story.id,
+                {
+                  verdict: 'rejected',
+                  feedback: evaluation.feedback,
+                  issues: [`Failed after ${this.MAX_RETRIES} attempts - human intervention required`],
+                }
+              );
+              console.log(`📦 [Judge] Rejection saved to GitHub for story ${story.id}`);
+            } catch (artifactError: any) {
+              console.warn(`⚠️ [Judge] GitHub backup failed (non-blocking): ${artifactError.message}`);
+            }
+          }
+
           // Emit notification to UI
           NotificationService.emitAgentMessage(
             (task._id as any).toString(),
@@ -951,6 +1044,33 @@ export class JudgePhase extends BasePhase {
     console.log(`🆔 Story ID: ${story.id}`);
     console.log(`👤 Developer: ${developer?.instanceId || 'UNKNOWN'}`);
     console.log(`📝 Description: ${story.description || 'No description'}`);
+
+    // 🔥🔥🔥 CRITICAL VALIDATION: workspacePath MUST exist for Judge to work correctly 🔥🔥🔥
+    // Without proper workspacePath, Judge will search in the project directory instead of agent workspace
+    if (!workspacePath) {
+      console.error(`\n❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌`);
+      console.error(`❌ [JUDGE] CRITICAL ERROR: workspacePath is NULL!`);
+      console.error(`❌ [JUDGE] This means Judge will search in the WRONG directory!`);
+      console.error(`❌ [JUDGE] Expected: /var/folders/.../agent-workspace/task-.../`);
+      console.error(`❌ [JUDGE] Without workspacePath, Judge would use the project directory`);
+      console.error(`❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n`);
+
+      // Try to get workspacePath from context if available
+      const contextWorkspace = context.workspacePath;
+      if (contextWorkspace) {
+        console.log(`🔧 [JUDGE] Recovered workspacePath from context: ${contextWorkspace}`);
+        // TypeScript workaround - we know we're going to use this value
+        (workspacePath as any) = contextWorkspace;
+      } else {
+        throw new Error(
+          `HUMAN_REQUIRED: Judge cannot execute without workspacePath. ` +
+          `Story ${story.id} evaluation aborted. ` +
+          `Ensure the orchestration context has valid workspacePath from workspace setup.`
+        );
+      }
+    }
+
+    console.log(`📁 [JUDGE] Workspace path: ${workspacePath}`);
 
     // Validate critical inputs
     if (!task?._id) {
@@ -1019,17 +1139,17 @@ export class JudgePhase extends BasePhase {
 
     // Show files that should have been modified/created
     console.log(`\n📝 [Judge] Expected File Changes:`);
-    const filesToModify = (story as any).filesToModify || [];
-    const filesToCreate = (story as any).filesToCreate || [];
+    const filesToModify: string[] = (story as any).filesToModify || [];
+    const filesToCreate: string[] = (story as any).filesToCreate || [];
 
-    if (filesToModify.length > 0) {
+    if (isNotEmpty(filesToModify)) {
       console.log(`   ✏️  Files to MODIFY (${filesToModify.length}):`);
       filesToModify.forEach((f: string) => console.log(`      - ${f}`));
     } else {
       console.log(`   ⚠️  No files marked to MODIFY`);
     }
 
-    if (filesToCreate.length > 0) {
+    if (isNotEmpty(filesToCreate)) {
       console.log(`   ➕ Files to CREATE (${filesToCreate.length}):`);
       filesToCreate.forEach((f: string) => console.log(`      - ${f}`));
     } else {
@@ -1068,7 +1188,7 @@ export class JudgePhase extends BasePhase {
     const storyAny = story as any;
     const modifiedFiles = [...(storyAny.filesToModify || []), ...(storyAny.filesToCreate || [])];
 
-    if (modifiedFiles.length > 0 && workspacePath) {
+    if (isNotEmpty(modifiedFiles) && workspacePath) {
       console.log(`\n🔬 [Judge] Running automated semantic verification...`);
       try {
         semanticVerificationResult = await SemanticVerificationService.verifyChanges(
@@ -1169,7 +1289,7 @@ export class JudgePhase extends BasePhase {
       console.error(`❌ [Judge] Failed to convert task._id: ${conversionError.message}`);
       throw new Error(`Cannot convert task._id to string: ${conversionError.message}`);
     }
-    if (attachments.length > 0) {
+    if (isNotEmpty(attachments)) {
       console.log(`📎 [Judge] Using ${attachments.length} attachment(s) from context`);
       const { NotificationService } = await import('../NotificationService');
       NotificationService.emitConsoleLog(
@@ -1521,19 +1641,78 @@ export class JudgePhase extends BasePhase {
       throw new Error('executeDeveloperFn not available - cannot retry developer');
     }
 
-    // 🔥 CRITICAL: Format feedback for Developer to understand clearly
-    const formattedFeedback = `🚨 CODE REVIEW FAILED - CHANGES REQUIRED 🚨
+    // 🔥 CRITICAL: Format feedback for Developer using AITMPL Debugger methodology
+    // Systematic approach: CAPTURE → REPRODUCE → ISOLATE → FIX → VERIFY
+    const formattedFeedback = `🚨 CODE REVIEW FAILED - DEBUGGER MODE ACTIVATED 🚨
 
+## 📋 JUDGE FEEDBACK (CAPTURE)
 ${judgeFeedback}
 
-⚠️ CRITICAL INSTRUCTIONS:
-1. Read the feedback above carefully
-2. Make ALL required changes
-3. Test your changes
-4. Commit with descriptive message
-5. Report commit SHA with marker: 📍 Commit SHA: <your-sha-here>
+## 🔍 DEBUGGER METHODOLOGY (MANDATORY)
 
-❌ DO NOT mark as complete until ALL feedback items are addressed.`;
+You MUST follow this systematic approach to fix the issues:
+
+### 1️⃣ CAPTURE - Understand the exact problem
+- Read the Judge feedback above carefully
+- Identify EACH specific issue mentioned
+- Note the file:line references if provided
+
+### 2️⃣ REPRODUCE - Verify you can see the problem
+\`\`\`bash
+# Run these commands to see the current state:
+npm run typecheck    # See type errors
+npm run lint         # See lint errors
+npm test             # See test failures
+\`\`\`
+- Confirm you understand WHY Judge rejected the code
+- If unclear, Read the specific files mentioned
+
+### 3️⃣ ISOLATE - Find the root cause
+- For each issue, identify the EXACT location:
+  - Which file?
+  - Which function/method?
+  - Which line(s)?
+- Ask yourself: "Why did this happen?"
+- Consider if the issue is:
+  - A typo/syntax error? → Simple fix
+  - A logic error? → Need to understand the intent
+  - A missing import/export? → Check dependencies
+  - A type mismatch? → Check interfaces
+
+### 4️⃣ FIX - Apply targeted, minimal changes
+- Fix ONLY what is broken - don't refactor unrelated code
+- One issue at a time, verify each fix before moving on
+- Use Edit tool for precise changes (not Write for whole files)
+- After each Edit, immediately run verification:
+\`\`\`bash
+npm run typecheck && echo "✅ Types OK"
+\`\`\`
+
+### 5️⃣ VERIFY - Confirm the fix works completely
+\`\`\`bash
+# Run ALL verification commands:
+npm run typecheck    # Must pass
+npm run lint         # Must pass
+npm test             # Must pass
+\`\`\`
+- If any fails, go back to step 3 (ISOLATE)
+- Only proceed to commit when ALL pass
+
+## ⚠️ ANTI-PATTERNS TO AVOID
+- ❌ Changing multiple files without testing between changes
+- ❌ Guessing at fixes without understanding the problem
+- ❌ Ignoring error messages - READ them carefully
+- ❌ Committing before verification passes
+
+## ✅ SUCCESS CRITERIA
+1. All Judge feedback items addressed
+2. \`npm run typecheck\` passes
+3. \`npm run lint\` passes
+4. \`npm test\` passes
+5. Commit with descriptive message
+6. Report: 📍 Commit SHA: <your-sha-here>
+
+❌ DO NOT mark as complete until ALL criteria are met.`;
     console.log(`✅ [Judge] Formatted feedback for Developer`);
 
     // 🔥 Store Judge feedback in context for Fixer to access

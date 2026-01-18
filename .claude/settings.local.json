@@ -112,7 +112,18 @@
       "Bash(VALIDACIONES_ROBUSTAS_COMPLETAS.md )",
       "Bash(VERIFICATION_COMPLETE.md )",
       "Bash(ZERO_TOLERANCE_POLICY.md)",
-      "Bash(pgrep:*)"
+      "Bash(pgrep:*)",
+      "mcp__github__get_file_contents",
+      "Bash(tree:*)",
+      "Bash(git reset:*)",
+      "Bash(mdfind:*)",
+      "Bash(echo:*)",
+      "Bash(# Buscar donde está configurado el workspace grep -r \"\"AGENT_WORKSPACE\"\" /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq/.env* || echo \"\"No .env found\"\" # También buscar directorios de workspace ls -la /tmp/)",
+      "Bash(AGENT_WORKSPACE_DIR=/Users/luiscorrea/agent-workspace-prod node:*)",
+      "Bash(# Ver estructura completa del workspace de producción echo \"\"=== ESTRUCTURA DEL WORKSPACE ===\"\" find /Users/luiscorrea/agent-workspace-prod -type f \\\\\\( -name \"\"*.json\"\" -o -name \"\"*.md\"\" \\\\\\))",
+      "Bash(MONGODB_URI=\"mongodb://localhost:27017/multi-agent-dev\" node -e:*)",
+      "Bash(AGENT_WORKSPACE_DIR=/Users/luiscorrea/agent-workspace-prod MONGODB_URI=\"mongodb://localhost:27017/multi-agent-dev\" node:*)",
+      "Bash(npm run lint:*)"
     ],
     "deny": [],
     "ask": []

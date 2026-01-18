@@ -118,8 +118,6 @@ export class OutputParser {
     confidence: number;
     reasons: string[];
   } {
-    void output.toLowerCase(); // Available for pattern matching
-
     // Check for explicit decision
     const goPatterns = [/decision:\s*go/i, /approved/i, /✅/];
     const noGoPatterns = [/decision:\s*no-?go/i, /rejected/i, /failed/i, /❌/];
@@ -207,5 +205,218 @@ export class OutputParser {
     }
 
     return cleaned.trim();
+  }
+
+  /**
+   * Extract JSON with robust fallback strategies
+   *
+   * Tries multiple strategies in order:
+   * 1. Standard JSON patterns (```json blocks, { }, [ ])
+   * 2. Balanced brace matching (handles malformed output)
+   * 3. Cleaned output retry (strips markdown, extra text)
+   *
+   * @param output - Raw agent output
+   * @param options - Extraction options
+   */
+  static extractJSONRobust<T = any>(
+    output: string,
+    options: {
+      /** Field that must exist in result */
+      requiredField?: string;
+      /** Log extraction attempts */
+      verbose?: boolean;
+    } = {}
+  ): ParseResult<T> {
+    const { requiredField, verbose = false } = options;
+
+    if (!output || output.trim().length === 0) {
+      return { success: false, error: 'Empty output', rawOutput: output };
+    }
+
+    // Strategy 1: Standard extraction
+    const standardResult = this.extractJSON(output);
+    if (standardResult.success) {
+      if (!requiredField || (standardResult.data && requiredField in standardResult.data)) {
+        return standardResult as ParseResult<T>;
+      }
+      if (verbose) {
+        console.log(`   📋 Standard extraction succeeded but missing required field: ${requiredField}`);
+      }
+    }
+
+    // Strategy 2: Try brace matching for balanced JSON
+    const candidates = this.findBalancedJSONBlocks(output);
+    if (verbose) {
+      console.log(`   📋 Found ${candidates.length} balanced JSON candidates`);
+    }
+
+    // Sort by size (largest first - more likely to be complete)
+    candidates.sort((a, b) => b.length - a.length);
+
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!requiredField || requiredField in parsed) {
+          if (verbose) {
+            console.log(`   ✅ Brace-matching extraction succeeded`);
+          }
+          return { success: true, data: parsed, rawOutput: output };
+        }
+      } catch (e) {
+        // Try next candidate
+      }
+    }
+
+    // Strategy 3: Strip markdown and try again
+    const stripped = output
+      .replace(/```json\s*/g, '')
+      .replace(/```\s*/g, '')
+      .replace(/^[^{[]*/, '') // Remove text before JSON
+      .replace(/[^\]}]*$/, ''); // Remove text after JSON
+
+    try {
+      const parsed = JSON.parse(stripped);
+      if (!requiredField || requiredField in parsed) {
+        if (verbose) {
+          console.log(`   ✅ Stripped extraction succeeded`);
+        }
+        return { success: true, data: parsed, rawOutput: output };
+      }
+    } catch (e) {
+      // Fall through
+    }
+
+    return {
+      success: false,
+      error: `No valid JSON found${requiredField ? ` with required field '${requiredField}'` : ''}`,
+      rawOutput: output,
+    };
+  }
+
+  /**
+   * Find all balanced JSON blocks in output using brace matching
+   */
+  private static findBalancedJSONBlocks(output: string): string[] {
+    const candidates: string[] = [];
+
+    for (let i = 0; i < output.length; i++) {
+      if (output[i] === '{' || output[i] === '[') {
+        const openChar = output[i];
+        const closeChar = openChar === '{' ? '}' : ']';
+        let depth = 0;
+        let j = i;
+        let inString = false;
+        let escape = false;
+
+        while (j < output.length) {
+          const char = output[j];
+
+          if (escape) {
+            escape = false;
+            j++;
+            continue;
+          }
+
+          if (char === '\\') {
+            escape = true;
+            j++;
+            continue;
+          }
+
+          if (char === '"') {
+            inString = !inString;
+            j++;
+            continue;
+          }
+
+          if (!inString) {
+            if (char === openChar) depth++;
+            if (char === closeChar) depth--;
+
+            if (depth === 0) {
+              const block = output.substring(i, j + 1);
+              if (block.length > 10) {
+                candidates.push(block);
+              }
+              break;
+            }
+          }
+
+          j++;
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Parse epics from agent output
+   *
+   * Handles various formats agents might use:
+   * - JSON with "epics" array
+   * - JSON with "plan" containing epics
+   * - Direct array of epics
+   */
+  static parseEpics<T = any>(output: string): ParseResult<T[]> {
+    const result = this.extractJSONRobust<any>(output, {
+      verbose: true,
+    });
+
+    if (!result.success) {
+      return { ...result, data: undefined } as ParseResult<T[]>;
+    }
+
+    const data = result.data;
+
+    // Handle different structures
+    if (Array.isArray(data)) {
+      return { success: true, data, rawOutput: output };
+    }
+
+    if (data.epics && Array.isArray(data.epics)) {
+      return { success: true, data: data.epics, rawOutput: output };
+    }
+
+    if (data.plan?.epics && Array.isArray(data.plan.epics)) {
+      return { success: true, data: data.plan.epics, rawOutput: output };
+    }
+
+    return {
+      success: false,
+      error: 'Could not find epics array in parsed JSON',
+      rawOutput: output,
+    };
+  }
+
+  /**
+   * Parse stories from agent output
+   */
+  static parseStories<T = any>(output: string): ParseResult<T[]> {
+    const result = this.extractJSONRobust<any>(output);
+
+    if (!result.success) {
+      return { ...result, data: undefined } as ParseResult<T[]>;
+    }
+
+    const data = result.data;
+
+    if (Array.isArray(data)) {
+      return { success: true, data, rawOutput: output };
+    }
+
+    if (data.stories && Array.isArray(data.stories)) {
+      return { success: true, data: data.stories, rawOutput: output };
+    }
+
+    if (data.userStories && Array.isArray(data.userStories)) {
+      return { success: true, data: data.userStories, rawOutput: output };
+    }
+
+    return {
+      success: false,
+      error: 'Could not find stories array in parsed JSON',
+      rawOutput: output,
+    };
   }
 }

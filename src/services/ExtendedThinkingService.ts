@@ -108,15 +108,12 @@ class ExtendedThinkingServiceClass extends EventEmitter {
 
     // Agent type weight
     const agentWeights: Record<string, number> = {
-      'planning-agent': 0.3,      // Planning needs thinking
-      'problem-analyst': 0.35,    // Analysis needs deep thinking
-      'product-manager': 0.2,
-      'project-manager': 0.15,
+      'planning-agent': 0.35,     // Planning needs deep thinking
       'tech-lead': 0.4,           // Architecture decisions
       'developer': 0.25,          // Code complexity varies
       'judge': 0.3,               // Code review needs analysis
-      'fixer': 0.35,              // Bug fixing needs investigation
-      'qa-engineer': 0.2,
+      'verification-fixer': 0.35, // Bug fixing needs investigation
+      'recovery-analyst': 0.4,    // Error analysis needs deep thinking
       'auto-merge': 0.1,
     };
 

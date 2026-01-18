@@ -256,3 +256,137 @@ export function wrapAsBillingErrorIfApplicable(error: any, agentType?: string): 
   }
   return error;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔥 STRUCTURED ERROR TYPES: For better error classification and recovery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Enumeration of all possible error types in the orchestration system.
+ * This enables type-safe error classification instead of fragile string matching.
+ */
+export enum OrchestrationErrorType {
+  /** API billing/credit issues - recoverable by user */
+  BILLING = 'billing',
+  /** Agent timeout - may retry with different model */
+  TIMEOUT = 'timeout',
+  /** Git operation failed - may retry or need manual fix */
+  GIT_ERROR = 'git_error',
+  /** Validation failure - data/context issue */
+  VALIDATION = 'validation',
+  /** Network/API connection issue - transient, retry */
+  NETWORK = 'network',
+  /** Agent execution failed - code/logic error */
+  EXECUTION = 'execution',
+  /** Cost budget exceeded */
+  BUDGET_EXCEEDED = 'budget_exceeded',
+  /** Circuit breaker tripped */
+  CIRCUIT_BREAKER = 'circuit_breaker',
+  /** Unknown error type */
+  UNKNOWN = 'unknown',
+}
+
+/**
+ * Structured result for Promise.allSettled that includes error classification
+ */
+export interface ClassifiedResult<T> {
+  success: boolean;
+  data?: T;
+  errorType?: OrchestrationErrorType;
+  errorMessage?: string;
+  retryable: boolean;
+}
+
+/**
+ * Classify an error into a structured type.
+ * Use this instead of ad-hoc string matching throughout the codebase.
+ */
+export function classifyError(error: any): { type: OrchestrationErrorType; retryable: boolean } {
+  if (!error) {
+    return { type: OrchestrationErrorType.UNKNOWN, retryable: false };
+  }
+
+  // Check error name first (for typed errors)
+  const errorName = error?.name || '';
+  if (errorName === 'BillingError') {
+    return { type: OrchestrationErrorType.BILLING, retryable: false };
+  }
+  if (errorName === 'CostBudgetExceededError') {
+    return { type: OrchestrationErrorType.BUDGET_EXCEEDED, retryable: false };
+  }
+  if (errorName === 'CircuitBreakerError') {
+    return { type: OrchestrationErrorType.CIRCUIT_BREAKER, retryable: false };
+  }
+
+  const errorMessage = (error?.message || error?.toString() || '').toLowerCase();
+
+  // Billing errors (user-recoverable)
+  if (isBillingError(error)) {
+    return { type: OrchestrationErrorType.BILLING, retryable: false };
+  }
+
+  // Timeout errors (may retry with stronger model)
+  const timeoutPatterns = ['timeout', 'timed out', 'deadline exceeded', 'execution timeout'];
+  if (timeoutPatterns.some(p => errorMessage.includes(p))) {
+    return { type: OrchestrationErrorType.TIMEOUT, retryable: true };
+  }
+
+  // Git errors (may need manual fix)
+  const gitPatterns = ['git', 'repository', 'branch', 'merge conflict', 'not a git repository'];
+  if (gitPatterns.some(p => errorMessage.includes(p))) {
+    return { type: OrchestrationErrorType.GIT_ERROR, retryable: false };
+  }
+
+  // Network errors (transient, should retry)
+  const networkPatterns = ['econnreset', 'enotfound', 'etimedout', 'socket hang up', 'network', 'connection refused'];
+  if (networkPatterns.some(p => errorMessage.includes(p))) {
+    return { type: OrchestrationErrorType.NETWORK, retryable: true };
+  }
+
+  // Validation errors (data/context issue)
+  const validationPatterns = ['validation', 'invalid', 'required', 'missing', 'undefined', 'null'];
+  if (validationPatterns.some(p => errorMessage.includes(p))) {
+    return { type: OrchestrationErrorType.VALIDATION, retryable: false };
+  }
+
+  // Default to execution error
+  return { type: OrchestrationErrorType.EXECUTION, retryable: true };
+}
+
+/**
+ * Wrap a Promise.allSettled result array into ClassifiedResults.
+ * This standardizes error handling across all parallel execution.
+ */
+export function classifySettledResults<T>(
+  results: PromiseSettledResult<T>[]
+): ClassifiedResult<T>[] {
+  return results.map(result => {
+    if (result.status === 'fulfilled') {
+      // Check if the fulfilled value indicates failure (some functions return { success: false })
+      const value = result.value as any;
+      if (value && typeof value === 'object' && 'success' in value && !value.success) {
+        const classification = classifyError(value.error || value.errorMessage);
+        return {
+          success: false,
+          data: result.value,
+          errorType: classification.type,
+          errorMessage: value.error || value.errorMessage,
+          retryable: classification.retryable,
+        };
+      }
+      return {
+        success: true,
+        data: result.value,
+        retryable: false,
+      };
+    } else {
+      const classification = classifyError(result.reason);
+      return {
+        success: false,
+        errorType: classification.type,
+        errorMessage: result.reason?.message || String(result.reason),
+        retryable: classification.retryable,
+      };
+    }
+  });
+}

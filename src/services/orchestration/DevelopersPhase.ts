@@ -12,6 +12,207 @@ import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
 import { ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 📦 Utility helpers
+import { assertValidWorkspacePath } from './utils/WorkspaceValidator';
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { logSection } from './utils/LogHelpers';
+import { isEmpty } from './utils/ArrayHelpers';
+import { CostAccumulator } from './utils/CostAccumulator';
+import { getEpicId, getStoryId } from './utils/IdNormalizer';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔥 TYPED CONTRACTS: Developer ↔ Judge Communication
+// ═══════════════════════════════════════════════════════════════════════════════
+// These interfaces define the EXACT data that flows between Developer and Judge.
+// This ensures type safety and prevents silent data mismatches.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Output from Developer after implementing a story.
+ * This is the SINGLE SOURCE OF TRUTH for what Developer produced.
+ */
+export interface DeveloperOutput {
+  /** Whether the developer completed successfully */
+  success: boolean;
+  /** The exact git commit SHA of the developer's work */
+  commitSHA: string;
+  /** The branch name where work was committed */
+  branchName: string;
+  /** List of files that were modified */
+  filesModified: string[];
+  /** List of files that were created */
+  filesCreated: string[];
+  /** Cost of the developer execution in USD */
+  cost: number;
+  /** Token usage for the developer */
+  tokens: { input: number; output: number };
+  /** When the developer completed */
+  completedAt: Date;
+  /** The story that was implemented */
+  storyId: string;
+  /** Raw agent response (for debugging) */
+  rawResponse?: string;
+}
+
+/**
+ * Input that Judge receives to evaluate Developer's work.
+ * This is derived from DeveloperOutput to ensure consistency.
+ */
+export interface JudgeInput {
+  /** The exact commit SHA to review (from DeveloperOutput.commitSHA) */
+  commitSHA: string;
+  /** The branch to review (from DeveloperOutput.branchName) */
+  branchName: string;
+  /** Files to review (from DeveloperOutput.filesModified + filesCreated) */
+  filesToReview: string[];
+  /** The story being evaluated */
+  story: {
+    id: string;
+    title: string;
+    acceptanceCriteria?: string[];
+  };
+  /** The epic context */
+  epic: {
+    id: string;
+    name: string;
+    targetRepository: string;
+  };
+  /** Path to the isolated workspace where code exists */
+  workspacePath: string;
+  /** Type of judge evaluation */
+  judgeType: 'developer' | 'story' | 'epic' | 'integration';
+}
+
+/**
+ * Result from Judge evaluation.
+ */
+export interface JudgeResult {
+  /** Whether the code was approved */
+  approved: boolean;
+  /** Numeric score (0-100) */
+  score: number;
+  /** Detailed feedback from the judge */
+  feedback: string;
+  /** Whether human review is required (e.g., judge crashed) */
+  requiresHumanReview?: boolean;
+  /** Error message if evaluation failed */
+  evaluationError?: string;
+  /** Cost of the judge execution in USD */
+  cost?: number;
+  /** Token usage */
+  usage?: { input_tokens?: number; output_tokens?: number };
+  /** Current iteration (for retries) */
+  iteration?: number;
+  /** Max retries allowed */
+  maxRetries?: number;
+}
+
+/**
+ * Helper to create JudgeInput from DeveloperOutput.
+ * This ensures the handoff is consistent and type-safe.
+ */
+export function createJudgeInput(
+  developerOutput: DeveloperOutput,
+  story: JudgeInput['story'],
+  epic: JudgeInput['epic'],
+  workspacePath: string,
+  judgeType: JudgeInput['judgeType'] = 'developer'
+): JudgeInput {
+  return {
+    commitSHA: developerOutput.commitSHA,
+    branchName: developerOutput.branchName,
+    filesToReview: [...developerOutput.filesModified, ...developerOutput.filesCreated],
+    story,
+    epic,
+    workspacePath,
+    judgeType,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔥 STAGE-BASED PIPELINE: Modular execution for mid-story recovery
+// ═══════════════════════════════════════════════════════════════════════════════
+// These interfaces define the inputs/outputs for each stage of the story pipeline.
+// This modularity allows jumping directly to any stage during recovery.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parameters shared across all pipeline stages.
+ * Extracted from executeIsolatedStoryPipeline to enable stage isolation.
+ */
+export interface StoryPipelineContext {
+  task: any;
+  story: any;
+  developer: any;
+  epic: any;
+  repositories: any[];
+  effectiveWorkspacePath: string;
+  workspaceStructure: string;
+  attachments: any[];
+  state: any;
+  context: OrchestrationContext;
+  taskId: string;
+  normalizedEpicId: string;
+  normalizedStoryId: string;
+  epicBranchName: string;
+  devAuth?: any;
+  architectureBrief?: any;
+  environmentCommands?: any;
+  projectRadiographies?: Map<string, ProjectRadiography>;
+}
+
+/**
+ * Result from the Developer stage.
+ * Contains everything needed for subsequent stages.
+ */
+export interface DeveloperStageResult {
+  success: boolean;
+  developerCost: number;
+  developerTokens: { input: number; output: number };
+  sdkSessionId?: string;
+  output?: string;
+  error?: string;
+}
+
+/**
+ * Result from the Git Validation stage.
+ * Confirms code is committed and pushed.
+ */
+export interface GitValidationStageResult {
+  success: boolean;
+  commitSHA: string | null;
+  storyBranch: string | null;
+  gitValidationPassed: boolean;
+  error?: string;
+}
+
+/**
+ * Result from the Judge stage.
+ * Contains verdict and feedback.
+ */
+export interface JudgeStageResult {
+  success: boolean;
+  approved: boolean;
+  judgeCost: number;
+  judgeTokens: { input: number; output: number };
+  feedback?: string;
+  iteration?: number;
+  maxRetries?: number;
+  error?: string;
+}
+
+/**
+ * Result from the Merge stage.
+ * Confirms story branch merged to epic branch.
+ */
+export interface MergeStageResult {
+  success: boolean;
+  conflictResolutionCost: number;
+  conflictResolutionUsage: { input_tokens: number; output_tokens: number };
+  error?: string;
+}
 
 /**
  * Developers Phase
@@ -36,11 +237,25 @@ export class DevelopersPhase extends BasePhase {
   readonly name = 'Developers'; // Must match PHASE_ORDER
   readonly description = 'Implementing features with production-ready code';
 
+  /**
+   * 🔥 STAGE METHODS REGISTRY
+   * These methods are used for mid-story recovery via direct-to-Judge flow.
+   * This property exists to register all stage methods for TypeScript.
+   */
+  private readonly _stageMethods = {
+    developer: this.executeDeveloperStage.bind(this),
+    gitValidation: this.executeGitValidationStage.bind(this),
+    judge: this.executeJudgeStage.bind(this),
+    merge: this.executeMergeStage.bind(this),
+  };
+
   constructor(
     private executeDeveloperFn: Function,
     private executeAgentFn?: Function // For Judge execution (optional for backward compatibility)
   ) {
     super();
+    // Reference _stageMethods to satisfy TypeScript's unused check
+    void this._stageMethods;
   }
 
   /**
@@ -124,186 +339,82 @@ export class DevelopersPhase extends BasePhase {
   }
 
   /**
-   * Skip if developers already completed all stories (ONLY for recovery, NOT for continuations)
+   * 🎯 UNIFIED MEMORY: Skip if developers already completed all stories
    *
-   * 🔥 SMART RECOVERY: Uses EventStore as source of truth + DB as fallback
-   * This ensures that if server restarts mid-development:
-   * - Stories 1-8 completed → Skip them (already done)
-   * - Story 9 in progress → Continue from story 9
-   * - NOT re-execute all 10 developers!
+   * Uses UnifiedMemoryService as THE SINGLE SOURCE OF TRUTH.
+   * In multi-team mode, checks story completion per-epic.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
-    const task = context.task;
-
-    // Refresh task from DB to get latest state
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
-
-    // 🔄 CONTINUATION: Never skip - always re-execute to implement new stories
-    const isContinuation = context.task.orchestration.continuations &&
-                          context.task.orchestration.continuations.length > 0;
-
-    if (isContinuation) {
-      console.log(`🔄 [Developers] This is a CONTINUATION - will re-execute to implement new stories`);
-      return false; // DO NOT SKIP
-    }
-
-    // 🔥 SMART RECOVERY: Check EventStore for accurate story completion status
-    console.log(`\n🔍 [Developers.shouldSkip] Checking for recovery scenario...`);
-
-    // 🔥 CRITICAL FIX: In multi-team mode, only check stories for THIS team's epic
+    const taskId = this.getTaskIdString(context);
     const teamEpic = context.getData<any>('teamEpic');
-    const multiTeamMode = !!teamEpic;
 
-    if (multiTeamMode) {
-      console.log(`   🎯 Multi-team mode: Checking only epic ${teamEpic.id}`);
+    // Multi-team mode: check epic-specific completion
+    if (teamEpic) {
+      return this.shouldSkipMultiTeam(context, taskId, teamEpic);
     }
 
-    try {
-      const { eventStore } = await import('../EventStore');
-      const state = await eventStore.getCurrentState(context.task._id as any);
+    // Single-team mode: use centralized skip logic
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'Developers' });
 
-      // 🔥 CRITICAL FIX: Filter stories by epicId in multi-team mode
-      // Without this filter, Team 2-N would see Team 1's completed stories and incorrectly skip!
-      let relevantStories = state.stories || [];
-      if (multiTeamMode && teamEpic) {
-        relevantStories = relevantStories.filter((s: any) => s.epicId === teamEpic.id);
-        console.log(`   🎯 Filtered to epic ${teamEpic.id}: ${relevantStories.length} stories (was ${state.stories?.length || 0} total)`);
-      }
-
-      // Use getCurrentState which gives us the aggregated stories with status
-      const totalStories = relevantStories.length;
-      const completedStories = relevantStories.filter((s: any) =>
-        s.status === 'completed' || s.mergedToEpic === true
-      ).length;
-
-      console.log(`   📊 EventStore status${multiTeamMode ? ` (epic: ${teamEpic.id})` : ''}:`);
-      console.log(`      Total stories: ${totalStories}`);
-      console.log(`      Completed: ${completedStories}`);
-
-      if (totalStories > 0 && completedStories === totalStories) {
-        const epicInfo = multiTeamMode ? ` for epic ${teamEpic.id}` : '';
-        console.log(`\n✅ [SKIP] ALL ${totalStories} stories completed${epicInfo} (from EventStore)`);
-
-        // Restore team from context or DB
-        const team = context.task.orchestration.team || [];
-        context.setData('developmentTeam', team);
-        context.setData('developmentComplete', true);
-
-        return true;
-      }
-
-      // 🔥 CRITICAL: In multi-team mode, if NO stories exist for this epic yet, DON'T skip!
-      // This happens when TechLead hasn't created stories for this epic yet
-      if (multiTeamMode && totalStories === 0) {
-        console.log(`   ⚠️ No stories found for epic ${teamEpic.id} - TechLead needs to create them`);
-        console.log(`   → Will NOT skip - need to execute TechLead first or create stories`);
-        return false;
-      }
-
-      if (completedStories > 0 && completedStories < totalStories) {
-        console.log(`\n🔄 [PARTIAL RECOVERY] ${completedStories}/${totalStories} stories completed`);
-        console.log(`   → Will resume from incomplete stories (NOT re-execute all)`);
-        // Don't skip - but individual stories will be skipped in executePhase
-        return false;
-      }
-    } catch (error: any) {
-      console.log(`   ⚠️ EventStore check failed: ${error.message}`);
+    if (skipResult.shouldSkip) {
+      this.restoreDevContextOnSkip(context);
+      return true;
     }
 
-    // 🛠️ FALLBACK RECOVERY: Check DB if EventStore failed
-    const team = context.task.orchestration.team || [];
-    // Get stories from Project Manager (not epics from Tech Lead)
-    const stories = context.task.orchestration.projectManager?.stories || [];
-    const epics = stories; // Alias for backward compatibility
-
-    // If team exists and has members, AND all epics/stories are completed, skip
-    if (team.length > 0 && epics.length > 0) {
-      const completedCount = epics.filter((epic: any) => epic.status === 'completed').length;
-      const allEpicsCompleted = completedCount === epics.length;
-
-      console.log(`   📊 DB fallback status:`);
-      console.log(`      Total: ${epics.length}, Completed: ${completedCount}`);
-
-      if (allEpicsCompleted) {
-        console.log(`[SKIP] Developers already completed - all ${epics.length} stories done (recovery mode)`);
-
-        // Restore phase data
-        context.setData('developmentTeam', team);
-        context.setData('developmentComplete', true);
-        context.setData('epicExecutionOrder', epics.map((e: any) => e.id));
-
-        return true;
-      }
-
-      if (completedCount > 0) {
-        console.log(`\n🔄 [PARTIAL RECOVERY] ${completedCount}/${epics.length} stories completed (from DB)`);
-        console.log(`   → Will resume from incomplete stories`);
-      }
-    }
-
-    // 🧠 GRANULAR MEMORY: Third fallback - check memory for completed progress
-    // 🔥 CRITICAL FIX: In multi-team mode, filter memories by epicId!
-    try {
-      const taskId = (context.task._id as any).toString();
-      const projectId = context.task.projectId?.toString();
-      if (projectId) {
-        const phaseMemories = await granularMemoryService.getPhaseMemories({
-          projectId,
-          taskId,
-          phaseType: 'developer',
-          limit: 100,
-        });
-
-        // 🔥 CRITICAL: In multi-team mode, only check memories for THIS epic
-        const relevantMemories = multiTeamMode && teamEpic
-          ? phaseMemories.filter((m: any) => m.epicId === teamEpic.id || !m.epicId)
-          : phaseMemories;
-
-        if (multiTeamMode) {
-          console.log(`   🎯 Filtered memories to epic ${teamEpic?.id}: ${relevantMemories.length} (was ${phaseMemories.length})`);
-        }
-
-        // Check for phase completion marker FOR THIS EPIC
-        const completionMarker = relevantMemories.find((m: any) =>
-          m.type === 'progress' &&
-          m.title?.includes('COMPLETED') &&
-          m.phaseType === 'developer' &&
-          !m.storyId && // Phase-level, not story-level
-          (!multiTeamMode || m.epicId === teamEpic?.id) // In multi-team, must match epic
-        );
-
-        if (completionMarker) {
-          const epicInfo = multiTeamMode ? ` for epic ${teamEpic?.id}` : '';
-          console.log(`\n🧠 [MEMORY RECOVERY] Found phase completion marker${epicInfo} in granular memory`);
-          console.log(`   Marker: ${completionMarker.title}`);
-          console.log(`   → Phase already completed, skipping`);
-
-          context.setData('developmentTeam', team);
-          context.setData('developmentComplete', true);
-          return true;
-        }
-
-        // Count completed stories from memory FOR THIS EPIC
-        const completedInMemory = relevantMemories.filter((m: any) =>
-          m.type === 'progress' &&
-          m.title?.startsWith('COMPLETED:') &&
-          m.storyId
-        );
-
-        if (completedInMemory.length > 0) {
-          const epicInfo = multiTeamMode ? ` for epic ${teamEpic?.id}` : '';
-          console.log(`   🧠 Memory shows ${completedInMemory.length} stories completed${epicInfo}`);
-        }
-      }
-    } catch (memError: any) {
-      console.log(`   ⚠️ Granular memory check failed: ${memError.message}`);
-    }
-
+    console.log(`   ❌ Phase not completed - Developers must execute`);
     return false;
+  }
+
+  /**
+   * Check skip for multi-team mode (epic-specific)
+   */
+  private async shouldSkipMultiTeam(
+    context: OrchestrationContext,
+    taskId: string,
+    teamEpic: any
+  ): Promise<boolean> {
+    console.log(`\n🎯 [Developers.shouldSkip] Multi-team mode - Epic: ${teamEpic.id}`);
+
+    // CONTINUATION: Never skip
+    if (this.isContinuation(context)) {
+      console.log(`   ↪️ CONTINUATION - will re-execute to implement new stories`);
+      return false;
+    }
+
+    const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+    const epic = resumption.executionMap?.epics?.find(e => e.epicId === teamEpic.id);
+
+    // Check if ALL stories for THIS EPIC are completed
+    if (epic && epic.status === 'completed') {
+      logSection(`🎯 [UNIFIED MEMORY] Development for epic ${teamEpic.id} already COMPLETED`);
+      console.log(`   Stories: ${epic.stories?.length || 0} total`);
+      this.restoreDevContextOnSkip(context);
+      return true;
+    }
+
+    // Check partial recovery (some stories done, some pending)
+    if (epic && !isEmpty(epic.stories)) {
+      const completedStories = epic.stories!.filter(s => s.status === 'completed');
+      const totalStories = epic.stories!.length;
+
+      if (completedStories.length > 0 && completedStories.length < totalStories) {
+        console.log(`\n🔄 [PARTIAL RECOVERY] ${completedStories.length}/${totalStories} stories completed`);
+        console.log(`   → Will resume from incomplete stories`);
+        return false; // Don't skip phase, but individual stories will be skipped
+      }
+    }
+
+    console.log(`   ❌ Epic development not completed - must execute`);
+    return false;
+  }
+
+  /**
+   * Restore development context when skipping
+   */
+  private restoreDevContextOnSkip(context: OrchestrationContext): void {
+    const team = context.task.orchestration.team || [];
+    context.setData('developmentTeam', team);
+    context.setData('developmentComplete', true);
   }
 
   protected async executePhase(
@@ -315,15 +426,14 @@ export class DevelopersPhase extends BasePhase {
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
 
-    // Initialize cost tracking
-    let totalDeveloperCost = 0;
-    let totalJudgeCost = 0;
-    let totalConflictResolutionCost = 0;
-    let totalDeveloperTokens = { input: 0, output: 0 };
-    let totalJudgeTokens = { input: 0, output: 0 };
-    let totalConflictResolutionTokens = { input: 0, output: 0 };
+    // 🔥 CRITICAL VALIDATION: workspacePath MUST exist for Developers+Judge to work correctly
+    assertValidWorkspacePath(workspacePath, 'DevelopersPhase');
+    console.log(`   ✅ Workspace path valid: ${workspacePath}`);
 
-    // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+    // Initialize cost tracking with CostAccumulator
+    const phaseCosts = new CostAccumulator();
+
+    // 🔥 CRITICAL: Retrieve processed attachments from context (shared from Planning phase)
     const attachments = context.getData<any[]>('attachments') || [];
     if (attachments.length > 0) {
       console.log(`📎 [Developers] Using ${attachments.length} attachment(s) from context`);
@@ -518,19 +628,19 @@ export class DevelopersPhase extends BasePhase {
         });
         console.error(`\n   🛑 STOPPING PHASE - HUMAN INTERVENTION REQUIRED`);
 
-        // Mark task as failed
+        // Mark task as failed (atomic update to avoid version conflicts)
         const Task = require('../../models/Task').Task;
-        const dbTask = await Task.findById(task._id);
-        if (dbTask) {
-          dbTask.status = 'failed';
-          dbTask.orchestration.developers = {
+        await Task.findByIdAndUpdate(task._id, {
+          $set: {
             status: 'failed',
-            error: `${invalidEpics.length} epic(s) have no targetRepository - cannot determine which repo to work in`,
-            humanRequired: true,
-            invalidEpics: invalidEpics.map((e: any) => ({ id: e.id, name: e.name })),
-          };
-          await dbTask.save();
-        }
+            'orchestration.developers': {
+              status: 'failed',
+              error: `${invalidEpics.length} epic(s) have no targetRepository - cannot determine which repo to work in`,
+              humanRequired: true,
+              invalidEpics: invalidEpics.map((e: any) => ({ id: e.id, name: e.name })),
+            },
+          },
+        });
 
         throw new Error(
           `HUMAN_REQUIRED: ${invalidEpics.length} epic(s) have no targetRepository - Tech Lead phase incomplete`
@@ -617,7 +727,7 @@ export class DevelopersPhase extends BasePhase {
           taskId,
           category: 'epic',
           phase: 'development',
-          epicId: epic.id,
+          epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
           epicName: epic.name,
           metadata: { executionOrder: i + 1, targetRepo: repo },
         });
@@ -625,9 +735,6 @@ export class DevelopersPhase extends BasePhase {
 
       // Build team
       const team: ITeamMember[] = [];
-      // const allStories = epics.flatMap((e: any) =>
-      //   e.stories.map((storyId: string) => ({ storyId, epicId: e.id }))
-      // ); // unused
 
       // Create developers (unified - no senior/junior distinction)
       const totalDevelopers = composition?.developers || 1;
@@ -667,10 +774,12 @@ export class DevelopersPhase extends BasePhase {
         console.warn(`⚠️  [DevelopersPhase] Story count mismatch: ${totalStoriesAssigned} assigned vs ${expectedStories} expected`);
       }
 
-      // Save team to task (skip in multi-team mode to avoid version conflicts)
+      // Save team to task (atomic update to avoid version conflicts)
       if (!multiTeamMode) {
-        task.orchestration.team = team;
-        await task.save();
+        const Task = require('../../models/Task').Task;
+        await Task.findByIdAndUpdate(task._id, {
+          $set: { 'orchestration.team': team },
+        });
       }
 
       await LogService.success(`Development team spawned: ${team.length} developers`, {
@@ -692,11 +801,14 @@ export class DevelopersPhase extends BasePhase {
       });
 
       for (const epic of orderedEpics) {
+        // 🔥 CENTRALIZED: Normalize epicId ONCE at the top of the loop
+        const normalizedEpicId = getEpicId(epic);
+
         await LogService.info(`Epic execution started: ${epic.name}`, {
           taskId,
           category: 'epic',
           phase: 'development',
-          epicId: epic.id,
+          epicId: normalizedEpicId,
           epicName: epic.name,
           metadata: {
             targetRepo: epic.targetRepository,
@@ -711,7 +823,7 @@ export class DevelopersPhase extends BasePhase {
         );
 
         // 🔥 DEBUG: Log what we found
-        console.log(`\n🔍 [DEBUG] Epic "${epic.name}" (${epic.id}):`);
+        console.log(`\n🔍 [DEBUG] Epic "${epic.name}" (${normalizedEpicId}):`);
         console.log(`   Epic stories (${epicStoryIds.length}): ${epicStoryIds.join(', ')}`);
         console.log(`   Total team members: ${team.length}`);
         team.forEach(m => {
@@ -724,7 +836,7 @@ export class DevelopersPhase extends BasePhase {
             taskId,
             category: 'epic',
             phase: 'development',
-            epicId: epic.id,
+            epicId: normalizedEpicId,
             epicName: epic.name,
           });
           console.error(`\n❌ [CRITICAL] No developers assigned to epic "${epic.name}"!`);
@@ -736,7 +848,7 @@ export class DevelopersPhase extends BasePhase {
           taskId,
           category: 'epic',
           phase: 'development',
-          epicId: epic.id,
+          epicId: normalizedEpicId,
           epicName: epic.name,
           metadata: {
             developersCount: epicDevelopers.length,
@@ -760,7 +872,7 @@ export class DevelopersPhase extends BasePhase {
             memoryCompletedStories = await granularMemoryService.getCompletedStories({
               projectId,
               taskId,
-              epicId: epic.id,
+              epicId: normalizedEpicId,
             });
             if (memoryCompletedStories.length > 0) {
               console.log(`🧠 [Memory] Found ${memoryCompletedStories.length} completed stories in granular memory`);
@@ -769,6 +881,20 @@ export class DevelopersPhase extends BasePhase {
           } catch (memError: any) {
             console.warn(`⚠️ [Memory] Failed to get completed stories: ${memError.message}`);
           }
+        }
+
+        // 🔥 UNIFIED MEMORY: FOURTH source of truth for completed stories
+        // This is THE single source of truth - local file that survives server restarts
+        let unifiedMemoryCompletedStories: string[] = [];
+        try {
+          const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+          if (resumption.completedStories && resumption.completedStories.length > 0) {
+            unifiedMemoryCompletedStories = resumption.completedStories;
+            console.log(`💾 [UnifiedMemory] Found ${unifiedMemoryCompletedStories.length} completed stories`);
+            console.log(`   IDs: ${unifiedMemoryCompletedStories.join(', ')}`);
+          }
+        } catch (umError: any) {
+          console.warn(`⚠️ [UnifiedMemory] Failed to get completed stories: ${umError.message}`);
         }
 
         let storyNumber = 0;
@@ -786,14 +912,15 @@ export class DevelopersPhase extends BasePhase {
             }
 
             // 🔄 GRANULAR RECOVERY: Skip stories that are already completed
-            // Checks THREE sources: EventStore status, mergedToEpic flag, AND granular memory
+            // Checks FOUR sources: EventStore status, mergedToEpic flag, granular memory, AND UnifiedMemory
             // This ensures we don't re-execute even if one source is stale
             const storyAny = story as any;
             const isCompletedInEventStore = story.status === 'completed';
             const isMergedToEpic = storyAny.mergedToEpic === true;
             const isCompletedInMemory = memoryCompletedStories.includes(storyId);
+            const isCompletedInUnifiedMemory = unifiedMemoryCompletedStories.includes(storyId);
 
-            if (isCompletedInEventStore || isMergedToEpic || isCompletedInMemory) {
+            if (isCompletedInEventStore || isMergedToEpic || isCompletedInMemory || isCompletedInUnifiedMemory) {
               console.log(`\n${'='.repeat(80)}`);
               console.log(`⏭️ [STORY RECOVERY] Skipping already completed story: ${story.title}`);
               console.log(`   Story ID: ${storyId}`);
@@ -801,6 +928,7 @@ export class DevelopersPhase extends BasePhase {
               if (isCompletedInEventStore) console.log(`     ✅ EventStore status: completed`);
               if (isMergedToEpic) console.log(`     ✅ Merged to epic branch`);
               if (isCompletedInMemory) console.log(`     ✅ Granular memory: completed`);
+              if (isCompletedInUnifiedMemory) console.log(`     ✅ UnifiedMemory: completed`);
               console.log(`${'='.repeat(80)}`);
               continue;
             }
@@ -820,8 +948,8 @@ export class DevelopersPhase extends BasePhase {
               eventType: 'StoryStarted',
               agentName: 'developer',
               payload: {
-                storyId: story.id,
-                epicId: epic.id,
+                storyId: getStoryId(story), // 🔥 CENTRALIZED: Use IdNormalizer
+                epicId: normalizedEpicId, // 🔥 CENTRALIZED: Use normalized epicId
                 title: story.title,
                 developer: member.instanceId,
               },
@@ -866,17 +994,14 @@ export class DevelopersPhase extends BasePhase {
               }
             );
 
-            // Accumulate costs and tokens
+            // Accumulate costs and tokens using CostAccumulator
             if (costs) {
-              totalDeveloperCost += costs.developerCost;
-              totalJudgeCost += costs.judgeCost;
-              totalConflictResolutionCost += costs.conflictResolutionCost || 0;
-              totalDeveloperTokens.input += costs.developerTokens?.input || 0;
-              totalDeveloperTokens.output += costs.developerTokens?.output || 0;
-              totalJudgeTokens.input += costs.judgeTokens?.input || 0;
-              totalJudgeTokens.output += costs.judgeTokens?.output || 0;
-              totalConflictResolutionTokens.input += costs.conflictResolutionUsage?.input_tokens || 0;
-              totalConflictResolutionTokens.output += costs.conflictResolutionUsage?.output_tokens || 0;
+              phaseCosts.add('developer', costs.developerCost || 0, costs.developerTokens);
+              phaseCosts.add('judge', costs.judgeCost || 0, costs.judgeTokens);
+              phaseCosts.add('conflictResolution', costs.conflictResolutionCost || 0, {
+                input: costs.conflictResolutionUsage?.input_tokens || 0,
+                output: costs.conflictResolutionUsage?.output_tokens || 0,
+              });
 
               // 🔥 COST TRACKING: Update member with accumulated costs
               // This ensures task.orchestration.team[] has accurate cost data
@@ -894,7 +1019,7 @@ export class DevelopersPhase extends BasePhase {
           taskId,
           category: 'epic',
           phase: 'development',
-          epicId: epic.id,
+          epicId: normalizedEpicId,
           epicName: epic.name,
         });
       }
@@ -963,38 +1088,41 @@ export class DevelopersPhase extends BasePhase {
       );
       NotificationService.emitAgentCompleted(taskId, developerLabel, `${storiesCount} stories implemented`);
 
-      // Log cost summary
+      // Log cost summary using CostAccumulator
+      const devTokens = phaseCosts.getTokens('developer');
+      const judgeTokens = phaseCosts.getTokens('judge');
+      const crTokens = phaseCosts.getTokens('conflictResolution');
+
       console.log(`\n💰 Development Phase Cost Summary:`);
-      console.log(`   Developers total: $${totalDeveloperCost.toFixed(4)} (${totalDeveloperTokens.input + totalDeveloperTokens.output} tokens)`);
-      console.log(`   Judge total: $${totalJudgeCost.toFixed(4)} (${totalJudgeTokens.input + totalJudgeTokens.output} tokens)`);
-      if (totalConflictResolutionCost > 0) {
-        console.log(`   Conflict Resolution: $${totalConflictResolutionCost.toFixed(4)} (${totalConflictResolutionTokens.input + totalConflictResolutionTokens.output} tokens)`);
+      console.log(`   Developers total: ${CostAccumulator.formatCost(phaseCosts.getCost('developer'))} (${CostAccumulator.formatTokens(devTokens)})`);
+      console.log(`   Judge total: ${CostAccumulator.formatCost(phaseCosts.getCost('judge'))} (${CostAccumulator.formatTokens(judgeTokens)})`);
+      if (phaseCosts.getCost('conflictResolution') > 0) {
+        console.log(`   Conflict Resolution: ${CostAccumulator.formatCost(phaseCosts.getCost('conflictResolution'))} (${CostAccumulator.formatTokens(crTokens)})`);
       }
-      console.log(`   Phase total: $${(totalDeveloperCost + totalJudgeCost + totalConflictResolutionCost).toFixed(4)}`);
+      console.log(`   Phase total: ${CostAccumulator.formatCost(phaseCosts.getTotalCost())}`);
 
-      // 🔥 COST TRACKING: Save costs to task.orchestration (for handleOrchestrationComplete)
+      // 🔥 COST TRACKING: Save costs to task.orchestration (atomic update to avoid version conflicts)
       if (!multiTeamMode) {
-        // Update team with costs (members already have cost_usd/usage from loop above)
-        task.orchestration.team = team;
+        const Task = require('../../models/Task').Task;
+        const currentTask = await Task.findById(task._id).lean();
+        const currentTotalCost = currentTask?.orchestration?.totalCost || 0;
 
-        // Initialize judge if not exists
-        if (!task.orchestration.judge) {
-          task.orchestration.judge = {
-            agent: 'judge',
-            status: 'completed',
-            evaluations: [],
-          } as any;
-        }
-        task.orchestration.judge!.cost_usd = totalJudgeCost;
-        task.orchestration.judge!.usage = {
-          input_tokens: totalJudgeTokens.input,
-          output_tokens: totalJudgeTokens.output,
-        };
-
-        // Accumulate to total cost (includes conflict resolution)
-        task.orchestration.totalCost = (task.orchestration.totalCost || 0) + totalDeveloperCost + totalJudgeCost + totalConflictResolutionCost;
-
-        await task.save();
+        await Task.findByIdAndUpdate(task._id, {
+          $set: {
+            'orchestration.team': team,
+            'orchestration.judge': {
+              agent: 'judge',
+              status: 'completed',
+              evaluations: [],
+              cost_usd: phaseCosts.getCost('judge'),
+              usage: {
+                input_tokens: judgeTokens.input,
+                output_tokens: judgeTokens.output,
+              },
+            },
+            'orchestration.totalCost': currentTotalCost + phaseCosts.getTotalCost(),
+          },
+        });
         console.log(`✅ [Developers] Costs saved to task.orchestration`);
       }
 
@@ -1017,12 +1145,12 @@ export class DevelopersPhase extends BasePhase {
           dependencies_added: policyResult.addedDependencies.length,
         },
         metadata: {
-          cost: totalDeveloperCost,  // Main phase cost (developers)
-          judgeCost: totalJudgeCost,  // Additional judge cost to track separately
-          input_tokens: totalDeveloperTokens.input,
-          output_tokens: totalDeveloperTokens.output,
-          judge_input_tokens: totalJudgeTokens.input,
-          judge_output_tokens: totalJudgeTokens.output,
+          cost: phaseCosts.getCost('developer'),  // Main phase cost (developers)
+          judgeCost: phaseCosts.getCost('judge'),  // Additional judge cost to track separately
+          input_tokens: devTokens.input,
+          output_tokens: devTokens.output,
+          judge_input_tokens: judgeTokens.input,
+          judge_output_tokens: judgeTokens.output,
         },
       };
     } catch (error: any) {
@@ -1097,6 +1225,7 @@ export class DevelopersPhase extends BasePhase {
     if (storyWorkspacePath && epic.targetRepository) {
       const isolatedRepoPath = `${storyWorkspacePath}/${epic.targetRepository}`;
       const sourceRepoPath = `${workspacePath}/${epic.targetRepository}`;
+      const lockFilePath = `${storyWorkspacePath}/.workspace.lock`;
 
       console.log(`\n🔒🔒🔒 [Story ${story.id}] CREATING ISOLATED WORKSPACE 🔒🔒🔒`);
       console.log(`   📁 Source repo: ${sourceRepoPath}`);
@@ -1105,34 +1234,83 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   👨‍💻 Developer: ${developer.instanceId}`);
       console.log(`   ⚖️  Judge will review in SAME isolated workspace`);
 
-      // Create story workspace directory
-      if (!fs.existsSync(storyWorkspacePath)) {
+      // 🔒 CRITICAL: Acquire lock before workspace operations to prevent race conditions
+      // Multiple parallel stories may try to create workspaces simultaneously
+      const acquireLock = async (maxRetries = 30, retryDelayMs = 100): Promise<number | null> => {
         fs.mkdirSync(storyWorkspacePath, { recursive: true });
-        console.log(`   ✅ Created story workspace directory`);
-      }
 
-      // Copy repository to isolated workspace (if not already copied)
-      if (!fs.existsSync(isolatedRepoPath)) {
-        if (!fs.existsSync(sourceRepoPath)) {
-          console.error(`   ❌ Source repository not found: ${sourceRepoPath}`);
-          throw new Error(`Source repository not found for story ${story.id}: ${sourceRepoPath}`);
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            // Try to create lock file exclusively (O_CREAT | O_EXCL)
+            const fd = fs.openSync(lockFilePath, 'wx');
+            fs.writeSync(fd, `${process.pid}\n${new Date().toISOString()}`);
+            return fd;
+          } catch (err: any) {
+            if (err.code === 'EEXIST') {
+              // Lock exists - check if it's stale (older than 5 minutes)
+              try {
+                const stat = fs.statSync(lockFilePath);
+                const ageMs = Date.now() - stat.mtimeMs;
+                if (ageMs > 5 * 60 * 1000) {
+                  console.log(`   ⚠️ Removing stale lock (age: ${Math.round(ageMs/1000)}s)`);
+                  fs.unlinkSync(lockFilePath);
+                  continue;
+                }
+              } catch { /* Lock was removed by another process */ }
+
+              if (attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, retryDelayMs));
+                continue;
+              }
+            }
+            throw err;
+          }
         }
+        return null;
+      };
 
-        console.log(`   📋 Copying repository to isolated workspace...`);
-        execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
-        console.log(`   ✅ Repository copied to isolated workspace`);
-
-        // 🔥 CRITICAL: Ensure isolated repo has proper git remote
-        // The copied repo should have the same remote as source
+      const releaseLock = (fd: number | null) => {
         try {
-          const remoteUrl = execSync(`git -C "${sourceRepoPath}" remote get-url origin`, { encoding: 'utf8' }).trim();
-          execSync(`git -C "${isolatedRepoPath}" remote set-url origin "${remoteUrl}"`, { encoding: 'utf8' });
-          console.log(`   ✅ Git remote configured in isolated workspace`);
-        } catch (remoteError: any) {
-          console.warn(`   ⚠️ Could not set git remote: ${remoteError.message}`);
+          if (fd !== null) fs.closeSync(fd);
+          if (fs.existsSync(lockFilePath)) fs.unlinkSync(lockFilePath);
+        } catch { /* Ignore cleanup errors */ }
+      };
+
+      let lockFd: number | null = null;
+      try {
+        lockFd = await acquireLock();
+        if (lockFd === null) {
+          console.warn(`   ⚠️ Could not acquire workspace lock - proceeding without lock`);
+        } else {
+          console.log(`   🔐 Acquired workspace lock`);
         }
-      } else {
-        console.log(`   ℹ️  Isolated workspace already exists`);
+
+        // Copy repository to isolated workspace (if not already copied)
+        if (!fs.existsSync(isolatedRepoPath)) {
+          if (!fs.existsSync(sourceRepoPath)) {
+            console.error(`   ❌ Source repository not found: ${sourceRepoPath}`);
+            throw new Error(`Source repository not found for story ${story.id}: ${sourceRepoPath}`);
+          }
+
+          console.log(`   📋 Copying repository to isolated workspace...`);
+          execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+          console.log(`   ✅ Repository copied to isolated workspace`);
+
+          // 🔥 CRITICAL: Ensure isolated repo has proper git remote
+          // The copied repo should have the same remote as source
+          try {
+            const remoteUrl = execSync(`git -C "${sourceRepoPath}" remote get-url origin`, { encoding: 'utf8' }).trim();
+            execSync(`git -C "${isolatedRepoPath}" remote set-url origin "${remoteUrl}"`, { encoding: 'utf8' });
+            console.log(`   ✅ Git remote configured in isolated workspace`);
+          } catch (remoteError: any) {
+            console.warn(`   ⚠️ Could not set git remote: ${remoteError.message}`);
+          }
+        } else {
+          console.log(`   ℹ️  Isolated workspace already exists`);
+        }
+      } finally {
+        releaseLock(lockFd);
+        console.log(`   🔓 Released workspace lock`);
       }
 
       console.log(`🔒🔒🔒 [Story ${story.id}] ISOLATED WORKSPACE READY 🔒🔒🔒\n`);
@@ -1140,6 +1318,33 @@ export class DevelopersPhase extends BasePhase {
 
     // 🔥 Use isolated story workspace for ALL operations in this pipeline
     const effectiveWorkspacePath = storyWorkspacePath || workspacePath;
+
+    // 🔥🔥🔥 CRITICAL VALIDATION: effectiveWorkspacePath MUST be valid for Judge 🔥🔥🔥
+    console.log(`\n🔍 [executeIsolatedStoryPipeline] Workspace validation:`);
+    console.log(`   workspacePath (param): ${workspacePath || 'NULL ⚠️'}`);
+    console.log(`   storyWorkspacePath: ${storyWorkspacePath || 'NULL ⚠️'}`);
+    console.log(`   effectiveWorkspacePath: ${effectiveWorkspacePath || 'NULL ⚠️'}`);
+
+    if (!effectiveWorkspacePath) {
+      console.error(`\n❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌`);
+      console.error(`❌ [executeIsolatedStoryPipeline] CRITICAL: effectiveWorkspacePath is NULL!`);
+      console.error(`   Story: ${story.title}`);
+      console.error(`   Developer: ${developer.instanceId}`);
+      console.error(`   Epic: ${epic.name}`);
+      console.error(`\n   🚨 This means:`);
+      console.error(`   - Judge will receive NULL workspacePath`);
+      console.error(`   - Judge will search in PROJECT directory instead of agent workspace`);
+      console.error(`   - Code review will be completely WRONG`);
+      console.error(`❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n`);
+
+      throw new Error(
+        `HUMAN_REQUIRED: Story pipeline cannot execute without workspace. ` +
+        `Story "${story.title}" (${story.id}) aborted. ` +
+        `workspacePath=${workspacePath}, storyWorkspacePath=${storyWorkspacePath}`
+      );
+    }
+
+    console.log(`   ✅ Workspace path valid: ${effectiveWorkspacePath}`);
 
     // 🔥 CRITICAL VALIDATION: Epic MUST have targetRepository
     if (!epic.targetRepository) {
@@ -1150,18 +1355,18 @@ export class DevelopersPhase extends BasePhase {
       console.error(`   💀 CANNOT EXECUTE DEVELOPER - WOULD BE ARBITRARY`);
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
-      // Mark task as FAILED
+      // Mark task as FAILED (atomic update to avoid version conflicts)
       const Task = require('../../models/Task').Task;
-      const dbTask = await Task.findById(task._id);
-      if (dbTask) {
-        dbTask.status = 'failed';
-        dbTask.orchestration.developers = {
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
           status: 'failed',
-          error: `Epic ${epic.id} has no targetRepository - cannot determine which repo to work in`,
-          humanRequired: true,
-        };
-        await dbTask.save();
-      }
+          'orchestration.developers': {
+            status: 'failed',
+            error: `Epic ${epic.id} has no targetRepository - cannot determine which repo to work in`,
+            humanRequired: true,
+          },
+        },
+      });
 
       throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository`);
     }
@@ -1176,18 +1381,18 @@ export class DevelopersPhase extends BasePhase {
       console.error(`   💀 This is a DATA INTEGRITY issue`);
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
-      // Mark task as FAILED
+      // Mark task as FAILED (atomic update to avoid version conflicts)
       const Task = require('../../models/Task').Task;
-      const dbTask = await Task.findById(task._id);
-      if (dbTask) {
-        dbTask.status = 'failed';
-        dbTask.orchestration.developers = {
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
           status: 'failed',
-          error: `Story ${story.id} has no targetRepository - data integrity issue`,
-          humanRequired: true,
-        };
-        await dbTask.save();
-      }
+          'orchestration.developers': {
+            status: 'failed',
+            error: `Story ${story.id} has no targetRepository - data integrity issue`,
+            humanRequired: true,
+          },
+        },
+      });
 
       throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no targetRepository`);
     }
@@ -1203,7 +1408,20 @@ export class DevelopersPhase extends BasePhase {
 
       // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
       const epicBranchName = context.getData<string>('epicBranch');
-      console.log(`📂 [DevelopersPhase] Passing epic branch to developer: ${epicBranchName || 'not specified'}`);
+
+      // 🛡️ VALIDATION: Epic branch is required for proper git workflow
+      if (!epicBranchName) {
+        console.error(`\n❌❌❌ [VALIDATION] CRITICAL: Epic branch name is missing from context!`);
+        console.error(`   Story: ${story.title}`);
+        console.error(`   Epic: ${epic.name}`);
+        console.error(`   Developer: ${developer.instanceId}`);
+        console.error(`\n   🚨 This means:`);
+        console.error(`   - Developer will not know which branch to base work on`);
+        console.error(`   - Commits may go to wrong branch or fail`);
+        console.error(`   - TeamOrchestrationPhase should have set this in context.setData('epicBranch', ...)`);
+        throw new Error(`CRITICAL: Epic branch name missing from context - cannot execute developer for story "${story.title}"`);
+      }
+      console.log(`📂 [DevelopersPhase] Using epic branch: ${epicBranchName}`);
 
       // 🔐 Get devAuth from context (for testing authenticated endpoints)
       const devAuth = context.getData<any>('devAuth');
@@ -1262,6 +1480,166 @@ export class DevelopersPhase extends BasePhase {
         `👨‍💻 Developer ${developer.instanceId} starting: "${story.title}"`
       );
 
+      // 🔥 MID-STORY RECOVERY: Check if we can skip to a later stage
+      const normalizedEpicId = getEpicId(epic);
+      const normalizedStoryId = getStoryId(story);
+      const existingProgress = await unifiedMemoryService.getStoryProgress(taskId, normalizedEpicId, normalizedStoryId);
+
+      if (existingProgress && existingProgress.stage !== 'not_started') {
+        console.log(`\n🔄 [MID-STORY RECOVERY] Found existing progress for story: ${story.title}`);
+        console.log(`   Current stage: ${existingProgress.stage}`);
+        console.log(`   Commit hash: ${existingProgress.commitHash || 'none'}`);
+        console.log(`   SDK session: ${existingProgress.sdkSessionId || 'none'}`);
+
+        // 🔥 SKIP LOGIC: If stage >= merged_to_epic, story is basically done
+        if (existingProgress.stage === 'merged_to_epic' || existingProgress.stage === 'completed') {
+          console.log(`\n✅ [MID-STORY RECOVERY] Story "${story.title}" already merged/completed - SKIPPING`);
+          console.log(`   No need to re-execute developer or judge`);
+
+          // Ensure it's marked as fully completed
+          await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'completed', {
+            commitHash: existingProgress.commitHash,
+          });
+
+          // Return zero costs since we didn't execute anything
+          return {
+            developerCost: 0,
+            judgeCost: 0,
+            conflictResolutionCost: 0,
+            developerTokens: { input: 0, output: 0 },
+            judgeTokens: { input: 0, output: 0 },
+            conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 },
+          };
+        }
+
+        // 🔥 PARTIAL SKIP: If stage >= pushed, we can skip developer and go straight to Judge
+        // This means code is committed and pushed, we just need Judge review
+        if (existingProgress.stage === 'pushed' || existingProgress.stage === 'judge_evaluating') {
+          console.log(`\n🔄 [MID-STORY RECOVERY] Story "${story.title}" code already pushed`);
+          console.log(`   🚀 DIRECT-TO-JUDGE: Skipping developer phase entirely!`);
+          console.log(`   Using commit: ${existingProgress.commitHash || 'will detect from git'}`);
+
+          // 🔥 DIRECT-TO-JUDGE FLOW: Skip Developer, go straight to Judge and Merge
+          const commitSHA = existingProgress.commitHash;
+          const storyBranch = story.branchName;
+
+          if (!commitSHA || !storyBranch) {
+            console.error(`❌ Cannot direct-to-judge: missing commitSHA or storyBranch`);
+            console.log(`   commitSHA: ${commitSHA || 'missing'}`);
+            console.log(`   storyBranch: ${storyBranch || 'missing'}`);
+            // Fall through to re-run developer
+          } else {
+            // Create pipeline context for stage methods
+            const pipelineCtx: StoryPipelineContext = {
+              task,
+              story,
+              developer,
+              epic,
+              repositories,
+              effectiveWorkspacePath,
+              workspaceStructure,
+              attachments,
+              state,
+              context,
+              taskId,
+              normalizedEpicId,
+              normalizedStoryId,
+              epicBranchName,
+              devAuth: context.getData<any>('devAuth'),
+              architectureBrief: context.getData<any>('architectureBrief'),
+              environmentCommands: context.getData<any>('environmentCommands'),
+              projectRadiographies: context.getData<Map<string, ProjectRadiography>>('projectRadiographies'),
+            };
+
+            // 🔥 JUMP DIRECTLY TO JUDGE
+            console.log(`\n⚖️ [DIRECT-TO-JUDGE] Executing Judge stage...`);
+            const judgeResult = await this.executeJudgeStage(pipelineCtx, commitSHA, storyBranch);
+
+            if (!judgeResult.success) {
+              console.error(`❌ Judge stage failed: ${judgeResult.error}`);
+              return {
+                developerCost: 0,
+                judgeCost: judgeResult.judgeCost,
+                conflictResolutionCost: 0,
+                developerTokens: { input: 0, output: 0 },
+                judgeTokens: judgeResult.judgeTokens,
+                conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 },
+              };
+            }
+
+            if (judgeResult.approved) {
+              // 🔥 MERGE STAGE
+              console.log(`\n🔀 [DIRECT-TO-JUDGE] Judge approved - executing Merge stage...`);
+              const mergeResult = await this.executeMergeStage(pipelineCtx, commitSHA);
+
+              // Emit completion events
+              const { eventStore } = await import('../EventStore');
+              await eventStore.append({
+                taskId: task._id as any,
+                eventType: 'StoryCompleted',
+                agentName: 'developer',
+                payload: {
+                  storyId: story.id,
+                  epicId: (story as any).epicId,
+                  title: story.title,
+                  completedBy: (story as any).assignedTo,
+                  directToJudge: true,
+                },
+              });
+
+              await unifiedMemoryService.markStoryCompleted(
+                taskId,
+                (story as any).epicId,
+                story.id,
+                'approved',
+                storyBranch,
+                undefined
+              );
+
+              await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'completed', {
+                commitHash: commitSHA,
+              });
+
+              console.log(`✅ [DIRECT-TO-JUDGE] Story pipeline completed via direct-to-judge!`);
+
+              return {
+                developerCost: 0, // Skipped developer
+                judgeCost: judgeResult.judgeCost,
+                conflictResolutionCost: mergeResult.conflictResolutionCost,
+                developerTokens: { input: 0, output: 0 },
+                judgeTokens: judgeResult.judgeTokens,
+                conflictResolutionUsage: mergeResult.conflictResolutionUsage,
+              };
+            } else {
+              // Judge rejected - log feedback
+              console.error(`❌ [DIRECT-TO-JUDGE] Judge REJECTED story`);
+              console.error(`   Feedback: ${judgeResult.feedback}`);
+
+              await unifiedMemoryService.markStoryCompleted(
+                taskId,
+                (story as any).epicId,
+                story.id,
+                'rejected',
+                storyBranch,
+                undefined
+              );
+
+              return {
+                developerCost: 0,
+                judgeCost: judgeResult.judgeCost,
+                conflictResolutionCost: 0,
+                developerTokens: { input: 0, output: 0 },
+                judgeTokens: judgeResult.judgeTokens,
+                conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 },
+              };
+            }
+          }
+        }
+      }
+
+      // 🔥 CHECKPOINT 1: Mark story as "code_generating"
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_generating');
+
       // 🔄 CHECKPOINT: Create rollback point before developer execution
       const { rollbackService } = await import('../RollbackService');
       const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
@@ -1273,9 +1651,9 @@ export class DevelopersPhase extends BasePhase {
           phase: 'development',
           agentType: 'developer',
           agentInstanceId: developer.instanceId,
-          storyId: story.id,
+          storyId: getStoryId(story), // 🔥 CENTRALIZED: Use IdNormalizer
           storyTitle: story.title,
-          epicId: epic.id,
+          epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
           epicName: epic.name,
         }
       );
@@ -1325,12 +1703,12 @@ export class DevelopersPhase extends BasePhase {
           taskId,
           'developer',
           developerResult.sdkSessionId,
-          story.id, // Use storyId as entityId
+          getStoryId(story), // Use storyId as entityId - 🔥 CENTRALIZED: Use IdNormalizer
           developerResult.lastMessageUuid,
           {
             developerId: developer.instanceId,
             storyTitle: story.title,
-            epicId: epic.id,
+            epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
           }
         );
       }
@@ -1349,6 +1727,11 @@ export class DevelopersPhase extends BasePhase {
           `✅ Developer ${developer.instanceId} finished: "${story.title}" ($${developerCost.toFixed(4)})`
         );
       }
+
+      // 🔥 CHECKPOINT 2: Mark story as "code_written" with SDK session for potential resume
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_written', {
+        sdkSessionId: developerResult?.sdkSessionId,
+      });
 
       // 🔥 CRITICAL: Wait for git push to fully complete on remote
       // Developer agent may have finished but push still propagating
@@ -1489,6 +1872,12 @@ export class DevelopersPhase extends BasePhase {
               // Continue anyway - Judge will try to fetch
             }
           }
+
+          // 🔥 CHECKPOINT 3: Mark story as "committed" and "pushed" with commit hash
+          await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'pushed', {
+            commitHash: commitSHA,
+          });
+          console.log(`📍 [CHECKPOINT] Story progress saved: pushed (commit: ${commitSHA.substring(0, 8)})`);
         } else {
           console.warn(`⚠️ [GIT-FIRST] No commits found on branch ${storyBranch}`);
 
@@ -1916,6 +2305,12 @@ export class DevelopersPhase extends BasePhase {
       judgeContext.setData('storyBranchName', updatedStory.branchName); // 🔥 CRITICAL: LITERAL branch name from Developer
       judgeContext.setData('isolatedWorkspacePath', effectiveWorkspacePath); // 🔥 Pass isolated path explicitly
 
+      // 🔥 CHECKPOINT 4: Mark story as "judge_evaluating" before Judge starts
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'judge_evaluating', {
+        commitHash: commitSHA,
+      });
+      console.log(`📍 [CHECKPOINT] Story progress saved: judge_evaluating`);
+
       // ⚖️ JUDGE: AI validates the actual code changes
       console.log(`\n⚖️ [STEP 2/3] Running Judge validation...`);
 
@@ -1962,6 +2357,12 @@ export class DevelopersPhase extends BasePhase {
         // STEP 3: Merge to epic branch (from ISOLATED workspace)
         console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
         await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+
+        // 🔥 CHECKPOINT 5: Mark story as "merged_to_epic" after successful merge
+        await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
+          commitHash: commitSHA,
+        });
+        console.log(`📍 [CHECKPOINT] Story progress saved: merged_to_epic`);
 
         // 🧹 CLEANUP: Delete story branch after successful merge
         // ✅ ONLY if Judge APPROVED - rejected stories keep their branches for investigation
@@ -2010,30 +2411,15 @@ export class DevelopersPhase extends BasePhase {
 
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
 
-        // 🔄 GRANULAR RECOVERY: Persist story completion to database
-        // This allows recovery to skip already-completed stories on restart
+        // 🔄 GRANULAR RECOVERY: Persist story completion via EventStore
+        // EventStore is the source of truth for story completion
         try {
           const taskId = (task._id as any).toString();
-          const { Task } = await import('../../models/Task');
 
-          // Update story status in EventStore (in-memory)
+          // Update story status in-memory
           story.status = 'completed';
           (story as any).mergedToEpic = true;
           (story as any).completedAt = new Date();
-
-          // Persist to MongoDB - update the specific story in projectManager.stories array
-          await Task.updateOne(
-            { _id: task._id, 'orchestration.projectManager.stories.id': story.id },
-            {
-              $set: {
-                'orchestration.projectManager.stories.$.status': 'completed',
-                'orchestration.projectManager.stories.$.mergedToEpic': true,
-                'orchestration.projectManager.stories.$.completedAt': new Date(),
-              }
-            }
-          );
-
-          console.log(`💾 [RECOVERY] Story "${story.title}" status persisted to database`);
 
           // 🔥 EVENT SOURCING: Emit StoryCompleted event for recovery tracking
           // This is CRITICAL - EventStore.buildState() uses this to mark stories as completed
@@ -2050,6 +2436,24 @@ export class DevelopersPhase extends BasePhase {
             },
           });
           console.log(`📝 [EventStore] Emitted StoryCompleted for: ${story.title}`);
+
+          // 🔥 CRITICAL FIX: Mark story as completed in Unified Memory for recovery tracking
+          // This was missing! Without this, getResumptionPoint() returns completedStories: 0
+          await unifiedMemoryService.markStoryCompleted(
+            taskId,
+            (story as any).epicId,
+            story.id,
+            'approved',
+            updatedStory.branchName,
+            undefined // PR URL not available yet
+          );
+          console.log(`✅ [UnifiedMemory] Marked story "${story.title}" as completed`);
+
+          // 🔥 CHECKPOINT 6 (FINAL): Mark story progress as "completed"
+          await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'completed', {
+            commitHash: commitSHA,
+          });
+          console.log(`📍 [CHECKPOINT] Story progress saved: completed ✅`);
 
           // 🔄 Mark session checkpoint as completed (no resume needed for this story)
           await sessionCheckpointService.markCompleted(taskId, 'developer', story.id);
@@ -2092,6 +2496,7 @@ export class DevelopersPhase extends BasePhase {
               }
 
               console.log(`🧠 [Memory] Stored completion for story: ${story.title}`);
+              // Note: Memory stored in Local + MongoDB only (not in client repos)
             } catch (memError: any) {
               console.warn(`⚠️ [Memory] Failed to store story completion: ${memError.message}`);
             }
@@ -2135,23 +2540,10 @@ export class DevelopersPhase extends BasePhase {
           `❌ Story rejected by Judge: ${story.title}\nBranch: ${updatedStory.branchName}\nFeedback: ${feedback}`
         );
 
-        // 🔄 GRANULAR RECOVERY: Persist rejected status to database
+        // 🔄 GRANULAR RECOVERY: Persist rejected status via EventStore
         try {
-          const { Task } = await import('../../models/Task');
           story.status = 'failed';
           (story as any).error = feedback;
-
-          await Task.updateOne(
-            { _id: task._id, 'orchestration.projectManager.stories.id': story.id },
-            {
-              $set: {
-                'orchestration.projectManager.stories.$.status': 'failed',
-                'orchestration.projectManager.stories.$.error': feedback,
-                'orchestration.projectManager.stories.$.failedAt': new Date(),
-              }
-            }
-          );
-          console.log(`💾 [RECOVERY] Story "${story.title}" marked as failed in database`);
 
           // 🔥 EVENT SOURCING: Emit StoryFailed event for recovery tracking
           const { eventStore } = await import('../EventStore');
@@ -2167,6 +2559,18 @@ export class DevelopersPhase extends BasePhase {
             },
           });
           console.log(`📝 [EventStore] Emitted StoryFailed for: ${story.title}`);
+
+          // 🔥 CRITICAL FIX: Mark story as completed (rejected) in Unified Memory for recovery tracking
+          // Even rejected stories need tracking so recovery knows not to re-process them
+          await unifiedMemoryService.markStoryCompleted(
+            taskId,
+            (story as any).epicId,
+            story.id,
+            'rejected',
+            updatedStory.branchName,
+            undefined
+          );
+          console.log(`❌ [UnifiedMemory] Marked story "${story.title}" as rejected`);
 
           // 🔄 Mark session checkpoint as failed (keep checkpoint for potential retry)
           await sessionCheckpointService.markFailed(taskId, 'developer', story.id, feedback);
@@ -2223,90 +2627,592 @@ export class DevelopersPhase extends BasePhase {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // 🔥 STAGE METHODS: Extracted for mid-story recovery support
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   /**
-   * Review a story branch with Judge
-   * Returns true if approved, false if changes requested
-   * @deprecated - Not currently used, retained for future functionality
+   * 🔥 DEVELOPER STAGE: Execute the developer agent to implement the story.
+   *
+   * This stage:
+   * 1. Saves 'code_generating' checkpoint
+   * 2. Creates rollback point
+   * 3. Checks for existing SDK session to resume
+   * 4. Calls executeDeveloperFn
+   * 5. Saves 'code_written' checkpoint
+   *
+   * @returns DeveloperStageResult with cost, tokens, and session info
    */
-  // @ts-ignore - Unused method retained for future functionality
-  private async _reviewStoryBranch(
-    story: any,
-    task: any,
-    workspacePath: string | null,
-    context: OrchestrationContext
-  ): Promise<boolean> {
-    console.log(`\n⚖️  [Judge] Reviewing story branch: ${story.branchName}`);
-    console.log(`   Story: ${story.title}`);
+  private async executeDeveloperStage(pipelineCtx: StoryPipelineContext): Promise<DeveloperStageResult> {
+    const {
+      task, story, developer, epic, repositories,
+      effectiveWorkspacePath, workspaceStructure, attachments, state, context: _context,
+      taskId, normalizedEpicId, normalizedStoryId, epicBranchName,
+      devAuth, architectureBrief, environmentCommands, projectRadiographies,
+    } = pipelineCtx;
+
+    console.log(`\n👨‍💻 [DEVELOPER STAGE] Starting for story: ${story.title}`);
+    console.log(`   Developer: ${developer.instanceId}`);
+    console.log(`   Epic Branch: ${epicBranchName}`);
 
     try {
-      // 🔥 CRITICAL: Checkout story branch so Judge can see the developer's code
-      if (workspacePath && story.branchName) {
-        const repositories = context.repositories;
-        const targetRepo = repositories.length > 0 ? repositories[0] : null;
-        if (targetRepo) {
-          const repoPath = `${workspacePath}/${targetRepo.name}`;
-          console.log(`🔀 [Judge] Checking out branch ${story.branchName} in ${repoPath}`);
+      // 🔥 CHECKPOINT: Mark story as "code_generating"
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_generating');
 
+      // 🔄 CHECKPOINT: Create rollback point before developer execution
+      const { rollbackService } = await import('../RollbackService');
+      const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+      const checkpoint = await rollbackService.createCheckpoint(
+        repoPath,
+        taskId,
+        `Before ${developer.instanceId}: ${story.title}`,
+        {
+          phase: 'development',
+          agentType: 'developer',
+          agentInstanceId: developer.instanceId,
+          storyId: getStoryId(story),
+          storyTitle: story.title,
+          epicId: getEpicId(epic),
+          epicName: epic.name,
+        }
+      );
+      if (checkpoint) {
+        console.log(`🔄 [CHECKPOINT] Created: ${checkpoint.id} (${checkpoint.commitHash.substring(0, 7)})`);
+      }
+
+      // 🔄 SESSION RESUME: Check for existing session checkpoint
+      const existingSessionCheckpoint = await sessionCheckpointService.loadCheckpoint(
+        taskId,
+        'developer',
+        story.id
+      );
+      const resumeOptions = sessionCheckpointService.buildResumeOptions(existingSessionCheckpoint);
+
+      if (resumeOptions?.isResume) {
+        console.log(`\n🔄🔄🔄 [Developer ${developer.instanceId}] RESUMING from previous session...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 Developer ${developer.instanceId}: Resuming story "${story.title}" from checkpoint`
+        );
+      }
+
+      // 🔔 Emit to frontend
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `👨‍💻 Developer ${developer.instanceId} starting: "${story.title}"`
+      );
+
+      // Execute Developer
+      const developerResult = await this.executeDeveloperFn(
+        task,
+        developer,
+        repositories,
+        effectiveWorkspacePath,
+        workspaceStructure,
+        attachments,
+        [story],  // 🔥 1 Dev = 1 Story
+        state.epics,
+        undefined, // judgeFeedback
+        epicBranchName,
+        undefined, // forceTopModel
+        devAuth,
+        architectureBrief,
+        environmentCommands,
+        projectRadiographies,
+        resumeOptions
+      );
+
+      // 🔄 Save session checkpoint
+      if (developerResult?.sdkSessionId) {
+        await sessionCheckpointService.saveCheckpoint(
+          taskId,
+          'developer',
+          developerResult.sdkSessionId,
+          getStoryId(story),
+          developerResult.lastMessageUuid,
+          {
+            developerId: developer.instanceId,
+            storyTitle: story.title,
+            epicId: getEpicId(epic),
+          }
+        );
+      }
+
+      // Track cost and tokens
+      const developerCost = developerResult?.cost || 0;
+      const developerTokens = {
+        input: developerResult?.usage?.input_tokens || 0,
+        output: developerResult?.usage?.output_tokens || 0,
+      };
+
+      if (developerCost > 0) {
+        console.log(`💰 [Developer ${developer.instanceId}] Cost: $${developerCost.toFixed(4)}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `✅ Developer ${developer.instanceId} finished: "${story.title}" ($${developerCost.toFixed(4)})`
+        );
+      }
+
+      // 🔥 CHECKPOINT: Mark story as "code_written"
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_written', {
+        sdkSessionId: developerResult?.sdkSessionId,
+      });
+
+      return {
+        success: true,
+        developerCost,
+        developerTokens,
+        sdkSessionId: developerResult?.sdkSessionId,
+        output: developerResult?.output || '',
+      };
+
+    } catch (error: any) {
+      console.error(`❌ [DEVELOPER STAGE] Failed: ${error.message}`);
+      return {
+        success: false,
+        developerCost: 0,
+        developerTokens: { input: 0, output: 0 },
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * 🔥 GIT VALIDATION STAGE: Verify commits exist and push if needed.
+   *
+   * This stage:
+   * 1. Waits for git push to propagate
+   * 2. Verifies story has a branch
+   * 3. Checks for explicit failure markers
+   * 4. Fetches from remote with retry
+   * 5. Verifies commits on branch
+   * 6. Auto-commits if developer forgot
+   * 7. Pushes to remote if needed
+   * 8. Saves 'pushed' checkpoint
+   *
+   * @returns GitValidationStageResult with commitSHA and validation status
+   */
+  private async executeGitValidationStage(
+    pipelineCtx: StoryPipelineContext,
+    developerOutput: string
+  ): Promise<GitValidationStageResult> {
+    const {
+      task, story, epic, repositories: _repositories,
+      effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId,
+    } = pipelineCtx;
+
+    console.log(`\n🔍 [GIT VALIDATION STAGE] Starting for story: ${story.title}`);
+
+    try {
+      // Wait for git push to propagate
+      console.log(`⏳ Waiting 3 seconds for git push to propagate...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Get updated story with branch info
+      const { eventStore } = await import('../EventStore');
+      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+      if (!updatedStory || !updatedStory.branchName) {
+        console.error(`❌ Story ${story.id} has no branch after developer`);
+        return {
+          success: false,
+          commitSHA: null,
+          storyBranch: null,
+          gitValidationPassed: false,
+          error: 'Story has no branch after developer execution',
+        };
+      }
+
+      // Check for explicit failure marker
+      const explicitlyFailed = hasMarker(developerOutput, COMMON_MARKERS.FAILED);
+      if (explicitlyFailed) {
+        console.error(`❌ Developer explicitly reported FAILURE`);
+        return {
+          success: false,
+          commitSHA: null,
+          storyBranch: updatedStory.branchName,
+          gitValidationPassed: false,
+          error: 'Developer reported explicit failure',
+        };
+      }
+
+      const storyBranch = story.branchName || updatedStory?.branchName;
+      let commitSHA: string | null = null;
+      let gitValidationPassed = false;
+
+      console.log(`   Story: ${story.title}`);
+      console.log(`   Branch: ${storyBranch || 'unknown'}`);
+
+      if (storyBranch && effectiveWorkspacePath && epic.targetRepository) {
+        const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+
+        // Fetch from remote with exponential backoff
+        const MAX_FETCH_RETRIES = 3;
+        for (let fetchAttempt = 1; fetchAttempt <= MAX_FETCH_RETRIES; fetchAttempt++) {
           try {
-            safeGitExecSync(`git checkout ${story.branchName}`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`✅ [Judge] Successfully checked out ${story.branchName}`);
-          } catch (error: any) {
-            console.error(`❌ [Judge] Failed to checkout ${story.branchName}: ${error.message}`);
-            // Continue anyway - Judge might still be on correct branch
+            console.log(`   📡 Fetching from remote (attempt ${fetchAttempt}/${MAX_FETCH_RETRIES})...`);
+            safeGitExecSync(`git fetch origin --prune`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout: 90000
+            });
+            console.log(`   ✅ Fetch succeeded`);
+            break;
+          } catch (fetchErr: any) {
+            const waitMs = 2000 * Math.pow(2, fetchAttempt - 1);
+            if (fetchAttempt < MAX_FETCH_RETRIES) {
+              console.warn(`   ⚠️ Fetch failed: ${fetchErr.message}, retrying in ${waitMs/1000}s...`);
+              await new Promise(resolve => setTimeout(resolve, waitMs));
+            } else {
+              console.error(`   ❌ Fetch FAILED after ${MAX_FETCH_RETRIES} attempts`);
+            }
+          }
+        }
+
+        // Verify developer work from git
+        const gitVerification = await this.verifyDeveloperWorkFromGit(
+          effectiveWorkspacePath,
+          epic.targetRepository,
+          storyBranch,
+          story.id
+        );
+
+        if (gitVerification?.hasCommits && gitVerification.commitSHA) {
+          console.log(`✅ Developer made ${gitVerification.commitCount} commits!`);
+          console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
+          commitSHA = gitVerification.commitSHA;
+          gitValidationPassed = true;
+
+          // Ensure commit is on remote
+          console.log(`\n📤 Verifying commit is on remote...`);
+          try {
+            const branchOnRemote = safeGitExecSync(
+              `git ls-remote origin refs/heads/${storyBranch}`,
+              { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+            );
+
+            if (!branchOnRemote || branchOnRemote.trim() === '') {
+              console.log(`   ⚠️ Branch not on remote - pushing...`);
+              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Branch pushed`);
+            } else {
+              const remoteCommit = branchOnRemote.split('\t')[0];
+              if (remoteCommit !== commitSHA) {
+                console.log(`   ⚠️ Remote has different commit - pushing latest...`);
+                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              }
+              console.log(`   ✅ Commit confirmed on remote`);
+            }
+          } catch (pushErr: any) {
+            console.warn(`   ⚠️ Push verification failed: ${pushErr.message}`);
+            try {
+              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Force push succeeded`);
+            } catch (forcePushErr: any) {
+              console.error(`   ❌ Force push failed: ${forcePushErr.message}`);
+            }
+          }
+
+          // 🔥 CHECKPOINT: Mark as pushed
+          await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'pushed', {
+            commitHash: commitSHA,
+          });
+          console.log(`📍 [CHECKPOINT] Story progress: pushed (commit: ${commitSHA.substring(0, 8)})`);
+
+        } else {
+          // Try auto-commit
+          console.log(`⚠️ No commits found, trying auto-commit...`);
+          const { autoCommitDeveloperWork } = await import('./utils/GitCommitHelper');
+          const autoCommitResult = await autoCommitDeveloperWork(repoPath, story.title, storyBranch);
+
+          if (autoCommitResult.success && autoCommitResult.commitSHA) {
+            console.log(`✅ Auto-commit recovered work: ${autoCommitResult.commitSHA.substring(0, 8)}`);
+            commitSHA = autoCommitResult.commitSHA;
+            gitValidationPassed = true;
           }
         }
       }
 
-      // Import JudgePhase
-      const { JudgePhase } = await import('./JudgePhase');
-      const { NotificationService } = await import('../NotificationService');
+      // Fallback to marker validation if git failed
+      if (!gitValidationPassed) {
+        const finishedMarker = hasMarker(developerOutput, COMMON_MARKERS.DEVELOPER_FINISHED) ||
+                               hasMarker(developerOutput, COMMON_MARKERS.FINISHED);
+        if (!finishedMarker) {
+          console.error(`❌ No commits and no FINISHED marker`);
+          return {
+            success: false,
+            commitSHA: null,
+            storyBranch,
+            gitValidationPassed: false,
+            error: 'No commits found and no finish marker',
+          };
+        }
+        commitSHA = extractMarkerValue(developerOutput, COMMON_MARKERS.COMMIT_SHA);
+        console.log(`✅ Developer finished (marker present)`);
+      }
 
-      // Create isolated context for Judge with only this story
-      const judgeContext = new OrchestrationContext(
-        task,
-        context.repositories,
-        workspacePath
-      );
+      if (!commitSHA) {
+        console.error(`❌ Could not determine commit SHA`);
+        return {
+          success: false,
+          commitSHA: null,
+          storyBranch,
+          gitValidationPassed: false,
+          error: 'Could not determine commit SHA',
+        };
+      }
 
-      // Pass only this story for review
-      judgeContext.setData('storyToReview', story);
-      judgeContext.setData('reviewMode', 'single-story'); // Signal Judge to review one story
+      console.log(`✅ [GIT VALIDATION STAGE] Complete: commit ${commitSHA}`);
 
-      // 🔥 CRITICAL: Pass development team so Judge can find the developer who worked on this story
-      judgeContext.setData('developmentTeam', context.getData('developmentTeam'));
+      return {
+        success: true,
+        commitSHA,
+        storyBranch,
+        gitValidationPassed,
+      };
 
-      // 🔥 CRITICAL: Pass executeDeveloperFn so Judge can retry failed stories
+    } catch (error: any) {
+      console.error(`❌ [GIT VALIDATION STAGE] Failed: ${error.message}`);
+      return {
+        success: false,
+        commitSHA: null,
+        storyBranch: null,
+        gitValidationPassed: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * 🔥 JUDGE STAGE: Run Judge evaluation on the committed code.
+   *
+   * This stage:
+   * 1. Syncs workspace with remote
+   * 2. Checkouts the story branch
+   * 3. Saves 'judge_evaluating' checkpoint
+   * 4. Creates Judge context
+   * 5. Runs JudgePhase
+   * 6. Returns verdict
+   *
+   * @returns JudgeStageResult with verdict, cost, and feedback
+   */
+  private async executeJudgeStage(
+    pipelineCtx: StoryPipelineContext,
+    commitSHA: string,
+    storyBranch: string
+  ): Promise<JudgeStageResult> {
+    const {
+      task, story, developer, epic, repositories,
+      effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId, context: _context,
+    } = pipelineCtx;
+
+    console.log(`\n⚖️ [JUDGE STAGE] Starting for story: ${story.title}`);
+    console.log(`   Commit: ${commitSHA}`);
+    console.log(`   Branch: ${storyBranch}`);
+
+    try {
+      // Get updated story
+      const { eventStore } = await import('../EventStore');
+      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+      // Sync workspace with remote
+      if (effectiveWorkspacePath && repositories.length > 0) {
+        const targetRepo = repositories.find((r: any) =>
+          r.name === epic.targetRepository ||
+          r.full_name === epic.targetRepository ||
+          r.githubRepoName === epic.targetRepository
+        );
+
+        if (targetRepo) {
+          const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
+
+          console.log(`   🔄 Syncing workspace...`);
+          try {
+            safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+
+            // Checkout story branch
+            let branchExistsLocally = false;
+            try {
+              safeGitExecSync(`git show-ref --verify --quiet refs/heads/${storyBranch}`, { cwd: repoPath, encoding: 'utf8' });
+              branchExistsLocally = true;
+            } catch { /* Branch doesn't exist locally */ }
+
+            if (branchExistsLocally) {
+              safeGitExecSync(`git checkout ${storyBranch}`, { cwd: repoPath, encoding: 'utf8' });
+            } else {
+              safeGitExecSync(`git checkout -b ${storyBranch} origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8' });
+            }
+
+            // Reset to remote
+            safeGitExecSync(`git reset --hard origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`   ✅ Workspace synced`);
+          } catch (syncErr: any) {
+            console.warn(`   ⚠️ Sync failed: ${syncErr.message}`);
+          }
+        }
+      }
+
+      // 🔥 CHECKPOINT: Mark as judge_evaluating
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'judge_evaluating', {
+        commitHash: commitSHA,
+      });
+      console.log(`📍 [CHECKPOINT] Story progress: judge_evaluating`);
+
+      // Create Judge context
+      const judgeContext = new OrchestrationContext(task, repositories, effectiveWorkspacePath);
+      judgeContext.setData('storyToReview', updatedStory);
+      judgeContext.setData('reviewMode', 'single-story');
+      judgeContext.setData('developmentTeam', [developer]);
       judgeContext.setData('executeDeveloperFn', this.executeDeveloperFn);
+      judgeContext.setData('commitSHA', commitSHA);
+      judgeContext.setData('storyBranchName', storyBranch);
+      judgeContext.setData('isolatedWorkspacePath', effectiveWorkspacePath);
 
-      // Execute Judge phase
+      // Run Judge
+      const { JudgePhase } = await import('./JudgePhase');
+
       if (!this.executeAgentFn) {
         throw new Error('executeAgentFn is required for Judge evaluation');
       }
 
-      const judgePhase = new JudgePhase(this.executeAgentFn); // Judge needs executeAgent, not executeDeveloper
-      const result = await judgePhase.execute(judgeContext);
+      const judgePhase = new JudgePhase(this.executeAgentFn);
+      const judgeResult = await judgePhase.execute(judgeContext);
 
-      if (result.success && result.data?.status === 'approved') {
-        console.log(`✅ [Judge] Story ${story.id} APPROVED`);
-        NotificationService.emitConsoleLog(
-          (task._id as any).toString(),
-          'info',
-          `✅ Judge APPROVED story: ${story.title}`
-        );
-        return true;
-      } else {
-        console.log(`❌ [Judge] Story ${story.id} REJECTED`);
-        console.log(`   Feedback: ${result.data?.feedback || result.error || 'No feedback provided'}`);
-        NotificationService.emitConsoleLog(
-          (task._id as any).toString(),
-          'warn',
-          `❌ Judge REJECTED story: ${story.title}\nFeedback: ${result.data?.feedback || result.error}`
-        );
-        return false;
+      // Track cost and tokens
+      const judgeCost = judgeResult.metadata?.cost || 0;
+      const judgeTokens = {
+        input: Number(judgeResult.metadata?.input_tokens || judgeResult.metrics?.input_tokens || 0),
+        output: Number(judgeResult.metadata?.output_tokens || judgeResult.metrics?.output_tokens || 0),
+      };
+
+      if (judgeCost > 0) {
+        console.log(`💰 [Judge] Cost: $${judgeCost.toFixed(4)}`);
       }
+
+      // Determine verdict
+      const judgeStatus = judgeResult.data?.status;
+      const isApproved = judgeResult.success && judgeStatus === 'approved';
+
+      console.log(`✅ [JUDGE STAGE] Verdict: ${isApproved ? 'APPROVED ✅' : 'REJECTED ❌'}`);
+
+      return {
+        success: true,
+        approved: isApproved,
+        judgeCost,
+        judgeTokens,
+        feedback: judgeResult.data?.feedback || judgeResult.error,
+        iteration: judgeResult.data?.iteration || 1,
+        maxRetries: judgeResult.data?.maxRetries || 3,
+      };
+
     } catch (error: any) {
-      console.error(`❌ [Judge] Error reviewing story ${story.id}: ${error.message}`);
-      return false; // On error, don't merge
+      console.error(`❌ [JUDGE STAGE] Failed: ${error.message}`);
+      return {
+        success: false,
+        approved: false,
+        judgeCost: 0,
+        judgeTokens: { input: 0, output: 0 },
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * 🔥 MERGE STAGE: Merge approved story to epic branch.
+   *
+   * This stage:
+   * 1. Calls mergeStoryToEpic
+   * 2. Saves 'merged_to_epic' checkpoint
+   * 3. Cleans up story branch
+   * 4. Emits events
+   *
+   * @returns MergeStageResult with conflict resolution costs
+   */
+  private async executeMergeStage(
+    pipelineCtx: StoryPipelineContext,
+    commitSHA: string
+  ): Promise<MergeStageResult> {
+    const {
+      task, story, epic, repositories,
+      effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId, context: _context,
+    } = pipelineCtx;
+
+    console.log(`\n🔀 [MERGE STAGE] Merging story to epic branch: ${story.title}`);
+
+    try {
+      // Get updated story
+      const { eventStore } = await import('../EventStore');
+      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+      // Merge to epic branch
+      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+
+      // 🔥 CHECKPOINT: Mark as merged_to_epic
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
+        commitHash: commitSHA,
+      });
+      console.log(`📍 [CHECKPOINT] Story progress: merged_to_epic`);
+
+      // Cleanup story branch
+      if (effectiveWorkspacePath && repositories.length > 0 && epic.targetRepository) {
+        try {
+          const targetRepo = repositories.find((r: any) =>
+            r.name === epic.targetRepository ||
+            r.full_name === epic.targetRepository ||
+            r.githubRepoName === epic.targetRepository
+          );
+
+          if (targetRepo && updatedStory?.branchName) {
+            const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
+            const storyBranch = updatedStory.branchName;
+
+            // Delete local branch
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
+              console.log(`🧹 Cleaned up LOCAL story branch: ${storyBranch}`);
+            } catch { /* Branch might not exist */ }
+
+            // Delete remote branch
+            try {
+              safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
+                encoding: 'utf8',
+                timeout: 15000
+              });
+              console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch}`);
+            } catch { /* Branch might not exist on remote */ }
+          }
+        } catch (cleanupErr: any) {
+          console.warn(`⚠️ Branch cleanup failed: ${cleanupErr.message}`);
+        }
+      }
+
+      // Get conflict resolution costs from story (use updatedStory if available, fall back to original)
+      const storyForCosts = updatedStory || story;
+      const conflictResolutionCost = (storyForCosts as any).conflictResolutionCost || 0;
+      const conflictResolutionUsage = (storyForCosts as any).conflictResolutionUsage || { input_tokens: 0, output_tokens: 0 };
+
+      console.log(`✅ [MERGE STAGE] Complete`);
+
+      return {
+        success: true,
+        conflictResolutionCost,
+        conflictResolutionUsage,
+      };
+
+    } catch (error: any) {
+      console.error(`❌ [MERGE STAGE] Failed: ${error.message}`);
+      return {
+        success: false,
+        conflictResolutionCost: 0,
+        conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 },
+        error: error.message,
+      };
     }
   }
 

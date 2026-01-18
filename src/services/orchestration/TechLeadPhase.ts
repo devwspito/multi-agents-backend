@@ -9,6 +9,14 @@ import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiogr
 import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
 import { granularMemoryService } from '../GranularMemoryService';
+import { AgentArtifactService } from '../AgentArtifactService';
+// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 📦 Utility helpers
+import { checkPhaseSkip } from './utils/SkipLogicHelper';
+import { logSection } from './utils/LogHelpers';
+import { isEmpty } from './utils/ArrayHelpers';
+import { getEpicId, getStoryId, validateStoryIds } from './utils/IdNormalizer';
 
 /**
  * Tech Lead Phase
@@ -28,184 +36,60 @@ export class TechLeadPhase extends BasePhase {
   }
 
   /**
-   * Skip if Tech Lead already completed
+   * 🎯 UNIFIED MEMORY: Skip if Tech Lead already completed
    *
-   * 🔥 CRITICAL: In multi-team mode, each team has its OWN epic!
-   * We must check if TechLead was completed for THIS SPECIFIC EPIC,
-   * not globally for any epic.
+   * In multi-team mode, each team has its OWN epic.
+   * UnifiedMemoryService tracks completion per-epic via markEpicTechLeadCompleted.
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
-    const task = context.task;
-
-    // 🔥 CRITICAL FIX: Detect multi-team mode FIRST
+    const taskId = this.getTaskIdString(context);
     const teamEpic = context.getData<any>('teamEpic');
-    const multiTeamMode = !!teamEpic;
 
-    if (multiTeamMode) {
-      console.log(`\n🎯 [TechLead.shouldSkip] Multi-team mode detected - Epic: ${teamEpic.id}`);
-    }
+    // Multi-team mode: check epic-specific completion
+    if (teamEpic) {
+      console.log(`\n🎯 [TechLead.shouldSkip] Multi-team mode - Epic: ${teamEpic.id}`);
 
-    // Refresh task from DB to get latest state
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
-    if (freshTask) {
-      context.task = freshTask;
-    }
+      // Check if THIS SPECIFIC EPIC's TechLead was completed
+      const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
+      const epicData = resumption.executionMap?.epics?.find(
+        e => e.epicId === teamEpic.id && e.techLeadCompleted
+      );
 
-    // 🔄 CONTINUATION: Never skip - always re-execute all phases with new context
-    const isContinuation = context.task.orchestration.continuations &&
-                          context.task.orchestration.continuations.length > 0;
-
-    if (isContinuation) {
-      console.log(`🔄 [TechLead] This is a CONTINUATION - will re-execute with additional requirements`);
-      return false; // DO NOT SKIP
-    }
-
-    // 🛠️ RECOVERY: Skip if already completed (orchestration interrupted and restarting)
-    // 🔥 CRITICAL FIX: In multi-team mode, techLead.status is GLOBAL, not per-epic!
-    // We need to check EventStore for TechLeadCompleted event WITH THIS EPIC's ID
-    if (context.task.orchestration.techLead?.status === 'completed') {
-      if (multiTeamMode) {
-        // In multi-team mode, check if TechLead was completed FOR THIS SPECIFIC EPIC
-        console.log(`   ⚠️ Global techLead.status is 'completed', but checking if this specific epic (${teamEpic.id}) was completed...`);
-
-        try {
-          const { eventStore } = await import('../EventStore');
-          const events = await eventStore.getEvents(context.task._id as any);
-          const techLeadForThisEpic = events.find((e: any) =>
-            e.eventType === 'TechLeadCompleted' &&
-            !e.payload?.failed &&
-            e.payload?.epicId === teamEpic.id
-          );
-
-          if (!techLeadForThisEpic) {
-            console.log(`   ✅ No TechLeadCompleted event found for epic ${teamEpic.id} - will execute TechLead`);
-            return false; // DO NOT SKIP - this epic hasn't had TechLead run yet
-          }
-
-          console.log(`   ✅ Found TechLeadCompleted for epic ${teamEpic.id} - will skip`);
-        } catch (error: any) {
-          console.log(`   ⚠️ Error checking EventStore: ${error.message} - will NOT skip to be safe`);
-          return false;
-        }
+      if (epicData) {
+        logSection(`🎯 [UNIFIED MEMORY] TechLead for epic ${teamEpic.id} already COMPLETED`);
+        // Restore stories if available
+        await this.restoreStoriesOnSkip(context, epicData.stories);
+        return true;
       }
 
-      console.log(`[SKIP] Tech Lead already completed - skipping re-execution (recovery mode)`);
+      console.log(`   ❌ Epic TechLead not completed - must execute`);
+      return false;
+    }
 
-      // Restore phase data from previous execution for next phases
+    // Single-team mode: use centralized skip logic
+    const skipResult = await checkPhaseSkip(context, { phaseName: 'TechLead' });
+
+    if (skipResult.shouldSkip) {
       await this.restoreTechLeadData(context);
-
       return true;
     }
 
-    // 🔥 SMART RECOVERY: If techLead was in_progress but has valid output + storyAssignments,
-    // the agent finished but status wasn't saved before crash. Use the existing output.
-    // 🔥 CRITICAL: In multi-team mode, techLead is GLOBAL - skip this check for subsequent teams
-    const techLead = context.task.orchestration.techLead;
-    if (!multiTeamMode && techLead?.status === 'in_progress' && techLead.storyAssignments && techLead.storyAssignments.length > 0 && techLead.output) {
-      console.log(`\n🔄🔄🔄 [SMART RECOVERY] TechLead was in_progress but has ${techLead.storyAssignments.length} story assignment(s) + output`);
-      console.log(`   → Using existing output instead of re-executing (saves ~5 min + $$)`);
-      console.log(`   → Story assignments found: ${techLead.storyAssignments.map((a: any) => `${a.storyId} → ${a.assignedTo}`).join(', ')}`);
-
-      // Mark as completed since we have valid output
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(context.task._id, {
-        $set: {
-          'orchestration.techLead.status': 'completed',
-          'orchestration.techLead.completedAt': new Date(),
-        }
-      });
-
-      // Restore phase data for next phases
-      await this.restoreTechLeadData(context);
-
-      NotificationService.emitConsoleLog(
-        (context.task._id as any).toString(),
-        'info',
-        `🔄 SMART RECOVERY: TechLead already finished (${techLead.storyAssignments.length} story assignments) - skipping re-execution`
-      );
-
-      return true; // Skip re-execution
-    }
-
-    // 🔥 SMART RECOVERY: Check EventStore for TechLeadCompleted event (even if DB not updated)
-    // 🔥 CRITICAL FIX: In multi-team mode, filter by epicId!
-    try {
-      const { eventStore } = await import('../EventStore');
-      const events = await eventStore.getEvents(context.task._id as any);
-
-      // 🔥 CRITICAL: In multi-team mode, only match events for THIS epic
-      const techLeadCompletedEvent = multiTeamMode
-        ? events.find((e: any) =>
-            e.eventType === 'TechLeadCompleted' &&
-            !e.payload?.failed &&
-            e.payload?.epicId === teamEpic?.id
-          )
-        : events.find((e: any) => e.eventType === 'TechLeadCompleted' && !e.payload?.failed);
-
-      if (techLeadCompletedEvent && techLeadCompletedEvent.payload?.epicsCount > 0) {
-        const epicInfo = multiTeamMode ? ` (epic: ${teamEpic?.id})` : '';
-        console.log(`\n🔄🔄🔄 [SMART RECOVERY] Found TechLeadCompleted event in EventStore${epicInfo}!`);
-        console.log(`   → Epics: ${techLeadCompletedEvent.payload.epicsCount}, Stories: ${techLeadCompletedEvent.payload.storiesCount}`);
-        console.log(`   → DB status: ${techLead?.status || 'not set'} - updating to completed`);
-
-        // Mark as completed in DB
-        const Task = require('../../models/Task').Task;
-        await Task.findByIdAndUpdate(context.task._id, {
-          $set: {
-            'orchestration.techLead.status': 'completed',
-            'orchestration.techLead.completedAt': new Date(),
-          }
-        });
-
-        // Restore from events
-        const epicEvents = events.filter((e: any) => e.eventType === 'EpicCreated');
-        const storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
-        const teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
-
-        if (epicEvents.length > 0) {
-          const epics = epicEvents.map((e: any) => e.payload);
-          context.setData('epics', epics);
-          console.log(`   → Restored ${epics.length} epics from EventStore`);
-        }
-
-        if (storyEvents.length > 0) {
-          const storiesMap: { [id: string]: any } = {};
-          storyEvents.forEach((e: any) => {
-            storiesMap[e.payload.id] = e.payload;
-          });
-          context.setData('storiesMap', storiesMap);
-
-          // Build storyAssignments from story events
-          const storyAssignments = storyEvents
-            .filter(e => e.payload.assignedTo)
-            .map(e => ({ storyId: e.payload.id, assignedTo: e.payload.assignedTo }));
-          context.setData('storyAssignments', storyAssignments);
-          console.log(`   → Restored ${Object.keys(storiesMap).length} stories, ${storyAssignments.length} assignments from EventStore`);
-        }
-
-        if (teamEvent) {
-          context.setData('teamComposition', teamEvent.payload);
-          console.log(`   → Restored teamComposition: ${teamEvent.payload.developers} developers`);
-        }
-
-        if (techLead?.output) {
-          context.setData('techLeadOutput', techLead.output);
-        }
-
-        NotificationService.emitConsoleLog(
-          (context.task._id as any).toString(),
-          'info',
-          `🔄 SMART RECOVERY: Restored TechLead from EventStore - ${epicEvents.length} epics, ${storyEvents.length} stories`
-        );
-
-        return true; // Skip re-execution
-      }
-    } catch (error: any) {
-      console.log(`   ⚠️ EventStore recovery check failed: ${error.message}`);
-    }
-
+    console.log(`   ❌ Phase not completed - TechLead must execute`);
     return false;
+  }
+
+  /**
+   * Restore stories when skipping due to epic completion
+   */
+  private async restoreStoriesOnSkip(
+    context: OrchestrationContext,
+    epicStories?: Array<{ storyId: string; title: string }>
+  ): Promise<void> {
+    if (!isEmpty(epicStories)) {
+      const stories = epicStories!.map(s => ({ id: s.storyId, title: s.title }));
+      context.setData('stories', stories);
+      console.log(`   ✅ Restored ${stories.length} stories from unified memory`);
+    }
   }
 
   protected async executePhase(
@@ -320,11 +204,6 @@ export class TechLeadPhase extends BasePhase {
         console.log(`   Complexity: ${teamEpic.estimatedComplexity}`);
         console.log(`   🔥 CRITICAL: Tech Lead will ONLY create stories for ${repoObj.type.toUpperCase()} tasks`);
       }
-
-      // TODO: Add epicsIdentified to IAgentStep if needed
-      // For now, extract epics from productManager output manually if needed
-      const _epicsIdentified: string[] = []; // task.orchestration.productManager.epicsIdentified || [];
-      void _epicsIdentified; // Marked as intentionally unused
 
       // Build repositories information with TYPE and ENVIRONMENT VARIABLES for multi-repo orchestration
       const repoInfo = context.repositories.length > 0
@@ -746,7 +625,7 @@ ${this.getFileOverlapExamples(context.repositories)}
 - 1:1 ASSIGNMENT: Each story to UNIQUE developer (story-1→dev-1, story-2→dev-2, etc.)
 - NO OVERLAPS: Each file in only ONE story`;
 
-      // 🔥 CRITICAL: Retrieve processed attachments from context (shared from ProductManager)
+      // 🔥 CRITICAL: Retrieve processed attachments from context (shared from Planning phase)
       // This ensures ALL agents receive the same multimedia context without re-processing
       const attachments = context.getData<any[]>('attachments') || [];
       if (attachments.length > 0) {
@@ -1015,12 +894,13 @@ ${this.getFileOverlapExamples(context.repositories)}
       // Build complete stories map - Preserve all story data from Tech Lead
       const storiesMap: { [storyId: string]: any } = {};
       parsed.epics.forEach((epic: any) => {
+        const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID
         epic.stories.forEach((story: any) => {
-          storiesMap[story.id] = {
-            id: story.id,
+          storiesMap[getStoryId(story)] = {
+            id: getStoryId(story), // 🔥 CENTRALIZED: Use IdNormalizer
             title: story.title,
             description: story.description,
-            epicId: epic.id,
+            epicId: epicId, // 🔥 CENTRALIZED: Use normalized epicId
             priority: story.priority,
             estimatedComplexity: story.estimatedComplexity,
             status: 'pending',
@@ -1126,20 +1006,21 @@ ${this.getFileOverlapExamples(context.repositories)}
 
         // Emit story events for each story in this epic
         // 🔥 CRITICAL: Stories INHERIT targetRepository from their epic
+        const normalizedEpicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
         for (const story of epic.stories) {
           await eventStore.append({
             taskId: task._id as any,
             eventType: 'StoryCreated',
             agentName: 'tech-lead',
             payload: {
-              id: story.id,
-              epicId: epic.id,
+              id: getStoryId(story), // 🔥 CENTRALIZED: Use IdNormalizer
+              epicId: normalizedEpicId, // 🔥 CENTRALIZED: Use normalized epicId
               title: story.title,
               description: story.description,
               priority: story.priority,
               complexity: story.estimatedComplexity,
               estimatedComplexity: story.estimatedComplexity, // For backward compatibility
-              assignedTo: parsed.storyAssignments?.find((a: any) => a.storyId === story.id)?.assignedTo,
+              assignedTo: parsed.storyAssignments?.find((a: any) => a.storyId === getStoryId(story))?.assignedTo,
               filesToRead: story.filesToRead || [],
               filesToModify: story.filesToModify || [],
               filesToCreate: story.filesToCreate || [],
@@ -1186,7 +1067,16 @@ ${this.getFileOverlapExamples(context.repositories)}
 
       // ⚖️ TECHLEAD JUDGE: Validate stories cover the EPIC (not the full requirement)
       // This is different from Supervisor - we only check if THIS epic is well broken down
-      const techLeadJudgeResult = await this.judgeTechLeadOutput(parsed, multiTeamMode ? teamEpic : null, taskId, task);
+      // 🔥 FIX: Pass workspacePath and repositories directly (context.workspacePath, context.repositories)
+      //    Previously used task.orchestration?.workspacePath which was null, causing fallback to process.cwd()
+      const techLeadJudgeResult = await this.judgeTechLeadOutput(
+        parsed,
+        multiTeamMode ? teamEpic : null,
+        taskId,
+        task,
+        workspacePath || process.cwd(),  // Use context.workspacePath from line 217
+        context.repositories             // Use context.repositories directly
+      );
 
       if (!techLeadJudgeResult.approved) {
         console.error(`\n🚨 [TechLead] Judge rejected: ${techLeadJudgeResult.reason}`);
@@ -1338,6 +1228,49 @@ ${this.getFileOverlapExamples(context.repositories)}
         await task.save();
       }
 
+      // 📦 GITHUB BACKUP: Save architecture/stories to GitHub
+      // MongoDB has the data (above), now push to GitHub for disaster recovery
+      try {
+        for (const epic of parsed.epics) {
+          const epicRepo = epic.targetRepository || context.repositories?.[0]?.name;
+          if (epicRepo) {
+            // Save architecture/stories artifact
+            const artifactResult = await AgentArtifactService.saveTechLeadArtifact(
+              workspacePath || process.cwd(),
+              epicRepo,
+              taskId,
+              epic.id,
+              parsed.architectureDesign,
+              epic.stories || []
+            );
+            if (artifactResult.success) {
+              console.log(`📦 [TechLead] Artifacts saved to GitHub: ${artifactResult.filePath}`);
+            }
+
+            // Save Judge evaluation artifact for this epic
+            const aiEval = techLeadJudgeResult.aiEvaluation;
+            await AgentArtifactService.saveJudgeArtifact(
+              workspacePath || process.cwd(),
+              epicRepo,
+              taskId,
+              'techlead',
+              epic.id, // entityId is the epic being judged
+              {
+                verdict: techLeadJudgeResult.approved ? 'approved' : 'rejected',
+                score: aiEval?.score,
+                feedback: aiEval?.reasoning || checksMessage,
+                issues: aiEval?.issues,
+                suggestions: aiEval?.suggestions,
+              }
+            );
+            console.log(`📦 [TechLead] Judge evaluation saved to GitHub for epic ${epic.id}`);
+          }
+        }
+      } catch (artifactError: any) {
+        // Non-blocking - local save and MongoDB are the source of truth
+        console.warn(`⚠️ [TechLead] GitHub backup failed (non-blocking): ${artifactError.message}`);
+      }
+
       // 🔥 EVENT SOURCING: Emit completion event
       // 🔥 CRITICAL FIX: Include epicId in multi-team mode so shouldSkip can filter correctly
       await eventStore.append({
@@ -1359,6 +1292,35 @@ ${this.getFileOverlapExamples(context.repositories)}
       });
 
       console.log(`📝 [TechLead] Emitted ${parsed.epics.length} EpicCreated + ${Object.keys(storiesMap).length} StoryCreated events`);
+
+      // 🔥 CRITICAL FIX: Register stories and mark epic TechLead as completed in Unified Memory
+      // This enables proper recovery tracking. Without this, getResumptionPoint() can't know
+      // which epics have completed TechLead or what stories exist.
+      for (const epic of parsed.epics) {
+        const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
+        const epicStories = (epic.stories || []).map((s: any) => ({
+          id: getStoryId(s), // 🔥 CENTRALIZED: Use IdNormalizer
+          title: s.title,
+        }));
+        // 🔥 VALIDATE: Fail fast if any story has no valid ID
+        if (epicStories.length > 0) {
+          validateStoryIds(epic.stories);
+        }
+
+        if (epicStories.length > 0) {
+          await unifiedMemoryService.registerStories(taskId, epicId, epicStories);
+          console.log(`📋 [TechLead] Registered ${epicStories.length} stories for epic ${epicId}`);
+        }
+
+        await unifiedMemoryService.markEpicTechLeadCompleted(taskId, epicId);
+        console.log(`✅ [TechLead] Marked TechLead completed for epic ${epicId}`);
+      }
+
+      // 🔥 CRITICAL FOR RECOVERY: Save team composition and story assignments to Unified Memory
+      // This ensures we can recreate the team on restart without re-running TechLead
+      await unifiedMemoryService.saveTeamComposition(taskId, parsed.teamComposition);
+      await unifiedMemoryService.saveStoryAssignments(taskId, parsed.storyAssignments);
+      console.log(`💾 [TechLead] Saved team composition and story assignments to Unified Memory`);
 
       // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
       NotificationService.emitConsoleLog(
@@ -1846,11 +1808,19 @@ Explore first, then output JSON.`;
    * First does fast programmatic checks (fail fast, no cost).
    * Then uses AI to evaluate the quality of the work.
    */
+  /**
+   * 🔥 CRITICAL BUG FIX (2024-01): workspacePath and repositories MUST be passed from caller!
+   * Previously, this method used task.orchestration?.workspacePath || process.cwd()
+   * which resulted in Judge searching in the project directory instead of agent workspace.
+   * Now we receive these explicitly from executePhase which has context.workspacePath.
+   */
   private async judgeTechLeadOutput(
     parsed: any,
     epicContext: any,
     taskId: string,
-    task?: any
+    task: any,
+    workspacePath: string,    // 🔥 FIX: Must be passed from caller (context.workspacePath)
+    repositories: any[]       // 🔥 FIX: Must be passed from caller (context.repositories)
   ): Promise<{
     approved: boolean;
     reason?: string;
@@ -1912,9 +1882,9 @@ Explore first, then output JSON.`;
       hasTools: true,
     });
 
-    // Get workspace path for Judge to read files
-    const workspacePath = task?.orchestration?.workspacePath || process.cwd();
-    const repositories = task?.repositories || [];
+    // 🔥 FIX: workspacePath and repositories are now passed as parameters
+    // from the caller where context.workspacePath is available (correct agent workspace)
+    // This fixes bug where Judge was searching in process.cwd() (project dir) instead of agent workspace
 
     // Determine if this is a multi-epic task
     const totalEpicsInTask = task?.orchestration?.planning?.epics?.length || 1;
@@ -2060,14 +2030,51 @@ Grep("export.*api|export.*fetch|axios")  # API service patterns
       context.setData('architectureDesign', techLead.architectureDesign);
     }
 
-    // Try to restore epics and storiesMap from EventStore
+    // 🔥 UNIFIED MEMORY FALLBACK: Check local file as THIRD source of truth
+    // Priority: 1) MongoDB (techLead object) 2) UnifiedMemory 3) EventStore
+    const taskId = (context.task._id as any).toString();
+    try {
+      // Check UnifiedMemory for teamComposition if not in DB
+      if (!techLead?.teamComposition) {
+        const unifiedTeamComp = await unifiedMemoryService.getTeamComposition(taskId);
+        if (unifiedTeamComp) {
+          context.setData('teamComposition', unifiedTeamComp);
+          console.log(`   🔄 Restored teamComposition from UnifiedMemory: ${unifiedTeamComp.developers} devs`);
+        }
+      }
+
+      // Check UnifiedMemory for storyAssignments if not in DB
+      if (!techLead?.storyAssignments || techLead.storyAssignments.length === 0) {
+        const unifiedAssignments = await unifiedMemoryService.getStoryAssignments(taskId);
+        if (unifiedAssignments.length > 0) {
+          context.setData('storyAssignments', unifiedAssignments);
+          console.log(`   🔄 Restored ${unifiedAssignments.length} story assignments from UnifiedMemory`);
+        }
+      }
+    } catch (error: any) {
+      console.log(`   ⚠️ UnifiedMemory recovery failed: ${error.message}`);
+    }
+
+    // Try to restore epics and storiesMap from EventStore (THIRD fallback)
     try {
       const { eventStore } = await import('../EventStore');
       const events = await eventStore.getEvents(context.task._id as any);
 
+      // 🔥 FIX: Detect multi-team mode to filter stories by current epic
+      const teamEpic = context.getData<any>('teamEpic');
+      const multiTeamMode = !!teamEpic;
+
       const epicEvents = events.filter((e: any) => e.eventType === 'EpicCreated');
-      const storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
+      let storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
       const teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
+
+      // 🔥 CRITICAL FIX: In multi-team mode, ONLY restore stories for THIS EPIC
+      // Without this filter, epic 2's developers would get stories from epic 1
+      if (multiTeamMode && teamEpic?.id) {
+        const totalStories = storyEvents.length;
+        storyEvents = storyEvents.filter((e: any) => e.payload.epicId === teamEpic.id);
+        console.log(`   🎯 [Multi-Team] Filtered stories: ${storyEvents.length}/${totalStories} for epic ${teamEpic.id}`);
+      }
 
       if (epicEvents.length > 0) {
         const epics = epicEvents.map((e: any) => e.payload);
@@ -2083,8 +2090,8 @@ Grep("export.*api|export.*fetch|axios")  # API service patterns
         context.setData('storiesMap', storiesMap);
         console.log(`   🔄 Restored ${Object.keys(storiesMap).length} stories from EventStore`);
 
-        // Also rebuild storyAssignments if not in DB
-        if (!techLead?.storyAssignments || techLead.storyAssignments.length === 0) {
+        // Also rebuild storyAssignments if not already restored
+        if (!context.getData<any[]>('storyAssignments')) {
           const storyAssignments = storyEvents
             .filter((e: any) => e.payload.assignedTo)
             .map((e: any) => ({ storyId: e.payload.id, assignedTo: e.payload.assignedTo }));
@@ -2093,7 +2100,8 @@ Grep("export.*api|export.*fetch|axios")  # API service patterns
         }
       }
 
-      if (teamEvent && !techLead?.teamComposition) {
+      // Only restore teamComposition from EventStore if not already restored
+      if (teamEvent && !context.getData<any>('teamComposition')) {
         context.setData('teamComposition', teamEvent.payload);
         console.log(`   🔄 Restored teamComposition from EventStore: ${teamEvent.payload.developers} devs`);
       }

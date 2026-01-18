@@ -6,6 +6,12 @@
  * 2. Inject directives during execution
  * 3. Request immediate abort
  * 4. Monitor real-time execution state
+ * 5. **Automatic checkpoint writing via UnifiedMemoryService**
+ *
+ * UNIFIED MEMORY INTEGRATION:
+ * - startExecution() now initializes execution map
+ * - recordToolExecution() writes checkpoints after significant tools
+ * - endExecution() marks phase as completed
  *
  * Claude Code/OpenCode level feature for proactive supervision
  */
@@ -13,6 +19,7 @@
 import { EventEmitter } from 'events';
 import { NotificationService } from './NotificationService';
 import { AgentActivityService } from './AgentActivityService';
+import { unifiedMemoryService } from './UnifiedMemoryService';
 
 export type InterventionType = 'pause' | 'abort' | 'directive' | 'warning';
 
@@ -341,6 +348,140 @@ class ExecutionControlServiceClass extends EventEmitter {
       };
       this.once('abort_requested', onAbort);
     });
+  }
+
+  // ==================== UNIFIED MEMORY INTEGRATION ====================
+
+  /**
+   * Start execution WITH unified memory tracking
+   * Call this instead of raw startExecution for automatic checkpointing
+   */
+  async startExecutionWithMemory(
+    taskId: string,
+    projectId: string,
+    agentType: string,
+    phase: string,
+    targetRepository: string,
+    workspacePath: string
+  ): Promise<AbortSignal> {
+    // Initialize unified memory execution map
+    await unifiedMemoryService.initializeExecution({
+      taskId,
+      projectId,
+      targetRepository,
+      workspacePath,
+    });
+
+    // Mark phase as started in unified memory
+    await unifiedMemoryService.markPhaseStarted(taskId, phase);
+
+    // Normal execution tracking
+    return this.startExecution(taskId, agentType, phase);
+  }
+
+  /**
+   * End execution WITH unified memory update
+   */
+  async endExecutionWithMemory(
+    taskId: string,
+    phase: string,
+    success: boolean,
+    output?: any,
+    error?: string
+  ): Promise<void> {
+    if (success) {
+      await unifiedMemoryService.markPhaseCompleted(taskId, phase, output);
+    } else if (error) {
+      await unifiedMemoryService.markPhaseFailed(taskId, phase, error);
+    }
+
+    // Normal cleanup
+    this.endExecution(taskId);
+  }
+
+  /**
+   * Check if a phase should be skipped (already completed)
+   * THE SINGLE SOURCE OF TRUTH for skip logic
+   */
+  async shouldSkipPhase(taskId: string, phaseType: string): Promise<boolean> {
+    return unifiedMemoryService.shouldSkipPhase(taskId, phaseType);
+  }
+
+  /**
+   * Check if an epic should be skipped
+   */
+  async shouldSkipEpic(taskId: string, epicId: string): Promise<boolean> {
+    return unifiedMemoryService.shouldSkipEpic(taskId, epicId);
+  }
+
+  /**
+   * Check if a story should be skipped
+   */
+  async shouldSkipStory(taskId: string, storyId: string): Promise<boolean> {
+    return unifiedMemoryService.shouldSkipStory(taskId, storyId);
+  }
+
+  /**
+   * Get the full resumption point
+   */
+  async getResumptionPoint(taskId: string) {
+    return unifiedMemoryService.getResumptionPoint(taskId);
+  }
+
+  /**
+   * Register epics for tracking
+   */
+  async registerEpics(taskId: string, epics: Array<{ id: string; title: string }>) {
+    return unifiedMemoryService.registerEpics(taskId, epics);
+  }
+
+  /**
+   * Register stories for an epic
+   */
+  async registerStories(taskId: string, epicId: string, stories: Array<{ id: string; title: string }>) {
+    return unifiedMemoryService.registerStories(taskId, epicId, stories);
+  }
+
+  /**
+   * Mark epic tech-lead as completed
+   */
+  async markEpicTechLeadCompleted(taskId: string, epicId: string) {
+    return unifiedMemoryService.markEpicTechLeadCompleted(taskId, epicId);
+  }
+
+  /**
+   * Mark story as completed with verdict
+   */
+  async markStoryCompleted(
+    taskId: string,
+    epicId: string,
+    storyId: string,
+    verdict: 'approved' | 'rejected',
+    branch?: string,
+    prUrl?: string
+  ) {
+    return unifiedMemoryService.markStoryCompleted(taskId, epicId, storyId, verdict, branch, prUrl);
+  }
+
+  /**
+   * Mark phase as waiting for approval
+   */
+  async markPhaseWaitingApproval(taskId: string, phaseType: string) {
+    return unifiedMemoryService.markPhaseWaitingApproval(taskId, phaseType);
+  }
+
+  /**
+   * Mark phase as approved
+   */
+  async markPhaseApproved(taskId: string, phaseType: string, approvedBy?: string) {
+    return unifiedMemoryService.markPhaseApproved(taskId, phaseType, approvedBy);
+  }
+
+  /**
+   * Add cost tracking
+   */
+  async addCost(taskId: string, cost: number, tokens: number) {
+    return unifiedMemoryService.addCost(taskId, cost, tokens);
   }
 }
 

@@ -38,7 +38,7 @@ export type HookType =
  * Executes bash hooks from .claude/hooks/ directory
  *
  * Hooks are executed at key points in the orchestration:
- * - auto-test.sh: Before QA phase
+ * - auto-test.sh: During verification phase
  * - auto-format.sh: Before git commits
  * - security-scan.sh: After development phase
  * - file-protection.sh: Before modifying critical files
@@ -160,7 +160,7 @@ export class HookService {
 
   /**
    * Execute auto-test hook
-   * Runs tests before QA phase
+   * Runs tests during verification phase
    */
   static async executeAutoTest(repoPath: string, taskId?: string): Promise<IHookResult> {
     return this.executeHook('auto-test', [repoPath], repoPath, taskId);

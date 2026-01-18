@@ -1,6 +1,5 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { GitHubService } from '../GitHubService';
 import { LogService } from '../logging/LogService';
 import { NotificationService } from '../NotificationService';
 import { safeGitExec, safeFetch, safePull, safePushBranch } from '../../utils/safeGitExecution';
@@ -54,9 +53,7 @@ export interface IMergeResult {
  * - cli-tool/components/agents/git/git-flow-manager.md
  */
 export class AutoMergeService {
-  constructor(_githubService?: GitHubService) {
-    // GitHubService available for future use
-    void _githubService;
+  constructor() {
   }
 
   /**

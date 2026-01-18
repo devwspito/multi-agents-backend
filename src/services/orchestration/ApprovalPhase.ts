@@ -79,7 +79,7 @@ export class ApprovalPhase extends BasePhase {
     const autoApprovalEnabled = context.task.orchestration.autoApprovalEnabled;
     const autoApprovalPhases = context.task.orchestration.autoApprovalPhases || [];
 
-    // Normalize phase name for comparison (ProductManager -> product-manager)
+    // Normalize phase name for comparison (Planning -> planning, TechLead -> tech-lead)
     const normalizedPhaseName = this.normalizePhase(previousPhase);
 
     if (autoApprovalEnabled && autoApprovalPhases.includes(normalizedPhaseName as any)) {
@@ -122,7 +122,6 @@ export class ApprovalPhase extends BasePhase {
       'tech-lead': 'TechLead',
       'development': 'Developers',
       'judge': 'Judge',
-      'fixer': 'Fixer',
     };
 
     return reverseMapping[normalizedPhase] || normalizedPhase;
@@ -277,7 +276,7 @@ export class ApprovalPhase extends BasePhase {
    * Planning → Approval → TeamOrchestration → Verification → AutoMerge
    *
    * Sub-phases within TeamOrchestration:
-   * TechLead → Developers → Judge → Fixer
+   * TechLead → Developers → Judge
    */
   private normalizePhase(phase: string): string {
     // Map PascalCase to kebab-case for API routes
@@ -292,7 +291,6 @@ export class ApprovalPhase extends BasePhase {
       'TechLead': 'tech-lead',
       'Developers': 'development',
       'Judge': 'judge',
-      'Fixer': 'fixer',
     };
 
     if (phaseMappings[phase]) {
@@ -324,7 +322,6 @@ export class ApprovalPhase extends BasePhase {
       'TechLead': 'Tech Lead',
       'Developers': 'Development Team',
       'Judge': 'Judge Evaluation',
-      'Fixer': 'Bug Fixer',
     };
 
     return phaseNames[phase] || phase;

@@ -186,17 +186,16 @@ export class CommandService {
     prompt: string,
     taskId?: string
   ): Promise<any> {
-    // Use general-purpose agent or create a specialized quality-check agent
+    // Use judge agent for quality checks
     const coordinator = new OrchestrationCoordinator();
     const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
-    // For now, use QA engineer agent for quality checks
     return await coordinator.executeAgent(
-      'qa-engineer',
+      'judge',
       prompt,
       workspaceDir,
       taskId,
-      'qa-engineer',
+      'judge',
       undefined,
       false,
       [],
@@ -218,13 +217,13 @@ export class CommandService {
     const coordinator = new OrchestrationCoordinator();
     const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
-    // Use QA engineer with security-focused prompt
+    // Use judge with security-focused prompt
     return await coordinator.executeAgent(
-      'qa-engineer',
+      'judge',
       `${prompt}\n\nFocus on OWASP API Security Top 10 vulnerabilities and dependency security.`,
       workspaceDir,
       taskId,
-      'qa-engineer',
+      'judge',
       undefined,
       false,
       [],
@@ -281,13 +280,13 @@ export class CommandService {
     const coordinator = new OrchestrationCoordinator();
     const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
 
-    // Use QA engineer to run tests
+    // Use developer to run tests
     return await coordinator.executeAgent(
-      'qa-engineer',
+      'developer',
       `${prompt}\n\nRun the complete test suite and report results.`,
       workspaceDir,
       taskId,
-      'qa-engineer',
+      'developer',
       undefined,
       false,
       [],

@@ -20,6 +20,9 @@
  */
 
 import mongoose from 'mongoose';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 // ==================== TYPES ====================
 
@@ -169,20 +172,306 @@ export class GranularMemoryService {
     return GranularMemoryService.instance;
   }
 
+  // ==================== LOCAL FILE STORAGE ====================
+
+  /**
+   * Get workspace path for a task
+   */
+  private getWorkspacePath(taskId: string): string {
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    return path.join(workspaceDir, `task-${taskId}`);
+  }
+
+  /**
+   * Get memory directory for a task
+   * 🔥 IMPORTANT: Saves OUTSIDE client repos to avoid polluting their codebase
+   * Location: {workspacePath}/.agent-memory/granular/ (not inside cloned repos)
+   */
+  private getMemoryDir(taskId: string): string | null {
+    const taskDir = this.getWorkspacePath(taskId);
+    if (!fs.existsSync(taskDir)) return null;
+
+    // 🔥 Save in workspace root, NOT inside client repos
+    return path.join(taskDir, '.agent-memory', 'granular');
+  }
+
+  /**
+   * Ensure memory directory exists
+   */
+  private ensureMemoryDir(taskId: string): string | null {
+    const memDir = this.getMemoryDir(taskId);
+    if (!memDir) return null;
+
+    try {
+      if (!fs.existsSync(memDir)) {
+        fs.mkdirSync(memDir, { recursive: true });
+        console.log(`📁 [GranularMemory] Created local memory dir: ${memDir}`);
+      }
+      return memDir;
+    } catch (error) {
+      console.warn(`⚠️ [GranularMemory] Failed to create memory dir: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 🔥 TRIPLE REDUNDANCY: Save memory to local file
+   *
+   * Local storage structure:
+   * .granular-memory/
+   *   - memories.jsonl (append-only log of ALL memories)
+   *   - checkpoints/
+   *     - {phaseType}-{epicId}-{storyId}.json (latest checkpoint per scope)
+   *   - by-type/
+   *     - decisions.jsonl
+   *     - actions.jsonl
+   *     - progress.jsonl
+   *     - errors.jsonl
+   *     - etc.
+   */
+  private async saveToLocal(memory: GranularMemory, taskId: string): Promise<void> {
+    if (!taskId) return;
+
+    const memDir = this.ensureMemoryDir(taskId);
+    if (!memDir) {
+      // No local workspace yet - that's OK for early phases
+      return;
+    }
+
+    try {
+      // 1️⃣ Append to main log (memories.jsonl)
+      const mainLogPath = path.join(memDir, 'memories.jsonl');
+      const logEntry = JSON.stringify({
+        ...memory,
+        _localSavedAt: new Date().toISOString(),
+      }) + '\n';
+      fs.appendFileSync(mainLogPath, logEntry);
+
+      // 2️⃣ Save by type for easier querying
+      const byTypeDir = path.join(memDir, 'by-type');
+      if (!fs.existsSync(byTypeDir)) {
+        fs.mkdirSync(byTypeDir, { recursive: true });
+      }
+      const typeLogPath = path.join(byTypeDir, `${memory.type}s.jsonl`);
+      fs.appendFileSync(typeLogPath, logEntry);
+
+      // 3️⃣ For checkpoints, also save latest as JSON for quick access
+      if (memory.type === 'checkpoint') {
+        const checkpointDir = path.join(memDir, 'checkpoints');
+        if (!fs.existsSync(checkpointDir)) {
+          fs.mkdirSync(checkpointDir, { recursive: true });
+        }
+        const checkpointName = [
+          memory.phaseType || 'unknown',
+          memory.epicId || '',
+          memory.storyId || '',
+        ].filter(Boolean).join('-');
+        const checkpointPath = path.join(checkpointDir, `${checkpointName}.json`);
+        fs.writeFileSync(checkpointPath, JSON.stringify(memory, null, 2));
+        console.log(`💾 [GranularMemory] Saved checkpoint locally: ${checkpointPath}`);
+      }
+
+      // 4️⃣ Update summary index
+      await this.updateLocalIndex(memDir, memory);
+
+    } catch (error) {
+      console.warn(`⚠️ [GranularMemory] Failed to save locally: ${error}`);
+      // Don't throw - MongoDB is the primary source, local is backup
+    }
+  }
+
+  /**
+   * Update local index file with summary
+   */
+  private async updateLocalIndex(memDir: string, memory: GranularMemory): Promise<void> {
+    const indexPath = path.join(memDir, 'index.json');
+    let index: any = { lastUpdated: null, counts: {}, latestByType: {} };
+
+    try {
+      if (fs.existsSync(indexPath)) {
+        index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      }
+    } catch {
+      // Start fresh
+    }
+
+    index.lastUpdated = new Date().toISOString();
+    index.counts[memory.type] = (index.counts[memory.type] || 0) + 1;
+    index.latestByType[memory.type] = {
+      title: memory.title,
+      timestamp: new Date().toISOString(),
+    };
+
+    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+  }
+
+  /**
+   * 🔥 Load memories from local files (fallback when MongoDB unavailable)
+   */
+  async loadFromLocal(taskId: string, type?: GranularMemoryType): Promise<GranularMemory[]> {
+    const memDir = this.getMemoryDir(taskId);
+    if (!memDir || !fs.existsSync(memDir)) return [];
+
+    const memories: GranularMemory[] = [];
+
+    try {
+      let logPath: string;
+      if (type) {
+        logPath = path.join(memDir, 'by-type', `${type}s.jsonl`);
+      } else {
+        logPath = path.join(memDir, 'memories.jsonl');
+      }
+
+      if (!fs.existsSync(logPath)) return [];
+
+      const content = fs.readFileSync(logPath, 'utf8');
+      const lines = content.trim().split('\n').filter(Boolean);
+
+      for (const line of lines) {
+        try {
+          const memory = JSON.parse(line) as GranularMemory;
+          memories.push(memory);
+        } catch {
+          // Skip malformed lines
+        }
+      }
+
+      console.log(`📂 [GranularMemory] Loaded ${memories.length} memories from local (type: ${type || 'all'})`);
+    } catch (error) {
+      console.warn(`⚠️ [GranularMemory] Failed to load from local: ${error}`);
+    }
+
+    return memories;
+  }
+
+  /**
+   * 🔥 Load latest checkpoint from local files
+   */
+  async loadCheckpointFromLocal(taskId: string, phaseType: string, epicId?: string, storyId?: string): Promise<GranularMemory | null> {
+    const memDir = this.getMemoryDir(taskId);
+    if (!memDir || !fs.existsSync(memDir)) return null;
+
+    try {
+      const checkpointDir = path.join(memDir, 'checkpoints');
+      if (!fs.existsSync(checkpointDir)) return null;
+
+      const checkpointName = [phaseType, epicId || '', storyId || ''].filter(Boolean).join('-');
+      const checkpointPath = path.join(checkpointDir, `${checkpointName}.json`);
+
+      if (!fs.existsSync(checkpointPath)) return null;
+
+      const content = fs.readFileSync(checkpointPath, 'utf8');
+      const checkpoint = JSON.parse(content) as GranularMemory;
+      console.log(`📂 [GranularMemory] Loaded checkpoint from local: ${checkpointPath}`);
+      return checkpoint;
+    } catch (error) {
+      console.warn(`⚠️ [GranularMemory] Failed to load checkpoint from local: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * 🔥 Sync ALL local memories to MongoDB (for disaster recovery)
+   */
+  async syncLocalToMongoDB(taskId: string): Promise<{ synced: number; errors: number }> {
+    const memories = await this.loadFromLocal(taskId);
+    let synced = 0;
+    let errors = 0;
+
+    for (const memory of memories) {
+      try {
+        // Check if already exists in MongoDB
+        const existing = await GranularMemoryModel.findOne({
+          taskId: memory.taskId,
+          type: memory.type,
+          title: memory.title,
+          createdAt: memory.createdAt,
+        });
+
+        if (!existing) {
+          await GranularMemoryModel.create(memory);
+          synced++;
+        }
+      } catch (error) {
+        errors++;
+      }
+    }
+
+    console.log(`🔄 [GranularMemory] Synced local to MongoDB: ${synced} new, ${errors} errors`);
+    return { synced, errors };
+  }
+
+  /**
+   * 🔥 Sync ALL local memories from multiple tasks to MongoDB
+   */
+  async syncAllLocalToMongoDB(): Promise<{ tasks: number; synced: number; errors: number }> {
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    let totalSynced = 0;
+    let totalErrors = 0;
+    let taskCount = 0;
+
+    if (!fs.existsSync(workspaceDir)) {
+      return { tasks: 0, synced: 0, errors: 0 };
+    }
+
+    const entries = fs.readdirSync(workspaceDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith('task-')) {
+        const taskId = entry.name.replace('task-', '');
+        const result = await this.syncLocalToMongoDB(taskId);
+        totalSynced += result.synced;
+        totalErrors += result.errors;
+        taskCount++;
+      }
+    }
+
+    console.log(`🔄 [GranularMemory] Synced ${taskCount} tasks: ${totalSynced} memories, ${totalErrors} errors`);
+    return { tasks: taskCount, synced: totalSynced, errors: totalErrors };
+  }
+
+  // ==================== OBJECTID VALIDATION HELPERS ====================
+
+  /**
+   * Check if a string is a valid MongoDB ObjectId (24-character hex)
+   */
+  private isValidObjectId(id: string | undefined | null): boolean {
+    if (!id || typeof id !== 'string') return false;
+    return /^[a-fA-F0-9]{24}$/.test(id.trim());
+  }
+
+  /**
+   * Safely create an ObjectId from a string, returns undefined if invalid
+   */
+  private safeObjectId(id: string | undefined | null): mongoose.Types.ObjectId | undefined {
+    if (!this.isValidObjectId(id)) return undefined;
+    return new mongoose.Types.ObjectId(id!.trim());
+  }
+
   // ==================== WRITE OPERATIONS ====================
 
   /**
    * Store a memory (generic)
+   *
+   * 🔥 TRIPLE REDUNDANCY: Saves to MongoDB + Local Disk
    */
   async store(memory: Omit<GranularMemory, '_id' | 'usageCount' | 'createdAt' | 'updatedAt' | 'archived'>): Promise<GranularMemory> {
+    // 1️⃣ Save to MongoDB (primary)
     const doc = await GranularMemoryModel.create({
       ...memory,
       usageCount: 0,
       archived: false,
     });
 
-    console.log(`🧠 [Memory] Stored: [${memory.type}] ${memory.title} (scope: ${memory.scope})`);
-    return doc.toObject() as GranularMemory;
+    const savedMemory = doc.toObject() as GranularMemory;
+
+    // 2️⃣ Save to Local Disk (backup)
+    const taskIdStr = memory.taskId?.toString();
+    if (taskIdStr) {
+      await this.saveToLocal(savedMemory, taskIdStr);
+    }
+
+    console.log(`🧠 [Memory] Stored: [${memory.type}] ${memory.title} (scope: ${memory.scope}) [MongoDB + Local]`);
+    return savedMemory;
   }
 
   /**
@@ -199,9 +488,15 @@ export class GranularMemoryService {
     content: string;
     importance?: 'low' | 'medium' | 'high' | 'critical';
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storeDecision skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: params.taskId ? new mongoose.Types.ObjectId(params.taskId) : undefined,
+      projectId: projectOid,
+      taskId: this.safeObjectId(params.taskId),
       scope: params.storyId ? 'story' : params.epicId ? 'epic' : 'phase',
       phaseType: params.phaseType,
       epicId: params.epicId,
@@ -228,9 +523,15 @@ export class GranularMemoryService {
     title: string;
     content: string;
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storeAction skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: params.taskId ? new mongoose.Types.ObjectId(params.taskId) : undefined,
+      projectId: projectOid,
+      taskId: this.safeObjectId(params.taskId),
       scope: params.storyId ? 'story' : params.epicId ? 'epic' : 'phase',
       phaseType: params.phaseType,
       epicId: params.epicId,
@@ -257,9 +558,16 @@ export class GranularMemoryService {
     status: 'started' | 'in_progress' | 'completed' | 'failed';
     details: string;
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      console.warn(`⚠️ [GranularMemory] storeProgress skipped - invalid IDs: projectId=${params.projectId}, taskId=${params.taskId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      projectId: projectOid,
+      taskId: taskOid,
       scope: params.storyId ? 'story' : params.epicId ? 'epic' : 'phase',
       phaseType: params.phaseType,
       epicId: params.epicId,
@@ -287,9 +595,15 @@ export class GranularMemoryService {
     solution?: string;
     avoidanceRule?: string;
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storeError skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: params.taskId ? new mongoose.Types.ObjectId(params.taskId) : undefined,
+      projectId: projectOid,
+      taskId: this.safeObjectId(params.taskId),
       scope: 'task', // Errors are task-scoped to avoid in future runs
       phaseType: params.phaseType,
       epicId: params.epicId,
@@ -322,9 +636,16 @@ export class GranularMemoryService {
     operation: 'create' | 'modify' | 'delete';
     summary: string;
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      console.warn(`⚠️ [GranularMemory] storeFileChange skipped - invalid IDs: projectId=${params.projectId}, taskId=${params.taskId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      projectId: projectOid,
+      taskId: taskOid,
       scope: params.storyId ? 'story' : 'epic',
       phaseType: params.phaseType,
       epicId: params.epicId,
@@ -358,10 +679,17 @@ export class GranularMemoryService {
     completedActions: string[];
     pendingActions: string[];
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      console.warn(`⚠️ [GranularMemory] storeCheckpoint skipped - invalid IDs: projectId=${params.projectId}, taskId=${params.taskId}`);
+      return {} as GranularMemory;
+    }
+
     // Upsert to replace previous checkpoint at same scope
     const filter = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      projectId: projectOid,
+      taskId: taskOid,
       phaseType: params.phaseType,
       type: 'checkpoint',
       ...(params.storyId && { storyId: params.storyId }),
@@ -392,12 +720,17 @@ export class GranularMemoryService {
       },
     };
 
+    // 1️⃣ Save to MongoDB (primary)
     const doc = await GranularMemoryModel.findOneAndUpdate(filter, update, { upsert: true, new: true });
+    const savedCheckpoint = doc.toObject() as GranularMemory;
 
-    console.log(`📍 [Checkpoint] Saved: ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
+    // 2️⃣ Save to Local Disk (backup)
+    await this.saveToLocal(savedCheckpoint, params.taskId);
+
+    console.log(`📍 [Checkpoint] Saved: ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''} [MongoDB + Local]`);
     console.log(`   Completed: ${params.completedActions.length}, Pending: ${params.pendingActions.length}`);
 
-    return doc.toObject() as GranularMemory;
+    return savedCheckpoint;
   }
 
   /**
@@ -409,8 +742,14 @@ export class GranularMemoryService {
     content: string;
     importance?: 'low' | 'medium' | 'high' | 'critical';
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storePattern skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
+      projectId: projectOid,
       scope: 'project', // Patterns are project-wide
       type: 'pattern',
       title: params.title,
@@ -428,8 +767,14 @@ export class GranularMemoryService {
     title: string;
     content: string;
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storeConvention skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
+      projectId: projectOid,
       scope: 'project',
       type: 'convention',
       title: params.title,
@@ -449,9 +794,15 @@ export class GranularMemoryService {
     content: string;
     importance?: 'low' | 'medium' | 'high' | 'critical';
   }): Promise<GranularMemory> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] storeLearning skipped - invalid projectId: ${params.projectId}`);
+      return {} as GranularMemory;
+    }
+
     return this.store({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: params.taskId ? new mongoose.Types.ObjectId(params.taskId) : undefined,
+      projectId: projectOid,
+      taskId: this.safeObjectId(params.taskId),
       scope: params.taskId ? 'task' : 'project',
       type: 'learning',
       title: params.title,
@@ -465,6 +816,8 @@ export class GranularMemoryService {
 
   /**
    * Get checkpoint for exact resumption
+   *
+   * 🔥 DUAL SOURCE: Tries MongoDB first, then falls back to local files
    */
   async getCheckpoint(params: {
     projectId: string;
@@ -473,13 +826,26 @@ export class GranularMemoryService {
     epicId?: string;
     storyId?: string;
   }): Promise<GranularMemory | null> {
+    // taskId is required for checkpoint lookup
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!taskOid) {
+      // Don't log warning - caller will handle fallback
+      return null;
+    }
+
+    // Build filter with validated ObjectIds
     const filter: any = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      taskId: taskOid,
       phaseType: params.phaseType,
       type: 'checkpoint',
       archived: false,
     };
+
+    // Only add projectId if valid (can be empty string when searching by taskId only)
+    const projectOid = this.safeObjectId(params.projectId);
+    if (projectOid) {
+      filter.projectId = projectOid;
+    }
 
     if (params.storyId) {
       filter.storyId = params.storyId;
@@ -488,10 +854,33 @@ export class GranularMemoryService {
       filter.storyId = { $exists: false };
     }
 
-    const checkpoint = await GranularMemoryModel.findOne(filter).sort({ updatedAt: -1 }).lean();
+    // 1️⃣ Try MongoDB first
+    let checkpoint = await GranularMemoryModel.findOne(filter).sort({ updatedAt: -1 }).lean();
+
+    // 2️⃣ Fallback to local files if not in MongoDB
+    if (!checkpoint) {
+      console.log(`📂 [Checkpoint] Not in MongoDB, checking local files...`);
+      const localCheckpoint = await this.loadCheckpointFromLocal(
+        params.taskId,
+        params.phaseType,
+        params.epicId,
+        params.storyId
+      );
+
+      if (localCheckpoint) {
+        console.log(`📂 [Checkpoint] Found in local files, syncing to MongoDB...`);
+        // Sync to MongoDB for future lookups
+        try {
+          await GranularMemoryModel.create(localCheckpoint);
+        } catch {
+          // Might already exist
+        }
+        return localCheckpoint;
+      }
+    }
 
     if (checkpoint) {
-      console.log(`📍 [Checkpoint] Found: ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
+      console.log(`📍 [Checkpoint] Found in MongoDB: ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
     }
 
     return checkpoint as GranularMemory | null;
@@ -507,12 +896,19 @@ export class GranularMemoryService {
     epicId?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      // Don't log warning - just return empty array for graceful degradation
+      return [];
+    }
+
     const filter: any = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
+      projectId: projectOid,
       archived: false,
       $or: [
         { scope: 'project' }, // Always include project-wide memories
-        { taskId: new mongoose.Types.ObjectId(params.taskId) }, // Include task memories
+        { taskId: taskOid }, // Include task memories
       ],
     };
 
@@ -549,9 +945,15 @@ export class GranularMemoryService {
     taskId: string;
     epicId: string;
   }): Promise<string[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      return []; // Graceful degradation
+    }
+
     const completedProgress = await GranularMemoryModel.find({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      projectId: projectOid,
+      taskId: taskOid,
       epicId: params.epicId,
       type: 'progress',
       title: { $regex: /^COMPLETED:/ },
@@ -569,15 +971,21 @@ export class GranularMemoryService {
     taskId?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      return []; // Graceful degradation
+    }
+
     const filter: any = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
+      projectId: projectOid,
       type: 'error',
       archived: false,
     };
 
-    if (params.taskId) {
+    const taskOid = this.safeObjectId(params.taskId);
+    if (taskOid) {
       filter.$or = [
-        { taskId: new mongoose.Types.ObjectId(params.taskId) },
+        { taskId: taskOid },
         { scope: 'project' },
       ];
     }
@@ -596,8 +1004,13 @@ export class GranularMemoryService {
     projectId: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      return []; // Graceful degradation
+    }
+
     const results = await GranularMemoryModel.find({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
+      projectId: projectOid,
       type: { $in: ['pattern', 'convention'] },
       archived: false,
     })
@@ -616,9 +1029,15 @@ export class GranularMemoryService {
     epicId?: string;
     storyId?: string;
   }): Promise<GranularMemory[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      return []; // Graceful degradation
+    }
+
     const filter: any = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId),
+      projectId: projectOid,
+      taskId: taskOid,
       type: 'file_change',
       archived: false,
     };
@@ -652,9 +1071,15 @@ export class GranularMemoryService {
     phaseType: string;
     cacheTitle: string;
   }): Promise<GranularMemory | null> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      return null; // Graceful degradation
+    }
+
     const result = await GranularMemoryModel.findOne({
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId), // 🔥 STRICT: Must match EXACT taskId
+      projectId: projectOid,
+      taskId: taskOid, // 🔥 STRICT: Must match EXACT taskId
       phaseType: params.phaseType,
       type: 'context',
       title: params.cacheTitle,
@@ -682,9 +1107,15 @@ export class GranularMemoryService {
     cacheTitlePrefix?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const projectOid = this.safeObjectId(params.projectId);
+    const taskOid = this.safeObjectId(params.taskId);
+    if (!projectOid || !taskOid) {
+      return []; // Graceful degradation
+    }
+
     const filter: any = {
-      projectId: new mongoose.Types.ObjectId(params.projectId),
-      taskId: new mongoose.Types.ObjectId(params.taskId), // 🔥 STRICT: Must match EXACT taskId
+      projectId: projectOid,
+      taskId: taskOid, // 🔥 STRICT: Must match EXACT taskId
       phaseType: params.phaseType,
       type: 'context',
       archived: false,
@@ -772,6 +1203,178 @@ export class GranularMemoryService {
     return lines.join('\n');
   }
 
+  // ==================== GIT COMMITS ====================
+
+  /**
+   * 🔥 TRIPLE REDUNDANCY: Commit agent action to git
+   *
+   * This creates a git commit for agent actions, providing:
+   * - Full audit trail in git history
+   * - Ability to rollback to any agent action
+   * - Clear visibility of what each agent did
+   */
+  async commitAgentAction(params: {
+    taskId: string;
+    agentType: string;
+    phaseType: string;
+    epicId?: string;
+    storyId?: string;
+    actionTitle: string;
+    actionDetails: string;
+    filePaths?: string[];
+  }): Promise<{ success: boolean; commitSha?: string; error?: string }> {
+    const memDir = this.getMemoryDir(params.taskId);
+    if (!memDir) {
+      return { success: false, error: 'No workspace found' };
+    }
+
+    // Get the repo directory (parent of .granular-memory)
+    const repoDir = path.dirname(memDir);
+
+    try {
+      const { execSync } = require('child_process');
+
+      // Check if there are changes to commit
+      const status = execSync('git status --porcelain', {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 30000,
+      }).trim();
+
+      if (!status) {
+        console.log(`📝 [Git] No changes to commit for ${params.agentType}`);
+        return { success: true, commitSha: 'no-changes' };
+      }
+
+      // Stage all changes (or specific files if provided)
+      if (params.filePaths && params.filePaths.length > 0) {
+        for (const filePath of params.filePaths) {
+          execSync(`git add "${filePath}"`, { cwd: repoDir, timeout: 30000 });
+        }
+      } else {
+        execSync('git add -A', { cwd: repoDir, timeout: 30000 });
+      }
+
+      // Create commit message
+      const scope = [params.epicId, params.storyId].filter(Boolean).join('/');
+      const commitMessage = [
+        `[${params.agentType}] ${params.actionTitle}`,
+        '',
+        `Phase: ${params.phaseType}`,
+        scope ? `Scope: ${scope}` : '',
+        '',
+        params.actionDetails,
+        '',
+        `🤖 Auto-committed by ${params.agentType} agent`,
+      ].filter(Boolean).join('\n');
+
+      // Commit
+      execSync(
+        `git commit -m "${commitMessage.replace(/"/g, '\\"')}"`,
+        { cwd: repoDir, encoding: 'utf8', timeout: 30000 }
+      );
+
+      // Get commit SHA
+      const commitSha = execSync('git rev-parse HEAD', {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 10000,
+      }).trim();
+
+      console.log(`📝 [Git] Committed: ${commitSha.substring(0, 7)} - ${params.actionTitle}`);
+
+      // Store the commit info as a memory too
+      await this.storeAction({
+        projectId: '', // Will be filled if available
+        taskId: params.taskId,
+        phaseType: params.phaseType,
+        agentType: params.agentType,
+        epicId: params.epicId,
+        storyId: params.storyId,
+        title: `Git Commit: ${commitSha.substring(0, 7)}`,
+        content: `Committed: ${params.actionTitle}\nSHA: ${commitSha}\nFiles: ${params.filePaths?.join(', ') || 'all changes'}`,
+      });
+
+      return { success: true, commitSha };
+    } catch (error: any) {
+      console.warn(`⚠️ [Git] Failed to commit: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 🔥 Push all commits to remote
+   */
+  async pushToRemote(params: {
+    taskId: string;
+    branch?: string;
+    force?: boolean;
+  }): Promise<{ success: boolean; error?: string }> {
+    const memDir = this.getMemoryDir(params.taskId);
+    if (!memDir) {
+      return { success: false, error: 'No workspace found' };
+    }
+
+    const repoDir = path.dirname(memDir);
+
+    try {
+      const { execSync } = require('child_process');
+
+      // Get current branch if not specified
+      const branch = params.branch || execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 10000,
+      }).trim();
+
+      // Push to remote
+      const forceFlag = params.force ? '--force' : '';
+      execSync(`git push origin ${branch} ${forceFlag}`.trim(), {
+        cwd: repoDir,
+        timeout: 120000, // 2 minutes for push
+      });
+
+      console.log(`🚀 [Git] Pushed to origin/${branch}`);
+      return { success: true };
+    } catch (error: any) {
+      console.warn(`⚠️ [Git] Failed to push: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 🔥 Commit and push in one operation
+   */
+  async commitAndPush(params: {
+    taskId: string;
+    agentType: string;
+    phaseType: string;
+    epicId?: string;
+    storyId?: string;
+    actionTitle: string;
+    actionDetails: string;
+    filePaths?: string[];
+    branch?: string;
+  }): Promise<{ success: boolean; commitSha?: string; error?: string }> {
+    // First commit
+    const commitResult = await this.commitAgentAction(params);
+    if (!commitResult.success || commitResult.commitSha === 'no-changes') {
+      return commitResult;
+    }
+
+    // Then push
+    const pushResult = await this.pushToRemote({
+      taskId: params.taskId,
+      branch: params.branch,
+    });
+
+    if (!pushResult.success) {
+      return { success: true, commitSha: commitResult.commitSha, error: `Committed but push failed: ${pushResult.error}` };
+    }
+
+    return { success: true, commitSha: commitResult.commitSha };
+  }
+
   // ==================== CLEANUP ====================
 
   /**
@@ -789,12 +1392,18 @@ export class GranularMemoryService {
    * Archive old memories
    */
   async cleanup(projectId: string, olderThanDays: number = 30): Promise<number> {
+    const projectOid = this.safeObjectId(projectId);
+    if (!projectOid) {
+      console.warn(`⚠️ [GranularMemory] cleanup skipped - invalid projectId: ${projectId}`);
+      return 0;
+    }
+
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
     const result = await GranularMemoryModel.updateMany(
       {
-        projectId: new mongoose.Types.ObjectId(projectId),
+        projectId: projectOid,
         archived: false,
         importance: { $in: ['low', 'medium'] },
         updatedAt: { $lt: cutoffDate },
@@ -814,8 +1423,14 @@ export class GranularMemoryService {
    * Delete all memories for a task (cleanup after task completes successfully)
    */
   async deleteTaskMemories(taskId: string, keepProjectLevel: boolean = true): Promise<number> {
+    const taskOid = this.safeObjectId(taskId);
+    if (!taskOid) {
+      console.warn(`⚠️ [GranularMemory] deleteTaskMemories skipped - invalid taskId: ${taskId}`);
+      return 0;
+    }
+
     const filter: any = {
-      taskId: new mongoose.Types.ObjectId(taskId),
+      taskId: taskOid,
     };
 
     if (keepProjectLevel) {

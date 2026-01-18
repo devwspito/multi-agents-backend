@@ -50,7 +50,7 @@ class ApprovalEventEmitter extends EventEmitter {
    * Returns Promise that resolves when user approves/rejects
    *
    * @param taskId - Task ID
-   * @param phase - Phase name (e.g., 'ProductManager', 'TechLead')
+   * @param phase - Phase name (e.g., 'Planning', 'TechLead', 'TeamOrchestration')
    * @param timeoutMs - Max wait time in milliseconds (default: 24 hours)
    * @returns Promise<{ approved: boolean, feedback?: string }> - approval result with optional feedback
    * @throws Error if timeout exceeded
