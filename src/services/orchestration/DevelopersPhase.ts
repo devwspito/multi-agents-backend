@@ -1104,7 +1104,10 @@ export class DevelopersPhase extends BasePhase {
       // 🔥 COST TRACKING: Save costs to task.orchestration (atomic update to avoid version conflicts)
       if (!multiTeamMode) {
         const Task = require('../../models/Task').Task;
-        const currentTask = await Task.findById(task._id).lean();
+        // ⚡ OPTIMIZATION: Only fetch totalCost field
+        const currentTask = await Task.findById(task._id)
+          .select('orchestration.totalCost')
+          .lean();
         const currentTotalCost = currentTask?.orchestration?.totalCost || 0;
 
         await Task.findByIdAndUpdate(task._id, {

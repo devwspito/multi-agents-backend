@@ -1031,10 +1031,13 @@ export class OrchestrationCoordinator {
     taskId: string
   ): Promise<Array<{ id: string; content: string; priority: string }>> {
     // Refresh task to get latest directives
-    const freshTask = await Task.findById(task._id);
+    // ⚡ OPTIMIZATION: Only fetch pendingDirectives field with lean() for speed
+    const freshTask = await Task.findById(task._id)
+      .select('orchestration.pendingDirectives')
+      .lean();
     if (!freshTask) return [];
 
-    const pendingDirectives = freshTask.orchestration.pendingDirectives || [];
+    const pendingDirectives = freshTask.orchestration?.pendingDirectives || [];
     if (pendingDirectives.length === 0) return [];
 
     // Filter directives that match this phase
