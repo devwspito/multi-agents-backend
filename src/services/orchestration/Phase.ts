@@ -390,9 +390,12 @@ export abstract class BasePhase implements IPhase {
 
     try {
       // 🛑 CHECK FOR CANCELLATION BEFORE EXECUTING PHASE
+      // ⚡ OPTIMIZATION: Only fetch cancelRequested field with lean() for speed
       const { Task } = await import('../../models/Task');
-      const task = await Task.findById(context.task._id);
-      if (task?.orchestration.cancelRequested) {
+      const taskCancel = await Task.findById(context.task._id)
+        .select('orchestration.cancelRequested')
+        .lean();
+      if (taskCancel?.orchestration?.cancelRequested) {
         const duration = Date.now() - startTime;
         console.log(`🛑 [${this.name}] Task cancelled - aborting phase execution`);
         return {
@@ -514,9 +517,12 @@ export abstract class BasePhase implements IPhase {
 
       // 🌿 BRANCH REGISTRY RESTORATION: Restore branches from MongoDB on recovery
       // When phases are skipped, the branchRegistry is empty but MongoDB may have branch info
-      const task = await Task.findById(taskId);
-      if (task?.orchestration?.branchRegistry) {
-        const storedBranches = task.orchestration.branchRegistry as BranchInfo[];
+      // ⚡ OPTIMIZATION: Only fetch branchRegistry field with lean() for speed
+      const taskBranches = await Task.findById(taskId)
+        .select('orchestration.branchRegistry')
+        .lean();
+      if (taskBranches?.orchestration?.branchRegistry) {
+        const storedBranches = taskBranches.orchestration.branchRegistry as BranchInfo[];
         if (Array.isArray(storedBranches) && storedBranches.length > 0) {
           for (const branch of storedBranches) {
             if (branch.name && !context.branchRegistry.has(branch.name)) {
