@@ -823,10 +823,35 @@ export class OrchestrationCoordinator {
   /**
    * Setup workspace for multi-repo development
    * Clones ONLY the repositories selected by the user for this specific task
+   * ⚡ OPTIMIZATION: Fast path for recovery - skip cloning if repos already exist
    */
   private async setupWorkspace(taskId: string, repositories: any[], githubToken: string): Promise<string> {
     const taskWorkspace = path.join(this.workspaceDir, `task-${taskId}`);
 
+    // ⚡ FAST PATH: Check if workspace already exists with all required repos
+    if (fs.existsSync(taskWorkspace)) {
+      const existingDirs = fs.readdirSync(taskWorkspace).filter(
+        name => !name.startsWith('.') && !name.startsWith('team-')
+      );
+      const requiredRepos = repositories.map(r => r.name);
+      const allReposExist = requiredRepos.every(repoName =>
+        existingDirs.includes(repoName) &&
+        fs.existsSync(path.join(taskWorkspace, repoName, '.git'))
+      );
+
+      if (allReposExist) {
+        console.log(`⚡ [Workspace] Fast path - already exists with all ${repositories.length} repos`);
+        console.log(`   📁 Using existing: ${taskWorkspace}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `⚡ Workspace already ready (fast recovery): ${repositories.map(r => r.name).join(', ')}`
+        );
+        return taskWorkspace;
+      }
+    }
+
+    // SLOW PATH: Full workspace setup
     console.log(`📦 Setting up workspace for task ${taskId}`);
     console.log(`   Selected repositories count: ${repositories.length}`);
 
