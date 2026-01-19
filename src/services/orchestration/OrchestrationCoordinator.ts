@@ -131,7 +131,12 @@ export class OrchestrationCoordinator {
 
     try {
       // === GATHER CONTEXT ===
-      const task = await Task.findById(taskId);
+      // ⚡ OPTIMIZATION: Parallel fetch of Task + UnifiedMemory (no dependencies)
+      const [task, resumptionPoint] = await Promise.all([
+        Task.findById(taskId),
+        unifiedMemoryService.getResumptionPoint(taskId),
+      ]);
+
       if (!task) {
         throw new Error(`Task ${taskId} not found`);
       }
@@ -145,7 +150,6 @@ export class OrchestrationCoordinator {
 
       // 🔄 RECOVERY DETECTION: Check UNIFIED MEMORY for resumption point
       // This is THE SINGLE SOURCE OF TRUTH - not task.status or task.orchestration
-      const resumptionPoint = await unifiedMemoryService.getResumptionPoint(taskId);
       const isRecovery = resumptionPoint.shouldResume;
 
       if (isRecovery) {
@@ -183,13 +187,15 @@ export class OrchestrationCoordinator {
       );
       NotificationService.emitConsoleLog(taskId, 'info', `📋 Task request: ${taskDescription.substring(0, 200)}${taskDescription.length > 200 ? '...' : ''}`);
 
-      // Load repositories
-      // Note: Repository belongs to Project, not directly to User
-      // So we don't filter by userId - just verify the IDs exist
-      const repositories = await Repository.find({
-        _id: { $in: task.repositoryIds || [] },
-        isActive: true,
-      });
+      // ⚡ OPTIMIZATION: Parallel fetch of Repositories + User (both depend only on task)
+      const User = (await import('../../models/User')).User;
+      const [repositories, user] = await Promise.all([
+        Repository.find({
+          _id: { $in: task.repositoryIds || [] },
+          isActive: true,
+        }),
+        User.findById(task.userId).select('+accessToken +defaultApiKey'),
+      ]);
 
       if (repositories.length === 0) {
         log.error(`Repository lookup failed`, {
@@ -207,6 +213,12 @@ export class OrchestrationCoordinator {
         );
       }
 
+      if (!user || !user.accessToken) {
+        throw new Error(
+          `User GitHub token not found. User must connect their GitHub account before starting orchestration.`
+        );
+      }
+
       // Verify repositories belong to user's projects (security check)
       const Project = (await import('../../models/Project')).Project;
       const projectIds = [...new Set(repositories.map(r => r.projectId.toString()))];
@@ -219,15 +231,6 @@ export class OrchestrationCoordinator {
         throw new Error(
           `Security error: Some repositories belong to projects not owned by this user. ` +
           `User projects found: ${userProjects.length}, expected: ${projectIds.length}`
-        );
-      }
-
-      // Get user's GitHub token for cloning (GitHub tokens NOT encrypted)
-      const User = (await import('../../models/User')).User;
-      const user = await User.findById(task.userId).select('+accessToken +defaultApiKey');
-      if (!user || !user.accessToken) {
-        throw new Error(
-          `User GitHub token not found. User must connect their GitHub account before starting orchestration.`
         );
       }
 
