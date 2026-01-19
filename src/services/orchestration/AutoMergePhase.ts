@@ -165,9 +165,9 @@ export class AutoMergePhase extends BasePhase {
     });
 
     try {
-      // Get repositories and workspace path
-      const repositories = context.getData<any[]>('repositories') || [];
-      const workspacePath = context.getData<string>('workspacePath');
+      // Get repositories and workspace path from context properties
+      const repositories = context.repositories || [];
+      const workspacePath = context.workspacePath;
 
       if (isEmpty(repositories) || !workspacePath) {
         throw new Error('No repositories or workspace path available');
@@ -253,7 +253,7 @@ export class AutoMergePhase extends BasePhase {
 
             // Get the target repository ObjectId
             const targetRepoName = pendingIntegration.targetRepository;
-            const repos = context.getData<any[]>('repositories') || [];
+            const repos = context.repositories || [];
             const targetRepo = repos.find(r =>
               r.name === targetRepoName ||
               r.githubRepoName === targetRepoName ||
