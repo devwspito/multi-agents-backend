@@ -399,6 +399,10 @@ export class OrchestrationCoordinator {
       });
 
       // === EXECUTE PHASES SEQUENTIALLY WITH APPROVAL GATES ===
+      // ⚡ OPTIMIZATION: Cache phase statuses to avoid redundant MongoDB writes during skips
+      const cachedPhaseStatuses = this.getPhaseStatusesFromTask(task);
+      console.log(`⚡ [Optimization] Cached ${cachedPhaseStatuses.size} phase statuses for fast skip checks`);
+
       for (const phaseName of this.PHASE_ORDER) {
         // 🔥 CRITICAL: Check for pause/cancel requests before each phase
         await task.save(); // Refresh task to get latest state
@@ -494,7 +498,8 @@ export class OrchestrationCoordinator {
 
           // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
           // TeamOrchestrationPhase checks task.orchestration.planning.status
-          await this.syncSkippedPhaseToDb(taskId, phaseName);
+          // ⚡ OPTIMIZATION: Pass cache to avoid redundant writes
+          await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
 
           continue; // Move to next phase
         }
@@ -509,7 +514,8 @@ export class OrchestrationCoordinator {
             NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed)`);
 
             // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
-            await this.syncSkippedPhaseToDb(taskId, phaseName);
+            // ⚡ OPTIMIZATION: Pass cache to avoid redundant writes
+            await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
 
             continue; // Move to next phase
           }
@@ -909,14 +915,22 @@ export class OrchestrationCoordinator {
   }
 
   /**
-   * 🔧 FIX: Sync skipped phase status to MongoDB
+   * 🔧 FIX: Sync skipped phase status to MongoDB (OPTIMIZED)
    *
    * When a phase is skipped (because Unified Memory says it's completed),
    * we must also update the task.orchestration.[phase] field in MongoDB.
    * This is necessary because downstream phases (like TeamOrchestration)
    * validate phase completion by checking MongoDB, not Unified Memory.
+   *
+   * ⚡ OPTIMIZATION: Skip the MongoDB write if the phase is already marked
+   * as completed in the cached task status. This avoids redundant writes
+   * during retry scenarios.
    */
-  private async syncSkippedPhaseToDb(taskId: string, phaseName: string): Promise<void> {
+  private async syncSkippedPhaseToDb(
+    taskId: string,
+    phaseName: string,
+    cachedPhaseStatuses?: Map<string, string>
+  ): Promise<void> {
     // Map phase names to their MongoDB field paths
     const phaseFieldMap: Record<string, string> = {
       'Planning': 'orchestration.planning',
@@ -937,6 +951,12 @@ export class OrchestrationCoordinator {
       return;
     }
 
+    // ⚡ OPTIMIZATION: Check cache first - skip write if already completed
+    if (cachedPhaseStatuses?.get(phaseName) === 'completed') {
+      console.log(`   ⚡ [${phaseName}] Already completed in MongoDB - skipping redundant sync`);
+      return;
+    }
+
     try {
       // Update the phase status in MongoDB
       const updateObj: Record<string, any> = {};
@@ -951,6 +971,36 @@ export class OrchestrationCoordinator {
       console.warn(`   ⚠️ [${phaseName}] Failed to sync skipped phase to DB:`, error.message);
       // Don't throw - this is a best-effort sync
     }
+  }
+
+  /**
+   * ⚡ OPTIMIZATION: Load all phase statuses from MongoDB once at start
+   * This avoids multiple queries/writes during retry skip logic
+   */
+  private getPhaseStatusesFromTask(task: any): Map<string, string> {
+    const statuses = new Map<string, string>();
+    const orchestration = task.orchestration || {};
+
+    const phases = [
+      { name: 'Planning', field: orchestration.planning },
+      { name: 'Approval', field: orchestration.approval },
+      { name: 'TechLead', field: orchestration.techLead },
+      { name: 'TeamOrchestration', field: orchestration.teamOrchestration },
+      { name: 'Development', field: orchestration.development },
+      { name: 'Developers', field: orchestration.development },
+      { name: 'Judge', field: orchestration.judge },
+      { name: 'AutoMerge', field: orchestration.autoMerge },
+      { name: 'Merge', field: orchestration.merge },
+      { name: 'Verification', field: orchestration.verification },
+    ];
+
+    for (const phase of phases) {
+      if (phase.field?.status) {
+        statuses.set(phase.name, phase.field.status);
+      }
+    }
+
+    return statuses;
   }
 
   /**
