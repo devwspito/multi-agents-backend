@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
 import { IStory } from '../../models/Task';
 import { NotificationService } from '../NotificationService';
@@ -1161,6 +1163,48 @@ export class JudgePhase extends BasePhase {
 
     if (totalExpectedFiles === 0) {
       console.warn(`   ⚠️  WARNING: No expected file changes listed - Judge may have limited context`);
+    }
+
+    // 🔥🔥🔥 CRITICAL VALIDATION: Verify files actually exist before Judge evaluation 🔥🔥🔥
+    // This catches developers that failed silently or didn't create required files
+    if (isNotEmpty(filesToCreate) && workspacePath) {
+      console.log(`\n🔍 [Judge] Verifying required files exist...`);
+      const missingFiles: string[] = [];
+
+      for (const fileToCreate of filesToCreate) {
+        const fullPath = path.join(workspacePath, fileToCreate);
+        const exists = fs.existsSync(fullPath);
+
+        if (!exists) {
+          missingFiles.push(fileToCreate);
+          console.log(`   ❌ MISSING: ${fileToCreate}`);
+        } else {
+          // Also check if file is empty or just a placeholder
+          const stats = fs.statSync(fullPath);
+          if (stats.size === 0) {
+            missingFiles.push(`${fileToCreate} (empty file)`);
+            console.log(`   ❌ EMPTY: ${fileToCreate} (0 bytes)`);
+          } else {
+            console.log(`   ✅ EXISTS: ${fileToCreate} (${stats.size} bytes)`);
+          }
+        }
+      }
+
+      if (missingFiles.length > 0) {
+        console.log(`\n❌❌❌ [Judge] AUTOMATIC REJECTION: ${missingFiles.length} required files missing ❌❌❌`);
+        console.log(`   Missing files:`);
+        missingFiles.forEach(f => console.log(`   - ${f}`));
+
+        // Return immediate rejection - don't even call the Judge AI
+        return {
+          status: 'changes_requested',
+          feedback: `🚨 AUTOMATIC REJECTION: Developer did not create required files.\n\nMissing files:\n${missingFiles.map(f => `- ${f}`).join('\n')}\n\nThe developer must create these files before the code can be reviewed.`,
+          cost: 0,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+      }
+
+      console.log(`   ✅ All ${filesToCreate.length} required files exist`);
     }
 
     // 🏗️ Get architectureBrief from context for pattern-aware evaluation
