@@ -404,45 +404,43 @@ export class OrchestrationCoordinator {
       console.log(`⚡ [Optimization] Cached ${cachedPhaseStatuses.size} phase statuses for fast skip checks`);
 
       for (const phaseName of this.PHASE_ORDER) {
-        // 🔥 CRITICAL: Check for pause/cancel requests before each phase
-        await task.save(); // Refresh task to get latest state
-        const Task = require('../../models/Task').Task;
-        const freshTask = await Task.findById(task._id);
-        if (freshTask) {
-          Object.assign(task, freshTask);
+        // ⚡⚡⚡ MEGA OPTIMIZATION: Check skip conditions FIRST ⚡⚡⚡
+        // Priority: 1) Cache (instant) → 2) Unified Memory (if cache miss)
+        const skipFromCache = cachedPhaseStatuses.get(phaseName) === 'completed';
+        const skipFromMemory = skipFromCache ? false : await unifiedMemoryService.shouldSkipPhase(taskId, phaseName);
+
+        // Fast skip: No DB queries, no budget check, no directives - just skip!
+        if (skipFromCache || skipFromMemory) {
+          console.log(`⚡ [${phaseName}] FAST SKIP`);
+          NotificationService.emitConsoleLog(taskId, 'info', `⚡ Fast skip: ${phaseName}`);
+          // Only sync to DB if not already in cache
+          if (!skipFromCache) {
+            await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
+          }
+          continue; // ← Skip everything: pause check, budget, directives, etc.
         }
 
-        // Check if user requested pause
-        if (task.orchestration.paused) {
-          console.log(`⏸️  [Orchestration] Task paused by user - stopping after current phase`);
-          NotificationService.emitConsoleLog(taskId, 'warn', `⏸️  Orchestration paused by user`);
-          NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Task paused - will resume when server restarts or user resumes manually`);
-          return; // Exit gracefully
+        // === ONLY REACH HERE IF PHASE WILL EXECUTE ===
+        // Check pause/cancel (only for phases we'll actually run)
+        const freshTask = await Task.findById(task._id).select('orchestration.paused orchestration.cancelRequested').lean();
+
+        if (freshTask?.orchestration?.paused) {
+          console.log(`⏸️  [Orchestration] Task paused by user`);
+          NotificationService.emitConsoleLog(taskId, 'warn', `⏸️  Task paused - will resume later`);
+          return;
         }
 
-        // Check if user requested cancellation
-        if (task.orchestration.cancelRequested) {
-          console.log(`🛑 [Orchestration] Task cancellation requested - stopping immediately`);
+        if (freshTask?.orchestration?.cancelRequested) {
+          console.log(`🛑 [Orchestration] Task cancelled`);
           await Task.findByIdAndUpdate(task._id, {
-            $set: {
-              status: 'cancelled',
-              'orchestration.currentPhase': 'completed',
-              'orchestration.cancelledAt': new Date(),
-            },
+            $set: { status: 'cancelled', 'orchestration.currentPhase': 'completed' },
           });
           task.status = 'cancelled';
-          task.orchestration.currentPhase = 'completed';
-
-          NotificationService.emitConsoleLog(taskId, 'error', `🛑 Task cancelled by user`);
           NotificationService.emitTaskFailed(taskId, { error: 'Task cancelled by user' });
-
-          // 🔥 IMPORTANT: Clean up resources on cancellation
           CostBudgetService.cleanupTaskConfig(taskId);
           const { approvalEvents } = await import('../ApprovalEvents');
           approvalEvents.cleanupTask(taskId);
-          console.log(`🧹 Cleaned up resources for cancelled task ${taskId}`);
-
-          return; // Exit immediately
+          return;
         }
 
         const phase = this.createPhase(phaseName, context);
@@ -487,37 +485,14 @@ export class OrchestrationCoordinator {
         // Log phase start
         NotificationService.emitConsoleLog(taskId, 'info', `🚀 Starting phase: ${phaseName}`);
 
-        // 🎯🎯🎯 UNIFIED MEMORY: CHECK IF PHASE SHOULD BE SKIPPED 🎯🎯🎯
-        // This is THE SINGLE SOURCE OF TRUTH for recovery - not task.orchestration
-        const shouldSkipFromMemory = await unifiedMemoryService.shouldSkipPhase(taskId, phaseName);
-        if (shouldSkipFromMemory) {
-          console.log(`\n${'='.repeat(60)}`);
-          console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed (UNIFIED MEMORY)`);
-          console.log(`${'='.repeat(60)}\n`);
-          NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed in unified memory)`);
-
-          // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
-          // TeamOrchestrationPhase checks task.orchestration.planning.status
-          // ⚡ OPTIMIZATION: Pass cache to avoid redundant writes
-          await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
-
-          continue; // Move to next phase
-        }
-
-        // Also check phase's own shouldSkip logic
+        // Check phase's own custom shouldSkip logic (if any)
         if (phase.shouldSkip && typeof phase.shouldSkip === 'function') {
           const shouldSkipPhase = await phase.shouldSkip(context);
           if (shouldSkipPhase) {
-            console.log(`\n${'='.repeat(60)}`);
-            console.log(`⏭️  [${phaseName}] SKIPPING - Phase already completed`);
-            console.log(`${'='.repeat(60)}\n`);
-            NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (already completed)`);
-
-            // 🔧 FIX: Sync skipped phase status to MongoDB for downstream validation
-            // ⚡ OPTIMIZATION: Pass cache to avoid redundant writes
+            console.log(`⏭️  [${phaseName}] Custom skip logic triggered`);
+            NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (custom logic)`);
             await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
-
-            continue; // Move to next phase
+            continue;
           }
         }
 
