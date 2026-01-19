@@ -2,8 +2,8 @@ import { Task, ITask } from '../../models/Task';
 import { OrchestrationCoordinator } from './OrchestrationCoordinator';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
-import { eventStore } from '../EventStore';
-import { AgentArtifactService } from '../AgentArtifactService';
+// ⚡ OPTIMIZATION: Removed eventStore and AgentArtifactService imports
+// Recovery now delegates to orchestrator which handles it more efficiently
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -92,14 +92,9 @@ export class OrchestrationRecoveryService {
         this.recoveredTasks.add(taskId);
 
         try {
-          // Convertir a documento de Mongoose solo para recoverTask
-          const task = await Task.findById(taskRaw._id);
-          if (!task) {
-            console.log(`⚠️  [Recovery] Task ${taskId} not found, skipping`);
-            return;
-          }
-
-          await this.recoverTask(task);
+          // ⚡ OPTIMIZATION: Use taskRaw directly, convert to proper type
+          // Skip the redundant Task.findById() query
+          await this.recoverTask(taskRaw as unknown as ITask);
         } catch (error: any) {
           console.error(`❌ [Recovery] Failed to recover task ${taskRaw._id}:`, error.message);
 
@@ -144,6 +139,7 @@ export class OrchestrationRecoveryService {
 
   /**
    * Recupera una task específica
+   * ⚡ OPTIMIZED: Minimal I/O, skip unnecessary checks
    */
   private async recoverTask(task: ITask): Promise<void> {
     const taskId = (task._id as any).toString();
@@ -151,34 +147,26 @@ export class OrchestrationRecoveryService {
     console.log(`🔄 [Recovery] Recovering task ${taskId}: ${task.title}`);
 
     try {
-      await LogService.info(`Auto-recovering interrupted orchestration`, {
-        taskId,
-        category: 'orchestration',
-        phase: task.orchestration.currentPhase as any,
-        metadata: {
-          lastPhase: task.orchestration.currentPhase,
-        },
-      });
+      // ⚡ OPTIMIZATION: Skip LogService.info() - it's a DB write we don't need
+      // The console.log above is enough for debugging
 
-      // Notificar al frontend que la task se está recuperando
+      // Notify frontend (non-blocking emit)
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `🔄 Server restarted - Auto-recovering orchestration from phase: ${task.orchestration.currentPhase}`
+        `🔄 Auto-recovering from phase: ${task.orchestration.currentPhase}`
       );
 
-      // Verificar integridad del workspace
-      const workspaceInfo = await this.getWorkspaceInfo(task);
+      // ⚡ FAST workspace check - just verify it exists
+      const workspaceInfo = this.getWorkspaceInfoFast(task);
 
       if (!workspaceInfo.exists) {
-        console.log(`⚠️  [Recovery] Workspace missing for task ${taskId} - will re-clone`);
-      } else {
-        // 🔄 LOCAL FALLBACK: Sync events from Local to MongoDB if MongoDB is empty
-        console.log(`📦 [Recovery] Checking for Local backup data...`);
-        await this.syncFromLocalIfNeeded(taskId, workspaceInfo.path, workspaceInfo.primaryRepo);
+        console.log(`⚠️  [Recovery] Workspace missing - will re-clone`);
       }
+      // ⚡ OPTIMIZATION: Skip syncFromLocalIfNeeded - orchestrator handles recovery
+      // The unified memory service will detect completed phases
 
-      console.log(`✅ [Recovery] Starting orchestration for task ${taskId}`);
+      console.log(`⚡ [Recovery] Starting orchestration for task ${taskId}`);
 
       // 🔥 CRITICAL: Create a NEW orchestrator instance for each task
       // This prevents conflicts when multiple tasks are recovered
@@ -228,102 +216,19 @@ export class OrchestrationRecoveryService {
   }
 
   /**
-   * Get workspace information including path and primary repository
+   * ⚡ FAST workspace check - synchronous, minimal I/O
+   * Only checks if workspace directory exists
    */
-  private async getWorkspaceInfo(task: ITask): Promise<{
-    exists: boolean;
-    path: string;
-    primaryRepo: string | null;
-  }> {
-    try {
-      const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-      const taskWorkspace = path.join(workspaceDir, `task-${task._id}`);
-
-      const exists = fs.existsSync(taskWorkspace);
-
-      // Find primary repository (first repo in the workspace)
-      let primaryRepo: string | null = null;
-      if (exists) {
-        const contents = fs.readdirSync(taskWorkspace);
-        // Look for directories that could be repos (exclude hidden folders)
-        for (const item of contents) {
-          const itemPath = path.join(taskWorkspace, item);
-          if (fs.statSync(itemPath).isDirectory() && !item.startsWith('.')) {
-            // Check if it's a git repo
-            if (fs.existsSync(path.join(itemPath, '.git'))) {
-              primaryRepo = item;
-              break;
-            }
-          }
-        }
-      }
-
-      return { exists, path: taskWorkspace, primaryRepo };
-    } catch (error: any) {
-      // 🔥 FIX: Log error instead of silently swallowing
-      console.warn(`⚠️ [Recovery] Error checking workspace for task ${task._id}: ${error.message}`);
-      return { exists: false, path: '', primaryRepo: null };
-    }
+  private getWorkspaceInfoFast(task: ITask): { exists: boolean; path: string; primaryRepo: string | null } {
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const taskWorkspace = path.join(workspaceDir, `task-${task._id}`);
+    const exists = fs.existsSync(taskWorkspace);
+    // ⚡ Skip repo scanning - orchestrator will handle it
+    return { exists, path: taskWorkspace, primaryRepo: null };
   }
 
-  /**
-   * Sync data from Local files to MongoDB if MongoDB is empty
-   * This is the Local → MongoDB fallback for recovery
-   */
-  private async syncFromLocalIfNeeded(
-    taskId: string,
-    workspacePath: string,
-    primaryRepo: string | null
-  ): Promise<void> {
-    if (!primaryRepo) {
-      console.log(`⚠️ [Recovery] No repository found in workspace, skipping Local sync`);
-      return;
-    }
-
-    try {
-      // 1. Sync EventStore events from Local to MongoDB
-      const eventSyncResult = await eventStore.syncFromLocal(taskId, workspacePath, primaryRepo);
-      if (eventSyncResult.eventsRestored > 0) {
-        console.log(`✅ [Recovery] Restored ${eventSyncResult.eventsRestored} events from Local`);
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `📦 Restored ${eventSyncResult.eventsRestored} events from Local backup`
-        );
-      }
-
-      // 2. Load orchestration timeline from Local and log info
-      const timeline = AgentArtifactService.loadOrchestrationTimeline(workspacePath, primaryRepo);
-      if (timeline) {
-        console.log(`📦 [Recovery] Found Local timeline:`);
-        console.log(`   - Last phase: ${timeline.data?.currentPhase || 'unknown'}`);
-        console.log(`   - Phases completed: ${timeline.data?.phasesCompleted?.length || 0}`);
-        console.log(`   - Epics: ${timeline.data?.epics?.length || 0}`);
-        console.log(`   - Last updated: ${timeline._metadata?.savedAt || 'unknown'}`);
-
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `📦 Local timeline: ${timeline.data?.phasesCompleted?.length || 0} phases completed, last phase: ${timeline.data?.currentPhase || 'unknown'}`
-        );
-      }
-
-      // 3. Check for agent artifacts (epics, architecture, etc.)
-      const planningArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'planning');
-      const techleadArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'techlead');
-      const judgeArtifacts = AgentArtifactService.listArtifacts(workspacePath, primaryRepo, 'judge');
-
-      if (planningArtifacts.length > 0 || techleadArtifacts.length > 0 || judgeArtifacts.length > 0) {
-        console.log(`📦 [Recovery] Found Local artifacts:`);
-        console.log(`   - Planning: ${planningArtifacts.length} files`);
-        console.log(`   - TechLead: ${techleadArtifacts.length} files`);
-        console.log(`   - Judge: ${judgeArtifacts.length} files`);
-      }
-
-    } catch (error: any) {
-      console.warn(`⚠️ [Recovery] Local sync failed (non-blocking): ${error.message}`);
-    }
-  }
+  // ⚡ OPTIMIZATION: Removed deprecated _getWorkspaceInfo and _syncFromLocalIfNeeded
+  // The orchestrator handles all recovery logic via UnifiedMemory and cached phase statuses
 
   /**
    * Resume a failed task from where it left off
