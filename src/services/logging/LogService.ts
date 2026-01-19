@@ -71,6 +71,22 @@ const emojis = {
 };
 
 export class LogService {
+  // ⚡ OPTIMIZATION: Skip MongoDB writes during high-throughput operations
+  // Console + WebSocket provide real-time visibility, MongoDB is for historical queries
+  private static skipMongoDb = process.env.LOG_SKIP_MONGODB === 'true';
+
+  /**
+   * Disable MongoDB logging temporarily (for performance during orchestration)
+   */
+  static setSkipMongoDb(skip: boolean): void {
+    this.skipMongoDb = skip;
+    if (skip) {
+      console.log('⚡ [LogService] MongoDB logging DISABLED for performance');
+    } else {
+      console.log('📝 [LogService] MongoDB logging ENABLED');
+    }
+  }
+
   /**
    * Log INFO level message
    */
@@ -153,10 +169,12 @@ export class LogService {
     // 1. Format and print to console
     this.logToConsole(sanitizedMessage, sanitizedContext, timestamp);
 
-    // 2. Store in MongoDB (async, don't block)
-    this.storeInDatabase(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
-      console.error('[LogService] Failed to store log:', err.message);
-    });
+    // 2. Store in MongoDB (async, don't block) - SKIP if disabled for performance
+    if (!this.skipMongoDb) {
+      this.storeInDatabase(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
+        console.error('[LogService] Failed to store log:', err.message);
+      });
+    }
 
     // 3. Emit to WebSocket for real-time frontend updates
     this.emitToWebSocket(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
