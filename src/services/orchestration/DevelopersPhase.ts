@@ -6,7 +6,7 @@ import { LogService } from '../logging/LogService';
 import { HookService } from '../HookService';
 import { AgentActivityService } from '../AgentActivityService';
 import { NotificationService } from '../NotificationService';
-import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
+import { safeGitExecSync, fixGitRemoteAuth, smartGitFetch } from '../../utils/safeGitExecution';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
 import { ProjectRadiography } from '../ProjectRadiographyService';
@@ -1590,10 +1590,11 @@ export class DevelopersPhase extends BasePhase {
                 },
               });
 
+              // 🔥 FIX: Use normalizedEpicId/normalizedStoryId for consistency with recovery checks
               await unifiedMemoryService.markStoryCompleted(
                 taskId,
-                (story as any).epicId,
-                story.id,
+                normalizedEpicId,
+                normalizedStoryId,
                 'approved',
                 storyBranch,
                 undefined
@@ -1618,10 +1619,11 @@ export class DevelopersPhase extends BasePhase {
               console.error(`❌ [DIRECT-TO-JUDGE] Judge REJECTED story`);
               console.error(`   Feedback: ${judgeResult.feedback}`);
 
+              // 🔥 FIX: Use normalizedEpicId/normalizedStoryId for consistency with recovery checks
               await unifiedMemoryService.markStoryCompleted(
                 taskId,
-                (story as any).epicId,
-                story.id,
+                normalizedEpicId,
+                normalizedStoryId,
                 'rejected',
                 storyBranch,
                 undefined
@@ -1853,6 +1855,13 @@ export class DevelopersPhase extends BasePhase {
               console.log(`   ⚠️ Branch ${storyBranch} NOT on remote - pushing now...`);
               safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
               console.log(`   ✅ Branch pushed to remote`);
+              // FIX: Sync local with remote after push
+              try {
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                console.log(`   ✅ Local synced with remote`);
+              } catch (_pullErr) {
+                console.log(`   ℹ️ Pull skipped (already up to date)`);
+              }
             } else {
               // Branch on remote - verify commit is there
               const remoteCommit = branchOnRemote.split('\t')[0];
@@ -1862,6 +1871,13 @@ export class DevelopersPhase extends BasePhase {
                 console.log(`   ⚠️ Remote has different commit (${remoteCommit.substring(0, 8)}) - pushing latest...`);
                 safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
                 console.log(`   ✅ Latest commit pushed to remote`);
+                // FIX: Sync local with remote after push
+                try {
+                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                  console.log(`   ✅ Local synced with remote`);
+                } catch (_pullErr) {
+                  console.log(`   ℹ️ Pull skipped (already up to date)`);
+                }
               }
             }
           } catch (pushCheckErr: any) {
@@ -1870,6 +1886,13 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
               console.log(`   ✅ Force push succeeded`);
+              // FIX: Sync local with remote after force push
+              try {
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                console.log(`   ✅ Local synced with remote`);
+              } catch (_pullErr) {
+                console.log(`   ℹ️ Pull skipped (already up to date)`);
+              }
             } catch (forcePushErr: any) {
               console.error(`   ❌ Force push failed: ${forcePushErr.message}`);
               // Continue anyway - Judge will try to fetch
@@ -1881,6 +1904,21 @@ export class DevelopersPhase extends BasePhase {
             commitHash: commitSHA,
           });
           console.log(`📍 [CHECKPOINT] Story progress saved: pushed (commit: ${commitSHA.substring(0, 8)})`);
+
+          // 🔥 CRITICAL: Verify push on GitHub and emit StoryPushVerified event
+          // This ensures Local state matches GitHub reality
+          try {
+            const { eventStore } = await import('../EventStore');
+            await eventStore.verifyStoryPush({
+              taskId: task._id as any,
+              storyId: story.id,
+              branchName: storyBranch,
+              repoPath,
+            });
+          } catch (verifyErr: any) {
+            console.warn(`⚠️ [PushVerify] Could not verify push: ${verifyErr.message}`);
+            // Non-blocking - verification is for tracking, not blocking the flow
+          }
         } else {
           console.warn(`⚠️ [GIT-FIRST] No commits found on branch ${storyBranch}`);
 
@@ -2127,9 +2165,9 @@ export class DevelopersPhase extends BasePhase {
           // 🔥 ISOLATED workspace path for Judge sync
           const repoPath = `${effectiveWorkspacePath}/${targetRepo.name || targetRepo.full_name}`;
 
-          // Fetch all branches from remote
+          // Fetch all branches from remote (uses cache to avoid redundant fetches)
           console.log(`   [1/3] Fetching from remote...`);
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+          smartGitFetch(repoPath, { timeout: 90000 });
           console.log(`   ✅ Fetched latest refs from remote`);
 
           // 🔥 NEW: Verify branch exists on remote BEFORE attempting checkout
@@ -2232,8 +2270,8 @@ export class DevelopersPhase extends BasePhase {
                 const delay = 2000 * (retryAttempt + 1); // 2s, 4s, 6s
                 console.log(`   ⏳ Waiting ${delay}ms before retry...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
-                // Re-fetch to get latest refs
-                safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+                // Re-fetch to get latest refs (force fetch on retry to ensure fresh data)
+                smartGitFetch(repoPath, { timeout: 90000, force: true });
               }
             }
           }
@@ -2399,7 +2437,7 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
                 encoding: 'utf8',
-                timeout: 15000 // 15 seconds timeout
+                timeout: 120000 // 15 seconds timeout
               });
               console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch} (GitHub)`);
             } catch (remoteDeleteError: any) {
@@ -2442,15 +2480,16 @@ export class DevelopersPhase extends BasePhase {
 
           // 🔥 CRITICAL FIX: Mark story as completed in Unified Memory for recovery tracking
           // This was missing! Without this, getResumptionPoint() returns completedStories: 0
+          // 🔥 FIX #2: Use normalizedEpicId/normalizedStoryId for consistency with recovery checks
           await unifiedMemoryService.markStoryCompleted(
             taskId,
-            (story as any).epicId,
-            story.id,
+            normalizedEpicId,
+            normalizedStoryId,
             'approved',
             updatedStory.branchName,
             undefined // PR URL not available yet
           );
-          console.log(`✅ [UnifiedMemory] Marked story "${story.title}" as completed`);
+          console.log(`✅ [UnifiedMemory] Marked story "${story.title}" as completed (epicId=${normalizedEpicId}, storyId=${normalizedStoryId})`);
 
           // 🔥 CHECKPOINT 6 (FINAL): Mark story progress as "completed"
           await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'completed', {
@@ -2565,15 +2604,16 @@ export class DevelopersPhase extends BasePhase {
 
           // 🔥 CRITICAL FIX: Mark story as completed (rejected) in Unified Memory for recovery tracking
           // Even rejected stories need tracking so recovery knows not to re-process them
+          // 🔥 FIX #2: Use normalizedEpicId/normalizedStoryId for consistency with recovery checks
           await unifiedMemoryService.markStoryCompleted(
             taskId,
-            (story as any).epicId,
-            story.id,
+            normalizedEpicId,
+            normalizedStoryId,
             'rejected',
             updatedStory.branchName,
             undefined
           );
-          console.log(`❌ [UnifiedMemory] Marked story "${story.title}" as rejected`);
+          console.log(`❌ [UnifiedMemory] Marked story "${story.title}" as rejected (epicId=${normalizedEpicId}, storyId=${normalizedStoryId})`);
 
           // 🔄 Mark session checkpoint as failed (keep checkpoint for potential retry)
           await sessionCheckpointService.markFailed(taskId, 'developer', story.id, feedback);
@@ -2902,11 +2942,19 @@ export class DevelopersPhase extends BasePhase {
               console.log(`   ⚠️ Branch not on remote - pushing...`);
               safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
               console.log(`   ✅ Branch pushed`);
+              // FIX: Sync local with remote after push
+              try {
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+              } catch (_pullErr) { /* already up to date */ }
             } else {
               const remoteCommit = branchOnRemote.split('\t')[0];
               if (remoteCommit !== commitSHA) {
                 console.log(`   ⚠️ Remote has different commit - pushing latest...`);
                 safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+                // FIX: Sync local with remote after push
+                try {
+                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                } catch (_pullErr) { /* already up to date */ }
               }
               console.log(`   ✅ Commit confirmed on remote`);
             }
@@ -2915,6 +2963,10 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
               console.log(`   ✅ Force push succeeded`);
+              // FIX: Sync local with remote after force push
+              try {
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+              } catch (_pullErr) { /* already up to date */ }
             } catch (forcePushErr: any) {
               console.error(`   ❌ Force push failed: ${forcePushErr.message}`);
             }
@@ -2925,6 +2977,21 @@ export class DevelopersPhase extends BasePhase {
             commitHash: commitSHA,
           });
           console.log(`📍 [CHECKPOINT] Story progress: pushed (commit: ${commitSHA.substring(0, 8)})`);
+
+          // 🔥 CRITICAL: Verify push on GitHub and emit StoryPushVerified event
+          // This ensures Local state matches GitHub reality
+          try {
+            const { eventStore } = await import('../EventStore');
+            await eventStore.verifyStoryPush({
+              taskId: task._id as any,
+              storyId: story.id,
+              branchName: storyBranch,
+              repoPath,
+            });
+          } catch (verifyErr: any) {
+            console.warn(`⚠️ [PushVerify] Could not verify push: ${verifyErr.message}`);
+            // Non-blocking - verification is for tracking, not blocking the flow
+          }
 
         } else {
           // Try auto-commit
@@ -3036,7 +3103,8 @@ export class DevelopersPhase extends BasePhase {
 
           console.log(`   🔄 Syncing workspace...`);
           try {
-            safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+            // Use cached fetch to avoid redundant network calls
+            smartGitFetch(repoPath, { timeout: 90000 });
 
             // Checkout story branch
             let branchExistsLocally = false;
@@ -3185,7 +3253,7 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
                 encoding: 'utf8',
-                timeout: 15000
+                timeout: 120000
               });
               console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch}`);
             } catch { /* Branch might not exist on remote */ }
@@ -3356,6 +3424,13 @@ export class DevelopersPhase extends BasePhase {
           console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
           console.log(`   Git push output:\n${pushOutput}`);
           pushSucceeded = true;
+          // FIX: Sync local with remote after push
+          try {
+            safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+            console.log(`✅ [Merge] Local synced with remote`);
+          } catch (_pullErr) {
+            console.log(`   ℹ️ Pull skipped (already up to date)`);
+          }
         } catch (pushError: any) {
           lastError = pushError;
           console.error(`❌ [Merge] Push attempt ${attempt} failed: ${pushError.message}`);

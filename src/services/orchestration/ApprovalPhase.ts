@@ -117,6 +117,8 @@ export class ApprovalPhase extends BasePhase {
       'planning': 'Planning',
       'approval': 'Approval',
       'team-orchestration': 'TeamOrchestration',
+      'recovery': 'Recovery',
+      'integration': 'Integration',
       'verification': 'Verification',
       'auto-merge': 'AutoMerge',
       'tech-lead': 'TechLead',
@@ -273,7 +275,7 @@ export class ApprovalPhase extends BasePhase {
    * Normalize phase name from PascalCase to kebab-case
    *
    * Active phases from PHASE_ORDER:
-   * Planning → Approval → TeamOrchestration → Verification → AutoMerge
+   * Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
    *
    * Sub-phases within TeamOrchestration:
    * TechLead → Developers → Judge
@@ -285,6 +287,8 @@ export class ApprovalPhase extends BasePhase {
       'Planning': 'planning',
       'Approval': 'approval',
       'TeamOrchestration': 'team-orchestration',
+      'Recovery': 'recovery',
+      'Integration': 'integration',
       'Verification': 'verification',
       'AutoMerge': 'auto-merge',
       // Sub-phases within TeamOrchestration
@@ -308,7 +312,7 @@ export class ApprovalPhase extends BasePhase {
    * Get human-readable phase name
    *
    * Active phases from PHASE_ORDER:
-   * Planning → Approval → TeamOrchestration → Verification → AutoMerge
+   * Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
    */
   private getPhaseName(phase: string): string {
     const phaseNames: Record<string, string> = {
@@ -316,6 +320,8 @@ export class ApprovalPhase extends BasePhase {
       'Planning': 'Planning (Analysis + Epics + Stories)',
       'Approval': 'Approval Gate',
       'TeamOrchestration': 'Team Orchestration',
+      'Recovery': 'Recovery (Verify & Complete Work)',
+      'Integration': 'Integration (Merge & Resolve Conflicts)',
       'Verification': 'Verification',
       'AutoMerge': 'Auto-Merge',
       // Sub-phases within TeamOrchestration

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { execSync } from 'child_process';
 import { Event, EventType, IEvent } from '../models/Event';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -63,6 +64,10 @@ export interface TaskState {
     completedBy?: string;
     completedAt?: Date;
     error?: string;
+    // 🔥 NEW: Push verification
+    pushVerified?: boolean;           // True only after verifying branch exists on GitHub
+    pushVerifiedAt?: Date;            // When push was verified
+    commitSha?: string;               // SHA of the pushed commit
   }>;
 
   // Team composition
@@ -365,6 +370,17 @@ export class EventStore {
                 epicForStory.status = 'in_progress';
               }
             }
+          }
+          break;
+
+        case 'StoryPushVerified':
+          // 🔥 CRITICAL: This confirms the branch actually exists on GitHub
+          const verifiedStory = state.stories.find((s: any) => s.id === payload.storyId);
+          if (verifiedStory) {
+            verifiedStory.pushVerified = true;
+            verifiedStory.pushVerifiedAt = payload.verifiedAt || new Date();
+            verifiedStory.commitSha = payload.commitSha;
+            console.log(`✅ [EventStore] Story ${payload.storyId} push VERIFIED on GitHub`);
           }
           break;
 
@@ -721,6 +737,161 @@ export class EventStore {
     // No events found anywhere - return initial state
     console.log(`⚠️ [EventStore] No events found for task ${taskId} in MongoDB or Local`);
     return this.buildState([]);
+  }
+
+  // ============================================================================
+  // 🔥 PUSH VERIFICATION: Verify stories actually exist on GitHub
+  // ============================================================================
+
+  /**
+   * Verify a story's branch exists on GitHub and emit StoryPushVerified event
+   * This is the CRITICAL step to ensure Local state matches GitHub reality
+   */
+  async verifyStoryPush(params: {
+    taskId: mongoose.Types.ObjectId | string;
+    storyId: string;
+    branchName: string;
+    repoPath: string;
+  }): Promise<{ verified: boolean; commitSha?: string; error?: string }> {
+    const { taskId, storyId, branchName, repoPath } = params;
+
+    try {
+      // Check if branch exists on remote
+      const lsRemoteOutput = execSync(
+        `git ls-remote --heads origin ${branchName}`,
+        { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
+      );
+
+      if (!lsRemoteOutput || lsRemoteOutput.trim().length === 0) {
+        console.error(`❌ [EventStore] Story ${storyId} branch NOT found on GitHub: ${branchName}`);
+        return { verified: false, error: `Branch ${branchName} not found on remote` };
+      }
+
+      // Extract commit SHA from ls-remote output
+      const commitSha = lsRemoteOutput.split('\t')[0]?.trim();
+
+      // Emit StoryPushVerified event
+      await this.append({
+        taskId,
+        eventType: 'StoryPushVerified',
+        payload: {
+          storyId,
+          branchName,
+          commitSha,
+          verifiedAt: new Date(),
+        },
+        agentName: 'EventStore',
+      });
+
+      console.log(`✅ [EventStore] Story ${storyId} push VERIFIED: ${branchName} (${commitSha?.substring(0, 7)})`);
+      return { verified: true, commitSha };
+
+    } catch (error: any) {
+      console.error(`❌ [EventStore] Failed to verify push for story ${storyId}: ${error.message}`);
+      return { verified: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get all stories that are marked completed but NOT push-verified
+   * These are potential "lost" stories that never made it to GitHub
+   */
+  async getUnverifiedStories(taskId: mongoose.Types.ObjectId | string): Promise<Array<{
+    storyId: string;
+    branchName?: string;
+    status: string;
+  }>> {
+    const state = await this.getCurrentState(taskId);
+
+    return state.stories
+      .filter((s: any) => s.status === 'completed' && !s.pushVerified)
+      .map((s: any) => ({
+        storyId: s.id,
+        branchName: s.branchName,
+        status: s.status,
+      }));
+  }
+
+  /**
+   * Verify all completed stories in a task against GitHub
+   * Returns summary of verification results
+   */
+  async verifyAllPushes(params: {
+    taskId: mongoose.Types.ObjectId | string;
+    repoPath: string;
+  }): Promise<{
+    total: number;
+    verified: number;
+    failed: number;
+    alreadyVerified: number;
+    failures: Array<{ storyId: string; branchName?: string; error: string }>;
+  }> {
+    const { taskId, repoPath } = params;
+    const state = await this.getCurrentState(taskId);
+
+    const completedStories = state.stories.filter((s: any) => s.status === 'completed');
+    const results = {
+      total: completedStories.length,
+      verified: 0,
+      failed: 0,
+      alreadyVerified: 0,
+      failures: [] as Array<{ storyId: string; branchName?: string; error: string }>,
+    };
+
+    console.log(`\n🔍 [EventStore] Verifying ${completedStories.length} completed stories against GitHub...`);
+
+    for (const story of completedStories) {
+      // Skip if already verified
+      if (story.pushVerified) {
+        results.alreadyVerified++;
+        continue;
+      }
+
+      // Skip if no branch name
+      if (!story.branchName) {
+        results.failed++;
+        results.failures.push({
+          storyId: story.id,
+          branchName: undefined,
+          error: 'No branch name defined',
+        });
+        continue;
+      }
+
+      // Verify push
+      const verifyResult = await this.verifyStoryPush({
+        taskId,
+        storyId: story.id,
+        branchName: story.branchName,
+        repoPath,
+      });
+
+      if (verifyResult.verified) {
+        results.verified++;
+      } else {
+        results.failed++;
+        results.failures.push({
+          storyId: story.id,
+          branchName: story.branchName,
+          error: verifyResult.error || 'Unknown error',
+        });
+      }
+    }
+
+    console.log(`\n📊 [EventStore] Verification Summary:`);
+    console.log(`   Total: ${results.total}`);
+    console.log(`   Already Verified: ${results.alreadyVerified}`);
+    console.log(`   Newly Verified: ${results.verified}`);
+    console.log(`   Failed: ${results.failed}`);
+
+    if (results.failures.length > 0) {
+      console.log(`\n⚠️ Failed stories (NOT on GitHub):`);
+      for (const failure of results.failures) {
+        console.log(`   - ${failure.storyId}: ${failure.branchName || 'no branch'} - ${failure.error}`);
+      }
+    }
+
+    return results;
   }
 }
 

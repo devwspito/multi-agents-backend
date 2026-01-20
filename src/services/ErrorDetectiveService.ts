@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAgentDefinition } from './orchestration/AgentDefinitions';
-import { PREMIUM_CONFIG } from '../config/ModelConfigurations';
+import { ALL_OPUS_CONFIG } from '../config/ModelConfigurations';
 
 /**
  * ErrorDetective Service
@@ -76,7 +76,7 @@ export class ErrorDetectiveService {
       if (!agentDef) {
         throw new Error('Agent definition not found for recovery-analyst');
       }
-      const model = PREMIUM_CONFIG['recovery-analyst'];
+      const model = ALL_OPUS_CONFIG['recovery-analyst'];
 
       // Build analysis prompt
       const prompt = this.buildAnalysisPrompt(input);

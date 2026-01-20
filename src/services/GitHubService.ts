@@ -758,7 +758,7 @@ export class GitHubService {
       // Fetch el target branch with timeout
       await safeGitExec(`git fetch origin ${targetBranch}`, {
         cwd: workspacePath,
-        timeout: 15000, // 15 seconds for fetch
+        timeout: 120000, // 2 minutes for git fetch
       });
 
       // Intentar rebase with timeout

@@ -168,6 +168,23 @@ export const MAX_CONFIG: AgentModelConfig = {
 };
 
 /**
+ * 🔥 ALL OPUS Configuration - Maximum intelligence for all agents
+ * TEMPORARY: For testing/debugging purposes
+ */
+export const ALL_OPUS_CONFIG: AgentModelConfig = {
+  'planning-agent': 'opus',
+  'tech-lead': 'opus',
+  'developer': 'opus',
+  'judge': 'opus',
+  'verification-fixer': 'opus',
+  'recovery-analyst': 'opus',
+  'auto-merge': 'opus',
+  'story-merge-agent': 'opus',
+  'git-flow-manager': 'opus',
+  'conflict-resolver': 'opus',
+};
+
+/**
  * Optimize a configuration for best cost-performance ratio
  * Note: Developer ALWAYS uses Sonnet regardless of optimization
  */
@@ -202,30 +219,21 @@ export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentMode
 
 /**
  * Convert DB config to AgentModelConfig
- * Note: Developer ALWAYS uses Sonnet regardless of DB config
+ * 🔥 HARDCODED: All agents use Opus
  */
-export function mapDbConfigToAgentModelConfig(dbConfig: any): AgentModelConfig {
-  return {
-    'planning-agent': dbConfig.planningAgent || dbConfig['planning-agent'] || RECOMMENDED_CONFIG['planning-agent'],
-    'tech-lead': dbConfig.techLead || dbConfig['tech-lead'] || RECOMMENDED_CONFIG['tech-lead'],
-    'developer': 'sonnet',  // 🔒 ALWAYS Sonnet - ignore DB config
-    'judge': dbConfig.judge || RECOMMENDED_CONFIG['judge'],
-    'verification-fixer': dbConfig.verificationFixer || dbConfig['verification-fixer'] || RECOMMENDED_CONFIG['verification-fixer'],
-    'recovery-analyst': dbConfig.recoveryAnalyst || dbConfig['recovery-analyst'] || RECOMMENDED_CONFIG['recovery-analyst'],
-    'auto-merge': dbConfig.autoMerge || dbConfig['auto-merge'] || RECOMMENDED_CONFIG['auto-merge'],
-    'story-merge-agent': dbConfig.storyMergeAgent || dbConfig['story-merge-agent'] || RECOMMENDED_CONFIG['story-merge-agent'],
-    'git-flow-manager': dbConfig.gitFlowManager || dbConfig['git-flow-manager'] || RECOMMENDED_CONFIG['git-flow-manager'],
-    'conflict-resolver': dbConfig.conflictResolver || dbConfig['conflict-resolver'] || RECOMMENDED_CONFIG['conflict-resolver'],
-  };
+export function mapDbConfigToAgentModelConfig(_dbConfig: any): AgentModelConfig {
+  // 🔥 HARDCODED: Ignore DB config, always use ALL_OPUS_CONFIG
+  return ALL_OPUS_CONFIG;
 }
 
 /**
  * Get model for a specific agent type
  * THROWS if agent type is not in config - no silent defaults
+ * 🔥 HARDCODED: Using ALL_OPUS_CONFIG for maximum intelligence
  */
 export function getAgentModel(
   agentType: string,
-  config: AgentModelConfig = RECOMMENDED_CONFIG
+  config: AgentModelConfig = ALL_OPUS_CONFIG
 ): ClaudeModel {
   const model = config[agentType as keyof AgentModelConfig];
 
