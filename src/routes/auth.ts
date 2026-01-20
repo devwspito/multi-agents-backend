@@ -217,7 +217,8 @@ router.get('/me', async (req: Request, res: Response) => {
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(token, env.JWT_SECRET) as { userId: string };
 
-    const user = await User.findById(decoded.userId).select('-refreshToken -__v');
+    // Include accessToken to check if GitHub is connected (but don't expose it)
+    const user = await User.findById(decoded.userId).select('+accessToken -refreshToken -__v');
 
     if (!user) {
       res.status(404).json({
@@ -235,7 +236,7 @@ router.get('/me', async (req: Request, res: Response) => {
         username: user.username,
         email: user.email,
         avatarUrl: user.avatarUrl,
-        hasGithubConnected: !!user.accessToken, // NUEVO: indica si tiene GitHub conectado
+        hasGithubConnected: !!user.accessToken, // Check if has GitHub token (not exposed)
       },
     });
   } catch (error) {

@@ -104,28 +104,33 @@ export class TechLeadPhase extends BasePhase {
     const teamEpic = context.getData<any>('teamEpic');
     const multiTeamMode = !!teamEpic;
 
-    // Update task status
+    // Update task status - 🔥 ALWAYS use atomic updates to avoid version conflicts
     const startTime = new Date();
-    if (!multiTeamMode) {
-      // Single-team mode: update in-memory and save
-      if (!task.orchestration.techLead) {
-        task.orchestration.techLead = { agent: 'tech-lead', status: 'pending' } as any;
-      }
-      task.orchestration.techLead.status = 'in_progress';
-      task.orchestration.techLead.startedAt = startTime;
-      await task.save();
-    } else {
-      // 🔥 MULTI-TEAM: Use atomic $set to initialize techLead without version conflicts
-      // This ensures the field exists for approval endpoint
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(task._id, {
-        $set: {
-          'orchestration.techLead.agent': 'tech-lead',
-          'orchestration.techLead.status': 'in_progress',
-          'orchestration.techLead.startedAt': startTime,
-        },
-      });
-      console.log(`📝 [TechLead] Initialized orchestration.techLead atomically for multi-team mode`);
+    const Task = require('../../models/Task').Task;
+
+    // 🔥 ATOMIC: Use findByIdAndUpdate for BOTH single-team and multi-team modes
+    // This prevents "No matching document found for id" version conflict errors
+    await Task.findByIdAndUpdate(task._id, {
+      $set: {
+        'orchestration.techLead.agent': 'tech-lead',
+        'orchestration.techLead.status': 'in_progress',
+        'orchestration.techLead.startedAt': startTime,
+      },
+    });
+
+    // Update in-memory object for subsequent code
+    if (!task.orchestration.techLead) {
+      task.orchestration.techLead = { agent: 'tech-lead', status: 'pending' } as any;
+    }
+    task.orchestration.techLead.status = 'in_progress';
+    task.orchestration.techLead.startedAt = startTime;
+
+    console.log(`📝 [TechLead] Initialized orchestration.techLead atomically${multiTeamMode ? ' (multi-team mode)' : ''}`);
+
+    // 🔥 CRITICAL: Reload task to get latest version to avoid future conflicts
+    const freshTask = await Task.findById(task._id);
+    if (freshTask) {
+      Object.assign(task, freshTask.toObject());
     }
 
     // Notify agent started
@@ -818,23 +823,35 @@ ${this.getFileOverlapExamples(context.repositories)}
       if (!parsed || !parsed.epics || !Array.isArray(parsed.epics)) {
         console.log('\n🔍 [TechLead] FULL Agent output:\n', result.output);
         NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead parsing failed. Full output:\n${result.output}`);
-        throw new Error(`Tech Lead did not return valid epics array. Marker: ${architectureComplete ? 'FOUND' : 'MISSING'}`);
+        const error = new Error(`Tech Lead did not return valid epics array. Marker: ${architectureComplete ? 'FOUND' : 'MISSING'}`);
+        (error as any).retryable = true;
+        (error as any).violationType = 'INVALID_EPICS_ARRAY';
+        throw error;
       }
 
       if (parsed.epics.length === 0) {
         console.log('\n⚠️  [TechLead] Agent returned empty epics array');
-        throw new Error('Tech Lead returned empty epics array - cannot proceed with development');
+        const error = new Error('Tech Lead returned empty epics array - cannot proceed with development');
+        (error as any).retryable = true;
+        (error as any).violationType = 'EMPTY_EPICS_ARRAY';
+        throw error;
       }
 
       // Validate storyAssignments[] exists (critical for developers)
       if (!parsed.storyAssignments || !Array.isArray(parsed.storyAssignments)) {
         console.log('\n🔍 [TechLead] Missing storyAssignments in output');
-        throw new Error('Tech Lead did not return storyAssignments array - developers need file paths');
+        const error = new Error('Tech Lead did not return storyAssignments array - developers need file paths');
+        (error as any).retryable = true;
+        (error as any).violationType = 'MISSING_STORY_ASSIGNMENTS';
+        throw error;
       }
 
       if (parsed.storyAssignments.length === 0) {
         console.log('\n⚠️  [TechLead] Agent returned empty storyAssignments array');
-        throw new Error('Tech Lead returned empty storyAssignments - developers need work assignments');
+        const error = new Error('Tech Lead returned empty storyAssignments - developers need work assignments');
+        (error as any).retryable = true;
+        (error as any).violationType = 'EMPTY_STORY_ASSIGNMENTS';
+        throw error;
       }
 
       console.log(`✅ [TechLead] Successfully parsed ${parsed.epics.length} epic(s) with ${parsed.storyAssignments.length} story assignment(s)`);
@@ -1223,10 +1240,33 @@ ${this.getFileOverlapExamples(context.repositories)}
         task.orchestration.techLead.output += `\n\n---\n\n## 💰 Cost Estimate\n\n*Cost estimation unavailable: ${error.message}*`;
       }
 
-      // Save task (skip in multi-team mode to avoid version conflicts)
-      if (!multiTeamMode) {
-        await task.save();
-      }
+      // 🔥 ATOMIC SAVE: Use findByIdAndUpdate to avoid version conflicts
+      // This replaces task.save() which fails when document version changes during execution
+      const completedAt = new Date();
+      const atomicUpdate = {
+        $set: {
+          'orchestration.techLead.architectureDesign': parsed.architectureDesign,
+          'orchestration.techLead.teamComposition': parsed.teamComposition,
+          'orchestration.techLead.storyAssignments': parsed.storyAssignments,
+          'orchestration.techLead.status': 'completed',
+          'orchestration.techLead.completedAt': completedAt,
+          'orchestration.techLead.output': task.orchestration.techLead.output,
+          'orchestration.techLead.sessionId': result.sessionId,
+          'orchestration.techLead.usage': result.usage,
+          'orchestration.techLead.cost_usd': result.cost,
+        },
+        $inc: {
+          'orchestration.totalCost': result.cost,
+          'orchestration.totalTokens': (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0),
+        },
+      };
+
+      await Task.findByIdAndUpdate(task._id, atomicUpdate);
+      console.log(`📝 [TechLead] Saved completion atomically (no version conflicts)`);
+
+      // Update in-memory for subsequent code
+      task.orchestration.techLead.status = 'completed';
+      task.orchestration.techLead.completedAt = completedAt;
 
       // 📦 GITHUB BACKUP: Save architecture/stories to GitHub
       // MongoDB has the data (above), now push to GitHub for disaster recovery
@@ -1470,12 +1510,15 @@ ${this.getFileOverlapExamples(context.repositories)}
         );
       }
 
-      // Skip task updates in multi-team mode to avoid version conflicts
-      if (!multiTeamMode) {
-        task.orchestration.techLead.status = 'failed';
-        task.orchestration.techLead.error = error.message;
-        await task.save();
-      }
+      // 🔥 ATOMIC: Update failure status without version conflicts
+      await Task.findByIdAndUpdate(task._id, {
+        $set: {
+          'orchestration.techLead.status': 'failed',
+          'orchestration.techLead.error': error.message,
+        },
+      });
+      task.orchestration.techLead.status = 'failed';
+      task.orchestration.techLead.error = error.message;
 
       // Notify failure
       NotificationService.emitAgentFailed(taskId, 'Tech Lead', error.message);

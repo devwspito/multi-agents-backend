@@ -1100,43 +1100,59 @@ If ANY answer is NO → REWRITE THE STORY
 ✅ **GOOD (SPECIFIC)**: "Replace 📬 emoji with <Mail size={20} /> in Chat.jsx line 123"
 → Developer knows EXACTLY what to do
 
-## 🧪 RUNTIME TESTING REQUIREMENTS (MANDATORY)
+## 🧪 VERIFICATION REQUIREMENTS (MANDATORY)
 
-For stories that create or modify **API endpoints**, **services**, or **integrations**,
-you MUST include runtime testing instructions in the story description.
+For all stories, include clear verification commands that DON'T require running servers.
+Use the appropriate commands for the project's language/framework.
 
-### For BACKEND stories (API endpoints):
-Add to description:
-\`\`\`
-RUNTIME TEST REQUIRED:
-1. Start server: npm run dev
-2. Test endpoint: curl -X POST http://localhost:3001/api/your-endpoint -d '{"test": "data"}'
-3. Expected response: {"success": true, "data": {...}}
-4. Developer must verify endpoint works before committing
-\`\`\`
+### ⚠️ IMPORTANT: NO LONG-RUNNING PROCESSES
+Developers have 30 minutes max and cannot run dev servers, watch modes, or daemons - these cause timeouts.
+Always use build/test/lint commands instead.
 
-### For FRONTEND stories calling APIs:
-Add to description:
+### For ALL stories:
+Add verification commands appropriate to the language:
 \`\`\`
-RUNTIME TEST REQUIRED:
-1. Ensure backend is running on localhost:3001
-2. Start frontend: npm run dev
-3. Verify the component loads and can call the API
-4. Check browser console for errors
+VERIFICATION:
+1. <Build Command>    # Verify code compiles (e.g., npm run build, cargo build, go build, mvn compile)
+2. <Test Command>     # Run unit tests (e.g., npm test, pytest, go test, cargo test)
+3. <Lint Command>     # Check code quality (e.g., npm run lint, ruff check, golint)
 \`\`\`
 
-### For INTEGRATION stories:
-Add to description:
+### Examples by language:
+
+**Node.js/TypeScript:**
 \`\`\`
-RUNTIME TEST REQUIRED:
-1. Start backend: cd backend && npm run dev
-2. Start frontend: cd frontend && npm run dev
-3. Test full flow: [describe user action to test]
-4. Verify API call succeeds (check Network tab)
-5. Developer must verify integration works before committing
+VERIFICATION:
+1. npm run build
+2. npm test
+3. npm run lint
 \`\`\`
 
-**CRITICAL**: Stories without runtime test instructions for API/service work will be REJECTED by Judge.
+**Python:**
+\`\`\`
+VERIFICATION:
+1. python -m py_compile src/*.py  # or mypy src/
+2. pytest
+3. ruff check . (or flake8)
+\`\`\`
+
+**Go:**
+\`\`\`
+VERIFICATION:
+1. go build ./...
+2. go test ./...
+3. golint ./...
+\`\`\`
+
+**Rust:**
+\`\`\`
+VERIFICATION:
+1. cargo build
+2. cargo test
+3. cargo clippy
+\`\`\`
+
+**CRITICAL**: Do NOT include instructions to run dev servers (npm run dev, python runserver, rails s, etc.) - developers cannot use these.
 
 ## Output Format
 
@@ -2294,8 +2310,7 @@ You have **Bash** tool (SDK native) for running ANY shell commands:
 - **TechLead's typecheck command** - Check type errors (tsc, mypy, cargo check, etc.)
 - **TechLead's test command** - Run tests (pytest, npm test, go test, etc.)
 - **TechLead's lint command** - Check code style (eslint, ruff, golint, etc.)
-- **npm run dev / python app.py / etc.** - Start development server
-- **curl http://localhost:PORT** - Make HTTP requests
+- **TechLead's BUILD command** - Verify code compiles (🚫 NOT dev servers - causes timeouts!)
 - **git status/add/commit/push** - Git operations
 
 ## 🚨 CRITICAL RULES
@@ -2305,6 +2320,14 @@ You have **Bash** tool (SDK native) for running ANY shell commands:
 3. **NEVER commit code with lint errors**
 4. **ALWAYS execute TechLead's verification commands BEFORE committing**
 5. **If verification fails → FIX → verify again (LOOP)**
+6. **🚫 NEVER run long-running processes (dev servers, watch modes, daemons)**
+   - These block execution and cause timeouts
+   - Use ONLY: TechLead's BUILD, TEST, and LINT commands
+   - To verify code compiles: use BUILD command (NOT dev/watch/serve)
+   - To verify code works: run unit tests
+   - FORBIDDEN (any language): dev servers, watch modes, REPL servers, hot reload
+     Examples: npm run dev, npm start, python runserver, rails s, cargo run (daemon),
+     go run (server), flask run, uvicorn, nodemon, webpack-dev-server, vite dev, etc.
 
 🎯 EXAMPLES:
 
@@ -2487,77 +2510,117 @@ Bash("git push origin HEAD")  # Push current branch to remote
 Bash("git rev-parse HEAD")    # Report commit SHA
 \`\`\`
 
-## 🚀 RUNTIME TESTING (MANDATORY FOR API/SERVICE CODE)
+## 🚀 CODE VERIFICATION (MANDATORY)
 
-If you created or modified any API endpoint, service, or feature that can be tested at runtime,
-you MUST verify it actually works by running the application.
+Verify your code works WITHOUT running a server. Use the commands defined by TechLead in your story.
 
-### ⚠️ CRITICAL: Use TechLead's Setup Commands!
-
-**DO NOT** guess how to start the project. **ALWAYS** use the exact commands from the story's Setup Commands section.
+### ⚠️ VERIFICATION METHODS (NO SERVERS!)
 
 \`\`\`bash
-# 1. Run the Setup Commands from your story (TechLead already defined them)
-Bash("<Setup Commands from story>")  # e.g., npm install
+# 1. Install dependencies (use TechLead's setup command)
+Bash("<TechLead's Install Command>")  # e.g., npm install, pip install -r requirements.txt, cargo build
 
-# 2. Start development server if needed
-Bash("npm run dev &")  # Run in background
+# 2. Build/Compile check - VERIFIES CODE COMPILES
+Bash("<TechLead's Build Command>")  # e.g., npm run build, cargo build, go build, mvn compile
 
-# 3. Test your endpoint with curl
-Bash("curl -X GET http://localhost:<PORT>/api/health")
-Bash("curl -X POST http://localhost:<PORT>/api/your-endpoint -H 'Content-Type: application/json' -d '{\"test\": \"data\"}'")
+# 3. Run unit tests - VERIFIES CODE WORKS
+Bash("<TechLead's Test Command>")  # e.g., npm test, pytest, go test, cargo test
 
-# 4. Check the response - if error, FIX IT and test again
-
-# 5. Run Verification Commands from your story
-Bash("<Verification Commands from story>")
+# 4. Lint check
+Bash("<TechLead's Lint Command>")  # e.g., npm run lint, ruff check, golint
 \`\`\`
 
-### Example workflow:
+### 🚫 NEVER DO THIS (CAUSES TIMEOUTS - ANY LANGUAGE):
+- ❌ Dev servers: npm run dev, python runserver, rails s, cargo run (server), go run (server)
+- ❌ Watch modes: nodemon, webpack --watch, cargo watch, air (Go)
+- ❌ Hot reload: vite dev, next dev, flask run --reload
+- ❌ Background processes: any command with & that starts a server
+
+### ✅ CORRECT VERIFICATION:
 \`\`\`bash
-# TechLead provides: Setup Commands: npm install
-Bash("npm install")
+Bash("<Build Command>")
+→ Build succeeded!
+✅ BUILD_PASSED
 
-# Start dev server
-Bash("npm run dev &")
-Bash("sleep 5")   # Wait for server to initialize
+Bash("<Test Command>")
+→ All tests passed!
+✅ TESTS_PASSED
 
-# Test endpoints
-Bash("curl http://localhost:3001/api/health")
-
-# Run tests (from Verification Commands)
-Bash("npm test -- tests/your-test-file.test.js")
-
-# Stop server when done
-Bash("pkill -f 'node.*dev'")
+Bash("<Lint Command>")
+→ No lint errors!
+✅ LINT_PASSED
 \`\`\`
 
-### 🔥 RUNTIME TESTING RULES:
-1. **If you created an API endpoint** → You MUST curl it and see a valid response
-2. **If you created a frontend component** → You MUST verify build passes
-3. **If you connected frontend to backend** → You MUST test the actual connection
-4. **If curl fails** → FIX the code and try again (LOOP until success)
-5. **NEVER commit code that doesn't actually run**
+### 🔥 VERIFICATION RULES:
+1. **Build pass = Code compiles** → TechLead's BUILD command must succeed
+2. **Tests pass = Code works** → TechLead's TEST command must succeed
+3. **Lint pass = Code quality** → TechLead's LINT command must succeed
+4. **NO server testing** → You don't have time to run servers
+5. **Trust the tests** → If tests pass, the code works
 
-### Runtime Testing Markers:
-- ✅ SERVER_STARTED
-- ✅ ENDPOINT_TESTED
-- ✅ RESPONSE_VALID
-- ✅ RUNTIME_VERIFIED
+## ⏰ TIME AWARENESS (CRITICAL - YOU HAVE 30 MINUTES MAX)
 
-Example:
+🚨 **YOU HAVE A MAXIMUM OF 30 MINUTES TO COMPLETE THIS STORY**
+
+After 30 minutes, the system will automatically abort your execution. Plan accordingly:
+- **Minutes 0-5**: Read story, understand requirements, setup environment
+- **Minutes 5-15**: Implement the core functionality
+- **Minutes 15-25**: Run verifications, fix errors, commit
+- **Minutes 25-30**: Final push, report completion
+
+**If you're past 20 minutes and still have errors:**
+1. Commit what you have (even partial)
+2. Document what's blocking you
+3. Output DEVELOPER_PARTIAL_COMPLETION with details
+
+---
+
+## 🆘 STUCK PROTOCOL (Use if spinning for >3 iterations on same issue)
+
+If you've tried the same fix 3+ times without success, STOP and do this:
+
 \`\`\`
-Bash("npm run dev &") → Server started on port 3001
-✅ SERVER_STARTED
+🆘 STUCK_DETECTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Issue: [What's not working]
+Attempts: [What you tried]
+Hypothesis: [Why you think it's failing]
+Blocker type: [ENV | DEPS | TEST | CODE | UNKNOWN]
 
-Bash("curl http://localhost:3001/api/users")
-→ {"users": [], "success": true}
-✅ ENDPOINT_TESTED
-✅ RESPONSE_VALID
+Partial progress:
+- Files modified: [list]
+- Tests passing: [X/Y]
+- Commit status: [pushed/local/none]
 
-Bash("pkill -f 'node.*dev'")
-✅ RUNTIME_VERIFIED
+Request: [What would unblock you]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 \`\`\`
+
+**DO NOT** keep trying the same thing. Escalate early, escalate clearly.
+
+---
+
+## 📋 QUICK REFERENCE (Full workflow above is MANDATORY)
+
+**Your job in 5 steps:**
+1. \`npm install\` (or setup from story) → ✅ ENVIRONMENT_READY
+2. Read files → Write code → Follow patterns from codebase
+3. \`npm run typecheck && npm test && npm run lint\` → Fix until ALL pass
+4. \`git add . && git commit -m "feat(scope): description" && git push origin HEAD\`
+5. Output commit SHA → ✅ DEVELOPER_FINISHED_SUCCESSFULLY
+
+**Required markers (ALL of these - no shortcuts):**
+- ✅ ENVIRONMENT_READY (after setup)
+- ✅ TYPECHECK_PASSED (zero type errors)
+- ✅ TESTS_PASSED (all tests green)
+- ✅ LINT_PASSED (no lint errors)
+- 📍 Commit SHA: [40-char hash]
+- ✅ DEVELOPER_FINISHED_SUCCESSFULLY
+
+**If creating API endpoints, also required:**
+- ✅ RUNTIME_VERIFIED (tested with curl)
+
+⚠️ This is a REFERENCE. The detailed workflow above ensures quality - follow it completely.
 
 ${MCP_TOOLS_SECTION_DEVELOPER}
 
@@ -3968,15 +4031,37 @@ These are the minimum performance requirements:
 - [ ] Error states displayed to user
 - [ ] Empty states handled gracefully
 
-### Verification Commands
+### ✅ VERIFICATION COMMANDS (NO SERVERS!)
+
+**Frontend ALWAYS has a build step. Use TechLead's commands.**
+
 \`\`\`bash
-# Verify component exists and is exported
-grep -r "export.*ComponentName" src/components/
-# Verify route registration (if page)
-grep -r "ComponentName" src/routes/ src/App.jsx
-# Check for console errors
-npm run dev # Open browser, check console
+# 1. Verify component exists and is exported
+Grep("export.*ComponentName", { path: "src/components/" })
+
+# 2. Verify route registration (if page)
+Grep("ComponentName", { path: "src/" })
+
+# 3. 🔥 BUILD (MANDATORY for frontend - produces static assets)
+Bash("<TechLead's Build Command> 2>&1")
+# Examples: npm run build 2>&1, yarn build 2>&1, vite build 2>&1
+
+# 4. RUN TESTS
+Bash("<TechLead's Test Command> 2>&1")
+# Examples: npm test 2>&1, vitest 2>&1, jest 2>&1
+
+# 5. LINT CHECK
+Bash("<TechLead's Lint Command> 2>&1")
+# Examples: npm run lint 2>&1, eslint src/ 2>&1
 \`\`\`
+
+### 🚫 FORBIDDEN (CAUSES TIMEOUTS):
+- ❌ \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`
+- ❌ \`vite\`, \`vite dev\`, \`next dev\`, \`nuxt dev\`
+- ❌ \`webpack-dev-server\`, \`webpack serve\`
+- ❌ \`ng serve\` (Angular), \`vue serve\`
+- ❌ Any command with \`--watch\`, \`--hot\`, \`--hmr\`
+- ❌ Any command that starts a local server
 
 **Priority**: Working, accessible, performant code. Test on mobile first.`,
 
@@ -4062,20 +4147,48 @@ app.use('/api/newFeature', newRoutes);            // 2. REGISTER
 - [ ] Indexes added for query fields
 - [ ] Relationships defined correctly
 
-### Verification Commands (RUN THESE!)
+### ✅ VERIFICATION COMMANDS (NO SERVERS!)
+
+**Backend verification depends on language. Use TechLead's commands.**
+
 \`\`\`bash
-# 1. Verify controller exists
-grep -r "exports.methodName" controllers/
+# 1. Verify controller/handler exists
+Grep("exports.methodName\\|async.*methodName", { path: "src/" })
 
 # 2. Verify route exists
-grep -r "router.post\\|router.get\\|router.put\\|router.delete" routes/
+Grep("router.post\\|router.get\\|app.post\\|app.get", { path: "src/" })
 
-# 3. Verify route is registered in app.js (CRITICAL!)
-grep -r "app.use.*routes" app.js index.js src/index.js
+# 3. Verify route is registered (CRITICAL!)
+Grep("app.use.*routes\\|router.use", { path: "src/" })
 
-# 4. Test the endpoint works
-curl -X POST http://localhost:PORT/api/endpoint -H "Content-Type: application/json" -d '{}'
+# 4. 🔥 TYPE-CHECK / COMPILE (verifies code is valid)
+Bash("<TechLead's Build/TypeCheck Command> 2>&1")
+# By language:
+#   TypeScript: tsc --noEmit 2>&1  OR  npm run build 2>&1
+#   Go:         go build ./... 2>&1
+#   Rust:       cargo check 2>&1  OR  cargo build 2>&1
+#   Python:     mypy src/ 2>&1  OR  python -m py_compile src/*.py 2>&1
+#   Ruby:       ruby -c app/**/*.rb 2>&1
+#   Java:       mvn compile 2>&1
+#   C#/.NET:    dotnet build 2>&1
+
+# 5. RUN TESTS (verifies logic works)
+Bash("<TechLead's Test Command> 2>&1")
+# Examples: npm test 2>&1, pytest 2>&1, go test ./... 2>&1, cargo test 2>&1
+
+# 6. LINT CHECK
+Bash("<TechLead's Lint Command> 2>&1")
+# Examples: npm run lint 2>&1, ruff check 2>&1, golint 2>&1, cargo clippy 2>&1
 \`\`\`
+
+### 🚫 FORBIDDEN (CAUSES TIMEOUTS):
+- ❌ \`npm run dev\`, \`npm start\`, \`node server.js\`
+- ❌ \`python manage.py runserver\`, \`flask run\`, \`uvicorn\`
+- ❌ \`go run main.go\` (server), \`air\`
+- ❌ \`cargo run\` (server), \`rails s\`
+- ❌ \`php artisan serve\`, \`dotnet run\` (server)
+- ❌ \`curl localhost:PORT\`
+- ❌ Any command that starts a server
 
 ### Integration Points
 - [ ] Service dependencies injected properly

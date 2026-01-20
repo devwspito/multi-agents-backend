@@ -42,6 +42,7 @@ export type EventType =
   | 'StoryStarted'
   | 'StoryBranchCreated'
   | 'StoryCompleted'
+  | 'StoryPushVerified'   // 🔥 NEW: Confirms branch actually exists on GitHub
   | 'StoryFailed'
   | 'DevelopersCompleted'
   | 'StorySessionCheckpoint'

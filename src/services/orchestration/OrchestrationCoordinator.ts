@@ -18,6 +18,8 @@ import { ApprovalPhase } from './ApprovalPhase';
 import { TeamOrchestrationPhase } from './TeamOrchestrationPhase';
 import { VerificationPhase } from './VerificationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
+import { RecoveryPhase } from './RecoveryPhase';
+import { IntegrationPhase } from './IntegrationPhase';
 import { AgentModelConfig } from '../../config/ModelConfigurations';
 import { safeGitExecSync } from '../../utils/safeGitExecution';
 
@@ -25,6 +27,7 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
 import { eventStore } from '../EventStore';
+import { AGENT_TIMEOUTS } from './constants/Timeouts';
 
 import path from 'path';
 import os from 'os';
@@ -98,8 +101,9 @@ export class OrchestrationCoordinator {
     'Planning',            // 1. Unified planning (Problem + Product + Project in one pass)
     'Approval',            // 2. Human approval gate (epics + stories)
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers+Judge per epic)
-    'Verification',        // 4. Verify completeness and coherence before merge
-    'AutoMerge',           // 5. Merge approved PRs to main
+    'Recovery',            // 4. Verify all work is done, complete any pending work
+    'Integration',         // 5. Merge all epic branches, resolve conflicts, fix build
+    'AutoMerge',           // 6. Merge integration branch to main
   ];
 
   constructor() {
@@ -543,19 +547,19 @@ export class OrchestrationCoordinator {
               const configs = await import('../../config/ModelConfigurations');
 
               // Get current model config (default to RECOMMENDED for optimal quality/cost)
-              let currentModelConfig: AgentModelConfig = configs.RECOMMENDED_CONFIG;
+              let currentModelConfig: AgentModelConfig = configs.ALL_OPUS_CONFIG;
               if (task.orchestration?.modelConfig) {
                 const { preset, customConfig } = task.orchestration.modelConfig;
                 if (preset === 'custom' && customConfig) {
                   currentModelConfig = customConfig as AgentModelConfig;
                 } else if (preset === 'max') {
-                  currentModelConfig = configs.MAX_CONFIG;
+                  currentModelConfig = configs.ALL_OPUS_CONFIG;
                 } else if (preset === 'premium') {
-                  currentModelConfig = configs.PREMIUM_CONFIG;
+                  currentModelConfig = configs.ALL_OPUS_CONFIG;
                 } else if (preset === 'recommended') {
-                  currentModelConfig = configs.RECOMMENDED_CONFIG;
+                  currentModelConfig = configs.ALL_OPUS_CONFIG;
                 } else if (preset === 'standard') {
-                  currentModelConfig = configs.STANDARD_CONFIG;
+                  currentModelConfig = configs.ALL_OPUS_CONFIG;
                 }
               }
 
@@ -790,6 +794,12 @@ export class OrchestrationCoordinator {
       case 'Verification':
         return new VerificationPhase(executeAgentWithContext);
 
+      case 'Recovery':
+        return new RecoveryPhase();
+
+      case 'Integration':
+        return new IntegrationPhase();
+
       case 'AutoMerge':
         return new AutoMergePhase(this.githubService);
 
@@ -992,6 +1002,8 @@ export class OrchestrationCoordinator {
       { name: 'Development', field: orchestration.development },
       { name: 'Developers', field: orchestration.development },
       { name: 'Judge', field: orchestration.judge },
+      { name: 'Recovery', field: orchestration.recovery },
+      { name: 'Integration', field: orchestration.integration },
       { name: 'AutoMerge', field: orchestration.autoMerge },
       { name: 'Merge', field: orchestration.merge },
       { name: 'Verification', field: orchestration.verification },
@@ -1506,60 +1518,10 @@ ${formattedDirectives}
       throw new Error(`Agent type "${agentType}" not found in agent definitions`);
     }
 
-    // Get model configuration from task if available
-    // Default to RECOMMENDED_CONFIG for optimal quality/cost balance
+    // 🔥 HARDCODED: All agents use Opus - ignoring task config
     const configs = await import('../../config/ModelConfigurations');
-    let modelConfig: AgentModelConfig = configs.RECOMMENDED_CONFIG; // Default to recommended
-
-    if (taskId) {
-      const task = await Task.findById(taskId);
-      if (task?.orchestration?.modelConfig) {
-        const { preset, customConfig } = task.orchestration.modelConfig;
-        console.log(`🎯 [ExecuteAgent] Task ${taskId} has modelConfig: preset=${preset}, hasCustomConfig=${!!customConfig}`);
-
-        if (preset === 'custom' && customConfig) {
-          // Map DB camelCase keys to AgentModelConfig kebab-case keys
-          modelConfig = configs.mapDbConfigToAgentModelConfig(customConfig);
-          console.log(`🎯 [ExecuteAgent] Using custom model configuration (mapped from DB format)`);
-        } else if (preset) {
-          switch (preset) {
-            case 'max':
-              modelConfig = configs.MAX_CONFIG;
-              console.log(`🚀 [ExecuteAgent] Using MAX_CONFIG (All Opus - Maximum Performance)`);
-              break;
-            case 'premium':
-              modelConfig = configs.PREMIUM_CONFIG;
-              console.log(`💎 [ExecuteAgent] Using PREMIUM_CONFIG (Opus + Sonnet)`);
-              break;
-            case 'recommended':
-              modelConfig = configs.RECOMMENDED_CONFIG;
-              console.log(`🌟 [ExecuteAgent] Using RECOMMENDED_CONFIG (Opus + Sonnet + Haiku - Optimal Balance)`);
-              break;
-            case 'standard':
-              modelConfig = configs.STANDARD_CONFIG;
-              console.log(`⚙️ [ExecuteAgent] Using STANDARD_CONFIG (Sonnet + Haiku)`);
-              break;
-            default:
-              modelConfig = configs.RECOMMENDED_CONFIG;
-              console.log(`🌟 [ExecuteAgent] Using RECOMMENDED_CONFIG (default)`);
-              break;
-          }
-        }
-      } else {
-        console.log(`🌟 [ExecuteAgent] Task ${taskId} has no modelConfig, using RECOMMENDED_CONFIG as default`);
-      }
-    }
-
-    // 🎯 AUTOMATIC OPTIMIZATION: Apply cost-performance optimization
-    // This ensures critical agents get top model, executors get bottom model
-    // Works with ANY config the user selected (MAX, PREMIUM, STANDARD, BALANCED, ECONOMY, CUSTOM)
-    // 🔥 SKIP when forceTopModel is used (retry scenario - developer needs best model)
-    if (!skipOptimization) {
-      modelConfig = configs.optimizeConfigForBudget(modelConfig);
-      console.log(`✨ [ExecuteAgent] Applied automatic optimization for agent: ${agentType}`);
-    } else {
-      console.log(`🚀 [ExecuteAgent] SKIPPING optimization (forceTopModel retry) - using topModel for: ${agentType}`);
-    }
+    const modelConfig: AgentModelConfig = configs.ALL_OPUS_CONFIG;
+    console.log(`🔥 [ExecuteAgent] Using ALL_OPUS_CONFIG (hardcoded) for agent: ${agentType}`);
 
     // 🎯 DYNAMIC MODEL ROUTING: Select model based on task complexity
     // This replaces static per-agent model assignment with intelligent runtime selection
@@ -2015,18 +1977,23 @@ ${formattedDirectives}
       console.log(`   SDK will handle timeouts and error recovery automatically`);
       console.log(`   Loop detection: ${MAX_MESSAGES_WITHOUT_TOOL_USE} messages without tool activity`);
       console.log(`   History limit: ${MAX_HISTORY_MESSAGES} messages before agent must start`);
+      console.log(`   🔥 Total timeout: ${Math.floor(AGENT_TIMEOUTS.TOTAL_MAX / 60000)} minutes (absolute max)`);
 
       // 🔥 EXTERNAL WATCHDOG: Timer that fires if no message received for too long
       // This catches cases where stream.next() blocks forever
-      // No global timeout - trust the agent as long as it's making progress
       const MESSAGE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max between messages
+      // 🔥 TOTAL TIMEOUT: Maximum execution time regardless of activity
+      // Prevents infinite loops where agent keeps sending messages but makes no real progress
+      const TOTAL_TIMEOUT_MS = AGENT_TIMEOUTS.TOTAL_MAX; // 30 minutes absolute maximum
       let lastMessageTime = Date.now();
       let watchdogTriggered = false;
+      let totalTimeoutTriggered = false;
 
       const watchdogInterval = setInterval(() => {
         const timeSinceLastMessage = Date.now() - lastMessageTime;
         const totalElapsed = Date.now() - startTime;
 
+        // 🔥 CHECK 1: No message timeout (agent stuck waiting)
         if (timeSinceLastMessage > MESSAGE_TIMEOUT_MS) {
           console.error(`\n${'='.repeat(80)}`);
           console.error(`🚨 WATCHDOG TIMEOUT: No message received in ${Math.floor(timeSinceLastMessage / 1000)}s`);
@@ -2038,6 +2005,20 @@ ${formattedDirectives}
           watchdogTriggered = true;
           // Note: We can't abort the stream from here, but we set a flag
           // The main loop will check this flag on each iteration
+        }
+
+        // 🔥 CHECK 2: Total timeout (agent running too long even with activity)
+        if (totalElapsed > TOTAL_TIMEOUT_MS && !totalTimeoutTriggered) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`🚨 TOTAL TIMEOUT: Agent exceeded maximum execution time`);
+          console.error(`   Agent: ${agentType}`);
+          console.error(`   Total elapsed: ${Math.floor(totalElapsed / 1000)}s (max: ${Math.floor(TOTAL_TIMEOUT_MS / 1000)}s)`);
+          console.error(`   Messages received: ${allMessages.length}`);
+          console.error(`   Turns completed: ${turnCount}`);
+          console.error(`   This prevents infinite loops where agent keeps messaging without completing`);
+          console.error(`${'='.repeat(80)}\n`);
+          totalTimeoutTriggered = true;
+          // The main loop will check this flag and abort
         }
       }, 30000); // Check every 30 seconds
 
@@ -2052,6 +2033,14 @@ ${formattedDirectives}
             const error = new Error(`Agent ${agentType} stream timeout - watchdog triggered`);
             (error as any).isTimeout = true;
             (error as any).isWatchdogTimeout = true;
+            throw error;
+          }
+
+          // 🔥 CHECK TOTAL TIMEOUT: Agent running too long even with activity
+          if (totalTimeoutTriggered) {
+            const error = new Error(`Agent ${agentType} exceeded maximum execution time (${Math.floor(TOTAL_TIMEOUT_MS / 60000)} min)`);
+            (error as any).isTimeout = true;
+            (error as any).isTotalTimeout = true;
             throw error;
           }
 
@@ -2843,7 +2832,7 @@ ${formattedDirectives}
       const configs = await import('../../config/ModelConfigurations');
 
       // Get the actual AgentModelConfig from the task (default to RECOMMENDED)
-      let actualConfig: typeof configs.RECOMMENDED_CONFIG = configs.RECOMMENDED_CONFIG;
+      let actualConfig: typeof configs.ALL_OPUS_CONFIG = configs.ALL_OPUS_CONFIG;
 
       if (task.orchestration.modelConfig) {
         const { preset, customConfig } = task.orchestration.modelConfig;
@@ -2852,10 +2841,10 @@ ${formattedDirectives}
           actualConfig = configs.mapDbConfigToAgentModelConfig(customConfig);
         } else if (preset) {
           switch (preset) {
-            case 'max': actualConfig = configs.MAX_CONFIG; break;
-            case 'premium': actualConfig = configs.PREMIUM_CONFIG; break;
-            case 'recommended': actualConfig = configs.RECOMMENDED_CONFIG; break;
-            case 'standard': actualConfig = configs.STANDARD_CONFIG; break;
+            case 'max': actualConfig = configs.ALL_OPUS_CONFIG; break;
+            case 'premium': actualConfig = configs.ALL_OPUS_CONFIG; break;
+            case 'recommended': actualConfig = configs.ALL_OPUS_CONFIG; break;
+            case 'standard': actualConfig = configs.ALL_OPUS_CONFIG; break;
           }
         }
       }
@@ -2868,7 +2857,7 @@ ${formattedDirectives}
       console.log(`   Reason: Judge rejected code, using best available model for retry`);
 
       // Temporarily override developer model to topModel
-      const updatedConfig: typeof configs.RECOMMENDED_CONFIG = {
+      const updatedConfig: typeof configs.ALL_OPUS_CONFIG = {
         ...actualConfig,
         'developer': topModel
       };
@@ -3676,18 +3665,38 @@ After writing code, you MUST follow this EXACT sequence:
 
         // 🔥 CRITICAL: Verify branch EXISTS on remote (Judge cannot review non-existent branch)
         let branchExistsOnRemote = false;
-        try {
-          const lsRemoteOutput = safeGitExecSync(
-            `git ls-remote --heads origin ${branchName}`,
-            { cwd: repoPath, encoding: 'utf8', timeout: 15000 }
-          );
-          branchExistsOnRemote = lsRemoteOutput.trim().length > 0 && lsRemoteOutput.includes(branchName);
-        } catch (lsError: any) {
-          console.error(`❌ [Developer ${member.instanceId}] git ls-remote failed: ${lsError.message}`);
+        let verificationAttempts = 0;
+        const maxVerificationAttempts = 3;
+        const verificationTimeout = 45000; // 45 seconds - increased from 15s
+
+        while (verificationAttempts < maxVerificationAttempts && !branchExistsOnRemote) {
+          verificationAttempts++;
+          try {
+            console.log(`⏱️  [Developer ${member.instanceId}] Verifying branch on remote (attempt ${verificationAttempts}/${maxVerificationAttempts})...`);
+            const lsRemoteOutput = safeGitExecSync(
+              `git ls-remote --heads origin ${branchName}`,
+              { cwd: repoPath, encoding: 'utf8', timeout: verificationTimeout }
+            );
+            branchExistsOnRemote = lsRemoteOutput.trim().length > 0 && lsRemoteOutput.includes(branchName);
+
+            if (!branchExistsOnRemote && verificationAttempts < maxVerificationAttempts) {
+              console.log(`⚠️  [Developer ${member.instanceId}] Branch not found yet, waiting 5s before retry...`);
+              // Wait 5 seconds before retry (branch might still be propagating)
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+          } catch (lsError: any) {
+            const isTimeout = lsError.message?.includes('timed out') || lsError.message?.includes('timeout');
+            console.error(`❌ [Developer ${member.instanceId}] git ls-remote failed (attempt ${verificationAttempts}): ${lsError.message}`);
+
+            if (isTimeout && verificationAttempts < maxVerificationAttempts) {
+              console.log(`⚠️  [Developer ${member.instanceId}] Timeout on verification, retrying in 5s...`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+          }
         }
 
         if (!branchExistsOnRemote) {
-          console.error(`❌ [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote!`);
+          console.error(`❌ [Developer ${member.instanceId}] Branch ${branchName} NOT found on remote after ${verificationAttempts} attempts!`);
           console.error(`   Developer reported success but branch is NOT on GitHub`);
           console.error(`   Judge CANNOT review non-existent branch`);
 
@@ -3708,7 +3717,7 @@ After writing code, you MUST follow this EXACT sequence:
           safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
           const containsOutput = safeGitExecSync(
             `git branch -r --contains ${commitSHA}`,
-            { cwd: repoPath, encoding: 'utf8', timeout: 15000 }
+            { cwd: repoPath, encoding: 'utf8', timeout: 60000 }
           );
           commitExistsOnRemote = containsOutput.includes(`origin/${branchName}`);
         } catch (commitCheckError: any) {

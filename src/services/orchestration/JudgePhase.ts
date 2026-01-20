@@ -1167,12 +1167,14 @@ export class JudgePhase extends BasePhase {
 
     // 🔥🔥🔥 CRITICAL VALIDATION: Verify files actually exist before Judge evaluation 🔥🔥🔥
     // This catches developers that failed silently or didn't create required files
-    if (isNotEmpty(filesToCreate) && workspacePath) {
+    if (isNotEmpty(filesToCreate) && workspacePath && targetRepository) {
       console.log(`\n🔍 [Judge] Verifying required files exist...`);
+      console.log(`   📂 Looking in: ${workspacePath}/${targetRepository}/`);
       const missingFiles: string[] = [];
 
       for (const fileToCreate of filesToCreate) {
-        const fullPath = path.join(workspacePath, fileToCreate);
+        // 🔥 FIX: Include targetRepository in path - files are inside the repo directory
+        const fullPath = path.join(workspacePath, targetRepository, fileToCreate);
         const exists = fs.existsSync(fullPath);
 
         if (!exists) {
@@ -1232,11 +1234,14 @@ export class JudgePhase extends BasePhase {
     const storyAny = story as any;
     const modifiedFiles = [...(storyAny.filesToModify || []), ...(storyAny.filesToCreate || [])];
 
-    if (isNotEmpty(modifiedFiles) && workspacePath) {
+    if (isNotEmpty(modifiedFiles) && workspacePath && targetRepository) {
       console.log(`\n🔬 [Judge] Running automated semantic verification...`);
+      // 🔥 FIX: Use full repo path, not just workspace
+      const repoPath = path.join(workspacePath, targetRepository);
+      console.log(`   📂 Verifying in: ${repoPath}`);
       try {
         semanticVerificationResult = await SemanticVerificationService.verifyChanges(
-          workspacePath,
+          repoPath,
           modifiedFiles,
           codebaseKnowledge
         );
@@ -1268,10 +1273,13 @@ export class JudgePhase extends BasePhase {
     const environmentCommands = context.getData<any>('environmentCommands');
     const customTestCommand = environmentCommands?.test;
 
-    if (workspacePath) {
+    if (workspacePath && targetRepository) {
       console.log(`\n🧪 [Judge] Running automated tests...`);
+      // 🔥 FIX: Use full repo path for test execution
+      const testRepoPath = path.join(workspacePath, targetRepository);
+      console.log(`   📂 Running tests in: ${testRepoPath}`);
       try {
-        testResult = await AutomatedTestRunner.runTests(workspacePath, {
+        testResult = await AutomatedTestRunner.runTests(testRepoPath, {
           command: customTestCommand,
           timeout: 90000, // 90 seconds for tests
         });
@@ -1972,9 +1980,9 @@ npm test             # Must pass
           console.log(`   Repository path: ${repoPath}`);
           console.log(`   Branch to sync: ${story.branchName}`);
 
-          // Fetch and pull latest commits
-          const { safeGitExecSync } = await import('../../utils/safeGitExecution');
-          safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
+          // Fetch and pull latest commits (using cached fetch to avoid redundant network calls)
+          const { safeGitExecSync, smartGitFetch } = await import('../../utils/safeGitExecution');
+          smartGitFetch(repoPath, { timeout: 90000 });
 
           // 🔥 FIX: Stash any unstaged changes before checkout
           // Developer might have left uncommitted changes

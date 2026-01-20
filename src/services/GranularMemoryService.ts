@@ -452,26 +452,73 @@ export class GranularMemoryService {
   /**
    * Store a memory (generic)
    *
-   * 🔥 TRIPLE REDUNDANCY: Saves to MongoDB + Local Disk
+   * 🔥 TRIPLE REDUNDANCY: Saves to Local Disk (immediate) + MongoDB (background or awaited)
+   *
+   * @param memory - The memory to store
+   * @param options - { fireAndForget: true } to save to local immediately and MongoDB in background
    */
-  async store(memory: Omit<GranularMemory, '_id' | 'usageCount' | 'createdAt' | 'updatedAt' | 'archived'>): Promise<GranularMemory> {
-    // 1️⃣ Save to MongoDB (primary)
-    const doc = await GranularMemoryModel.create({
+  async store(
+    memory: Omit<GranularMemory, '_id' | 'usageCount' | 'createdAt' | 'updatedAt' | 'archived'>,
+    options?: { fireAndForget?: boolean }
+  ): Promise<GranularMemory> {
+    const taskIdStr = memory.taskId?.toString();
+
+    // 1️⃣ Save to Local Disk FIRST (immediate, synchronous, fast)
+    // This ensures we never lose data even if MongoDB is slow/down
+    const localMemory = {
       ...memory,
+      _id: new mongoose.Types.ObjectId(),
       usageCount: 0,
       archived: false,
-    });
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as GranularMemory;
 
-    const savedMemory = doc.toObject() as GranularMemory;
-
-    // 2️⃣ Save to Local Disk (backup)
-    const taskIdStr = memory.taskId?.toString();
     if (taskIdStr) {
-      await this.saveToLocal(savedMemory, taskIdStr);
+      try {
+        await this.saveToLocal(localMemory, taskIdStr);
+      } catch (localErr) {
+        console.warn(`⚠️ [Memory] Local save failed (continuing): ${localErr}`);
+      }
     }
 
-    console.log(`🧠 [Memory] Stored: [${memory.type}] ${memory.title} (scope: ${memory.scope}) [MongoDB + Local]`);
-    return savedMemory;
+    // 2️⃣ Save to MongoDB
+    if (options?.fireAndForget) {
+      // 🚀 FIRE-AND-FORGET: Don't block, save in background
+      GranularMemoryModel.create({
+        ...memory,
+        usageCount: 0,
+        archived: false,
+      }).then(() => {
+        console.log(`🧠 [Memory] Background saved: [${memory.type}] ${memory.title}`);
+      }).catch((err: Error) => {
+        console.warn(`⚠️ [Memory] Background MongoDB save failed (local backup exists): ${err.message}`);
+      });
+
+      console.log(`⚡ [Memory] Fire-and-forget: [${memory.type}] ${memory.title} (local saved)`);
+      return localMemory;
+    } else {
+      // ⏳ AWAITED: Block until MongoDB saves (for critical operations)
+      const doc = await GranularMemoryModel.create({
+        ...memory,
+        usageCount: 0,
+        archived: false,
+      });
+
+      const savedMemory = doc.toObject() as GranularMemory;
+      console.log(`🧠 [Memory] Stored: [${memory.type}] ${memory.title} (scope: ${memory.scope}) [MongoDB + Local]`);
+      return savedMemory;
+    }
+  }
+
+  /**
+   * 🚀 Fire-and-forget store - saves locally immediately, MongoDB in background
+   * Use this for non-critical operations (progress updates, learnings, patterns)
+   */
+  storeFireAndForget(memory: Omit<GranularMemory, '_id' | 'usageCount' | 'createdAt' | 'updatedAt' | 'archived'>): void {
+    this.store(memory, { fireAndForget: true }).catch((err) => {
+      console.warn(`⚠️ [Memory] Fire-and-forget failed: ${err.message}`);
+    });
   }
 
   /**
@@ -547,6 +594,7 @@ export class GranularMemoryService {
 
   /**
    * Store a progress marker (story started/completed, etc.)
+   * 🚀 FIRE-AND-FORGET: Progress updates are non-critical, don't block execution
    */
   async storeProgress(params: {
     projectId: string;
@@ -565,6 +613,7 @@ export class GranularMemoryService {
       return {} as GranularMemory;
     }
 
+    // 🚀 Fire-and-forget - local save is immediate, MongoDB in background
     return this.store({
       projectId: projectOid,
       taskId: taskOid,
@@ -578,7 +627,7 @@ export class GranularMemoryService {
       content: params.details,
       importance: params.status === 'completed' ? 'high' : 'medium',
       confidence: 1.0,
-    });
+    }, { fireAndForget: true });
   }
 
   /**
@@ -624,6 +673,7 @@ export class GranularMemoryService {
 
   /**
    * Store a file change
+   * 🚀 FIRE-AND-FORGET: File changes can be reconstructed from git, non-blocking
    */
   async storeFileChange(params: {
     projectId: string;
@@ -643,6 +693,7 @@ export class GranularMemoryService {
       return {} as GranularMemory;
     }
 
+    // 🚀 Fire-and-forget - local save is immediate, MongoDB in background
     return this.store({
       projectId: projectOid,
       taskId: taskOid,
@@ -661,7 +712,7 @@ export class GranularMemoryService {
         operation: params.operation,
         summary: params.summary,
       },
-    });
+    }, { fireAndForget: true });
   }
 
   /**
@@ -735,6 +786,7 @@ export class GranularMemoryService {
 
   /**
    * Store a pattern discovered in codebase
+   * 🚀 FIRE-AND-FORGET: Patterns are nice-to-have, non-blocking
    */
   async storePattern(params: {
     projectId: string;
@@ -748,6 +800,7 @@ export class GranularMemoryService {
       return {} as GranularMemory;
     }
 
+    // 🚀 Fire-and-forget - local save is immediate, MongoDB in background
     return this.store({
       projectId: projectOid,
       scope: 'project', // Patterns are project-wide
@@ -756,11 +809,12 @@ export class GranularMemoryService {
       content: params.content,
       importance: params.importance || 'medium',
       confidence: 0.85,
-    });
+    }, { fireAndForget: true });
   }
 
   /**
    * Store a convention to follow
+   * 🚀 FIRE-AND-FORGET: Conventions are nice-to-have, non-blocking
    */
   async storeConvention(params: {
     projectId: string;
@@ -773,6 +827,7 @@ export class GranularMemoryService {
       return {} as GranularMemory;
     }
 
+    // 🚀 Fire-and-forget - local save is immediate, MongoDB in background
     return this.store({
       projectId: projectOid,
       scope: 'project',
@@ -781,11 +836,12 @@ export class GranularMemoryService {
       content: params.content,
       importance: 'high',
       confidence: 0.95,
-    });
+    }, { fireAndForget: true });
   }
 
   /**
    * Store a learning for future runs
+   * 🚀 FIRE-AND-FORGET: Learnings are nice-to-have, non-blocking
    */
   async storeLearning(params: {
     projectId: string;
@@ -800,6 +856,7 @@ export class GranularMemoryService {
       return {} as GranularMemory;
     }
 
+    // 🚀 Fire-and-forget - local save is immediate, MongoDB in background
     return this.store({
       projectId: projectOid,
       taskId: this.safeObjectId(params.taskId),
@@ -809,7 +866,7 @@ export class GranularMemoryService {
       content: params.content,
       importance: params.importance || 'medium',
       confidence: 0.8,
-    });
+    }, { fireAndForget: true });
   }
 
   // ==================== READ OPERATIONS ====================

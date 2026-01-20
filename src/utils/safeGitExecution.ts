@@ -5,12 +5,72 @@
  * Timeouts are OPT-IN via environment variable to avoid breaking working operations.
  *
  * Set GIT_ENABLE_TIMEOUTS=true to enable timeouts (use only if you have hanging issues)
+ *
+ * 🚀 PERFORMANCE: Includes fetch caching to avoid redundant git fetch operations
  */
 
 import { exec, execSync as nodeExecSync } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+
+// ==================== GIT FETCH CACHE ====================
+// Prevents redundant git fetch operations within a short time window
+
+interface FetchCacheEntry {
+  lastFetch: number;
+  success: boolean;
+}
+
+// Map of repoPath -> last fetch timestamp
+const gitFetchCache = new Map<string, FetchCacheEntry>();
+
+// Cache duration: 60 seconds (don't refetch within this window)
+const FETCH_CACHE_DURATION_MS = 60000;
+
+/**
+ * Check if we need to fetch or can use cached result
+ * @param repoPath - Repository path
+ * @returns true if we should skip fetch (already fetched recently)
+ */
+export function shouldSkipFetch(repoPath: string): boolean {
+  const cached = gitFetchCache.get(repoPath);
+  if (!cached) return false;
+
+  const age = Date.now() - cached.lastFetch;
+  if (age < FETCH_CACHE_DURATION_MS) {
+    console.log(`⚡ [GitCache] Skipping fetch for ${repoPath} (fetched ${Math.round(age / 1000)}s ago)`);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Record a successful fetch for caching
+ * @param repoPath - Repository path
+ */
+export function recordFetch(repoPath: string): void {
+  gitFetchCache.set(repoPath, {
+    lastFetch: Date.now(),
+    success: true,
+  });
+}
+
+/**
+ * Clear fetch cache for a repository (use after push/pull to ensure fresh data)
+ * @param repoPath - Repository path
+ */
+export function clearFetchCache(repoPath: string): void {
+  gitFetchCache.delete(repoPath);
+}
+
+/**
+ * Clear all fetch caches (use at phase boundaries)
+ */
+export function clearAllFetchCaches(): void {
+  gitFetchCache.clear();
+}
 
 /**
  * Normalize repository name by removing .git suffix
@@ -157,6 +217,78 @@ export function safeGitExecSync(
       console.error(`❌ [Git] Command timed out after ${timeoutSeconds}s: ${command.substring(0, 50)}...`);
       throw new Error(`Git operation timed out after ${timeoutSeconds} seconds`);
     }
+    throw error;
+  }
+}
+
+/**
+ * 🚀 Smart git fetch that uses caching to avoid redundant fetches
+ *
+ * @param repoPath - Repository path
+ * @param options - Execution options
+ * @returns Command output
+ */
+export function smartGitFetch(
+  repoPath: string,
+  options: {
+    timeout?: number;
+    force?: boolean;  // Force fetch even if cached
+  } = {}
+): string {
+  // Check cache (unless force is specified)
+  if (!options.force && shouldSkipFetch(repoPath)) {
+    return ''; // Already fetched recently
+  }
+
+  try {
+    const result = safeGitExecSync(`git fetch origin`, {
+      cwd: repoPath,
+      timeout: options.timeout || 90000,
+    });
+
+    // Record successful fetch
+    recordFetch(repoPath);
+    console.log(`✅ [GitCache] Fetched and cached for ${repoPath}`);
+
+    return result;
+  } catch (error) {
+    console.warn(`⚠️ [GitCache] Fetch failed for ${repoPath}: ${error}`);
+    throw error;
+  }
+}
+
+/**
+ * 🚀 Smart git fetch (async version) that uses caching
+ *
+ * @param repoPath - Repository path
+ * @param options - Execution options
+ * @returns Promise with command output
+ */
+export async function smartGitFetchAsync(
+  repoPath: string,
+  options: {
+    timeout?: number;
+    force?: boolean;
+  } = {}
+): Promise<string> {
+  // Check cache (unless force is specified)
+  if (!options.force && shouldSkipFetch(repoPath)) {
+    return ''; // Already fetched recently
+  }
+
+  try {
+    const result = await safeGitExec(`git fetch origin`, {
+      cwd: repoPath,
+      timeout: options.timeout || 90000,
+    });
+
+    // Record successful fetch
+    recordFetch(repoPath);
+    console.log(`✅ [GitCache] Async fetched and cached for ${repoPath}`);
+
+    return result.stdout;
+  } catch (error) {
+    console.warn(`⚠️ [GitCache] Async fetch failed for ${repoPath}: ${error}`);
     throw error;
   }
 }

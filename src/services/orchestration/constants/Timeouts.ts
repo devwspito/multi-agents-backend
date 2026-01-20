@@ -41,6 +41,9 @@ export const AGENT_TIMEOUTS = {
   JUDGE: 300_000, // 5 minutes
   /** Quick operations (lint, format) */
   QUICK: 60_000, // 1 minute
+  /** 🔥 TOTAL TIMEOUT: Maximum agent execution time regardless of activity */
+  /** Prevents infinite loops where agent keeps sending messages but makes no real progress */
+  TOTAL_MAX: 30 * 60 * 1000, // 30 minutes absolute maximum
 } as const;
 
 // Retry configuration

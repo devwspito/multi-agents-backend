@@ -194,6 +194,35 @@ export interface IOrchestration {
   };
 
 
+  // Fase 5: Recovery (verifica trabajo completado y detecta trabajo pendiente)
+  recovery?: IAgentStep & {
+    verifiedPRs?: {
+      number: number;
+      epicId: string;
+      branchName: string;
+      files: string[];
+      status: 'complete' | 'incomplete' | 'needs_fix';
+    }[];
+    recoveryStatuses?: {
+      epicId: string;
+      status: 'complete' | 'incomplete' | 'needs_pr' | 'missing';
+      action?: string;
+    }[];
+    allComplete?: boolean;
+  };
+
+  // Fase 6: Integration (merge de branches, resolución de conflictos, fix de build)
+  integration?: IAgentStep & {
+    merged?: number;
+    total?: number;
+    mergeResults?: {
+      branch: string;
+      success: boolean;
+      conflicts?: string[];
+    }[];
+    buildSuccess?: boolean;
+  };
+
   // Fase 7: Auto Merge (automático - merge PRs a main después de verificación)
   autoMerge?: IAgentStep & {
     results?: {
@@ -209,7 +238,7 @@ export interface IOrchestration {
 
 
   // Métricas globales
-  currentPhase?: 'planning' | 'architecture' | 'development' | 'merge' | 'auto-merge' | 'completed' | 'multi-team';
+  currentPhase?: 'planning' | 'architecture' | 'development' | 'recovery' | 'integration' | 'merge' | 'auto-merge' | 'completed' | 'multi-team';
   phases?: any[]; // Array of phase objects with name, status, startedAt, approval
   totalCost: number;
   totalTokens: number;
@@ -253,7 +282,7 @@ export interface IOrchestration {
   };
 
   // Model configuration
-  // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+  // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
   modelConfig?: {
     preset?: 'max' | 'premium' | 'recommended' | 'standard' | 'custom';
     customConfig?: {
@@ -663,7 +692,7 @@ const taskSchema = new Schema<ITask>(
           enum: ['max', 'premium', 'recommended', 'standard', 'custom'],
           default: 'standard',
         },
-        // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+        // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
         customConfig: {
           planning: String,
           techLead: String,

@@ -65,7 +65,7 @@ export async function autoCommitDeveloperWork(
         // Check if commit exists on remote
         const lsRemote = safeGitExecSync(`cd "${repoPath}" && git ls-remote origin ${branchName}`, {
           encoding: 'utf8',
-          timeout: 15000,
+          timeout: 120000, // 2 minutes for git operations
         });
 
         if (lsRemote.includes(localSHA)) {
@@ -82,6 +82,10 @@ export async function autoCommitDeveloperWork(
             encoding: 'utf8',
             timeout: 60000,
           });
+          // FIX: Sync local with remote after push
+          try {
+            safeGitExecSync(`cd "${repoPath}" && git pull origin HEAD --ff-only`, { encoding: 'utf8', timeout: 30000 });
+          } catch (_pullErr) { /* already up to date */ }
 
           return {
             success: true,
@@ -175,6 +179,10 @@ EOF
         encoding: 'utf8',
         timeout: 60000, // 60s timeout for push
       });
+      // FIX: Sync local with remote after push
+      try {
+        safeGitExecSync(`cd "${repoPath}" && git pull origin HEAD --ff-only`, { encoding: 'utf8', timeout: 30000 });
+      } catch (_pullErr) { /* already up to date */ }
 
       console.log(`   ✅ Pushed to remote`);
     } catch (pushError: any) {
