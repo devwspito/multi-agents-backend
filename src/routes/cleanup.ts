@@ -7,8 +7,8 @@
 
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../middleware/auth';
-import { Task } from '../models/Task';
-import { Repository } from '../models/Repository';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
+import { RepositoryRepository } from '../database/repositories/RepositoryRepository.js';
 import { GitHubService } from '../services/GitHubService';
 import { BranchCleanupService } from '../services/cleanup/BranchCleanupService';
 import { WorkspaceCleanupService } from '../services/cleanup/WorkspaceCleanupService';
@@ -29,13 +29,13 @@ router.post('/task/:taskId', authenticate, async (req: Request, res: Response): 
     const userId = (req as any).user.userId;
 
     // Get task
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
     }
 
     // Security check
-    if (task.userId.toString() !== userId) {
+    if (task.userId !== userId) {
       return res.status(403).json({ error: 'Not authorized to clean up this task' });
     }
 
@@ -48,9 +48,7 @@ router.post('/task/:taskId', authenticate, async (req: Request, res: Response): 
     }
 
     // Get repositories
-    const repositories = await Repository.find({
-      _id: { $in: task.repositoryIds || [] },
-    });
+    const repositories = RepositoryRepository.findByIds(task.repositoryIds || []);
 
     if (repositories.length === 0) {
       return res.status(400).json({ error: 'No repositories found for this task' });
@@ -142,13 +140,13 @@ router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Res
     const userId = (req as any).user.userId;
 
     // Get task
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
     }
 
     // Security check
-    if (task.userId.toString() !== userId) {
+    if (task.userId !== userId) {
       return res.status(403).json({ error: 'Not authorized to clean up this task' });
     }
 
@@ -203,13 +201,13 @@ router.get('/preview/:taskId', authenticate, async (req: Request, res: Response)
     const userId = (req as any).user.userId;
 
     // Get task
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       return res.status(404).json({ error: 'Task not found' });
     }
 
     // Security check
-    if (task.userId.toString() !== userId) {
+    if (task.userId !== userId) {
       return res.status(403).json({ error: 'Not authorized to view this task' });
     }
 

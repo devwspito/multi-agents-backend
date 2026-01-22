@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { env } from '../config/env';
-import { User } from '../models/User';
-import { OAuthState } from '../models/OAuthState';
+import { UserRepository } from '../database/repositories/UserRepository.js';
+import { OAuthStateRepository } from '../database/repositories/OAuthStateRepository.js';
 import { generateToken } from '../middleware/auth';
 import crypto from 'crypto';
 
@@ -15,9 +15,9 @@ router.get('/github-auth/url', async (req: Request, res: Response) => {
   try {
     const state = crypto.randomBytes(16).toString('hex');
 
-    // Guardar estado en MongoDB (TTL automático de 10 minutos)
-    const savedState = await OAuthState.create({ state });
-    console.log(`✅ OAuth state created and saved: ${state}`, { id: savedState._id });
+    // Guardar estado en SQLite
+    const savedState = OAuthStateRepository.create(state);
+    console.log(`✅ OAuth state created and saved: ${state}`, { id: savedState.id });
 
     const params = new URLSearchParams({
       client_id: env.GITHUB_CLIENT_ID,
@@ -49,9 +49,9 @@ router.get('/github', async (req: Request, res: Response) => {
   try {
     const state = crypto.randomBytes(16).toString('hex');
 
-    // Guardar estado en MongoDB (TTL automático de 10 minutos)
-    const savedState = await OAuthState.create({ state });
-    console.log(`✅ OAuth state created and saved (direct): ${state}`, { id: savedState._id });
+    // Guardar estado en SQLite
+    const savedState = OAuthStateRepository.create(state);
+    console.log(`✅ OAuth state created and saved (direct): ${state}`, { id: savedState.id });
 
     const params = new URLSearchParams({
       client_id: env.GITHUB_CLIENT_ID,
@@ -84,23 +84,16 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       return;
     }
 
-    // Verificar cuántos estados hay en la DB para debug
-    const allStates = await OAuthState.find({});
-    console.log(`📊 Total OAuth states in DB: ${allStates.length}`, allStates.map(s => s.state));
-
-    const oauthState = await OAuthState.findOne({ state: state as string });
+    // Verificar y consumir el estado (one-time use)
+    const oauthState = OAuthStateRepository.verifyAndConsume(state as string);
 
     if (!oauthState) {
-      console.error(`❌ OAuth callback: state not found in database: ${state}`);
-      console.error(`   Available states: ${allStates.map(s => s.state).join(', ')}`);
+      console.error(`❌ OAuth callback: state not found or expired: ${state}`);
       res.redirect(`${env.FRONTEND_URL}?error=invalid_state`);
       return;
     }
 
-    console.log(`✅ OAuth state validated: ${state}`);
-
-    // Eliminar el estado usado (one-time use)
-    await OAuthState.deleteOne({ state: state as string });
+    console.log(`✅ OAuth state validated and consumed: ${state}`);
 
     if (!code) {
       res.redirect(`${env.FRONTEND_URL}?error=no_code`);
@@ -153,42 +146,18 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       email = primaryEmail?.email || emails[0]?.email;
     }
 
-    // Crear o actualizar usuario
-    let user;
-
-    try {
-      // Intentar crear nuevo usuario
-      user = await User.create({
-        githubId: githubUser.id.toString(),
-        username: githubUser.login,
-        email,
-        avatarUrl: githubUser.avatar_url,
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token,
-      });
-    } catch (error: any) {
-      // Si falla por clave duplicada, buscar y actualizar
-      if (error.code === 11000) {
-        user = await User.findOne({ username: githubUser.login });
-
-        if (user) {
-          user.githubId = githubUser.id.toString();
-          user.email = email;
-          user.avatarUrl = githubUser.avatar_url;
-          user.accessToken = tokenData.access_token;
-          user.refreshToken = tokenData.refresh_token;
-          await user.save();
-        } else {
-          // No debería pasar, pero por si acaso
-          throw error;
-        }
-      } else {
-        throw error;
-      }
-    }
+    // Crear o actualizar usuario (findOrCreate handles both cases)
+    const user = UserRepository.findOrCreate({
+      githubId: githubUser.id.toString(),
+      username: githubUser.login,
+      email,
+      avatarUrl: githubUser.avatar_url,
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+    });
 
     // Generar JWT
-    const token = generateToken((user._id as any).toString(), user.githubId);
+    const token = generateToken(user.id, user.githubId);
 
     // Redirigir al frontend con el token y el indicador de GitHub
     res.redirect(`${env.FRONTEND_URL}/auth/callback?token=${token}&github=connected`);
@@ -218,7 +187,7 @@ router.get('/me', async (req: Request, res: Response) => {
     const decoded = jwt.verify(token, env.JWT_SECRET) as { userId: string };
 
     // Include accessToken to check if GitHub is connected (but don't expose it)
-    const user = await User.findById(decoded.userId).select('+accessToken -refreshToken -__v');
+    const user = UserRepository.findById(decoded.userId, true);
 
     if (!user) {
       res.status(404).json({
@@ -231,7 +200,7 @@ router.get('/me', async (req: Request, res: Response) => {
     res.json({
       success: true,
       data: {
-        id: user._id,
+        id: user.id,
         githubId: user.githubId,
         username: user.username,
         email: user.email,
@@ -267,17 +236,10 @@ router.get('/me/api-key', async (req: any, res): Promise<any> => {
   try {
     const { authenticate } = await import('../middleware/auth');
     return await authenticate(req, res, async () => {
-      const user = await User.findById(req.user.id).select('+defaultApiKey');
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found',
-        });
-      }
+      // Get decrypted API key from repository
+      const apiKey = UserRepository.getDecryptedApiKey(req.user.id);
 
       // Return masked API key for security (show only last 4 chars)
-      const apiKey = user.defaultApiKey;
       const maskedKey = apiKey
         ? `sk-ant-...${apiKey.slice(-4)}`
         : null;
@@ -317,16 +279,16 @@ router.put('/me/api-key', async (req: any, res): Promise<any> => {
         });
       }
 
-      const user = await User.findById(req.user.id);
+      const user = UserRepository.update(req.user.id, {
+        defaultApiKey: apiKey || undefined,
+      });
+
       if (!user) {
         return res.status(404).json({
           success: false,
           message: 'User not found',
         });
       }
-
-      user.defaultApiKey = apiKey || undefined;
-      await user.save();
 
       return res.json({
         success: true,

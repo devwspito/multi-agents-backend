@@ -15,8 +15,7 @@
  */
 
 import { OrchestrationCoordinator } from '../services/orchestration/OrchestrationCoordinator';
-import { Task } from '../models/Task';
-import { Repository } from '../models/Repository';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { connectDatabase } from '../config/database';
 import readline from 'readline';
 
@@ -63,7 +62,7 @@ const orchestrationCoordinator = new OrchestrationCoordinator();
 async function runTask(taskId: string): Promise<void> {
   await ensureDBConnection();
 
-  const task = await Task.findById(taskId);
+  const task = TaskRepository.findById(taskId);
   if (!task) {
     log(`❌ Task ${taskId} not found`, 'red');
     return;
@@ -91,38 +90,33 @@ async function createAndRunTask(
   // Find default project and repositories if not specified
   let repositoryIds = options.repositoryIds;
   if (!repositoryIds || repositoryIds.length === 0) {
-    const repos = await Repository.find({ isActive: true }).limit(5);
-    if (repos.length === 0) {
-      log('❌ No repositories found. Please add a repository first.', 'red');
-      return;
-    }
-    repositoryIds = repos.map(r => (r._id as any).toString());
-    log(`📦 Using repositories: ${repos.map(r => r.name).join(', ')}`, 'dim');
+    // Note: RepositoryRepository doesn't have a general findAll with limit, so we'd need to add that
+    // For now, this CLI feature requires explicit repositoryIds
+    log('❌ Please specify repository IDs with --repositoryIds flag.', 'red');
+    return;
   }
 
   // Create task
-  const task = new Task({
+  const task = TaskRepository.create({
     title: description.slice(0, 100),
     description,
-    status: 'pending',
     repositoryIds,
+    userId: 'cli-user', // CLI doesn't have user context
     orchestration: {
-      status: 'pending',
-      currentPhase: null,
+      currentPhase: 'pending',
     },
   });
 
-  await task.save();
-  log(`\n✅ Task created: ${task._id}`, 'green');
+  log(`\n✅ Task created: ${task.id}`, 'green');
 
   // Run it
-  await runTask((task._id as any).toString());
+  await runTask(task.id);
 }
 
 async function getTaskStatus(taskId: string): Promise<void> {
   await ensureDBConnection();
 
-  const task = await Task.findById(taskId);
+  const task = TaskRepository.findById(taskId);
   if (!task) {
     log(`❌ Task ${taskId} not found`, 'red');
     return;
@@ -138,16 +132,16 @@ async function getTaskStatus(taskId: string): Promise<void> {
 async function cancelTask(taskId: string): Promise<void> {
   await ensureDBConnection();
 
-  const task = await Task.findByIdAndUpdate(
-    taskId,
-    { 'orchestration.cancelRequested': true },
-    { new: true }
-  );
-
+  const task = TaskRepository.findById(taskId);
   if (!task) {
     log(`❌ Task ${taskId} not found`, 'red');
     return;
   }
+
+  TaskRepository.modifyOrchestration(taskId, (orch) => ({
+    ...orch,
+    cancelRequested: true,
+  }));
 
   log(`\n🛑 Cancellation requested for task: ${task.title}`, 'yellow');
 }
@@ -155,9 +149,7 @@ async function cancelTask(taskId: string): Promise<void> {
 async function listTasks(): Promise<void> {
   await ensureDBConnection();
 
-  const tasks = await Task.find()
-    .sort({ createdAt: -1 })
-    .limit(10);
+  const tasks = TaskRepository.findAll({ limit: 10 });
 
   if (tasks.length === 0) {
     log('\n📭 No tasks found', 'dim');
@@ -171,7 +163,7 @@ async function listTasks(): Promise<void> {
     const statusColor = task.status === 'completed' ? 'green' : task.status === 'failed' ? 'red' : 'yellow';
     const statusIcon = task.status === 'completed' ? '✅' : task.status === 'failed' ? '❌' : '⏳';
 
-    log(`${statusIcon} ${task._id}`, statusColor);
+    log(`${statusIcon} ${task.id}`, statusColor);
     log(`   ${task.title}`, 'bright');
     log(`   Status: ${task.status} | Cost: $${(task.orchestration.totalCost || 0).toFixed(4)} | Phase: ${task.orchestration.currentPhase || 'N/A'}`, 'dim');
     log('', 'reset');

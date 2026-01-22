@@ -1,5 +1,4 @@
-import mongoose from 'mongoose';
-import { Task, ITask } from '../../models/Task';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
 
 /**
  * Branch Registry Entry
@@ -362,7 +361,7 @@ export abstract class BasePhase implements IPhase {
    * Get task ID as string (common pattern)
    */
   protected getTaskIdString(context: OrchestrationContext): string {
-    return (context.task._id as any).toString();
+    return (context.task.id as any).toString();
   }
 
   /**
@@ -391,12 +390,8 @@ export abstract class BasePhase implements IPhase {
 
     try {
       // 🛑 CHECK FOR CANCELLATION BEFORE EXECUTING PHASE
-      // ⚡ OPTIMIZATION: Only fetch cancelRequested field with lean() for speed
-      const { Task } = await import('../../models/Task');
-      const taskCancel = await Task.findById(context.task._id)
-        .select('orchestration.cancelRequested')
-        .lean();
-      if (taskCancel?.orchestration?.cancelRequested) {
+      const task = TaskRepository.findById(context.task.id);
+      if (task?.orchestration?.cancelRequested) {
         const duration = Date.now() - startTime;
         console.log(`🛑 [${this.name}] Task cancelled - aborting phase execution`);
         return {
@@ -485,52 +480,52 @@ export abstract class BasePhase implements IPhase {
    * validate phase completion by checking MongoDB, not Unified Memory.
    */
   private async syncSkippedPhaseToDb(context: OrchestrationContext): Promise<void> {
-    const { Task } = await import('../../models/Task');
-    const taskId = (context.task._id as any).toString();
+    const taskId = context.task.id;
 
-    // Map phase names to their MongoDB field paths
-    const phaseFieldMap: Record<string, string> = {
-      'Planning': 'orchestration.planning',
-      'Approval': 'orchestration.approval',
-      'TechLead': 'orchestration.techLead',
-      'TeamOrchestration': 'orchestration.teamOrchestration',
-      'Development': 'orchestration.development',
-      'Judge': 'orchestration.judge',
-      'AutoMerge': 'orchestration.autoMerge',
+    // Map phase names to their orchestration fields
+    const phaseMap: Record<string, string> = {
+      'Planning': 'planning',
+      'Approval': 'approval',
+      'TechLead': 'techLead',
+      'TeamOrchestration': 'teamOrchestration',
+      'Development': 'development',
+      'Judge': 'judge',
+      'AutoMerge': 'autoMerge',
     };
 
-    const fieldPath = phaseFieldMap[this.name];
-    if (!fieldPath) {
-      console.log(`   ℹ️ No MongoDB field mapping for phase: ${this.name}`);
+    const phaseField = phaseMap[this.name];
+    if (!phaseField) {
+      console.log(`   ℹ️ No field mapping for phase: ${this.name}`);
       return;
     }
 
     try {
-      // Update the phase status in MongoDB
-      const updateObj: Record<string, any> = {};
-      updateObj[`${fieldPath}.status`] = 'completed';
-      updateObj[`${fieldPath}.skippedOnRecovery`] = true;
-      updateObj[`${fieldPath}.skippedAt`] = new Date();
+      // Update the phase status in database
+      TaskRepository.modifyOrchestration(taskId, (orch) => {
+        const phase = (orch as any)[phaseField] || {};
+        (orch as any)[phaseField] = {
+          ...phase,
+          status: 'completed',
+          skippedOnRecovery: true,
+          skippedAt: new Date(),
+        };
+        return orch;
+      });
 
-      await Task.findByIdAndUpdate(taskId, { $set: updateObj });
+      console.log(`   ✅ [${this.name}] Synced skipped phase status to DB: ${phaseField}.status = 'completed'`);
 
-      console.log(`   ✅ [${this.name}] Synced skipped phase status to MongoDB: ${fieldPath}.status = 'completed'`);
-
-      // 🌿 BRANCH REGISTRY RESTORATION: Restore branches from MongoDB on recovery
-      // When phases are skipped, the branchRegistry is empty but MongoDB may have branch info
-      // ⚡ OPTIMIZATION: Only fetch branchRegistry field with lean() for speed
-      const taskBranches = await Task.findById(taskId)
-        .select('orchestration.branchRegistry')
-        .lean();
-      if (taskBranches?.orchestration?.branchRegistry) {
-        const storedBranches = taskBranches.orchestration.branchRegistry as BranchInfo[];
+      // 🌿 BRANCH REGISTRY RESTORATION: Restore branches from DB on recovery
+      // When phases are skipped, the branchRegistry is empty but DB may have branch info
+      const task = TaskRepository.findById(taskId);
+      if (task?.orchestration?.branchRegistry) {
+        const storedBranches = task.orchestration.branchRegistry as BranchInfo[];
         if (Array.isArray(storedBranches) && storedBranches.length > 0) {
           for (const branch of storedBranches) {
             if (branch.name && !context.branchRegistry.has(branch.name)) {
               context.registerBranch(branch);
             }
           }
-          console.log(`   🌿 [${this.name}] Restored ${storedBranches.length} branch(es) from MongoDB to registry`);
+          console.log(`   🌿 [${this.name}] Restored ${storedBranches.length} branch(es) from DB to registry`);
         }
       }
     } catch (error: any) {
@@ -549,49 +544,34 @@ export abstract class BasePhase implements IPhase {
     context: OrchestrationContext,
     _startTime: number
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
-    const { Task } = await import('../../models/Task');
-
     // Configurable polling interval (default 5s, can be overridden via env)
     const CANCELLATION_CHECK_INTERVAL_MS = parseInt(process.env.CANCELLATION_CHECK_INTERVAL_MS || '5000', 10);
 
     let cancelled = false;
     let checkInterval: NodeJS.Timeout | null = null;
-    let inFlightCheck: Promise<void> | null = null; // 🔥 Track in-flight DB query
 
     // Single polling mechanism - check cancellation at configured interval
     const startCancellationChecker = () => {
       checkInterval = setInterval(() => {
-        // 🔥 FIX: Track the in-flight promise so cleanup can wait for it
-        inFlightCheck = (async () => {
-          try {
-            const task = await Task.findById(context.task._id, { 'orchestration.cancelRequested': 1 }).lean();
-            if (task?.orchestration?.cancelRequested) {
-              cancelled = true;
-              console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
-              if (checkInterval) clearInterval(checkInterval);
-            }
-          } catch (err) {
-            // Log but don't crash - cancellation check is non-critical
-            console.warn(`[${this.name}] Error checking cancellation (non-critical):`, err);
+        try {
+          const task = TaskRepository.findById(context.task.id);
+          if (task?.orchestration?.cancelRequested) {
+            cancelled = true;
+            console.log(`🛑 [${this.name}] Cancellation detected during phase execution`);
+            if (checkInterval) clearInterval(checkInterval);
           }
-        })();
+        } catch (err) {
+          // Log but don't crash - cancellation check is non-critical
+          console.warn(`[${this.name}] Error checking cancellation (non-critical):`, err);
+        }
       }, CANCELLATION_CHECK_INTERVAL_MS);
     };
 
-    // 🔥 FIX: Async cleanup that waits for in-flight checks to complete
-    const cleanup = async () => {
+    // Cleanup function to stop the cancellation checker
+    const cleanup = () => {
       if (checkInterval) {
         clearInterval(checkInterval);
         checkInterval = null;
-      }
-      // Wait for any in-flight database query to complete
-      if (inFlightCheck) {
-        try {
-          await inFlightCheck;
-        } catch {
-          // Ignore errors during cleanup - query may have failed
-        }
-        inFlightCheck = null;
       }
     };
 
@@ -637,10 +617,9 @@ export abstract class BasePhase implements IPhase {
 // ==================== FIRE-AND-FORGET UTILITIES ====================
 
 /**
- * 🔥 Fire-and-forget Task save
+ * Fire-and-forget Task update
  *
- * LOCAL-FIRST pattern: MongoDB writes should not block execution.
- * This utility saves the task to MongoDB in the background without blocking.
+ * LOCAL-FIRST pattern: Database writes are synchronous but wrapped in try-catch.
  *
  * Use this for non-critical updates like:
  * - Model config changes
@@ -650,38 +629,135 @@ export abstract class BasePhase implements IPhase {
  * For critical status changes (completed, failed), consider using saveTaskCritical()
  */
 export function saveTaskFireAndForget(task: ITask, context?: string): void {
-  const taskId = task._id?.toString() || 'unknown';
-  task.save()
-    .then(() => {
-      console.log(`☁️ [Task] Background save OK${context ? ` (${context})` : ''}`);
-    })
-    .catch((err: Error) => {
-      console.warn(`⚠️ [Task ${taskId}] Background save failed${context ? ` (${context})` : ''}: ${err.message}`);
-    });
+  const taskId = task.id?.toString() || 'unknown';
+  try {
+    // SQLite is synchronous, just update the task
+    TaskRepository.update(taskId, task);
+    console.log(`[Task] Background save OK${context ? ` (${context})` : ''}`);
+  } catch (err: any) {
+    console.warn(`[Task ${taskId}] Background save failed${context ? ` (${context})` : ''}: ${err.message}`);
+  }
 }
 
 /**
- * 🔥 Fire-and-forget Task.findByIdAndUpdate
+ * Fire-and-forget Task update by ID
  *
- * Same as saveTaskFireAndForget but for atomic updates.
+ * Same as saveTaskFireAndForget but for partial updates.
  * Use this when you don't need the updated document back.
+ *
+ * Supports both direct updates and MongoDB-style operators for backwards compatibility:
+ * - $set: Set field values
+ * - $unset: Remove fields
+ * - $inc: Increment numeric fields
+ * - $addToSet: Add to array if not exists
+ * - $push: Push to array
  */
 export function updateTaskFireAndForget(
-  taskId: string | mongoose.Types.ObjectId,
-  update: any,
+  taskId: string,
+  update: Partial<ITask> | Record<string, any>,
   context?: string
 ): void {
-  Task.findByIdAndUpdate(taskId, update)
-    .then(() => {
-      console.log(`☁️ [Task] Background update OK${context ? ` (${context})` : ''}`);
-    })
-    .catch((err: Error) => {
-      console.warn(`⚠️ [Task ${taskId}] Background update failed${context ? ` (${context})` : ''}: ${err.message}`);
-    });
+  try {
+    const hasMongoOperators = '$set' in update || '$unset' in update ||
+                               '$inc' in update || '$addToSet' in update ||
+                               '$push' in update;
+
+    if (hasMongoOperators) {
+      const mongoUpdate = update as Record<string, any>;
+      const task = TaskRepository.findById(taskId);
+      if (!task) {
+        console.warn(`[Task ${taskId}] Not found for update${context ? ` (${context})` : ''}`);
+        return;
+      }
+
+      // Handle $set - convert dot notation paths to nested updates
+      if (mongoUpdate.$set) {
+        for (const [path, value] of Object.entries(mongoUpdate.$set)) {
+          setNestedValue(task, path, value);
+        }
+      }
+
+      // Handle $unset - remove properties
+      if (mongoUpdate.$unset) {
+        for (const path of Object.keys(mongoUpdate.$unset)) {
+          setNestedValue(task, path, undefined);
+        }
+      }
+
+      // Handle $inc - increment values
+      if (mongoUpdate.$inc) {
+        for (const [path, value] of Object.entries(mongoUpdate.$inc)) {
+          const current = getNestedValue(task, path) || 0;
+          setNestedValue(task, path, current + (value as number));
+        }
+      }
+
+      // Handle $addToSet - add to array if not exists
+      if (mongoUpdate.$addToSet) {
+        for (const [path, value] of Object.entries(mongoUpdate.$addToSet)) {
+          const arr = getNestedValue(task, path) || [];
+          if (!Array.isArray(arr)) continue;
+          if (!arr.includes(value)) {
+            arr.push(value);
+            setNestedValue(task, path, arr);
+          }
+        }
+      }
+
+      // Handle $push - push to array
+      if (mongoUpdate.$push) {
+        for (const [path, value] of Object.entries(mongoUpdate.$push)) {
+          const arr = getNestedValue(task, path) || [];
+          if (!Array.isArray(arr)) continue;
+          arr.push(value);
+          setNestedValue(task, path, arr);
+        }
+      }
+
+      TaskRepository.update(taskId, task);
+    } else {
+      TaskRepository.update(taskId, update as Partial<ITask>);
+    }
+    console.log(`[Task] Background update OK${context ? ` (${context})` : ''}`);
+  } catch (err: any) {
+    console.warn(`[Task ${taskId}] Background update failed${context ? ` (${context})` : ''}: ${err.message}`);
+  }
 }
 
 /**
- * 🔥 Critical Task save with error handling
+ * Helper to set a value at a dot-notation path
+ */
+function setNestedValue(obj: any, path: string, value: any): void {
+  const parts = path.split('.');
+  let current = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (current[parts[i]] === undefined) {
+      current[parts[i]] = {};
+    }
+    current = current[parts[i]];
+  }
+  if (value === undefined) {
+    delete current[parts[parts.length - 1]];
+  } else {
+    current[parts[parts.length - 1]] = value;
+  }
+}
+
+/**
+ * Helper to get a value at a dot-notation path
+ */
+function getNestedValue(obj: any, path: string): any {
+  const parts = path.split('.');
+  let current = obj;
+  for (const part of parts) {
+    if (current === undefined || current === null) return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+/**
+ * Critical Task save with error handling
  *
  * Use this for critical status changes where you need to know if it failed,
  * but still don't want to crash the system.
@@ -689,13 +765,13 @@ export function updateTaskFireAndForget(
  * Returns true if save succeeded, false if failed.
  */
 export async function saveTaskCritical(task: ITask, context?: string): Promise<boolean> {
-  const taskId = task._id?.toString() || 'unknown';
+  const taskId = task.id?.toString() || 'unknown';
   try {
-    await task.save();
-    console.log(`✅ [Task] Critical save OK${context ? ` (${context})` : ''}`);
+    TaskRepository.update(taskId, task);
+    console.log(`[Task] Critical save OK${context ? ` (${context})` : ''}`);
     return true;
   } catch (err: any) {
-    console.error(`❌ [Task ${taskId}] Critical save FAILED${context ? ` (${context})` : ''}: ${err.message}`);
+    console.error(`[Task ${taskId}] Critical save FAILED${context ? ` (${context})` : ''}: ${err.message}`);
     return false;
   }
 }

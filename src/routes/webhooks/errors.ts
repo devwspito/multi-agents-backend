@@ -9,23 +9,18 @@ import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
 import { authenticateWebhook, WebhookAuthRequest } from '../../middleware/webhookAuth';
-import { Task } from '../../models/Task';
-import { Repository } from '../../models/Repository';
-// import { Project } from '../../models/Project';
-import { WebhookApiKey } from '../../models/WebhookApiKey';
+import { TaskRepository } from '../../database/repositories/TaskRepository.js';
+import { RepositoryRepository } from '../../database/repositories/RepositoryRepository.js';
 // v1 OrchestrationCoordinator - battle-tested with full prompts
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { LogService } from '../../services/logging/LogService';
 import { NotificationService } from '../../services/NotificationService';
 import { ErrorDetectiveService } from '../../services/ErrorDetectiveService';
 import { STANDARD_CONFIG, PREMIUM_CONFIG, RECOMMENDED_CONFIG, MAX_CONFIG } from '../../config/ModelConfigurations';
-// import { WebhookNotificationService } from '../../services/webhooks/WebhookNotificationService'; // DISABLED - requires SMTP setup
 import { z } from 'zod';
 
 const router = Router();
-// v1 shared OrchestrationCoordinator instance
 const orchestrationCoordinator = new OrchestrationCoordinator();
-// const notificationService = new WebhookNotificationService(); // DISABLED - requires SMTP setup
 
 /**
  * Zod validation schema for webhook error payload
@@ -77,20 +72,12 @@ function calculateErrorHash(errorType: string, message: string): string {
  * Find existing task with same error in time window
  * Deduplication window: 1 hour
  */
-async function findDuplicateTask(
+function findDuplicateTask(
   projectId: string,
   errorHash: string
-): Promise<any | null> {
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-
-  const existingTask = await Task.findOne({
-    projectId,
-    'webhookMetadata.errorHash': errorHash,
-    status: { $in: ['pending', 'in_progress'] },
-    createdAt: { $gte: oneHourAgo },
-  }).sort({ createdAt: -1 });
-
-  return existingTask;
+): any | null {
+  // Use the findByWebhookHash helper which implements deduplication logic
+  return TaskRepository.findByWebhookHash(projectId, errorHash);
 }
 
 /**
@@ -98,13 +85,13 @@ async function findDuplicateTask(
  */
 const webhookRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: async (req: WebhookAuthRequest) => {
+  max: (req: WebhookAuthRequest) => {
     if (!req.webhookAuth?.apiKeyDoc) return 60; // default
-    const apiKey = await WebhookApiKey.findById(req.webhookAuth.apiKeyDoc._id);
-    return apiKey?.rateLimit || 60;
+    // Rate limit is already in the apiKeyDoc from authentication
+    return req.webhookAuth.apiKeyDoc.rateLimit || 60;
   },
   keyGenerator: (req: WebhookAuthRequest) => {
-    return req.webhookAuth?.apiKeyDoc?._id?.toString() || 'unknown';
+    return req.webhookAuth?.apiKeyDoc?.id || 'unknown';
   },
   handler: (_req: Request, res: Response) => {
     const retryAfter = 60;
@@ -186,13 +173,9 @@ router.post(
       // Map severity to priority (use analyzed severity, not client-provided)
       const priority = mapSeverityToPriority(analysisResult.analysis?.severity || severity);
 
-      // Find active repositories for project
-      const repositories = await Repository.find({
-        projectId,
-        isActive: true,
-      })
-        .select('_id name')
-        .lean();
+      // Find active repositories for project (SQLite - synchronous)
+      const repositories = RepositoryRepository.findByProjectId(projectId)
+        .filter(r => r.isActive);
 
       if (repositories.length === 0) {
         console.warn(`⚠️  No active repositories found for project ${projectId}`);
@@ -214,18 +197,18 @@ router.post(
         // ♻️ DUPLICATE FOUND: Update existing task
         const occurrenceCount = (existingTask.webhookMetadata?.occurrenceCount || 1) + 1;
 
-        await Task.updateOne(
-          { _id: existingTask._id },
-          {
-            $set: {
-              'webhookMetadata.occurrenceCount': occurrenceCount,
-              'webhookMetadata.lastOccurrence': new Date(),
-            },
-          }
-        );
+        // Update webhook metadata (SQLite - synchronous)
+        const updatedWebhookMetadata = {
+          ...existingTask.webhookMetadata,
+          occurrenceCount,
+          lastOccurrence: new Date(),
+        };
+        TaskRepository.update(existingTask.id, {
+          webhookMetadata: updatedWebhookMetadata,
+        });
 
         task = existingTask;
-        const taskId = (task._id as any).toString();
+        const taskId = task.id;
 
         console.log(`♻️  Duplicate error detected - updating existing task ${taskId}`);
         console.log(`   Occurrence count: ${occurrenceCount}`);
@@ -246,32 +229,6 @@ router.post(
           'info',
           `♻️  Duplicate error detected (occurrence #${occurrenceCount})`
         );
-
-        // Send notification to client (DISABLED - requires SMTP setup)
-        /*
-        try {
-          const project = await Project.findById(projectId);
-          if (project?.settings?.errorNotifications?.enabled) {
-            await notificationService.notifyClient(
-              project.settings.errorNotifications.channels || [],
-              {
-                taskId,
-                projectId,
-                errorType,
-                errorMessage: message,
-                severity,
-                occurrenceCount,
-                isDuplicate: true,
-                taskUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${taskId}`,
-                timestamp: new Date().toISOString(),
-              }
-            );
-          }
-        } catch (notifError: any) {
-          console.error(`Failed to send notification: ${notifError.message}`);
-          // Don't fail the webhook request if notification fails
-        }
-        */
 
         // Return 200 with existing task info
         return res.status(200).json({
@@ -302,13 +259,15 @@ router.post(
           judge: modelConfig.judge,
         });
 
-        task = await Task.create({
+        // Create task (SQLite - synchronous)
+        // Note: userId is empty for webhook-generated tasks
+        task = TaskRepository.create({
           title: `[AUTO] ${analysisResult.analysis?.errorType || errorType}: ${message.substring(0, 80)}`,
           description,
           priority,
           projectId,
-          repositoryIds: repositories.map((r) => r._id),
-          status: 'pending',
+          repositoryIds: repositories.map((r) => r.id),
+          userId: '', // Webhook tasks don't have a user
           tags: ['webhook', 'auto-generated', analysisResult.analysis?.severity || severity, 'error-detective'],
           orchestration: {
             planning: { agent: 'planning-agent', status: 'pending' },
@@ -327,7 +286,10 @@ router.post(
             ],
 
             // Model configuration from API key
-            modelConfig,
+            modelConfig: {
+              preset: taskConfig,
+              customConfig: modelConfig,
+            },
           },
           webhookMetadata: {
             errorHash,
@@ -339,7 +301,7 @@ router.post(
           },
         });
 
-        const taskId = (task._id as any).toString();
+        const taskId = task.id;
 
         console.log(`✨ New error - created task ${taskId}`);
 
@@ -354,32 +316,6 @@ router.post(
             repositoryCount: repositories.length,
           },
         });
-
-        // Send notification to client (DISABLED - requires SMTP setup)
-        /*
-        try {
-          const project = await Project.findById(projectId);
-          if (project?.settings?.errorNotifications?.enabled) {
-            await notificationService.notifyClient(
-              project.settings.errorNotifications.channels || [],
-              {
-                taskId,
-                projectId,
-                errorType,
-                errorMessage: message,
-                severity,
-                occurrenceCount: 1,
-                isDuplicate: false,
-                taskUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/tasks/${taskId}`,
-                timestamp: new Date().toISOString(),
-              }
-            );
-          }
-        } catch (notifError: any) {
-          console.error(`Failed to send notification: ${notifError.message}`);
-          // Don't fail the webhook request if notification fails
-        }
-        */
 
         // Trigger v1 orchestration asynchronously
         setImmediate(async () => {

@@ -1,5 +1,5 @@
-import { Task, ITask } from '../../models/Task';
-import { Repository } from '../../models/Repository';
+import { TaskRepository, ITask, IOrchestration } from '../../database/repositories/TaskRepository.js';
+import { RepositoryRepository } from '../../database/repositories/RepositoryRepository.js';
 import { GitHubService } from '../GitHubService';
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
@@ -123,11 +123,8 @@ export class OrchestrationCoordinator {
 
     try {
       // === GATHER CONTEXT ===
-      // ⚡ OPTIMIZATION: Parallel fetch of Task + UnifiedMemory (no dependencies)
-      const [task, resumptionPoint] = await Promise.all([
-        Task.findById(taskId),
-        unifiedMemoryService.getResumptionPoint(taskId),
-      ]);
+      const task = TaskRepository.findById(taskId);
+      const resumptionPoint = await unifiedMemoryService.getResumptionPoint(taskId);
 
       if (!task) {
         throw new Error(`Task ${taskId} not found`);
@@ -142,23 +139,23 @@ export class OrchestrationCoordinator {
 
       // 🔄 RECOVERY DETECTION: Check UNIFIED MEMORY for resumption point
       // This is THE SINGLE SOURCE OF TRUTH - not task.status or task.orchestration
-      const isRecovery = resumptionPoint.shouldResume;
+      const isRecovery = resumptionPoint?.shouldResume ?? false;
 
-      if (isRecovery) {
+      if (isRecovery && resumptionPoint) {
         console.log(`\n${'🔄'.repeat(30)}`);
         console.log(`🔄 [RECOVERY MODE] Resuming task from UNIFIED MEMORY`);
         console.log(`🔄   Resume from phase: ${resumptionPoint.resumeFromPhase || 'start'}`);
         console.log(`🔄   Resume from epic: ${resumptionPoint.resumeFromEpic || 'none'}`);
         console.log(`🔄   Resume from story: ${resumptionPoint.resumeFromStory || 'none'}`);
-        console.log(`🔄   Completed phases: ${resumptionPoint.completedPhases.join(', ') || 'none'}`);
-        console.log(`🔄   Completed epics: ${resumptionPoint.completedEpics.join(', ') || 'none'}`);
-        console.log(`🔄   Completed stories: ${resumptionPoint.completedStories.length} stories`);
+        console.log(`🔄   Completed phases: ${(resumptionPoint.completedPhases ?? []).join(', ') || 'none'}`);
+        console.log(`🔄   Completed epics: ${(resumptionPoint.completedEpics ?? []).join(', ') || 'none'}`);
+        console.log(`🔄   Completed stories: ${(resumptionPoint.completedStories ?? []).length} stories`);
         console.log(`${'🔄'.repeat(30)}\n`);
         NotificationService.emitConsoleLog(
           taskId,
           'info',
           `🔄 RECOVERY MODE: Resuming from ${resumptionPoint.resumeFromPhase || 'start'}. ` +
-          `${resumptionPoint.completedPhases.length} phases already completed.`
+          `${(resumptionPoint.completedPhases ?? []).length} phases already completed.`
         );
 
         // Check for pending approval to re-emit
@@ -179,15 +176,10 @@ export class OrchestrationCoordinator {
       );
       NotificationService.emitConsoleLog(taskId, 'info', `📋 Task request: ${taskDescription.substring(0, 200)}${taskDescription.length > 200 ? '...' : ''}`);
 
-      // ⚡ OPTIMIZATION: Parallel fetch of Repositories + User (both depend only on task)
-      const User = (await import('../../models/User')).User;
-      const [repositories, user] = await Promise.all([
-        Repository.find({
-          _id: { $in: task.repositoryIds || [] },
-          isActive: true,
-        }),
-        User.findById(task.userId).select('+accessToken +defaultApiKey'),
-      ]);
+      // ⚡ OPTIMIZATION: Fetch Repositories + User (both depend only on task)
+      const { UserRepository } = await import('../../database/repositories/UserRepository.js');
+      const repositories = RepositoryRepository.findByIds(task.repositoryIds || []);
+      const user = UserRepository.findById(task.userId, true); // includeSecrets=true for accessToken
 
       if (repositories.length === 0) {
         log.error(`Repository lookup failed`, {
@@ -212,12 +204,9 @@ export class OrchestrationCoordinator {
       }
 
       // Verify repositories belong to user's projects (security check)
-      const Project = (await import('../../models/Project')).Project;
-      const projectIds = [...new Set(repositories.map(r => r.projectId.toString()))];
-      const userProjects = await Project.find({
-        _id: { $in: projectIds },
-        userId: task.userId,
-      });
+      const { ProjectRepository } = await import('../../database/repositories/ProjectRepository.js');
+      const projectIds = [...new Set(repositories.map(r => r.projectId))];
+      const userProjects = ProjectRepository.findByIdsAndUser(projectIds, task.userId, true);
 
       if (userProjects.length !== projectIds.length) {
         throw new Error(
@@ -297,20 +286,19 @@ export class OrchestrationCoordinator {
       let apiKeySource = 'environment';
 
       // Get project to check for project-specific API key and dev auth config
-      // Note: Sensitive fields are encrypted - use decryption methods
-      const ProjectModel = (await import('../../models/Project')).Project;
+      // Note: Sensitive fields are encrypted - decryption is handled by the repository
       const project = userProjects.length > 0
-        ? await ProjectModel.findById(userProjects[0]._id).select('+apiKey +devAuth.token +devAuth.credentials.password')
+        ? ProjectRepository.findById(userProjects[0].id, true) // includeSecrets=true
         : null;
 
       if (project?.apiKey) {
-        // Use decryption method to get the actual API key
-        anthropicApiKey = project.getDecryptedApiKey() || project.apiKey;
+        // API key is already decrypted by repository when includeSecrets=true
+        anthropicApiKey = project.apiKey;
         apiKeySource = 'project';
         console.log(`🔑 Using project-specific API key (project: ${project.name})`);
-      } else if (user.defaultApiKey) {
-        // User model also has encryption - use decryption method
-        anthropicApiKey = user.getDecryptedApiKey ? user.getDecryptedApiKey() : user.defaultApiKey;
+      } else if (user?.defaultApiKey) {
+        // User API key is already decrypted by repository when includeSecrets=true
+        anthropicApiKey = user.defaultApiKey;
         apiKeySource = 'user_default';
         console.log(`🔑 Using user's default API key`);
       } else {
@@ -319,30 +307,28 @@ export class OrchestrationCoordinator {
 
       // 🔐 Store developer authentication config (if configured)
       // IMPORTANT: DELETE method is ALWAYS BLOCKED - developers can only use GET, PUT, POST
-      // Uses decryption method to get decrypted tokens and credentials
+      // DevAuth is already decrypted by repository when includeSecrets=true
       if (project?.devAuth && project.devAuth.method !== 'none') {
-        const decryptedDevAuth = project.getDecryptedDevAuth();
-        if (decryptedDevAuth) {
-          context.setData('devAuth', {
-            method: decryptedDevAuth.method,
-            // For 'token' method
-            token: decryptedDevAuth.token,
-            tokenType: decryptedDevAuth.tokenType || 'bearer',
-            tokenHeader: decryptedDevAuth.tokenHeader || 'Authorization',
-            tokenPrefix: decryptedDevAuth.tokenPrefix || 'Bearer ',
-            // For 'credentials' method
-            loginEndpoint: decryptedDevAuth.loginEndpoint,
-            loginMethod: decryptedDevAuth.loginMethod || 'POST',
-            credentials: decryptedDevAuth.credentials,
-            loginContentType: decryptedDevAuth.loginContentType || 'application/json',
-            tokenResponsePath: decryptedDevAuth.tokenResponsePath || 'token',
-          });
-          console.log(`🔐 Developer authentication configured (method: ${decryptedDevAuth.method})`);
-          if (decryptedDevAuth.method === 'credentials') {
-            console.log(`   📝 Login endpoint: ${decryptedDevAuth.loginEndpoint}`);
-          }
-          console.log(`   ⚠️  DELETE method is BLOCKED for safety - only GET, PUT, POST allowed`);
+        const devAuth = project.devAuth;
+        context.setData('devAuth', {
+          method: devAuth.method,
+          // For 'token' method
+          token: devAuth.token,
+          tokenType: devAuth.tokenType || 'bearer',
+          tokenHeader: devAuth.tokenHeader || 'Authorization',
+          tokenPrefix: devAuth.tokenPrefix || 'Bearer ',
+          // For 'credentials' method
+          loginEndpoint: devAuth.loginEndpoint,
+          loginMethod: devAuth.loginMethod || 'POST',
+          credentials: devAuth.credentials,
+          loginContentType: devAuth.loginContentType || 'application/json',
+          tokenResponsePath: devAuth.tokenResponsePath || 'token',
+        });
+        console.log(`🔐 Developer authentication configured (method: ${devAuth.method})`);
+        if (devAuth.method === 'credentials') {
+          console.log(`   📝 Login endpoint: ${devAuth.loginEndpoint}`);
         }
+        console.log(`   ⚠️  DELETE method is BLOCKED for safety - only GET, PUT, POST allowed`);
       }
 
       if (!anthropicApiKey) {
@@ -359,14 +345,13 @@ export class OrchestrationCoordinator {
       context.setData('apiKeySource', apiKeySource);
       context.setData('workspaceStructure', workspaceStructure);
 
-      // Mark task as in progress (atomic update to avoid version conflicts)
-      await Task.findByIdAndUpdate(task._id, {
-        $set: {
-          status: 'in_progress',
-          'orchestration.currentPhase': 'planning',
-          'orchestration.startedAt': new Date(),
-        },
-      });
+      // Mark task as in progress
+      TaskRepository.update(task.id, { status: 'in_progress' });
+      TaskRepository.modifyOrchestration(task.id, (orch) => ({
+        ...orch,
+        currentPhase: 'planning',
+        startedAt: new Date(),
+      }));
       task.status = 'in_progress';
       task.orchestration.currentPhase = 'planning';
 
@@ -417,7 +402,7 @@ export class OrchestrationCoordinator {
 
         // === ONLY REACH HERE IF PHASE WILL EXECUTE ===
         // Check pause/cancel (only for phases we'll actually run)
-        const freshTask = await Task.findById(task._id).select('orchestration.paused orchestration.cancelRequested').lean();
+        const freshTask = TaskRepository.findById(task.id);
 
         if (freshTask?.orchestration?.paused) {
           console.log(`⏸️  [Orchestration] Task paused by user`);
@@ -427,9 +412,11 @@ export class OrchestrationCoordinator {
 
         if (freshTask?.orchestration?.cancelRequested) {
           console.log(`🛑 [Orchestration] Task cancelled`);
-          await Task.findByIdAndUpdate(task._id, {
-            $set: { status: 'cancelled', 'orchestration.currentPhase': 'completed' },
-          });
+          TaskRepository.update(task.id, { status: 'cancelled' });
+          TaskRepository.modifyOrchestration(task.id, (orch) => ({
+            ...orch,
+            currentPhase: 'completed',
+          }));
           task.status = 'cancelled';
           NotificationService.emitTaskFailed(taskId, { error: 'Task cancelled by user' });
           CostBudgetService.cleanupTaskConfig(taskId);
@@ -494,15 +481,14 @@ export class OrchestrationCoordinator {
         // 🎯 UNIFIED MEMORY: Mark phase as STARTED
         await unifiedMemoryService.markPhaseStarted(taskId, phaseName);
 
-        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing (atomic to avoid version conflicts)
+        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing
         // This ensures recovery knows where to resume from if server crashes
         const phaseEnum = this.mapPhaseToEnum(phaseName);
-        await Task.findByIdAndUpdate(task._id, {
-          $set: {
-            'orchestration.currentPhase': phaseEnum,
-            'orchestration.lastPhaseUpdate': new Date(),
-          },
-        });
+        TaskRepository.modifyOrchestration(task.id, (orch) => ({
+          ...orch,
+          currentPhase: phaseEnum,
+          lastPhaseUpdate: new Date(),
+        }));
         task.orchestration.currentPhase = phaseEnum; // Keep local copy in sync
         console.log(`📍 [Orchestration] Phase tracking updated: ${phaseName} → ${phaseEnum}`);
 
@@ -530,8 +516,8 @@ export class OrchestrationCoordinator {
             console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying with top model from user's config`);
 
             // Get current model config to find the top model
-            const task = await Task.findById(taskId);
-            if (task) {
+            const retryTask = TaskRepository.findById(taskId);
+            if (retryTask) {
               const configs = await import('../../config/ModelConfigurations');
 
               // Get current model config (default to RECOMMENDED for optimal quality/cost)
@@ -959,15 +945,20 @@ export class OrchestrationCoordinator {
     }
 
     try {
-      // Update the phase status in MongoDB
-      const updateObj: Record<string, any> = {};
-      updateObj[`${fieldPath}.status`] = 'completed';
-      updateObj[`${fieldPath}.skippedOnRecovery`] = true;
-      updateObj[`${fieldPath}.skippedAt`] = new Date();
+      // Update the phase status in SQLite
+      TaskRepository.modifyOrchestration(taskId, (orch: IOrchestration) => {
+        const parts = fieldPath.split('.');
+        const phaseKey = parts[parts.length - 1] as keyof IOrchestration;
+        const phaseData = orch[phaseKey] as Record<string, unknown> | undefined;
+        if (phaseData) {
+          (phaseData as Record<string, unknown>).status = 'completed';
+          (phaseData as Record<string, unknown>).skippedOnRecovery = true;
+          (phaseData as Record<string, unknown>).skippedAt = new Date();
+        }
+        return orch;
+      });
 
-      await Task.findByIdAndUpdate(taskId, { $set: updateObj });
-
-      console.log(`   ✅ [${phaseName}] Synced skipped phase to MongoDB: ${fieldPath}.status = 'completed'`);
+      console.log(`   ✅ [${phaseName}] Synced skipped phase to SQLite: ${fieldPath}.status = 'completed'`);
     } catch (error: any) {
       console.warn(`   ⚠️ [${phaseName}] Failed to sync skipped phase to DB:`, error.message);
       // Don't throw - this is a best-effort sync
@@ -1031,10 +1022,7 @@ export class OrchestrationCoordinator {
     taskId: string
   ): Promise<Array<{ id: string; content: string; priority: string }>> {
     // Refresh task to get latest directives
-    // ⚡ OPTIMIZATION: Only fetch pendingDirectives field with lean() for speed
-    const freshTask = await Task.findById(task._id)
-      .select('orchestration.pendingDirectives')
-      .lean();
+    const freshTask = TaskRepository.findById(task.id);
     if (!freshTask) return [];
 
     const pendingDirectives = freshTask.orchestration?.pendingDirectives || [];
@@ -1044,7 +1032,14 @@ export class OrchestrationCoordinator {
     // A directive matches if:
     // 1. No targetPhase specified (applies to all), OR
     // 2. targetPhase matches current phase
-    const matchingDirectives = pendingDirectives.filter(d => {
+    interface PendingDirective {
+      id: string;
+      content: string;
+      priority: string;
+      consumed?: boolean;
+      targetPhase?: string;
+    }
+    const matchingDirectives = pendingDirectives.filter((d: PendingDirective) => {
       if (d.consumed) return false;
       if (!d.targetPhase) return true; // No target = applies to all
       return d.targetPhase.toLowerCase() === phaseName.toLowerCase();
@@ -1059,7 +1054,7 @@ export class OrchestrationCoordinator {
       'normal': 2,
       'suggestion': 3,
     };
-    matchingDirectives.sort((a, b) =>
+    matchingDirectives.sort((a: PendingDirective, b: PendingDirective) =>
       (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3)
     );
 
@@ -1090,15 +1085,18 @@ export class OrchestrationCoordinator {
     directiveHistory.push(...matchingDirectives as any);
 
     // Remove consumed directives from pending
-    const newPendingDirectives = pendingDirectives.filter(d => !d.consumed);
+    const newPendingDirectives = pendingDirectives.filter((d: PendingDirective) => !d.consumed);
 
-    // Fire-and-forget update to MongoDB
-    updateTaskFireAndForget(task._id, {
-      $set: {
-        'orchestration.pendingDirectives': newPendingDirectives,
-        'orchestration.directiveHistory': directiveHistory,
-      }
-    }, 'consume directives');
+    // Fire-and-forget update to SQLite
+    try {
+      TaskRepository.modifyOrchestration(task.id, (orch: IOrchestration) => ({
+        ...orch,
+        pendingDirectives: newPendingDirectives,
+        directiveHistory: directiveHistory as IOrchestration['directiveHistory'],
+      }));
+    } catch (err) {
+      console.warn(`⚠️ [Directives] Failed to update directives: ${(err as Error).message}`);
+    }
 
     // Update the task reference with fresh data
     task.orchestration.pendingDirectives = newPendingDirectives;
@@ -1122,14 +1120,22 @@ export class OrchestrationCoordinator {
    */
   private async getDirectivesForAgent(taskId: string, agentType: string): Promise<string> {
     try {
-      const task = await Task.findById(taskId);
+      const task = TaskRepository.findById(taskId);
       if (!task) return '';
 
       const pendingDirectives = task.orchestration.pendingDirectives || [];
       if (pendingDirectives.length === 0) return '';
 
+      interface AgentDirective {
+        id: string;
+        content: string;
+        priority: string;
+        consumed?: boolean;
+        targetAgent?: string;
+      }
+
       // Filter directives that apply to this agent
-      const matchingDirectives = pendingDirectives.filter(d => {
+      const matchingDirectives = pendingDirectives.filter((d: AgentDirective) => {
         if (d.consumed) return false;
         // No targetAgent = applies to all, OR matches this agent
         return !d.targetAgent || d.targetAgent === agentType;
@@ -1152,11 +1158,11 @@ export class OrchestrationCoordinator {
         'normal': 2,
         'suggestion': 3,
       };
-      matchingDirectives.sort((a, b) =>
+      matchingDirectives.sort((a: AgentDirective, b: AgentDirective) =>
         (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3)
       );
 
-      const formattedDirectives = matchingDirectives.map(d => {
+      const formattedDirectives = matchingDirectives.map((d: AgentDirective) => {
         const emoji = priorityEmoji[d.priority] || '💡';
         return `${emoji} **[${d.priority.toUpperCase()}]** ${d.content}`;
       }).join('\n\n');
@@ -1383,7 +1389,7 @@ ${formattedDirectives}
       isResume?: boolean;          // Flag indicating this is a resume
     }
   ): Promise<{ output?: string; cost?: number; sdkSessionId?: string; lastMessageUuid?: string } | void> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // 🚀 RETRY OPTIMIZATION: Use topModel when Judge rejected code
     if (forceTopModel && judgeFeedback) {
@@ -1481,7 +1487,7 @@ ${formattedDirectives}
         console.error(`   🔥 CRITICAL: This should have been set by TechLeadPhase - check EventStore`);
 
         // Mark task as failed instead of using dangerous fallback (fire-and-forget)
-        updateTaskFireAndForget(task._id, { status: 'failed' }, 'mark failed - no targetRepository');
+        updateTaskFireAndForget(task.id, { status: 'failed' }, 'mark failed - no targetRepository');
 
         throw new Error(`Story ${story.id} has no targetRepository - cannot execute developer. Task marked as FAILED.`);
       }
@@ -1564,7 +1570,7 @@ ${formattedDirectives}
 
       // 🔥 Build developer prompt using extracted builder (Rich context per SDK philosophy)
       const projectId = task.projectId?.toString() || '';
-      const directivesBlock = await this.getDirectivesForAgent(task._id as any, 'developer');
+      const directivesBlock = await this.getDirectivesForAgent(task.id as any, 'developer');
 
       // Get project radiography for this repo
       let projectRadiography: any = undefined;
@@ -1841,7 +1847,7 @@ ${formattedDirectives}
         // This is idempotent - if TechLead already emitted this event, it just updates with same value
         const { eventStore } = await import('../EventStore');
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'StoryBranchCreated',
           agentName: 'developer',
           payload: {
@@ -1887,7 +1893,7 @@ ${formattedDirectives}
     workspacePath: string | null
   ): Promise<void> {
     try {
-      const taskId = (task._id as any).toString();
+      const taskId = (task.id as any).toString();
       const repositories = context.repositories || [];
       const primaryRepo = repositories[0]?.name;
 
@@ -1953,7 +1959,7 @@ ${formattedDirectives}
 
       // 📦 EVENTS BACKUP: Save all EventStore events to Local + GitHub
       // This ensures MongoDB events are mirrored to Local for recovery
-      await eventStore.backupEvents(task._id, workspacePath, primaryRepo);
+      await eventStore.backupEvents(task.id, workspacePath, primaryRepo);
       console.log(`📦 [EventStore] Events backed up after ${completedPhase} phase`);
     } catch (error: any) {
       // Non-blocking - timeline is backup, not critical
@@ -1970,7 +1976,7 @@ ${formattedDirectives}
     task.orchestration.currentPhase = this.mapPhaseToEnum(phaseName);
     saveTaskFireAndForget(task, 'phase failed');
 
-    NotificationService.emitTaskFailed((task._id as any).toString(), {
+    NotificationService.emitTaskFailed((task.id as any).toString(), {
       phase: phaseName,
       error: result.error || 'Phase failed',
     });
@@ -2083,7 +2089,7 @@ ${formattedDirectives}
     // Collect PRs from epics
     const pullRequests: { epicName: string; prNumber: number; prUrl: string; repository: string }[] = [];
     const { eventStore } = await import('../EventStore');
-    const currentState = await eventStore.getCurrentState(task._id as any);
+    const currentState = await eventStore.getCurrentState(task.id as any);
 
     if (currentState.epics && Array.isArray(currentState.epics)) {
       for (const epic of currentState.epics) {
@@ -2099,7 +2105,7 @@ ${formattedDirectives}
     }
 
     // Emit orchestration completed with detailed cost summary and PRs
-    NotificationService.emitOrchestrationCompleted((task._id as any).toString(), {
+    NotificationService.emitOrchestrationCompleted((task.id as any).toString(), {
       totalCost: realTotalCost,
       totalTokens: realTotalTokens,
       totalInputTokens,
@@ -2127,7 +2133,7 @@ ${formattedDirectives}
     console.log(`${'='.repeat(80)}\n`);
 
     // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // Clean up cost budget config
     CostBudgetService.cleanupTaskConfig(taskId);

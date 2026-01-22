@@ -8,7 +8,7 @@
  * - Circuit breaker for external services
  */
 
-import { Task } from '../models/Task';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { NotificationService } from './NotificationService';
 import { LogService } from './logging/LogService';
 
@@ -140,23 +140,10 @@ class ProductionMonitoringService {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      const result = await Task.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: today },
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalCost: { $sum: '$orchestration.totalCost' },
-            taskCount: { $sum: 1 },
-          },
-        },
-      ]);
-
-      const dailyCost = result[0]?.totalCost || 0;
-      const taskCount = result[0]?.taskCount || 0;
+      // Get tasks created today and calculate totals
+      const todayTasks = TaskRepository.findAll({ createdAfter: today });
+      const taskCount = todayTasks.length;
+      const dailyCost = todayTasks.reduce((sum, task) => sum + (task.orchestration.totalCost || 0), 0);
 
       // Check daily limit
       if (dailyCost >= this.DAILY_COST_LIMIT * 0.8) {
@@ -203,20 +190,19 @@ class ProductionMonitoringService {
     try {
       const stuckThreshold = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours
 
-      const stuckTasks = await Task.find({
-        status: 'in_progress',
-        updatedAt: { $lt: stuckThreshold },
-      }).select('_id title updatedAt').lean();
+      // Find tasks that are in_progress and haven't been updated recently
+      const inProgressTasks = TaskRepository.findAll({ status: 'in_progress' });
+      const stuckTasks = inProgressTasks.filter(task => task.updatedAt < stuckThreshold);
 
       if (stuckTasks.length > 0) {
         console.warn(`⚠️ [Monitoring] Found ${stuckTasks.length} potentially stuck task(s)`);
 
         for (const task of stuckTasks) {
           const hoursStuck = Math.floor((Date.now() - new Date(task.updatedAt).getTime()) / (60 * 60 * 1000));
-          console.warn(`   - Task ${task._id}: "${task.title}" (stuck for ${hoursStuck}h)`);
+          console.warn(`   - Task ${task.id}: "${task.title}" (stuck for ${hoursStuck}h)`);
 
           NotificationService.emitConsoleLog(
-            (task._id as any).toString(),
+            task.id,
             'warn',
             `⚠️ Task appears stuck (no update for ${hoursStuck}h)`
           );

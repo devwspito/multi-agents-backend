@@ -40,7 +40,7 @@ export class GitValidationStageExecutor {
 
       // Get updated story with branch info
       const { eventStore } = await import('../../../EventStore');
-      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedState = await eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       if (!updatedStory || !updatedStory.branchName) {
@@ -107,7 +107,7 @@ export class GitValidationStageExecutor {
           try {
             const { eventStore: es } = await import('../../../EventStore');
             await es.verifyStoryPush({
-              taskId: task._id as any,
+              taskId: task.id as any,
               storyId: story.id,
               branchName: storyBranch,
               repoPath,

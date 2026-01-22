@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { approvalEvents } from '../ApprovalEvents'; // Event-based approval system
 import { NotificationService } from '../NotificationService';
+import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 
 /**
  * Approval Phase
@@ -46,13 +47,12 @@ export class ApprovalPhase extends BasePhase {
     const task = context.task;
 
     // Refresh task to get latest state
-    const Task = require('../../models/Task').Task;
-    const freshTask = await Task.findById(task._id);
+    const freshTask = TaskRepository.findById(task.id);
     if (freshTask) {
       context.task = freshTask;
     }
 
-    const taskId = (context.task._id as any).toString();
+    const taskId = (context.task.id as any).toString();
 
     // 🔥 FIX: Check for existing pendingApproval in DB (recovery scenario)
     // If there's a pending approval, we MUST NOT skip - re-emit and wait
@@ -96,12 +96,13 @@ export class ApprovalPhase extends BasePhase {
         phase: previousPhase,
         phaseName: this.getPhaseName(previousPhase),
         approved: true,
+        approvedBy: 'system',
         approvedAt: new Date(),
         comments: 'Auto-approved',
         autoApproved: true,
       });
 
-      await context.task.save();
+      TaskRepository.update(context.task.id, context.task);
 
       return true; // Skip human approval
     }
@@ -133,7 +134,7 @@ export class ApprovalPhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const previousPhase = context.getData<string>('currentPhaseName');
 
     // 🔥 FIX: Check if we recovered a pending approval from DB (recovery scenario)
@@ -164,18 +165,18 @@ export class ApprovalPhase extends BasePhase {
     // 📌 Persist pending approval data for re-emit on socket reconnect
     // Only persist if not already in DB (fresh execution, not recovery)
     if (!isRecovery) {
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(task._id, {
-        $set: {
-          'orchestration.pendingApproval': {
-            phase: normalizedPhase,
-            phaseName: phaseName,
-            agentOutput: agentOutput,
-            retryCount: 0,
-            timestamp: new Date(),
-          },
-        },
-      });
+      const currentTask = TaskRepository.findById(task.id);
+      if (currentTask) {
+        const orchestration = currentTask.orchestration || {};
+        orchestration.pendingApproval = {
+          phase: normalizedPhase,
+          phaseName: phaseName,
+          agentOutput: agentOutput,
+          retryCount: 0,
+          timestamp: new Date(),
+        };
+        TaskRepository.update(task.id, { orchestration });
+      }
     }
 
     // Emit WebSocket notification to frontend
@@ -198,8 +199,7 @@ export class ApprovalPhase extends BasePhase {
       );
 
       // Refresh task to get updated state after approval
-      const Task = require('../../models/Task').Task;
-      const freshTask = await Task.findById(task._id);
+      const freshTask = TaskRepository.findById(task.id);
       if (freshTask) {
         Object.assign(task, freshTask);
         context.task = freshTask;
@@ -209,7 +209,7 @@ export class ApprovalPhase extends BasePhase {
       context.setData('approvalPending', false);
 
       // 📌 Clear persisted pending approval (fire-and-forget)
-      updateTaskFireAndForget(task._id, {
+      updateTaskFireAndForget(task.id, {
         $unset: { 'orchestration.pendingApproval': 1 },
       }, 'clear pendingApproval');
 

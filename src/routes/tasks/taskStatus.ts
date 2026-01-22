@@ -11,7 +11,7 @@ import {
   Router,
   authenticate,
   AuthRequest,
-  Task,
+  TaskRepository,
 } from './shared';
 
 const router = Router();
@@ -22,12 +22,7 @@ const router = Router();
  */
 router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('status orchestration')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -67,10 +62,7 @@ router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id/logs', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).select('logs');
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -101,12 +93,7 @@ router.get('/:id/logs', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id/orchestration', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('orchestration')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({

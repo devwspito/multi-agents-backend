@@ -70,9 +70,9 @@ export class AutoMergePhase extends BasePhase {
     // Check if there are PRs to merge
     // 🔥 RECOVERY: Check BOTH EventStore and UnifiedMemory for PR info
     const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
+    const state = await eventStore.getCurrentState(task.id as any);
     const epics = state.epics || [];
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // Type for epic with PR info
     interface EpicWithPR {
@@ -102,7 +102,7 @@ export class AutoMergePhase extends BasePhase {
       console.log(`   🔄 [AutoMerge] EventStore has no PRs - checking UnifiedMemory...`);
       try {
         const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-        if (resumption.completedEpics && resumption.completedEpics.length > 0) {
+        if (resumption && resumption.completedEpics && resumption.completedEpics.length > 0) {
           // For each completed epic, check if we have PR info in UnifiedMemory
           for (const epicId of resumption.completedEpics) {
             const prInfo = await unifiedMemoryService.getEpicPR(taskId, epicId);
@@ -142,7 +142,7 @@ export class AutoMergePhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // Initialize autoMerge in task model
     if (!(context.task.orchestration as any).autoMerge) {
@@ -249,18 +249,18 @@ export class AutoMergePhase extends BasePhase {
           console.log(`${'🔌'.repeat(40)}\n`);
 
           try {
-            const { Task: TaskModel } = await import('../../models/Task');
+            const { TaskRepository: TaskRepo } = await import('../../database/repositories/TaskRepository.js');
 
-            // Get the target repository ObjectId
+            // Get the target repository
             const targetRepoName = pendingIntegration.targetRepository;
             const repos = context.repositories || [];
-            const targetRepo = repos.find(r =>
+            const targetRepo = repos.find((r: any) =>
               r.name === targetRepoName ||
               r.githubRepoName === targetRepoName ||
               r.full_name?.includes(targetRepoName)
             );
 
-            const integrationTask = await TaskModel.create({
+            const integrationTask = TaskRepo.create({
               title: `[AUTO] ${pendingIntegration.title}`,
               description: pendingIntegration.description +
                 `\n\n---\n**Auto-generated Integration Task**\n\n` +
@@ -268,8 +268,7 @@ export class AutoMergePhase extends BasePhase {
                 `**Files to Create:**\n${pendingIntegration.filesToCreate.map((f: string) => `- ${f}`).join('\n')}`,
               userId: task.userId,
               projectId: task.projectId,
-              repositoryIds: targetRepo ? [targetRepo._id] : task.repositoryIds,
-              status: 'pending',
+              repositoryIds: targetRepo ? [targetRepo.id] : task.repositoryIds,
               priority: 'high',
               orchestration: {
                 totalCost: 0,
@@ -280,10 +279,10 @@ export class AutoMergePhase extends BasePhase {
 
             // Update pending integration status
             (task.orchestration as any).pendingIntegrationTask.status = 'created';
-            (task.orchestration as any).pendingIntegrationTask.createdTaskId = integrationTask._id;
+            (task.orchestration as any).pendingIntegrationTask.createdTaskId = integrationTask.id;
             saveTaskFireAndForget(task, 'integration task created');
 
-            console.log(`✅ Integration Task created: ${integrationTask._id}`);
+            console.log(`✅ Integration Task created: ${integrationTask.id}`);
             console.log(`   Title: ${integrationTask.title}`);
             console.log(`   Target Repo: ${targetRepoName}`);
 
@@ -291,14 +290,14 @@ export class AutoMergePhase extends BasePhase {
               taskId,
               'info',
               `🔌 Integration Task created automatically!\n` +
-              `   ID: ${integrationTask._id}\n` +
+              `   ID: ${integrationTask.id}\n` +
               `   Title: ${integrationTask.title}\n` +
               `   Status: Ready to start`
             );
 
             // Emit special event for frontend
             NotificationService.emitNotification(taskId, 'integration_task_created', {
-              integrationTaskId: integrationTask._id.toString(),
+              integrationTaskId: integrationTask.id,
               title: integrationTask.title,
               message: 'Integration task created and ready to start',
             });

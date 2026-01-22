@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { BasePhase, OrchestrationContext, PhaseResult, saveTaskFireAndForget } from './Phase';
-import { IStory } from '../../models/Task';
+import { IStory } from '../../database/repositories/TaskRepository.js';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { AgentActivityService } from '../AgentActivityService';
@@ -390,7 +390,9 @@ export class JudgePhase extends BasePhase {
     }
 
     const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-    const epic = resumption.executionMap?.epics?.find(e => e.epicId === teamEpic.id);
+    if (!resumption) return false;
+
+    const epic = resumption.executionMap?.epics?.find((e: any) => e.epicId === teamEpic.id);
 
     // Check if ALL stories for THIS EPIC have been judged
     if (epic && epic.status === 'completed') {
@@ -402,7 +404,7 @@ export class JudgePhase extends BasePhase {
 
     // Check if all stories approved
     if (isNotEmpty(epic?.stories)) {
-      const approvedStories = epic.stories.filter(s => s.judgeVerdict === 'approved');
+      const approvedStories = epic.stories.filter((s: any) => s.judgeVerdict === 'approved');
       const totalStories = epic.stories.length;
 
       console.log(`   📋 ${approvedStories.length}/${totalStories} stories approved`);
@@ -422,7 +424,7 @@ export class JudgePhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const workspacePath = context.workspacePath;
 
     // 🔥 CHECK REVIEW MODE: Single story or all stories?
@@ -440,7 +442,7 @@ export class JudgePhase extends BasePhase {
     } else {
       // Full batch review mode (called from orchestration)
       const { eventStore } = await import('../EventStore');
-      const state = await eventStore.getCurrentState(task._id as any);
+      const state = await eventStore.getCurrentState(task.id as any);
       stories = (state.stories || []) as any;
       console.log(`📋 [Judge] Batch review mode: Retrieved ${stories.length} stories from EventStore`);
     }
@@ -770,7 +772,7 @@ export class JudgePhase extends BasePhase {
       // 🔥 ATOMIC FIX: Store evaluation atomically to prevent race conditions
       // Use addOrUpdateJudgeEvaluation instead of direct array manipulation
       if (!multiTeamMode) {
-        const taskIdStr = (task._id as any).toString();
+        const taskIdStr = (task.id as any).toString();
         await addOrUpdateJudgeEvaluation(taskIdStr, {
           storyId: story.id,
           developerId: developer.instanceId,
@@ -820,7 +822,7 @@ export class JudgePhase extends BasePhase {
             await AgentArtifactService.saveJudgeArtifact(
               workspacePath,
               targetRepo,
-              (task._id as any).toString(),
+              (task.id as any).toString(),
               'developer',
               story.id,
               {
@@ -835,7 +837,7 @@ export class JudgePhase extends BasePhase {
         }
 
         NotificationService.emitAgentMessage(
-          (task._id as any).toString(),
+          (task.id as any).toString(),
           'Judge',
           `✅ Story **"${story.title}"** approved by Judge`
         );
@@ -857,7 +859,7 @@ export class JudgePhase extends BasePhase {
         }
 
         NotificationService.emitAgentMessage(
-          (task._id as any).toString(),
+          (task.id as any).toString(),
           'Judge',
           `🔄 Story **"${story.title}"** needs changes (attempt ${attempt}/${this.MAX_RETRIES}):\n\n${evaluation.feedback}`
         );
@@ -912,7 +914,7 @@ export class JudgePhase extends BasePhase {
             // 🔥 Retry failed catastrophically - mark story as failed and stop retrying
             console.error(`❌ [Judge] Developer retry failed catastrophically: ${retryError.message}`);
             NotificationService.emitAgentMessage(
-              (task._id as any).toString(),
+              (task.id as any).toString(),
               'Judge',
               `❌ Story **"${story.title}"** retry FAILED: ${retryError.message}`
             );
@@ -967,7 +969,7 @@ export class JudgePhase extends BasePhase {
               await AgentArtifactService.saveJudgeArtifact(
                 workspacePath,
                 targetRepo,
-                (task._id as any).toString(),
+                (task.id as any).toString(),
                 'developer',
                 story.id,
                 {
@@ -984,7 +986,7 @@ export class JudgePhase extends BasePhase {
 
           // Emit notification to UI
           NotificationService.emitAgentMessage(
-            (task._id as any).toString(),
+            (task.id as any).toString(),
             'Judge',
             `🆘 **HUMAN INTERVENTION REQUIRED**\n\n` +
             `Story **"${story.title}"** failed after ${this.MAX_RETRIES} attempts.\n\n` +
@@ -998,7 +1000,7 @@ export class JudgePhase extends BasePhase {
 
           // Also emit a special "human_intervention_required" event
           NotificationService.emitConsoleLog(
-            (task._id as any).toString(),
+            (task.id as any).toString(),
             'error',
             `🆘 HUMAN INTERVENTION REQUIRED: Story "${story.title}" needs manual review`
           );
@@ -1117,7 +1119,7 @@ export class JudgePhase extends BasePhase {
     let targetRepository = getDataOptional<string>(context, 'targetRepository');
     if (!targetRepository && (story as any).epicId) {
       const { eventStore } = await import('../EventStore');
-      const state = await eventStore.getCurrentState(task._id as any);
+      const state = await eventStore.getCurrentState(task.id as any);
       const epic = state.epics?.find((e: any) => e.id === (story as any).epicId);
 
       if (!epic) {
@@ -1254,7 +1256,7 @@ export class JudgePhase extends BasePhase {
           console.log(`   ❌ Semantic verification FAILED - ${semanticVerificationResult.violations.filter(v => v.severity === 'error').length} errors found`);
           // Emit to frontend
           NotificationService.emitConsoleLog(
-            task._id?.toString() || '',
+            task.id?.toString() || '',
             'warn',
             `🔬 Semantic verification found ${semanticVerificationResult.violations.filter(v => v.severity === 'error').length} errors - Judge will reject`
           );
@@ -1291,7 +1293,7 @@ export class JudgePhase extends BasePhase {
         if (!testResult.passed) {
           console.log(`   ❌ Tests FAILED - ${testResult.failedTests} test(s) failing`);
           NotificationService.emitConsoleLog(
-            task._id?.toString() || '',
+            task.id?.toString() || '',
             'warn',
             `🧪 ${testResult.failedTests} test(s) failed - Judge will reject: ${testResult.failedTestNames.slice(0, 3).join(', ')}`
           );
@@ -1311,7 +1313,7 @@ export class JudgePhase extends BasePhase {
     // 🏛️ UNIFIED: Use external prompt from JudgePrompts.ts
     const basePrompt = buildDeveloperJudgePrompt({
       projectId: task.projectId?.toString() || '',
-      taskId: task._id?.toString() || '',
+      taskId: task.id?.toString() || '',
       story,
       developer,
       workspacePath: workspacePath || undefined, // 🔥 CRITICAL: Pass workspace so Judge uses correct paths
@@ -1334,14 +1336,14 @@ export class JudgePhase extends BasePhase {
     // Convert taskId with extra safety
     let taskId: string;
     try {
-      console.log(`🔍 [Judge] About to convert task._id to string...`);
-      console.log(`   task._id type: ${typeof task._id}`);
-      console.log(`   task._id value: ${task._id}`);
-      taskId = task._id ? task._id.toString() : 'unknown-task';
+      console.log(`🔍 [Judge] About to convert task.id to string...`);
+      console.log(`   task.id type: ${typeof task.id}`);
+      console.log(`   task.id value: ${task.id}`);
+      taskId = task.id ? task.id.toString() : 'unknown-task';
       console.log(`✅ [Judge] taskId converted: ${taskId}`);
     } catch (conversionError: any) {
-      console.error(`❌ [Judge] Failed to convert task._id: ${conversionError.message}`);
-      throw new Error(`Cannot convert task._id to string: ${conversionError.message}`);
+      console.error(`❌ [Judge] Failed to convert task.id: ${conversionError.message}`);
+      throw new Error(`Cannot convert task.id to string: ${conversionError.message}`);
     }
     if (isNotEmpty(attachments)) {
       console.log(`📎 [Judge] Using ${attachments.length} attachment(s) from context`);
@@ -1668,7 +1670,7 @@ export class JudgePhase extends BasePhase {
   ): Promise<void> {
     console.log(`🔄 [Judge] Developer ${developer.instanceId} retrying story "${story.title}" with feedback`);
 
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // 🔥 CRITICAL: Use the ISOLATED story workspace for developer retry
     // With isolated workspaces per story (DEV+JUDGE pair), both use the SAME workspace:
@@ -1786,7 +1788,7 @@ npm test             # Must pass
 
     // Get EventStore state for stories and epics
     const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
+    const state = await eventStore.getCurrentState(task.id as any);
 
     // 🔥 CRITICAL: Verify story has branchName before retry
     const storyFromEventStore = state.stories.find((s: any) => s.id === story.id);
@@ -1897,7 +1899,7 @@ npm test             # Must pass
 
       for (let retryAttempt = 0; retryAttempt < maxRetries; retryAttempt++) {
         try {
-          const updatedState = await eventStore.getCurrentState(task._id as any);
+          const updatedState = await eventStore.getCurrentState(task.id as any);
           updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
           if (updatedStory && updatedStory.branchName) {
@@ -1957,7 +1959,7 @@ npm test             # Must pass
           const targetRepository = story.targetRepository ||
             (await (async () => {
               const { eventStore } = await import('../EventStore');
-              const state = await eventStore.getCurrentState(task._id as any);
+              const state = await eventStore.getCurrentState(task.id as any);
               const epic = state.epics?.find((e: any) => e.stories?.includes(story.id));
               return epic?.targetRepository;
             })());

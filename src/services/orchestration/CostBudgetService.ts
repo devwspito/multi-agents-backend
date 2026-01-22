@@ -5,7 +5,7 @@
  * costs in multi-agent orchestration to prevent runaway expenses.
  */
 
-import { ITask } from '../../models/Task';
+import { ITask } from '../../database/repositories/TaskRepository.js';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 
@@ -59,7 +59,7 @@ export class CostBudgetService {
     phaseName: string,
     estimatedPhaseCost?: number
   ): Promise<{ allowed: boolean; reason?: string; warning?: string }> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const config = this.getConfigForTask(taskId);
     const currentCost = task.orchestration.totalCost || 0;
 
@@ -164,7 +164,7 @@ export class CostBudgetService {
    * Calculate remaining budget
    */
   static getRemainingBudget(task: ITask): number {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const config = this.getConfigForTask(taskId);
     const currentCost = task.orchestration.totalCost || 0;
     return Math.max(0, config.maxTaskCostUSD - currentCost);
@@ -180,7 +180,7 @@ export class CostBudgetService {
     status: 'healthy' | 'warning' | 'critical' | 'exceeded';
     remainingUSD: number;
   } {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const config = this.getConfigForTask(taskId);
     const used = task.orchestration.totalCost || 0;
     const limit = config.maxTaskCostUSD;
@@ -233,7 +233,7 @@ export class CostBudgetService {
    * Emit budget notification to frontend
    */
   static async emitBudgetUpdate(task: ITask): Promise<void> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const status = this.getBudgetStatus(task);
 
     NotificationService.emitNotification(taskId, 'budget_update', {

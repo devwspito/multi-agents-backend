@@ -7,34 +7,31 @@
  * PROBLEM: Multiple phases (DevelopersPhase, JudgePhase) can create/update
  * task.orchestration.judge at the same time, causing overwrites.
  *
- * SOLUTION: Use MongoDB atomic operations ($setOnInsert, $push, $set with conditions)
+ * SOLUTION: Use TaskRepository.modifyOrchestration which provides atomic
+ * read-modify-write operations via SQLite.
  */
 
-import { Task } from '../models/Task';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 
 /**
  * Atomically initialize judge orchestration data if it doesn't exist
- * Uses $setOnInsert to prevent race conditions
  */
 export async function initializeJudgeOrchestration(taskId: string): Promise<void> {
-  await Task.findByIdAndUpdate(
-    taskId,
-    {
-      $setOnInsert: {
-        'orchestration.judge': {
-          status: 'in_progress',
-          evaluations: [],
-          startedAt: new Date(),
-        },
-      },
-    },
-    { upsert: false, new: false }
-  );
+  TaskRepository.modifyOrchestration(taskId, (orch) => {
+    if (!orch.judge) {
+      orch.judge = {
+        agent: 'judge',
+        status: 'in_progress',
+        evaluations: [],
+        startedAt: new Date(),
+      } as any;
+    }
+    return orch;
+  });
 }
 
 /**
  * Atomically add or update a judge evaluation
- * Uses findOneAndUpdate with arrayFilters to update specific array element
  */
 export async function addOrUpdateJudgeEvaluation(
   taskId: string,
@@ -49,51 +46,44 @@ export async function addOrUpdateJudgeEvaluation(
 ): Promise<void> {
   const timestamp = evaluation.timestamp || new Date();
 
-  // Try to update existing evaluation
-  const result = await Task.findOneAndUpdate(
-    {
-      _id: taskId,
-      'orchestration.judge.evaluations': {
-        $elemMatch: {
-          storyId: evaluation.storyId,
-          developerId: evaluation.developerId,
-        },
-      },
-    },
-    {
-      $set: {
-        'orchestration.judge.evaluations.$[elem].status': evaluation.status,
-        'orchestration.judge.evaluations.$[elem].feedback': evaluation.feedback,
-        'orchestration.judge.evaluations.$[elem].iteration': evaluation.iteration,
-        'orchestration.judge.evaluations.$[elem].timestamp': timestamp,
-      },
-    },
-    {
-      arrayFilters: [
-        {
-          'elem.storyId': evaluation.storyId,
-          'elem.developerId': evaluation.developerId,
-        },
-      ],
-      new: true,
+  TaskRepository.modifyOrchestration(taskId, (orch) => {
+    if (!orch.judge) {
+      orch.judge = {
+        agent: 'judge',
+        status: 'in_progress',
+        evaluations: [],
+        startedAt: new Date(),
+      } as any;
     }
-  );
 
-  // If no existing evaluation found, push new one
-  if (!result) {
-    await Task.findByIdAndUpdate(
-      taskId,
-      {
-        $push: {
-          'orchestration.judge.evaluations': {
-            ...evaluation,
-            timestamp,
-          },
-        },
-      },
-      { new: true }
+    const judge = orch.judge!;
+    const evaluations = judge.evaluations || [];
+
+    // Try to find existing evaluation
+    const existingIdx = evaluations.findIndex(
+      (e: any) => e.storyId === evaluation.storyId && e.developerId === evaluation.developerId
     );
-  }
+
+    if (existingIdx >= 0) {
+      // Update existing
+      evaluations[existingIdx] = {
+        ...evaluations[existingIdx],
+        status: evaluation.status,
+        feedback: evaluation.feedback,
+        iteration: evaluation.iteration,
+        timestamp,
+      };
+    } else {
+      // Add new
+      evaluations.push({
+        ...evaluation,
+        timestamp,
+      });
+    }
+
+    judge.evaluations = evaluations;
+    return orch;
+  });
 }
 
 /**
@@ -104,33 +94,39 @@ export async function updateJudgeStatus(
   status: 'in_progress' | 'completed' | 'failed',
   completedAt?: Date
 ): Promise<void> {
-  const update: any = {
-    'orchestration.judge.status': status,
-  };
+  TaskRepository.modifyOrchestration(taskId, (orch) => {
+    if (!orch.judge) {
+      orch.judge = {
+        agent: 'judge',
+        status,
+        evaluations: [],
+      } as any;
+    } else {
+      orch.judge.status = status;
+    }
 
-  if (completedAt) {
-    update['orchestration.judge.completedAt'] = completedAt;
-  }
+    const judge = orch.judge!;
+    if (completedAt) {
+      judge.completedAt = completedAt;
+    }
 
-  await Task.findByIdAndUpdate(taskId, { $set: update }, { new: true });
+    return orch;
+  });
 }
 
 /**
  * Atomically initialize developers orchestration data if it doesn't exist
  */
 export async function initializeDevelopersOrchestration(taskId: string): Promise<void> {
-  await Task.findByIdAndUpdate(
-    taskId,
-    {
-      $setOnInsert: {
-        'orchestration.developers': {
-          status: 'in_progress',
-          startedAt: new Date(),
-        },
-      },
-    },
-    { upsert: false, new: false }
-  );
+  TaskRepository.modifyOrchestration(taskId, (orch) => {
+    if (!(orch as any).developers) {
+      (orch as any).developers = {
+        status: 'in_progress',
+        startedAt: new Date(),
+      };
+    }
+    return orch;
+  });
 }
 
 /**
@@ -142,27 +138,31 @@ export async function updateDevelopersStatus(
   error?: string,
   metadata?: any
 ): Promise<void> {
-  const update: any = {
-    'orchestration.developers.status': status,
-  };
+  TaskRepository.modifyOrchestration(taskId, (orch) => {
+    if (!(orch as any).developers) {
+      (orch as any).developers = { status };
+    } else {
+      (orch as any).developers.status = status;
+    }
 
-  if (error) {
-    update['orchestration.developers.error'] = error;
-  }
+    if (error) {
+      (orch as any).developers.error = error;
+    }
 
-  if (status === 'completed' || status === 'failed') {
-    update['orchestration.developers.completedAt'] = new Date();
-  }
+    if (status === 'completed' || status === 'failed') {
+      (orch as any).developers.completedAt = new Date();
+    }
 
-  if (metadata) {
-    update['orchestration.developers.metadata'] = metadata;
-  }
+    if (metadata) {
+      (orch as any).developers.metadata = metadata;
+    }
 
-  await Task.findByIdAndUpdate(taskId, { $set: update }, { new: true });
+    return orch;
+  });
 }
 
 /**
- * Get judge evaluations atomically with proper locking
+ * Get judge evaluations
  */
 export async function getJudgeEvaluations(
   taskId: string
@@ -174,7 +174,7 @@ export async function getJudgeEvaluations(
   iteration: number;
   timestamp?: Date;
 }>> {
-  const task = await Task.findById(taskId).select('orchestration.judge.evaluations').lean();
+  const task = TaskRepository.findById(taskId);
   return task?.orchestration?.judge?.evaluations || [];
 }
 
@@ -186,18 +186,9 @@ export async function hasJudgeEvaluation(
   storyId: string,
   developerId: string
 ): Promise<boolean> {
-  const task = await Task.findOne(
-    {
-      _id: taskId,
-      'orchestration.judge.evaluations': {
-        $elemMatch: {
-          storyId,
-          developerId,
-        },
-      },
-    },
-    { _id: 1 }
-  ).lean();
-
-  return !!task;
+  const task = TaskRepository.findById(taskId);
+  const evaluations = task?.orchestration?.judge?.evaluations || [];
+  return evaluations.some(
+    (e: any) => e.storyId === storyId && e.developerId === developerId
+  );
 }

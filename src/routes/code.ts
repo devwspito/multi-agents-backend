@@ -239,7 +239,4 @@ router.get('/:taskId/stream', (req, res) => {
   });
 });
 
-// Import NotificationService type (disabled - not used yet)
-// import { NotificationService } from '../services/NotificationService';
-
 export default router;

@@ -1,4 +1,4 @@
-import { Task, ITask } from '../../models/Task';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
 import { OrchestrationCoordinator } from './OrchestrationCoordinator';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
@@ -160,29 +160,29 @@ export class OrchestrationRecoveryService {
       let interruptedTasksRaw: any[] = [];
 
       if (localInterruptedTasks.length > 0) {
-        console.log(`✅ [Recovery] Found ${localInterruptedTasks.length} interrupted task(s) LOCALLY`);
+        console.log(`[Recovery] Found ${localInterruptedTasks.length} interrupted task(s) LOCALLY`);
 
-        // For local tasks, we need to either find them in MongoDB or create minimal task objects
+        // For local tasks, we need to either find them in database or create minimal task objects
         for (const localTask of localInterruptedTasks) {
-          // Try to find in MongoDB first
-          const mongoTask = await Task.findById(localTask.taskId).lean().exec() as any;
+          // Try to find in database first
+          const dbTask = TaskRepository.findById(localTask.taskId);
 
-          if (mongoTask) {
-            // 🔥 CHECK STATUS: Skip cancelled/completed tasks
-            if (mongoTask.status === 'cancelled' || mongoTask.status === 'completed') {
-              console.log(`   ⏭️ Task ${localTask.taskId}: SKIPPED (status: ${mongoTask.status})`);
+          if (dbTask) {
+            // CHECK STATUS: Skip cancelled/completed tasks
+            if (dbTask.status === 'cancelled' || dbTask.status === 'completed') {
+              console.log(`   Task ${localTask.taskId}: SKIPPED (status: ${dbTask.status})`);
               continue;
             }
-            console.log(`   ✅ Task ${localTask.taskId}: Found in MongoDB (status: ${mongoTask.status})`);
-            interruptedTasksRaw.push(mongoTask);
+            console.log(`   Task ${localTask.taskId}: Found in database (status: ${dbTask.status})`);
+            interruptedTasksRaw.push(dbTask);
           } else {
-            // Task exists locally but not in MongoDB - reconstruct from local EventStore
-            console.log(`   🔄 Task ${localTask.taskId}: NOT in MongoDB, will recover from LOCAL EventStore`);
+            // Task exists locally but not in database - reconstruct from local EventStore
+            console.log(`   Task ${localTask.taskId}: NOT in database, will recover from LOCAL EventStore`);
 
             // Create minimal task object for recovery
             // The actual state will be loaded from local EventStore
             const minimalTask = {
-              _id: localTask.taskId,
+              id: localTask.taskId,
               title: localTask.title,
               status: 'in_progress',
               orchestration: {
@@ -197,16 +197,15 @@ export class OrchestrationRecoveryService {
           }
         }
       } else {
-        // 🔥 STEP 2: FALLBACK to MongoDB only if LOCAL found nothing
-        console.log('\n💾 [Recovery] STEP 2: No local tasks found, checking MongoDB as FALLBACK...');
+        // STEP 2: FALLBACK to database only if LOCAL found nothing
+        console.log('\n[Recovery] STEP 2: No local tasks found, checking database as FALLBACK...');
 
-        interruptedTasksRaw = await Task.find({
-          status: 'in_progress',
-          'orchestration.paused': { $ne: true },
-          'orchestration.cancelRequested': { $ne: true },
-        })
-          .lean()
-          .exec();
+        // Filter in JS for SQLite
+        interruptedTasksRaw = TaskRepository.findAll().filter((t: ITask) =>
+          t.status === 'in_progress' &&
+          t.orchestration?.paused !== true &&
+          t.orchestration?.cancelRequested !== true
+        );
       }
 
       if (interruptedTasksRaw.length === 0) {
@@ -216,7 +215,7 @@ export class OrchestrationRecoveryService {
 
       console.log(`📋 [Recovery] Found ${interruptedTasksRaw.length} interrupted task(s):`);
       interruptedTasksRaw.forEach((task: any) => {
-        console.log(`  - Task ${task._id}: ${task.title} (Phase: ${task.orchestration.currentPhase})`);
+        console.log(`  - Task ${task.id}: ${task.title} (Phase: ${task.orchestration.currentPhase})`);
       });
 
       // 🔥 CRITICAL: Recover tasks with controlled concurrency
@@ -246,18 +245,12 @@ export class OrchestrationRecoveryService {
         } catch (error: any) {
           console.error(`❌ [Recovery] Failed to recover task ${taskRaw._id}:`, error.message);
 
-          // Marcar como fallida directamente en la DB (sin save que valida)
-          const mongoose = require('mongoose');
-          await mongoose.connection.collection('tasks').updateOne(
-            { _id: taskRaw._id },
-            {
-              $set: {
-                status: 'failed',
-                'orchestration.currentPhase': 'completed',
-                updatedAt: new Date(),
-              },
-            }
-          );
+          // Mark as failed using TaskRepository
+          TaskRepository.update(taskId, { status: 'failed' });
+          TaskRepository.modifyOrchestration(taskId, (orch) => ({
+            ...orch,
+            currentPhase: 'completed',
+          }));
 
           await LogService.error(`Failed to recover task after server restart`, {
             taskId: taskRaw._id.toString(),
@@ -290,7 +283,7 @@ export class OrchestrationRecoveryService {
    * ⚡ OPTIMIZED: Minimal I/O, skip unnecessary checks
    */
   private async recoverTask(task: ITask): Promise<void> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     console.log(`🔄 [Recovery] Recovering task ${taskId}: ${task.title}`);
 
@@ -330,18 +323,12 @@ export class OrchestrationRecoveryService {
         console.error(`⚠️  [Recovery] Schema validation error for task ${taskId}:`, error.message);
         console.log(`📝 [Recovery] Attempting to fix schema issues...`);
 
-        // Marcar como failed directamente en la DB sin usar save() (que valida)
-        const mongoose = require('mongoose');
-        await mongoose.connection.collection('tasks').updateOne(
-          { _id: task._id },
-          {
-            $set: {
-              status: 'failed',
-              'orchestration.currentPhase': 'completed',
-              updatedAt: new Date(),
-            },
-          }
-        );
+        // Mark as failed using TaskRepository
+        TaskRepository.update(taskId, { status: 'failed' });
+        TaskRepository.modifyOrchestration(taskId, (orch) => ({
+          ...orch,
+          currentPhase: 'completed',
+        }));
 
         console.log(`✅ [Recovery] Task ${taskId} marked as failed due to schema issues`);
 
@@ -369,7 +356,7 @@ export class OrchestrationRecoveryService {
    */
   private getWorkspaceInfoFast(task: ITask): { exists: boolean; path: string; primaryRepo: string | null } {
     const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-    const taskWorkspace = path.join(workspaceDir, `task-${task._id}`);
+    const taskWorkspace = path.join(workspaceDir, `task-${task.id}`);
     const exists = fs.existsSync(taskWorkspace);
     // ⚡ Skip repo scanning - orchestrator will handle it
     return { exists, path: taskWorkspace, primaryRepo: null };
@@ -400,7 +387,7 @@ export class OrchestrationRecoveryService {
 
     try {
       // Find the task
-      const task = await Task.findById(taskId);
+      const task = TaskRepository.findById(taskId);
       if (!task) {
         return { success: false, message: 'Task not found' };
       }
@@ -423,18 +410,17 @@ export class OrchestrationRecoveryService {
         return { success: false, message: `Cannot resume task with status: ${task.status}` };
       }
 
-      console.log(`📋 [Recovery] Task details:`);
+      console.log(`[Recovery] Task details:`);
       console.log(`   Title: ${task.title}`);
       console.log(`   Status: ${task.status}`);
       console.log(`   Current Phase: ${task.orchestration.currentPhase}`);
 
       // Reset status to pending so orchestrator picks it up
-      task.status = 'pending';
-      task.orchestration.cancelRequested = false;
-
-      // If it failed during a phase, we'll restart from that phase
-      // The orchestrator will skip already completed phases
-      await task.save();
+      TaskRepository.update(taskId, { status: 'pending' });
+      TaskRepository.modifyOrchestration(taskId, (orch) => ({
+        ...orch,
+        cancelRequested: false,
+      }));
 
       console.log(`✅ [Recovery] Task status reset to pending`);
 
@@ -456,15 +442,15 @@ export class OrchestrationRecoveryService {
         });
       });
 
-      console.log(`✅ [Recovery] Task ${taskId} resume initiated`);
+      console.log(`[Recovery] Task ${taskId} resume initiated`);
 
       return {
         success: true,
         message: `Task resume initiated from phase: ${task.orchestration.currentPhase}`,
-        task: await Task.findById(taskId) as ITask
+        task: TaskRepository.findById(taskId) as ITask
       };
     } catch (error: any) {
-      console.error(`❌ [Recovery] Error resuming task ${taskId}:`, error.message);
+      console.error(`[Recovery] Error resuming task ${taskId}:`, error.message);
       return { success: false, message: `Error: ${error.message}` };
     }
   }
@@ -473,47 +459,52 @@ export class OrchestrationRecoveryService {
    * Get list of failed tasks that can be resumed
    */
   async getResumableTasks(): Promise<any[]> {
-    return Task.find({
-      status: { $in: ['failed', 'pending'] },
-      'orchestration.paused': { $ne: true },
-    })
-      .sort({ updatedAt: -1 })
-      .limit(20)
-      .lean();
+    return TaskRepository.findAll()
+      .filter((t: ITask) =>
+        (t.status === 'failed' || t.status === 'pending') &&
+        t.orchestration?.paused !== true
+      )
+      .sort((a: ITask, b: ITask) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )
+      .slice(0, 20);
   }
 
   /**
-   * 🔥 Mark all in_progress tasks as 'interrupted' on server startup
+   * Mark all in_progress tasks as 'interrupted' on server startup
    * This is called when auto-recovery is disabled, so users can manually Resume from frontend
    */
   private async markInProgressTasksAsInterrupted(): Promise<void> {
     try {
       // Find all tasks that are in_progress (they were running when server stopped)
-      const inProgressTasks = await Task.find({ status: 'in_progress' }).exec();
+      const inProgressTasks = TaskRepository.findAll().filter(
+        (t: ITask) => t.status === 'in_progress'
+      );
 
       if (inProgressTasks.length === 0) {
-        console.log('✅ [Recovery] No in_progress tasks to mark as interrupted');
+        console.log('[Recovery] No in_progress tasks to mark as interrupted');
         return;
       }
 
-      console.log(`🔄 [Recovery] Marking ${inProgressTasks.length} in_progress task(s) as 'interrupted'...`);
+      console.log(`[Recovery] Marking ${inProgressTasks.length} in_progress task(s) as 'interrupted'...`);
 
       for (const task of inProgressTasks) {
-        const taskId = (task._id as any).toString();
+        const taskId = task.id;
 
         // Update status to 'interrupted'
-        await Task.findByIdAndUpdate(taskId, {
-          status: 'interrupted',
-          'orchestration.interruptedAt': new Date(),
-          'orchestration.interruptReason': 'server_restart',
-        });
+        TaskRepository.update(taskId, { status: 'interrupted' });
+        TaskRepository.modifyOrchestration(taskId, (orch) => ({
+          ...orch,
+          interruptedAt: new Date(),
+          interruptReason: 'server_restart',
+        }));
 
-        console.log(`   ⏸️  Task ${taskId}: marked as 'interrupted' (was: in_progress)`);
+        console.log(`   Task ${taskId}: marked as 'interrupted' (was: in_progress)`);
       }
 
-      console.log(`✅ [Recovery] ${inProgressTasks.length} task(s) marked as 'interrupted' - users can Resume from frontend`);
+      console.log(`[Recovery] ${inProgressTasks.length} task(s) marked as 'interrupted' - users can Resume from frontend`);
     } catch (error: any) {
-      console.error(`❌ [Recovery] Error marking tasks as interrupted: ${error.message}`);
+      console.error(`[Recovery] Error marking tasks as interrupted: ${error.message}`);
     }
   }
 }

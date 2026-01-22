@@ -20,6 +20,10 @@ module.exports = {
       isolatedModules: true,
     }],
   },
+  // Map .js imports to .ts files for Jest (ESM compatibility)
+  moduleNameMapper: {
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+  },
   setupFilesAfterEnv: ['<rootDir>/src/tests/setup.ts'],
   testTimeout: 30000,
   verbose: true,

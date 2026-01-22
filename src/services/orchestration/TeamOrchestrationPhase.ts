@@ -24,6 +24,8 @@ import { CostAccumulator } from './utils/CostAccumulator';
 import { getEpicId, getEpicIdSafe, validateEpicIds } from './utils/IdNormalizer';
 // ⏱️ Centralized timeout constants
 import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
+// 📦 SQLite Repository
+import { TaskRepository } from '../../database/repositories/TaskRepository';
 
 // TechLead approval timeout - use centralized constant
 const TECH_LEAD_APPROVAL_TIMEOUT_MS = APPROVAL_TIMEOUTS.TECH_LEAD_APPROVAL;
@@ -80,7 +82,7 @@ export class TeamOrchestrationPhase extends BasePhase {
     // 1️⃣ UnifiedMemory (primary)
     try {
       const resumption = await unifiedMemoryService.getResumptionPoint(taskIdStr);
-      if (resumption.completedEpics && resumption.completedEpics.length > 0) {
+      if (resumption && resumption.completedEpics && resumption.completedEpics.length > 0) {
         sources.push({ name: 'UnifiedMemory', ids: resumption.completedEpics });
       }
     } catch (error: any) {
@@ -131,7 +133,7 @@ export class TeamOrchestrationPhase extends BasePhase {
    */
   async shouldSkip(context: OrchestrationContext): Promise<boolean> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // Use centralized skip logic (handles continuation check + unified memory)
     const skipResult = await checkPhaseSkip(context, { phaseName: 'TeamOrchestration' });
@@ -157,7 +159,7 @@ export class TeamOrchestrationPhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     // Initialize teamOrchestration in task model
     if (!(context.task.orchestration as any).teamOrchestration) {
@@ -173,7 +175,7 @@ export class TeamOrchestrationPhase extends BasePhase {
     (context.task.orchestration as any).teamOrchestration.startedAt = startTime;
 
     // 🔥 FIRE-AND-FORGET: Non-blocking update to avoid MongoDB bottleneck
-    updateTaskFireAndForget(task._id, {
+    updateTaskFireAndForget(task.id, {
       $set: {
         'orchestration.teamOrchestration.status': 'in_progress',
         'orchestration.teamOrchestration.startedAt': startTime,
@@ -224,40 +226,42 @@ export class TeamOrchestrationPhase extends BasePhase {
           console.log(`🔄 [TeamOrchestration] Planning completed in Unified Memory but no epics in context - attempting recovery...`);
           const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
 
-          // 🔥 FIX: Epics are stored in phases.Planning.output.epics, NOT in executionMap.epics
-          // executionMap.epics is for tracking epic execution status (EpicExecution[])
-          // phases.Planning.output.epics contains the ORIGINAL epic data from Planning phase
-          const planningOutput = resumption.executionMap?.phases?.Planning?.output;
-          const planningEpicsFromMemory = planningOutput?.epics || [];
+          if (resumption) {
+            // 🔥 FIX: Epics are stored in phases.Planning.output.epics, NOT in executionMap.epics
+            // executionMap.epics is for tracking epic execution status (EpicExecution[])
+            // phases.Planning.output.epics contains the ORIGINAL epic data from Planning phase
+            const planningOutput = resumption.executionMap?.phases?.Planning?.output;
+            const planningEpicsFromMemory = planningOutput?.epics || [];
 
-          if (planningEpicsFromMemory.length > 0) {
-            planningEpics = planningEpicsFromMemory.map((e: any) => ({
-              id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
-              title: e.title,
-              ...e, // Keep all epic data (filesToModify, filesToCreate, targetRepository, etc.)
-            }));
-            context.setData('epics', planningEpics);
-            console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (phases.Planning.output)`);
-
-            // Also restore to task model for consistency (fire-and-forget)
-            updateTaskFireAndForget(task._id, {
-              $set: {
-                'orchestration.planning.epics': planningEpics,
-                'orchestration.planning.restoredFromUnifiedMemory': true,
-                'orchestration.planning.restoredAt': new Date(),
-              },
-            }, 'restore epics from unified memory');
-            console.log(`   💾 Synced restored epics to task model (fire-and-forget)`);
-          } else {
-            // Fallback: Check if executionMap.epics has data (for backwards compatibility)
-            if (resumption.executionMap?.epics && resumption.executionMap.epics.length > 0) {
-              planningEpics = resumption.executionMap.epics.map((e: any) => ({
+            if (planningEpicsFromMemory.length > 0) {
+              planningEpics = planningEpicsFromMemory.map((e: any) => ({
                 id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
                 title: e.title,
-                ...e,
+                ...e, // Keep all epic data (filesToModify, filesToCreate, targetRepository, etc.)
               }));
               context.setData('epics', planningEpics);
-              console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (executionMap.epics fallback)`);
+              console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (phases.Planning.output)`);
+
+              // Also restore to task model for consistency (fire-and-forget)
+              updateTaskFireAndForget(task.id, {
+                $set: {
+                  'orchestration.planning.epics': planningEpics,
+                  'orchestration.planning.restoredFromUnifiedMemory': true,
+                  'orchestration.planning.restoredAt': new Date(),
+                },
+              }, 'restore epics from unified memory');
+              console.log(`   💾 Synced restored epics to task model (fire-and-forget)`);
+            } else {
+              // Fallback: Check if executionMap.epics has data (for backwards compatibility)
+              if (resumption.executionMap?.epics && resumption.executionMap.epics.length > 0) {
+                planningEpics = resumption.executionMap.epics.map((e: any) => ({
+                  id: getEpicId(e), // 🔥 CENTRALIZED: Use IdNormalizer for consistent ID extraction
+                  title: e.title,
+                  ...e,
+                }));
+                context.setData('epics', planningEpics);
+                console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (executionMap.epics fallback)`);
+              }
             }
           }
         }
@@ -480,7 +484,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
             // 🔥🔥🔥 CHECKPOINT: Save epic completion IMMEDIATELY after success 🔥🔥🔥
             if (result.success) {
-              await this.saveEpicCheckpoint(task._id, epicId, taskId);
+              await this.saveEpicCheckpoint(task.id, epicId, taskId);
               console.log(`✅ [Epic ${epicIndex + 1}/${epics.length}] COMPLETED: ${epic.title || epicId}`);
               console.log(`   📍 Checkpoint saved - safe to resume from here`);
             } else {
@@ -561,7 +565,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         task.status = 'paused';
         // 🔥 FIRE-AND-FORGET: Persist pause status without blocking
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
           $set: {
             status: 'paused',
             'orchestration.teamOrchestration.pendingEpicIds': pendingEpicIds,
@@ -723,7 +727,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         task.orchestration.totalCost = estimatedTotal;
 
         // 🔥 FIRE-AND-FORGET: Non-blocking cost update
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
             $inc: { 'orchestration.totalCost': totalTeamsCost },
             $set: {
               'orchestration.teamOrchestration.status': (context.task.orchestration as any).teamOrchestration.status,
@@ -739,7 +743,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`💰 [TeamOrchestration] Running orchestration total: $${estimatedTotal.toFixed(4)} (estimated)`);
       } else {
         // 🔥 FIRE-AND-FORGET: Save status without blocking
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
           $set: {
             'orchestration.teamOrchestration.status': (context.task.orchestration as any).teamOrchestration.status,
             'orchestration.teamOrchestration.completedAt': (context.task.orchestration as any).teamOrchestration.completedAt,
@@ -791,7 +795,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       (context.task.orchestration as any).teamOrchestration.error = error.message;
 
       // 🔥 FIRE-AND-FORGET: Save error status without blocking
-      updateTaskFireAndForget(task._id, {
+      updateTaskFireAndForget(task.id, {
         $set: {
           'orchestration.teamOrchestration.status': 'failed',
           'orchestration.teamOrchestration.error': error.message,
@@ -838,7 +842,7 @@ export class TeamOrchestrationPhase extends BasePhase {
     };
     epicId?: string;
   }> {
-    const taskId = (parentContext.task._id as any).toString();
+    const taskId = (parentContext.task.id as any).toString();
 
     // 🔥 CRITICAL: Check MongoDB connection before starting team
     const { isMongoConnected, waitForMongoConnection } = require('../../config/database');
@@ -876,8 +880,8 @@ export class TeamOrchestrationPhase extends BasePhase {
         try {
           const epicId = getEpicId(epic);
           const unifiedBranch = await unifiedMemoryService.getEpicBranch(taskId, epicId);
-          if (unifiedBranch?.branchName) {
-            epic.branchName = unifiedBranch.branchName;
+          if (unifiedBranch) {
+            epic.branchName = unifiedBranch; // getEpicBranch returns the branch name string directly
             console.log(`   🔄 [Team ${teamNumber}] Restored epic branch from UnifiedMemory: ${epic.branchName}`);
           }
         } catch (error: any) {
@@ -891,7 +895,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`   📌 [Team ${teamNumber}] Using EXISTING epic branch: ${branchName}`);
       } else {
         // Generate DETERMINISTIC branch name (same inputs = same branch name)
-        const taskShortId = (parentContext.task._id as any).toString().slice(-8);
+        const taskShortId = (parentContext.task.id as any).toString().slice(-8);
         const epicSlug = epic.id.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 30);
         // Use simple hash of epicId for uniqueness without randomness
         const epicHash = epic.id.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
@@ -1134,7 +1138,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       // This allows all downstream phases (Developers, Judge, QA) to access the correct branch
       const { eventStore } = await import('../EventStore');
       await eventStore.append({
-        taskId: parentContext.task._id as any,
+        taskId: parentContext.task.id as any,
         eventType: 'EpicBranchCreated' as any,
         agentName: 'team-orchestration',
         payload: {
@@ -1235,18 +1239,18 @@ export class TeamOrchestrationPhase extends BasePhase {
         console.log(`\n⏸️  [Team ${teamNumber}] Waiting for Tech Lead approval...`);
 
         // 🔥 CRITICAL: Persist pendingApproval to DB so bypass endpoint can find it
-        const Task = require('../../models/Task').Task;
-        await Task.findByIdAndUpdate(parentContext.task._id, {
-          $set: {
-            'orchestration.pendingApproval': {
-              phase: 'tech-lead',
-              phaseName: `Tech Lead Architecture (Epic: ${epic.title})`,
-              agentOutput: techLeadResult.data || {},
-              retryCount: techLeadRetryCount,
-              timestamp: new Date(),
-            },
-          },
-        });
+        const currentTask = TaskRepository.findById(parentContext.task.id);
+        if (currentTask) {
+          const orchestration = currentTask.orchestration || {};
+          orchestration.pendingApproval = {
+            phase: 'tech-lead',
+            phaseName: `Tech Lead Architecture (Epic: ${epic.title})`,
+            agentOutput: techLeadResult.data || {},
+            retryCount: techLeadRetryCount,
+            timestamp: new Date(),
+          };
+          TaskRepository.update(parentContext.task.id, { orchestration });
+        }
         console.log(`📝 [Team ${teamNumber}] Persisted pendingApproval to DB for bypass support`);
 
         // Emit approval required notification
@@ -1273,7 +1277,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           );
 
           // 🔥 FIRE-AND-FORGET: Clear pendingApproval from DB after processing
-          updateTaskFireAndForget(parentContext.task._id, {
+          updateTaskFireAndForget(parentContext.task.id, {
             $unset: { 'orchestration.pendingApproval': 1 },
           }, 'clear pendingApproval');
           console.log(`📝 [Team ${teamNumber}] Cleared pendingApproval from DB (fire-and-forget)`);
@@ -1373,7 +1377,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         // Try event store first
         const { eventStore } = await import('../EventStore');
-        const allEvents = await eventStore.getEvents(parentContext.task._id as any);
+        const allEvents = await eventStore.getEvents(parentContext.task.id as any);
         const envConfigEvents = allEvents.filter((e: any) => e.eventType === 'EnvironmentConfigDefined');
 
         if (envConfigEvents.length > 0) {
@@ -1483,10 +1487,15 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Get completed stories from Unified Memory (most reliable source)
       const executionMap = await unifiedMemoryService.getExecutionMap(taskId);
-      const epicInMemory = executionMap?.epics?.find((e: any) => e.epicId === getEpicId(epic));
-      const completedInMemory = (epicInMemory?.stories || [])
-        .filter((s: any) => s.status === 'completed')
-        .map((s: any) => s.storyId);
+      const epicId = getEpicId(epic);
+
+      // Get completed stories from stories map, filtering by this epic
+      const completedInMemory: string[] = [];
+      executionMap.stories.forEach((story, storyId) => {
+        if (story.epicId === epicId && story.status === 'completed') {
+          completedInMemory.push(storyId);
+        }
+      });
       const completedCount = completedInMemory.length;
 
       console.log(`\n📊 [Team ${teamNumber}] Story completion check:`);
@@ -2058,12 +2067,9 @@ Or if you cannot fix it:
       try {
         const map = await unifiedMemoryService.getExecutionMap(taskIdStr);
         if (map && map.epics) {
-          const epicIndex = map.epics.findIndex(e => e.epicId === epicId);
-          if (epicIndex >= 0) {
-            map.epics[epicIndex].status = 'completed';
-            await unifiedMemoryService.updateExecutionMap(taskIdStr, {
-              epics: map.epics,
-            });
+          const epicExecution = map.epics.get(epicId);
+          if (epicExecution) {
+            epicExecution.status = 'completed';
             console.log(`   🧠 [UNIFIED MEMORY] Epic "${epicId}" marked as completed`);
           }
         }

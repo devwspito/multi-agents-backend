@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
-import { WebhookApiKey } from '../models/WebhookApiKey';
+import { WebhookApiKeyRepository, IWebhookApiKey } from '../database/repositories/WebhookApiKeyRepository.js';
 
 export interface WebhookAuthRequest extends Request {
   webhookAuth?: {
-    apiKeyDoc: any;
+    apiKeyDoc: IWebhookApiKey;
     projectId: string;
   };
 }
@@ -35,8 +35,8 @@ export async function authenticateWebhook(
       return;
     }
 
-    // Validar API key con comparación constant-time
-    const apiKeyDoc = await WebhookApiKey.validateApiKey(apiKey);
+    // Validar API key con comparación constant-time (SQLite - synchronous)
+    const apiKeyDoc = WebhookApiKeyRepository.validateApiKey(apiKey);
 
     if (!apiKeyDoc) {
       const keyPreview = apiKey.substring(0, 10);
@@ -51,13 +51,7 @@ export async function authenticateWebhook(
     }
 
     // Actualizar timestamp y contador
-    await WebhookApiKey.updateOne(
-      { _id: apiKeyDoc._id },
-      {
-        lastUsedAt: new Date(),
-        $inc: { requestCount: 1 },
-      }
-    );
+    WebhookApiKeyRepository.incrementUsage(apiKeyDoc.id);
 
     // Log de autenticación exitosa
     const keyPreview = apiKey.substring(0, 10);
@@ -68,7 +62,7 @@ export async function authenticateWebhook(
     // Adjuntar contexto de webhook al request
     req.webhookAuth = {
       apiKeyDoc,
-      projectId: apiKeyDoc.projectId.toString(),
+      projectId: apiKeyDoc.projectId,
     };
 
     next();

@@ -4,9 +4,6 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const envSchema = z.object({
-  // MongoDB
-  MONGODB_URI: z.string().url(),
-
   // Claude API
   ANTHROPIC_API_KEY: z.string().min(1),
 

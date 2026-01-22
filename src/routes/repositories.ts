@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { Repository } from '../models/Repository';
-import { Project } from '../models/Project';
+import { RepositoryRepository, IRepository } from '../database/repositories/RepositoryRepository.js';
+import { ProjectRepository } from '../database/repositories/ProjectRepository.js';
+import { UserRepository } from '../database/repositories/UserRepository.js';
 import { GitHubService } from '../services/GitHubService';
 import { EnvService } from '../services/EnvService';
 import { z } from 'zod';
@@ -19,16 +20,17 @@ const githubService = new GitHubService(workspaceDir);
  */
 router.get('/github', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const { User } = await import('../models/User');
-    const user = await User.findById(req.user!.id).select('accessToken');
+    const accessToken = UserRepository.getAccessToken(req.user!.id);
 
-    if (!user || !user.accessToken) {
+    if (!accessToken) {
       res.status(401).json({
         success: false,
         message: 'GitHub access token not found. Please reconnect your GitHub account.',
       });
       return;
     }
+
+    const user = { accessToken };
 
     // Obtener TODOS los repositorios del usuario con paginación
     let allRepos: any[] = [];
@@ -113,16 +115,13 @@ const updateRepositorySchema = z.object({
  */
 router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const { projectId, isActive } = req.query;
+    const { projectId } = req.query;
 
-    // Si hay projectId, verificar que el usuario es dueño del proyecto
+    // If projectId is provided, verify user owns the project
     if (projectId) {
-      const project = await Project.findOne({
-        _id: projectId,
-        userId: req.user!.id,
-      });
+      const project = ProjectRepository.findById(projectId as string);
 
-      if (!project) {
+      if (!project || project.userId !== req.user!.id) {
         res.status(404).json({
           success: false,
           message: 'Project not found',
@@ -131,31 +130,45 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
       }
     }
 
-    const filter: any = {};
+    let repositories: IRepository[] | any[];
 
-    // Filtrar por projectId si se proporciona
     if (projectId) {
-      filter.projectId = projectId;
+      // Get repositories for specific project
+      repositories = RepositoryRepository.findByProjectId(projectId as string);
     } else {
-      // Si no hay projectId, obtener todos los repos de proyectos del usuario
-      const userProjects = await Project.find({ userId: req.user!.id }).select('_id');
-      filter.projectId = { $in: userProjects.map(p => p._id) };
+      // Get all repositories from user's projects
+      const userProjects = ProjectRepository.findByUserId(req.user!.id);
+      const allRepos: any[] = [];
+      for (const project of userProjects) {
+        const projectRepos = RepositoryRepository.findByProjectId(project.id);
+        // Add project info to each repo
+        projectRepos.forEach(repo => {
+          allRepos.push({
+            ...repo,
+            _id: repo.id,
+            projectId: {
+              _id: project.id,
+              name: project.name,
+              description: project.description,
+            },
+          });
+        });
+      }
+      repositories = allRepos;
     }
 
-    if (isActive !== undefined) {
-      filter.isActive = isActive === 'true';
-    }
-
-    const repositories = await Repository.find(filter)
-      .populate('projectId', 'name description')
-      .sort({ createdAt: -1 })
-      .select('-__v')
-      .lean();
+    // Format response
+    const formattedRepos = projectId
+      ? repositories.map((r: any) => ({
+          _id: r.id,
+          ...r,
+        }))
+      : repositories;
 
     res.json({
       success: true,
-      data: repositories,
-      count: repositories.length,
+      data: formattedRepos,
+      count: formattedRepos.length,
     });
   } catch (error) {
     console.error('Error fetching repositories:', error);
@@ -172,9 +185,7 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id)
-      .populate('projectId', 'name description userId')
-      .lean();
+    const repository = RepositoryRepository.findById(req.params.id);
 
     if (!repository) {
       res.status(404).json({
@@ -184,9 +195,9 @@ router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
       return;
     }
 
-    // Verificar que el usuario es dueño del proyecto
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    // Verify user owns the project
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -196,7 +207,15 @@ router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
 
     res.json({
       success: true,
-      data: repository,
+      data: {
+        _id: repository.id,
+        ...repository,
+        projectId: {
+          _id: project.id,
+          name: project.name,
+          description: project.description,
+        },
+      },
     });
   } catch (error) {
     console.error('Error fetching repository:', error);
@@ -215,13 +234,10 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
     const validatedData = createRepositorySchema.parse(req.body);
 
-    // Verificar que el usuario es dueño del proyecto
-    const project = await Project.findOne({
-      _id: validatedData.projectId,
-      userId: req.user!.id,
-    });
+    // Verify user owns the project
+    const project = ProjectRepository.findById(validatedData.projectId);
 
-    if (!project) {
+    if (!project || project.userId !== req.user!.id) {
       res.status(404).json({
         success: false,
         message: 'Project not found or access denied',
@@ -229,7 +245,7 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
       return;
     }
 
-    // Extraer owner/repo de la URL
+    // Extract owner/repo from URL
     const repoMatch = validatedData.githubRepoUrl.match(/github\.com\/([^\/]+\/[^\/]+)/);
     if (!repoMatch) {
       res.status(400).json({
@@ -241,19 +257,26 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
 
     const githubRepoName = repoMatch[1].replace(/\.git$/, '');
 
-    // Generar workspaceId único
+    // Generate unique workspaceId
     const workspaceId = `ws-${crypto.randomBytes(16).toString('hex')}`;
 
-    const repository = await Repository.create({
-      ...validatedData,
+    const repository = RepositoryRepository.create({
+      name: validatedData.name,
+      description: validatedData.description,
+      projectId: validatedData.projectId,
+      githubRepoUrl: validatedData.githubRepoUrl,
       githubRepoName,
+      githubBranch: validatedData.githubBranch,
       workspaceId,
-      isActive: true,
+      type: 'backend', // Default type when created via API
     });
 
     res.status(201).json({
       success: true,
-      data: repository,
+      data: {
+        _id: repository.id,
+        ...repository,
+      },
       message: 'Repository added successfully',
     });
   } catch (error) {
@@ -282,8 +305,8 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
   try {
     const validatedData = updateRepositorySchema.parse(req.body);
 
-    // Buscar repo y verificar permisos
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    // Find repo and verify permissions
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       res.status(404).json({
         success: false,
@@ -292,8 +315,8 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
       return;
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -301,13 +324,15 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
       return;
     }
 
-    // Actualizar
-    Object.assign(repository, validatedData);
-    await repository.save();
+    // Update
+    const updatedRepo = RepositoryRepository.update(req.params.id, validatedData);
 
     res.json({
       success: true,
-      data: repository,
+      data: {
+        _id: updatedRepo?.id,
+        ...updatedRepo,
+      },
       message: 'Repository updated successfully',
     });
   } catch (error) {
@@ -334,7 +359,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
  */
 router.post('/:id/sync', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       res.status(404).json({
         success: false,
@@ -343,8 +368,8 @@ router.post('/:id/sync', authenticate, async (req: AuthRequest, res): Promise<an
       return;
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -352,18 +377,19 @@ router.post('/:id/sync', authenticate, async (req: AuthRequest, res): Promise<an
       return;
     }
 
-    // Sincronizar workspace
+    // Sync workspace
     await githubService.syncWorkspace(repository.workspaceId);
 
-    // Actualizar timestamp
-    repository.lastSyncedAt = new Date();
-    await repository.save();
+    // Update timestamp
+    const updatedRepo = RepositoryRepository.update(req.params.id, {
+      lastSyncedAt: new Date(),
+    });
 
     res.json({
       success: true,
       message: 'Repository synchronized successfully',
       data: {
-        lastSyncedAt: repository.lastSyncedAt,
+        lastSyncedAt: updatedRepo?.lastSyncedAt,
       },
     });
   } catch (error: any) {
@@ -381,7 +407,7 @@ router.post('/:id/sync', authenticate, async (req: AuthRequest, res): Promise<an
  */
 router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       res.status(404).json({
         success: false,
@@ -390,8 +416,8 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> 
       return;
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -399,11 +425,11 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> 
       return;
     }
 
-    // Limpiar workspace
+    // Cleanup workspace
     await githubService.cleanupWorkspace(repository.workspaceId);
 
-    // Eliminar repository
-    await repository.deleteOne();
+    // Delete repository
+    RepositoryRepository.delete(req.params.id);
 
     res.json({
       success: true,
@@ -428,7 +454,7 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> 
  */
 router.get('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       return res.status(404).json({
         success: false,
@@ -436,20 +462,22 @@ router.get('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any>
       });
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       return res.status(403).json({
         success: false,
         message: 'Access denied',
       });
     }
 
-    // Return env variables (secrets are decrypted on frontend request)
+    // Get decrypted env variables
+    const envVariables = RepositoryRepository.getDecryptedEnvVariables(req.params.id);
+
     res.json({
       success: true,
       data: {
-        envVariables: repository.envVariables || [],
-        count: repository.envVariables?.length || 0,
+        envVariables: envVariables || [],
+        count: envVariables?.length || 0,
       },
     });
   } catch (error: any) {
@@ -476,7 +504,7 @@ const envVariableSchema = z.object({
 
 router.put('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       return res.status(404).json({
         success: false,
@@ -484,8 +512,8 @@ router.put('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any>
       });
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       return res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -508,9 +536,10 @@ router.put('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any>
     // Encrypt secret values before saving
     const preparedEnvVars = EnvService.prepareForStorage(body.envVariables);
 
-    // Update repository
-    repository.envVariables = preparedEnvVars;
-    await repository.save();
+    // Update repository (encryption is handled in the repository)
+    RepositoryRepository.update(req.params.id, {
+      envVariables: preparedEnvVars,
+    });
 
     console.log(`✅ Updated ${preparedEnvVars.length} environment variables for repository: ${repository.name}`);
 
@@ -545,7 +574,7 @@ router.put('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any>
  */
 router.delete('/:id/env', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const repository = await Repository.findById(req.params.id).populate('projectId');
+    const repository = RepositoryRepository.findById(req.params.id);
     if (!repository) {
       return res.status(404).json({
         success: false,
@@ -553,8 +582,8 @@ router.delete('/:id/env', authenticate, async (req: AuthRequest, res): Promise<a
       });
     }
 
-    const project: any = repository.projectId;
-    if (project.userId.toString() !== req.user!.id) {
+    const project = ProjectRepository.findById(repository.projectId);
+    if (!project || project.userId !== req.user!.id) {
       return res.status(403).json({
         success: false,
         message: 'Access denied',
@@ -562,8 +591,9 @@ router.delete('/:id/env', authenticate, async (req: AuthRequest, res): Promise<a
     }
 
     // Clear env variables
-    repository.envVariables = [];
-    await repository.save();
+    RepositoryRepository.update(req.params.id, {
+      envVariables: [],
+    });
 
     console.log(`✅ Cleared environment variables for repository: ${repository.name}`);
 

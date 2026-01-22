@@ -5,7 +5,6 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
-import mongoSanitize from 'express-mongo-sanitize';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
@@ -181,9 +180,6 @@ class AgentPlatformApp {
       }
     });
 
-    // MongoDB injection prevention
-    this.app.use(mongoSanitize());
-
     // Rate limiting - Increased for real-time polling and approval workflows
     const limiter = rateLimit({
       windowMs: 15 * 60 * 1000, // 15 minutes
@@ -349,8 +345,8 @@ class AgentPlatformApp {
 
         // Re-emitir logs y actividades históricos (para sobrevivir refresh)
         try {
-          const { Task } = await import('./models/Task');
-          const task = await Task.findById(taskId).select('logs activities orchestration status inputTokens outputTokens totalCost').lean();
+          const { TaskRepository } = await import('./database/repositories/TaskRepository.js');
+          const task = TaskRepository.findById(taskId);
 
           if (task) {
             // 1. Emitir logs históricos uno por uno
@@ -387,7 +383,7 @@ class AgentPlatformApp {
             }
 
             // 3. Si hay aprobación pendiente, re-emitir evento usando datos persistidos
-            const pendingApproval = (task as any).orchestration?.pendingApproval;
+            const pendingApproval = task.orchestration?.pendingApproval;
             if (task.status === 'in_progress' && pendingApproval && pendingApproval.phase) {
               console.log(`⏸️  Re-emitting approval_required from persisted data:`, {
                 phase: pendingApproval.phase,
@@ -427,8 +423,8 @@ class AgentPlatformApp {
 
         // Re-emitir logs históricos (igual que join-task)
         try {
-          const { Task } = await import('./models/Task');
-          const task = await Task.findById(taskId).select('logs').lean();
+          const { TaskRepository } = await import('./database/repositories/TaskRepository.js');
+          const task = TaskRepository.findById(taskId);
 
           if (task && task.logs && task.logs.length > 0) {
             console.log(`📜 Re-emitting ${task.logs.length} historical logs to socket ${socket.id}`);
@@ -493,7 +489,7 @@ class AgentPlatformApp {
    */
   public async start(): Promise<void> {
     try {
-      // Conectar a MongoDB
+      // Initialize SQLite database
       await connectDatabase();
 
       // 🔄 Auto-recover interrupted orchestrations
@@ -551,7 +547,7 @@ class AgentPlatformApp {
         console.log(`📍 Port: ${this.port}`);
         console.log(`🌍 Environment: ${env.NODE_ENV}`);
         console.log(`🤖 Claude Agent SDK: Ready`);
-        console.log(`💾 MongoDB: Connected`);
+        console.log(`💾 SQLite: Connected`);
         console.log(`🔀 Dynamic Team Orchestration: Enabled`);
         console.log(`🔌 WebSocket: ws://localhost:${this.port}/ws/notifications`);
         console.log('═══════════════════════════════════════════');

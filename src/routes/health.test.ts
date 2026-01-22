@@ -6,7 +6,6 @@
 
 import express from 'express';
 import request from 'supertest';
-import mongoose from 'mongoose';
 import healthRoutes from './health';
 
 describe('Health Routes', () => {
@@ -57,11 +56,11 @@ describe('Health Routes', () => {
       expect(response.body.version).toBeDefined();
     });
 
-    it('should include MongoDB check', async () => {
+    it('should include SQLite check', async () => {
       const response = await request(app).get('/health/ready');
 
-      expect(response.body.checks.mongodb).toBeDefined();
-      expect(['ok', 'error', 'degraded']).toContain(response.body.checks.mongodb.status);
+      expect(response.body.checks.sqlite).toBeDefined();
+      expect(['ok', 'error', 'degraded']).toContain(response.body.checks.sqlite.status);
     });
 
     it('should include Anthropic API check', async () => {

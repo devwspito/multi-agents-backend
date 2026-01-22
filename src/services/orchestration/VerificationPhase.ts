@@ -23,7 +23,7 @@ import { QualityGates, QualityGateResult } from '../QualityGates';
 import { LogService } from '../logging/LogService';
 import { NotificationService } from '../NotificationService';
 import { OutputParser } from './utils/OutputParser';
-import { IStory, IEpic } from '../../models/Task';
+import { IStory, IEpic, TaskRepository } from '../../database/repositories/TaskRepository.js';
 // 📦 Utility helpers
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { getEpicId } from './utils/IdNormalizer';
@@ -99,7 +99,7 @@ export class VerificationPhase extends BasePhase {
    */
   protected async executePhase(context: OrchestrationContext): Promise<PhaseResult> {
     const startTime = Date.now();
-    const taskId = (context.task._id as any)?.toString() || '';
+    const taskId = (context.task.id as any)?.toString() || '';
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ [Verification] Starting implementation verification...`);
@@ -306,7 +306,7 @@ export class VerificationPhase extends BasePhase {
     workspacePath: string,
     attempt: number
   ): Promise<boolean> {
-    const taskId = (context.task._id as any)?.toString() || '';
+    const taskId = (context.task.id as any)?.toString() || '';
 
     if (!this.executeAgentFn) {
       console.log(`⚠️ [Verification] No executeAgentFn available - cannot run fixer`);
@@ -368,7 +368,7 @@ export class VerificationPhase extends BasePhase {
       context.task.orchestration.totalCost = (context.task.orchestration.totalCost || 0) + cost;
       context.task.orchestration.totalTokens = (context.task.orchestration.totalTokens || 0) +
         (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
-      await context.task.save();
+      TaskRepository.update(context.task.id, context.task);
 
       if (parsed.fixed) {
         console.log(`✅ [Verification] Fixer applied ${parsed.filesModified.length} changes`);

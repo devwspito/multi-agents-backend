@@ -1,5 +1,5 @@
-import { FailedExecution, IFailedExecution } from '../models/FailedExecution';
-import { Task } from '../models/Task';
+import { FailedExecutionRepository, IFailedExecution } from '../database/repositories/FailedExecutionRepository.js';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { NotificationService } from './NotificationService';
 
 /**
@@ -59,15 +59,8 @@ export class FailedExecutionRetryService {
     let processed = 0;
 
     try {
-      // Find executions ready for retry
-      const retryable = await FailedExecution.find({
-        retryStatus: 'pending',
-        $expr: { $lt: ['$retryCount', '$maxRetries'] },
-        $or: [
-          { nextRetryAt: { $exists: false } },
-          { nextRetryAt: { $lte: new Date() } }
-        ]
-      }).sort({ createdAt: 1 }).limit(5); // Process max 5 at a time
+      // Find executions ready for retry (limit to 5)
+      const retryable = FailedExecutionRepository.findRetryable().slice(0, 5);
 
       if (retryable.length === 0) {
         return 0;
@@ -75,28 +68,25 @@ export class FailedExecutionRetryService {
 
       console.log(`[FailedExecutionRetry] Found ${retryable.length} executions to check`);
 
-      // 🛑 Pre-filter: Get task IDs and check which are still active
-      const taskIds = retryable.map(e => e.taskId).filter(Boolean);
-      const activeTasks = await Task.find({
-        _id: { $in: taskIds },
-        status: { $nin: ['completed', 'failed'] }  // Only active tasks
-      }).select('_id');
-      const activeTaskIds = new Set(activeTasks.map(t => t._id.toString()));
+      // Pre-filter: Get task IDs and check which are still active
+      const taskIds = retryable.map(e => e.taskId).filter(Boolean) as string[];
+      const tasks = TaskRepository.findByIds(taskIds);
+      const activeTasks = tasks.filter(t => t.status !== 'completed' && t.status !== 'failed');
+      const activeTaskIds = new Set(activeTasks.map(t => t.id));
 
       // Mark executions for completed/failed tasks as abandoned
       for (const execution of retryable) {
-        const taskIdStr = execution.taskId?.toString();
+        const taskIdStr = execution.taskId;
         if (taskIdStr && !activeTaskIds.has(taskIdStr)) {
-          console.log(`⏹️  [FailedExecutionRetry] Task ${taskIdStr} is completed/failed, abandoning execution ${execution._id}`);
-          execution.retryStatus = 'abandoned';
-          execution.retryHistory.push({
+          console.log(`⏹️  [FailedExecutionRetry] Task ${taskIdStr} is completed/failed, abandoning execution ${execution.id}`);
+          FailedExecutionRepository.recordRetryAttempt(execution.id, {
             attemptedAt: new Date(),
             modelId: execution.modelId,
             result: 'failed',
             errorMessage: 'Task is completed or failed - no retry needed',
             durationMs: 0
           });
-          await execution.save();
+          FailedExecutionRepository.abandon(execution.id);
           continue;
         }
 
@@ -104,7 +94,7 @@ export class FailedExecutionRetryService {
           await this.retryExecution(execution);
           processed++;
         } catch (error: any) {
-          console.error(`[FailedExecutionRetry] Error retrying ${execution._id}:`, error.message);
+          console.error(`[FailedExecutionRetry] Error retrying ${execution.id}:`, error.message);
         }
       }
 
@@ -119,7 +109,7 @@ export class FailedExecutionRetryService {
    */
   static async retryExecution(execution: IFailedExecution): Promise<boolean> {
     const startTime = Date.now();
-    const execId = execution._id?.toString();
+    const execId = execution.id;
 
     console.log(`\n${'='.repeat(60)}`);
     console.log(`🔄 [FailedExecutionRetry] Retrying execution: ${execId}`);
@@ -129,14 +119,12 @@ export class FailedExecutionRetryService {
     console.log(`${'='.repeat(60)}`);
 
     // Mark as retrying
-    execution.retryStatus = 'retrying';
-    execution.lastRetryAt = new Date();
-    await execution.save();
+    FailedExecutionRepository.markRetrying(execution.id);
 
     // Notify if we have a taskId
     if (execution.taskId) {
       NotificationService.emitConsoleLog(
-        execution.taskId.toString(),
+        execution.taskId,
         'info',
         `🔄 Retrying failed ${execution.agentType} execution (attempt ${execution.retryCount + 1})`
       );
@@ -147,23 +135,22 @@ export class FailedExecutionRetryService {
       const { OrchestrationCoordinator } = await import('./orchestration/OrchestrationCoordinator');
 
       // Get the task to create context
-      const task = await Task.findById(execution.taskId);
+      const task = TaskRepository.findById(execution.taskId || '');
       if (!task) {
         throw new Error(`Task ${execution.taskId} not found`);
       }
 
-      // 🛑 DON'T retry if task is already completed or failed
+      // DON'T retry if task is already completed or failed
       if (task.status === 'completed' || task.status === 'failed') {
         console.log(`⏹️  [FailedExecutionRetry] Task ${execution.taskId} is ${task.status}, skipping retry`);
-        execution.retryStatus = 'abandoned';
-        execution.retryHistory.push({
+        FailedExecutionRepository.recordRetryAttempt(execution.id, {
           attemptedAt: new Date(),
           modelId: execution.modelId,
           result: 'failed',
           errorMessage: `Task is ${task.status} - no retry needed`,
           durationMs: 0
         });
-        await execution.save();
+        FailedExecutionRepository.abandon(execution.id);
         return false;
       }
 
@@ -211,22 +198,18 @@ export class FailedExecutionRetryService {
       // Success!
       const durationMs = Date.now() - startTime;
 
-      execution.retryStatus = 'succeeded';
-      execution.resolvedAt = new Date();
-      execution.retryCount++;
-      execution.retryHistory.push({
+      FailedExecutionRepository.recordRetryAttempt(execution.id, {
         attemptedAt: new Date(),
         modelId: retryModel,
         result: 'success',
         durationMs
       });
-      await execution.save();
 
       console.log(`✅ [FailedExecutionRetry] Retry succeeded for ${execId} in ${durationMs}ms`);
 
       if (execution.taskId) {
         NotificationService.emitConsoleLog(
-          execution.taskId.toString(),
+          execution.taskId,
           'info',
           `✅ Retry succeeded for ${execution.agentType}`
         );
@@ -236,8 +219,8 @@ export class FailedExecutionRetryService {
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
 
-      execution.retryCount++;
-      execution.retryHistory.push({
+      // Record the failed retry attempt
+      FailedExecutionRepository.recordRetryAttempt(execution.id, {
         attemptedAt: new Date(),
         modelId: this.getRetryModel(execution),
         result: 'failed',
@@ -245,28 +228,25 @@ export class FailedExecutionRetryService {
         durationMs
       });
 
-      // Check if we've exhausted retries
-      if (execution.retryCount >= execution.maxRetries) {
-        execution.retryStatus = 'abandoned';
-        console.error(`❌ [FailedExecutionRetry] Max retries reached for ${execId}, abandoning`);
-      } else {
+      // Check if we've exhausted retries - recordRetryAttempt handles the status
+      const updatedExecution = FailedExecutionRepository.findById(execution.id);
+      if (updatedExecution && updatedExecution.retryStatus !== 'abandoned') {
         // Schedule next retry with exponential backoff
         const backoffMs = Math.min(
           30 * 60 * 1000, // Max 30 minutes
-          60 * 1000 * Math.pow(2, execution.retryCount) // 1min, 2min, 4min, 8min...
+          60 * 1000 * Math.pow(2, updatedExecution.retryCount) // 1min, 2min, 4min, 8min...
         );
-        execution.retryStatus = 'pending';
-        execution.nextRetryAt = new Date(Date.now() + backoffMs);
+        FailedExecutionRepository.scheduleRetry(execution.id, new Date(Date.now() + backoffMs));
         console.log(`⏰ [FailedExecutionRetry] Scheduling retry in ${backoffMs / 1000}s`);
+      } else {
+        console.error(`❌ [FailedExecutionRetry] Max retries reached for ${execId}, abandoning`);
       }
-
-      await execution.save();
 
       console.error(`❌ [FailedExecutionRetry] Retry failed for ${execId}:`, error.message);
 
       if (execution.taskId) {
         NotificationService.emitConsoleLog(
-          execution.taskId.toString(),
+          execution.taskId,
           'error',
           `❌ Retry failed for ${execution.agentType}: ${error.message}`
         );
@@ -297,7 +277,7 @@ export class FailedExecutionRetryService {
    * Manual retry of a specific execution by ID
    */
   static async retryById(executionId: string): Promise<{ success: boolean; message: string }> {
-    const execution = await FailedExecution.findById(executionId);
+    const execution = FailedExecutionRepository.findById(executionId);
     if (!execution) {
       return { success: false, message: 'Execution not found' };
     }
@@ -311,9 +291,7 @@ export class FailedExecutionRetryService {
     }
 
     // Reset retry status for manual retry
-    execution.retryStatus = 'pending';
-    execution.nextRetryAt = undefined;
-    await execution.save();
+    FailedExecutionRepository.scheduleRetry(executionId, new Date());
 
     const result = await this.retryExecution(execution);
     return {
@@ -326,12 +304,7 @@ export class FailedExecutionRetryService {
    * Abandon a failed execution (stop retrying)
    */
   static async abandonExecution(executionId: string): Promise<boolean> {
-    const result = await FailedExecution.findByIdAndUpdate(
-      executionId,
-      { retryStatus: 'abandoned' },
-      { new: true }
-    );
-    return !!result;
+    return FailedExecutionRepository.abandon(executionId);
   }
 
   /**
@@ -345,21 +318,13 @@ export class FailedExecutionRetryService {
     abandoned: number;
     byFailureType: Record<string, number>;
   }> {
-    const match = taskId ? { taskId } : {};
-
-    const [statusCounts, failureCounts] = await Promise.all([
-      FailedExecution.aggregate([
-        { $match: match },
-        { $group: { _id: '$retryStatus', count: { $sum: 1 } } }
-      ]),
-      FailedExecution.aggregate([
-        { $match: match },
-        { $group: { _id: '$failureType', count: { $sum: 1 } } }
-      ])
-    ]);
+    // Get all executions for this task
+    const executions = taskId
+      ? FailedExecutionRepository.findByTaskId(taskId)
+      : FailedExecutionRepository.findAll();
 
     const stats = {
-      total: 0,
+      total: executions.length,
       pending: 0,
       retrying: 0,
       succeeded: 0,
@@ -367,16 +332,15 @@ export class FailedExecutionRetryService {
       byFailureType: {} as Record<string, number>
     };
 
-    for (const item of statusCounts) {
-      const status = item._id as keyof typeof stats;
-      if (status in stats && typeof stats[status] === 'number') {
-        (stats as any)[status] = item.count;
-      }
-      stats.total += item.count;
-    }
+    for (const exec of executions) {
+      // Count by status
+      if (exec.retryStatus === 'pending') stats.pending++;
+      else if (exec.retryStatus === 'retrying') stats.retrying++;
+      else if (exec.retryStatus === 'succeeded') stats.succeeded++;
+      else if (exec.retryStatus === 'abandoned') stats.abandoned++;
 
-    for (const item of failureCounts) {
-      stats.byFailureType[item._id] = item.count;
+      // Count by failure type
+      stats.byFailureType[exec.failureType] = (stats.byFailureType[exec.failureType] || 0) + 1;
     }
 
     return stats;
@@ -385,25 +349,17 @@ export class FailedExecutionRetryService {
   /**
    * Get recent failed executions for a task
    */
-  static async getRecentForTask(taskId: string, limit: number = 10): Promise<any[]> {
-    return FailedExecution.find({ taskId })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+  static async getRecentForTask(taskId: string, limit: number = 10): Promise<IFailedExecution[]> {
+    const executions = FailedExecutionRepository.findByTaskId(taskId);
+    return executions.slice(0, limit);
   }
 
   /**
    * Cleanup old resolved executions (older than 7 days)
    */
   static async cleanupOld(daysOld: number = 7): Promise<number> {
-    const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
-
-    const result = await FailedExecution.deleteMany({
-      retryStatus: { $in: ['succeeded', 'abandoned'] },
-      resolvedAt: { $lt: cutoff }
-    });
-
-    console.log(`[FailedExecutionRetry] Cleaned up ${result.deletedCount} old executions`);
-    return result.deletedCount;
+    const deleted = FailedExecutionRepository.cleanupOld(daysOld);
+    console.log(`[FailedExecutionRetry] Cleaned up ${deleted} old executions`);
+    return deleted;
   }
 }

@@ -14,7 +14,7 @@
  * actual code dependencies and only adds necessary constraints.
  */
 
-import { IEpic } from '../../models/Task';
+import { IEpic } from '../../database/repositories/TaskRepository.js';
 
 export interface PolicyApplicationResult {
   originalEpics: IEpic[];

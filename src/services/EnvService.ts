@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { IEnvVariable } from '../models/Repository';
+import { IEnvVariable } from '../database/repositories/RepositoryRepository.js';
 import { CryptoService } from './CryptoService';
 
 /**

@@ -391,32 +391,23 @@ export class AgentActivityService {
 
     // Persist to database (survive refresh)
     try {
-      const mongoose = await import('mongoose');
-      if (!mongoose.default.Types.ObjectId.isValid(taskId)) {
+      const { TaskRepository } = await import('../database/repositories/TaskRepository.js');
+      if (!TaskRepository.isValidId(taskId)) {
         return; // Skip persistence for invalid IDs
       }
 
-      const { Task } = await import('../models/Task');
-      await Task.findByIdAndUpdate(
-        taskId,
-        {
-          $push: {
-            activities: {
-              agentName: activity.agentName,
-              type: activity.type,
-              timestamp: activity.timestamp,
-              file: activity.file,
-              content: activity.content,
-              command: activity.command,
-              output: activity.output,
-              toolName: activity.toolName,
-              toolInput: activity.toolInput,
-              diff: activity.diff,
-            },
-          },
-        },
-        { new: false }
-      );
+      TaskRepository.appendActivity(taskId, {
+        agentName: activity.agentName,
+        type: activity.type,
+        timestamp: activity.timestamp,
+        file: activity.file,
+        content: activity.content,
+        command: activity.command,
+        output: activity.output,
+        toolName: activity.toolName,
+        toolInput: activity.toolInput,
+        diff: activity.diff,
+      });
     } catch (error) {
       console.error(`❌ [AgentActivityService] Error persisting activity to DB:`, error);
       // Don't throw - activity emission shouldn't break orchestration

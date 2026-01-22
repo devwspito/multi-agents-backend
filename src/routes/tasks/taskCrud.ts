@@ -13,10 +13,12 @@ import {
   z,
   authenticate,
   AuthRequest,
-  Task,
-  Repository,
+  TaskRepository,
+  RepositoryRepository,
+  IRepository,
   createTaskSchema,
 } from './shared';
+import { ITask } from '../../database/repositories/TaskRepository.js';
 
 const router = Router();
 
@@ -36,47 +38,43 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const filter: any = { userId: req.user.id };
+    console.log('Tasks filter:', { userId: req.user.id, status, priority, projectId, repositoryId });
 
-    if (status) filter.status = status;
-    if (priority) filter.priority = priority;
-    if (projectId) filter.projectId = projectId;
-    if (repositoryId) {
-      filter.repositoryIds = repositoryId;
+    // Get tasks for user with filters
+    let tasks: ITask[] = TaskRepository.findByUserId(req.user.id);
+
+    // Apply filters
+    if (status && typeof status === 'string') {
+      tasks = tasks.filter((t: ITask) => t.status === status);
+    }
+    if (priority && typeof priority === 'string') {
+      tasks = tasks.filter((t: ITask) => t.priority === priority);
+    }
+    if (projectId && typeof projectId === 'string') {
+      tasks = tasks.filter((t: ITask) => t.projectId === projectId);
+    }
+    if (repositoryId && typeof repositoryId === 'string') {
+      tasks = tasks.filter((t: ITask) => t.repositoryIds?.includes(repositoryId));
     }
 
-    console.log('Tasks filter:', filter);
+    // Sort by updatedAt descending and limit
+    tasks = tasks
+      .sort((a: ITask, b: ITask) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, 50);
 
-    let tasks = [];
-    try {
-      const query = Task.find(filter)
-        .select('_id title description status priority projectId repositoryIds tags createdAt updatedAt')
-        .sort({ updatedAt: -1 })
-        .limit(50)
-        .lean();
-
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Query timeout')), 10000)
-      );
-
-      tasks = await Promise.race([query.exec(), timeoutPromise]) as any[];
-      console.log(`Tasks query successful: Found ${tasks?.length || 0} tasks`);
-    } catch (dbError: any) {
-      console.error('Tasks database error:', dbError);
-      tasks = [];
-    }
+    console.log(`Tasks query successful: Found ${tasks.length} tasks`);
 
     return res.json({
       success: true,
       data: {
-        tasks: tasks || [],
+        tasks: tasks,
         pagination: {
-          total: tasks?.length || 0,
+          total: tasks.length,
           page: 1,
           limit: 50
         }
       },
-      count: tasks?.length || 0,
+      count: tasks.length,
     });
   } catch (error) {
     console.error('Error fetching tasks:', error);
@@ -93,10 +91,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -127,35 +122,32 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
   try {
     const validatedData = createTaskSchema.parse(req.body);
 
-    let repositoryIds: any[] = validatedData.repositoryIds || [];
+    let repositoryIds: string[] = validatedData.repositoryIds || [];
 
     if (repositoryIds.length === 0) {
-      console.log(`⚠️ Task created without repository selection`);
+      console.log(`Task created without repository selection`);
     } else {
-      console.log(`✅ Task created with ${repositoryIds.length} selected repositories:`, repositoryIds);
+      console.log(`Task created with ${repositoryIds.length} selected repositories:`, repositoryIds);
 
-      const validRepos = await Repository.find({
-        _id: { $in: repositoryIds },
-        isActive: true,
-      }).select('_id name githubRepoName');
+      const validRepos = RepositoryRepository.findByIds(repositoryIds).filter(
+        (repo: IRepository) => repo.isActive
+      );
 
       if (validRepos.length !== repositoryIds.length) {
-        console.warn(`⚠️ Some selected repositories not found or inactive`);
+        console.warn(`Some selected repositories not found or inactive`);
         console.warn(`   Requested: ${repositoryIds.length}, Found: ${validRepos.length}`);
       }
 
-      validRepos.forEach(repo => {
+      validRepos.forEach((repo: IRepository) => {
         console.log(`   - ${repo.name} (${repo.githubRepoName})`);
       });
     }
 
-    const task = await Task.create({
+    const task = TaskRepository.create({
       ...validatedData,
       repositoryIds,
       userId: req.user!.id,
-      status: 'pending',
       orchestration: {
-        pipeline: [],
         totalCost: 0,
         totalTokens: 0,
         modelConfig: {
@@ -195,10 +187,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
  */
 router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -207,6 +196,8 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
       });
       return;
     }
+
+    TaskRepository.delete(req.params.id);
 
     res.json({
       success: true,

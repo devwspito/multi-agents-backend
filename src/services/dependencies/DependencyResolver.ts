@@ -8,7 +8,7 @@
  * - Clear error messages for invalid dependency graphs
  */
 
-import { IEpic } from '../../models/Task';
+import { IEpic } from '../../database/repositories/TaskRepository.js';
 
 export interface DependencyLevel {
   level: number; // 0-indexed execution level

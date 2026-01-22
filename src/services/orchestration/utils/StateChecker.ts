@@ -110,7 +110,7 @@ export function isStoryComplete(
 export async function loadUnifiedMemoryCompletedStories(taskId: string): Promise<string[]> {
   try {
     const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-    if (resumption.completedStories && resumption.completedStories.length > 0) {
+    if (resumption && resumption.completedStories && resumption.completedStories.length > 0) {
       console.log(`💾 [StateChecker] UnifiedMemory: ${resumption.completedStories.length} completed stories`);
       return resumption.completedStories;
     }
@@ -130,7 +130,7 @@ export async function loadUnifiedMemoryCompletedStories(taskId: string): Promise
 export async function loadUnifiedMemoryCompletedEpics(taskId: string): Promise<string[]> {
   try {
     const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-    if (resumption.completedEpics && resumption.completedEpics.length > 0) {
+    if (resumption && resumption.completedEpics && resumption.completedEpics.length > 0) {
       console.log(`💾 [StateChecker] UnifiedMemory: ${resumption.completedEpics.length} completed epics`);
       return resumption.completedEpics;
     }

@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { ITask, IEpic } from '../../models/Task';
-import { Repository } from '../../models/Repository';
+import { ITask, IEpic } from '../../database/repositories/TaskRepository.js';
+import { RepositoryRepository } from '../../database/repositories/RepositoryRepository.js';
 import { GitHubService } from '../GitHubService';
 import { NotificationService } from '../NotificationService';
 import { AutoMergeService, IMergeResult } from './AutoMergeService';
@@ -50,12 +50,12 @@ export class PRManagementService {
     repositories: any[],
     workspacePath: string | null
   ): Promise<IPRCreationResult[]> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     console.log(`\n🔀 [PR Management] Creating Pull Requests for completed epics (Multi-Repo)...`);
 
     // 🔥 EVENT SOURCING: Rebuild epics from events instead of reading from task model
     const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
+    const state = await eventStore.getCurrentState(task.id as any);
     const epics = state.epics || [];
 
     if (repositories.length === 0 || !workspacePath) {
@@ -165,7 +165,7 @@ export class PRManagementService {
     console.log(`  🔀 Creating PR for epic: ${epic.name} (branch: ${branchName})`);
 
     try {
-      const repoDoc = await Repository.findById(primaryRepo.id);
+      const repoDoc = RepositoryRepository.findById(primaryRepo.id);
       if (!repoDoc) {
         return {
           success: false,
@@ -179,7 +179,7 @@ export class PRManagementService {
 
       const pr = await this.githubService.createPullRequest(
         repoDoc,
-        (task.userId as any)._id.toString(),
+        task.userId,
         {
           title: `[Epic] ${epic.name}`,
           description: prDescription,
@@ -191,13 +191,11 @@ export class PRManagementService {
       epic.pullRequestNumber = pr.number;
       epic.pullRequestUrl = pr.url;
       epic.pullRequestState = 'open';
-
-      // 🔥 CRITICAL: Set simple boolean flag for flow control (Mongoose persists reliably)
       epic.prCreated = true;
 
-      // 🔥 CRITICAL: Mark nested array as modified for Mongoose
-      task.markModified('orchestration.techLead.epics');
-      await task.save();
+      // Update task in database
+      const { TaskRepository } = await import('../../database/repositories/TaskRepository.js');
+      TaskRepository.update(task.id, task);
 
       console.log(`  ✅ PR created: #${pr.number} - ${pr.url}`);
 
@@ -262,13 +260,11 @@ export class PRManagementService {
       epic.pullRequestNumber = existingPR.number;
       epic.pullRequestUrl = existingPR.url;
       epic.pullRequestState = 'open';
-
-      // 🔥 CRITICAL: Set simple boolean flag for flow control (Mongoose persists reliably)
       epic.prCreated = true;
 
-      // 🔥 CRITICAL: Mark nested array as modified for Mongoose
-      task.markModified('orchestration.techLead.epics');
-      await task.save();
+      // Update task in database
+      const { TaskRepository } = await import('../../database/repositories/TaskRepository.js');
+      TaskRepository.update(task.id, task);
 
       NotificationService.emitAgentMessage(
         taskId,
@@ -368,7 +364,7 @@ export class PRManagementService {
 
     // Rebuild epics from events (event sourcing)
     const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(task._id as any);
+    const state = await eventStore.getCurrentState(task.id as any);
     const epics = state.epics || [];
 
     const results: IMergeResult[] = [];
@@ -440,8 +436,8 @@ export class PRManagementService {
     }
 
     // Save epic updates
-    task.markModified('orchestration.techLead.epics');
-    await task.save();
+    const { TaskRepository } = await import('../../database/repositories/TaskRepository.js');
+    TaskRepository.update(task.id, task);
 
     const successfulMerges = results.filter((r) => r.merged).length;
     const needsReview = results.filter((r) => r.needsHumanReview).length;
