@@ -1,22 +1,12 @@
-import mongoose from 'mongoose';
 import { execSync } from 'child_process';
-import { Event, EventType, IEvent } from '../models/Event';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { atomicWriteFileSync, isOk } from '../utils/robustness';
 
-/**
- * EventCounter - Atomic counter for event versioning
- * Used to prevent duplicate version numbers in concurrent event writes
- */
-const eventCounterSchema = new mongoose.Schema({
-  taskId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
-  sequence: { type: Number, default: 0 }
-});
-
-// Only create model if it doesn't exist (prevents OverwriteModelError)
-const EventCounter = mongoose.models.EventCounter || mongoose.model('EventCounter', eventCounterSchema);
+// Re-export EventType from the SQLite repository
+import { EventType, IEvent } from '../database/repositories/EventRepository.js';
+export { EventType, IEvent };
 
 /**
  * Task State - Reconstructed from events
@@ -253,13 +243,13 @@ export class EventStore {
 
   /**
    * Append a new event
-   * 🔥 LOCAL-FIRST: Saves to local file FIRST, then MongoDB as backup
+   * Uses local file storage (primary)
    */
   async append(data: {
-    taskId: mongoose.Types.ObjectId | string;
+    taskId: string;
     eventType: EventType;
     payload: any;
-    userId?: mongoose.Types.ObjectId | string;
+    userId?: string;
     agentName?: string;
     metadata?: {
       cost?: number;
@@ -268,11 +258,8 @@ export class EventStore {
     };
   }): Promise<IEvent> {
     const taskIdStr = data.taskId.toString();
-    const taskId = typeof data.taskId === 'string'
-      ? new mongoose.Types.ObjectId(data.taskId)
-      : data.taskId;
 
-    // 1️⃣ SAVE TO LOCAL FIRST (primary)
+    // Save to local file (primary storage)
     const eventData = {
       taskId: taskIdStr,
       eventType: data.eventType,
@@ -284,227 +271,53 @@ export class EventStore {
     };
 
     const localVersion = this.appendToLocal(taskIdStr, eventData);
-    console.log(`💾 [EventStore] Saved to local: Event ${localVersion}: ${data.eventType}`);
+    console.log(`💾 [EventStore] Saved event ${localVersion}: ${data.eventType}`);
 
-    // 2️⃣ BACKUP TO MONGODB (secondary, non-blocking)
-    let mongoEvent: IEvent | null = null;
-    try {
-      // Get next version number from MongoDB (may differ from local if out of sync)
-      const mongoVersion = await this.getNextVersion(taskId);
-
-      // Create event in MongoDB
-      mongoEvent = await Event.create({
-        taskId,
-        eventType: data.eventType,
-        payload: data.payload,
-        version: mongoVersion,
-        userId: data.userId,
-        agentName: data.agentName,
-        metadata: data.metadata,
-        timestamp: new Date(),
-      });
-
-      console.log(`☁️ [EventStore] Backed up to MongoDB: Event ${mongoVersion}: ${data.eventType}`);
-    } catch (mongoError: any) {
-      console.warn(`⚠️ [EventStore] MongoDB backup failed (non-critical): ${mongoError.message}`);
-      // Don't throw - local is primary, MongoDB is just backup
-    }
-
-    // Return a pseudo-event object if MongoDB failed
-    if (!mongoEvent) {
-      return {
-        _id: new mongoose.Types.ObjectId(),
-        taskId,
-        eventType: data.eventType,
-        payload: data.payload,
-        version: localVersion,
-        userId: data.userId,
-        agentName: data.agentName,
-        metadata: data.metadata,
-        timestamp: new Date(),
-      } as IEvent;
-    }
-
-    return mongoEvent;
-  }
-
-  /**
-   * Get next version number for a task (atomic using MongoDB counter)
-   *
-   * Uses findOneAndUpdate with $inc to guarantee atomic version increments
-   * even when multiple teams write events concurrently
-   */
-  private async getNextVersion(taskId: mongoose.Types.ObjectId): Promise<number> {
-    // Atomically increment and return new version
-    const counter = await EventCounter.findOneAndUpdate(
-      { taskId },
-      { $inc: { sequence: 1 } },
-      { new: true, upsert: true }
-    );
-
-    return counter!.sequence;
+    // Return event object
+    return {
+      id: `${taskIdStr}-${localVersion}`,
+      taskId: taskIdStr,
+      eventType: data.eventType,
+      payload: data.payload,
+      version: localVersion,
+      userId: data.userId,
+      agentName: data.agentName,
+      metadata: data.metadata,
+      timestamp: new Date(),
+    };
   }
 
   /**
    * Get all events for a task (ordered by version)
-   * 🔥 LOCAL-FIRST: Reads from LOCAL first (primary), MongoDB as backup
-   * LOCAL -> MongoDB, NEVER MongoDB -> LOCAL
+   * Reads from local file storage
    */
-  async getEvents(taskId: mongoose.Types.ObjectId | string): Promise<any[]> {
+  async getEvents(taskId: string): Promise<any[]> {
     const taskIdStr = taskId.toString();
-    const id = typeof taskId === 'string'
-      ? new mongoose.Types.ObjectId(taskId)
-      : taskId;
-
-    // 1️⃣ LOCAL FIRST (primary source of truth)
     const localEvents = this.readFromLocal(taskIdStr);
 
-    // 2️⃣ If local has events, use them as primary
     if (localEvents.length > 0) {
-      console.log(`📂 [EventStore] Using ${localEvents.length} events from LOCAL (primary)`);
-
-      // 3️⃣ Optionally check MongoDB for any events we might have missed during recovery
-      // (e.g., events from another server instance)
-      try {
-        const mongoEvents = await Event.find({ taskId: id })
-          .sort({ version: 1 })
-          .lean();
-
-        if (mongoEvents.length > localEvents.length) {
-          // MongoDB has more events - merge them (rare case: another instance wrote)
-          console.log(`🔄 [EventStore] MongoDB has ${mongoEvents.length - localEvents.length} extra events, merging...`);
-          const localVersions = new Set(localEvents.map(e => e.version));
-          const mongoOnlyEvents = mongoEvents.filter(e => !localVersions.has(e.version));
-          if (mongoOnlyEvents.length > 0) {
-            console.log(`   Adding ${mongoOnlyEvents.length} MongoDB-only events to result`);
-            return [...localEvents, ...mongoOnlyEvents].sort((a, b) => (a.version || 0) - (b.version || 0));
-          }
-        }
-      } catch (mongoError: any) {
-        // MongoDB failed - that's OK, we have local data
-        console.warn(`⚠️ [EventStore] MongoDB read failed (using local): ${mongoError.message}`);
-      }
-
-      return localEvents;
+      console.log(`📂 [EventStore] Using ${localEvents.length} events from local storage`);
     }
 
-    // 4️⃣ LOCAL is empty - try MongoDB as fallback (recovery scenario)
-    console.log(`📂 [EventStore] LOCAL is empty, checking MongoDB as fallback...`);
-    try {
-      const mongoEvents = await Event.find({ taskId: id })
-        .sort({ version: 1 })
-        .lean();
-
-      if (mongoEvents.length > 0) {
-        console.log(`☁️ [EventStore] Found ${mongoEvents.length} events in MongoDB (recovery mode)`);
-        return mongoEvents;
-      }
-    } catch (mongoError: any) {
-      console.warn(`⚠️ [EventStore] MongoDB fallback failed: ${mongoError.message}`);
-    }
-
-    // 5️⃣ Both empty - return empty array
-    return [];
+    return localEvents;
   }
 
   /**
    * Get events since a specific version
-   * 🔥 LOCAL-FIRST: Same pattern as getEvents()
    */
   async getEventsSince(
-    taskId: mongoose.Types.ObjectId | string,
+    taskId: string,
     sinceVersion: number
   ): Promise<any[]> {
     const taskIdStr = taskId.toString();
-
-    // 1️⃣ LOCAL FIRST
     const localEvents = this.readFromLocal(taskIdStr);
-    const filteredLocal = localEvents.filter(e => (e.version || 0) > sinceVersion);
-
-    if (filteredLocal.length > 0) {
-      return filteredLocal;
-    }
-
-    // 2️⃣ Fallback to MongoDB only if local is empty
-    const id = typeof taskId === 'string'
-      ? new mongoose.Types.ObjectId(taskId)
-      : taskId;
-
-    try {
-      return await Event.find({
-        taskId: id,
-        version: { $gt: sinceVersion }
-      })
-        .sort({ version: 1 })
-        .lean();
-    } catch (mongoError: any) {
-      console.warn(`⚠️ [EventStore] MongoDB getEventsSince failed: ${mongoError.message}`);
-      return [];
-    }
-  }
-
-  /**
-   * 🔥 Sync local events to MongoDB
-   * Call this when MongoDB comes back online after a crash
-   */
-  async syncLocalToMongoDB(taskId: mongoose.Types.ObjectId | string): Promise<{ synced: number; skipped: number }> {
-    const taskIdStr = taskId.toString();
-    const id = typeof taskId === 'string'
-      ? new mongoose.Types.ObjectId(taskId)
-      : taskId;
-
-    const localEvents = this.readFromLocal(taskIdStr);
-    if (localEvents.length === 0) {
-      return { synced: 0, skipped: 0 };
-    }
-
-    // Get existing MongoDB events
-    let mongoEvents: any[] = [];
-    try {
-      mongoEvents = await Event.find({ taskId: id }).lean();
-    } catch (e) {
-      console.error(`❌ [EventStore] Cannot sync - MongoDB unavailable`);
-      return { synced: 0, skipped: localEvents.length };
-    }
-
-    const mongoEventKeys = new Set(mongoEvents.map(e => `${e.eventType}-${e.payload?.storyId || ''}-${e.payload?.epicId || ''}`));
-
-    let synced = 0;
-    let skipped = 0;
-
-    for (const localEvent of localEvents) {
-      const key = `${localEvent.eventType}-${localEvent.payload?.storyId || ''}-${localEvent.payload?.epicId || ''}`;
-      if (mongoEventKeys.has(key)) {
-        skipped++;
-        continue;
-      }
-
-      try {
-        await Event.create({
-          taskId: id,
-          eventType: localEvent.eventType,
-          payload: localEvent.payload,
-          version: localEvent.version,
-          userId: localEvent.userId ? new mongoose.Types.ObjectId(localEvent.userId) : undefined,
-          agentName: localEvent.agentName,
-          metadata: localEvent.metadata,
-          timestamp: new Date(localEvent.timestamp),
-        });
-        synced++;
-      } catch (e) {
-        // Duplicate or error, skip
-        skipped++;
-      }
-    }
-
-    console.log(`🔄 [EventStore] Synced ${synced} events from local to MongoDB (${skipped} skipped)`);
-    return { synced, skipped };
+    return localEvents.filter(e => (e.version || 0) > sinceVersion);
   }
 
   /**
    * Rebuild current state from all events
    */
-  async getCurrentState(taskId: mongoose.Types.ObjectId | string): Promise<TaskState> {
+  async getCurrentState(taskId: string): Promise<TaskState> {
     const events = await this.getEvents(taskId);
     return this.buildState(events);
   }
@@ -630,6 +443,7 @@ export class EventStore {
             title: payload.title,
             description: payload.description,
             assignedTo: payload.assignedTo,
+            branchName: payload.branchName, // 🔥 CRITICAL: Branch assigned by TechLead
             status: 'pending',
             priority: payload.priority,
             complexity: payload.complexity || payload.estimatedComplexity, // Support both field names
@@ -767,7 +581,7 @@ export class EventStore {
   /**
    * Get event history for debugging
    */
-  async getEventHistory(taskId: mongoose.Types.ObjectId | string): Promise<string[]> {
+  async getEventHistory(taskId: string): Promise<string[]> {
     const events = await this.getEvents(taskId);
     return events.map(e => `${e.version}: ${e.eventType} - ${JSON.stringify(e.payload).substring(0, 50)}`);
   }
@@ -775,7 +589,7 @@ export class EventStore {
   /**
    * Validate state integrity (for debugging)
    */
-  async validateState(taskId: mongoose.Types.ObjectId | string): Promise<{
+  async validateState(taskId: string): Promise<{
     valid: boolean;
     errors: string[];
   }> {
@@ -818,7 +632,7 @@ export class EventStore {
    * Format: JSONL (one JSON object per line) for easy append and read
    */
   async saveEventsToLocal(
-    taskId: mongoose.Types.ObjectId | string,
+    taskId: string,
     workspacePath: string,
     targetRepository: string
   ): Promise<{ success: boolean; filePath: string; eventsCount: number }> {
@@ -832,7 +646,7 @@ export class EventStore {
       // Build paths
       const repoPath = path.join(workspacePath, targetRepository);
       const eventsDir = path.join(repoPath, EventStore.EVENTS_DIR);
-      const taskIdStr = typeof taskId === 'string' ? taskId : taskId.toString();
+      const taskIdStr = taskId;
       const filePath = path.join(eventsDir, `task-${taskIdStr}-events.jsonl`);
 
       // Ensure directory exists
@@ -950,11 +764,11 @@ export class EventStore {
    * Convenience method that does both operations
    */
   async backupEvents(
-    taskId: mongoose.Types.ObjectId | string,
+    taskId: string,
     workspacePath: string,
     targetRepository: string
   ): Promise<{ success: boolean; filePath: string; eventsCount: number }> {
-    const taskIdStr = typeof taskId === 'string' ? taskId : taskId.toString();
+    const taskIdStr = taskId;
 
     // Save to local
     const result = await this.saveEventsToLocal(taskId, workspacePath, targetRepository);
@@ -1070,7 +884,7 @@ export class EventStore {
    * This is the CRITICAL step to ensure Local state matches GitHub reality
    */
   async verifyStoryPush(params: {
-    taskId: mongoose.Types.ObjectId | string;
+    taskId: string;
     storyId: string;
     branchName: string;
     repoPath: string;
@@ -1118,7 +932,7 @@ export class EventStore {
    * Get all stories that are marked completed but NOT push-verified
    * These are potential "lost" stories that never made it to GitHub
    */
-  async getUnverifiedStories(taskId: mongoose.Types.ObjectId | string): Promise<Array<{
+  async getUnverifiedStories(taskId: string): Promise<Array<{
     storyId: string;
     branchName?: string;
     status: string;
@@ -1139,7 +953,7 @@ export class EventStore {
    * Returns summary of verification results
    */
   async verifyAllPushes(params: {
-    taskId: mongoose.Types.ObjectId | string;
+    taskId: string;
     repoPath: string;
   }): Promise<{
     total: number;

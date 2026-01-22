@@ -208,17 +208,20 @@ export class RealisticCostEstimator {
    */
   private async getHistoricalCosts(): Promise<HistoricalCosts | null> {
     try {
-      const Task = require('../models/Task').Task;
+      const { TaskRepository } = await import('../database/repositories/TaskRepository');
 
-      // Obtener últimas 20 tareas completadas con costos
-      const completedTasks = await Task.find({
+      // Obtener últimas tareas completadas y filtrar las que tienen costos
+      const allCompleted = TaskRepository.findAll({
         status: 'completed',
-        'orchestration.totalCost': { $exists: true, $gt: 0 }
-      })
-        .sort({ completedAt: -1 })
-        .limit(20)
-        .select('orchestration.totalCost orchestration.team orchestration.planning orchestration.techLead createdAt completedAt')
-        .lean();
+        limit: 50, // Fetch more to filter in memory
+        orderBy: 'updated_at',
+        orderDir: 'DESC'
+      });
+
+      // Filter tasks with totalCost > 0
+      const completedTasks = allCompleted
+        .filter(t => t.orchestration?.totalCost && t.orchestration.totalCost > 0)
+        .slice(0, 20);
 
       if (completedTasks.length === 0) {
         console.log('ℹ️ No historical cost data available yet');

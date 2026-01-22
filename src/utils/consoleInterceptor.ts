@@ -34,8 +34,8 @@ function extractTaskId(args: any[]): string | null {
         return arg.taskId;
       }
       // Check nested properties
-      if (arg.task && arg.task._id) {
-        const id = arg.task._id.toString();
+      if (arg.task && arg.task.id) {
+        const id = arg.task.id.toString();
         if (id.length === 24) return id;
       }
     }

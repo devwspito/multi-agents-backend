@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
-import { User } from '../models/User';
+import { UserRepository } from '../database/repositories/UserRepository.js';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -42,9 +42,9 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
       throw jwtError;
     }
 
-    // Buscar usuario
+    // Buscar usuario (SQLite - synchronous)
     console.log('[Auth] Looking for user with ID:', decoded.userId);
-    const user = await User.findById(decoded.userId);
+    const user = UserRepository.findById(decoded.userId);
 
     if (!user) {
       res.status(401).json({
@@ -56,7 +56,7 @@ export async function authenticate(req: AuthRequest, res: Response, next: NextFu
 
     // Agregar usuario al request
     req.user = {
-      id: (user._id as any).toString(),
+      id: user.id,
       githubId: user.githubId,
       username: user.username,
       email: user.email,

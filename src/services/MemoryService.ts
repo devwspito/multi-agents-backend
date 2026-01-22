@@ -1,5 +1,4 @@
-import mongoose from 'mongoose';
-import { Memory, IMemory, MemoryType, MemoryImportance } from '../models/Memory';
+import { MemoryRepository, IMemory, MemoryType, MemoryImportance } from '../database/repositories/MemoryRepository.js';
 import { embeddingService } from './EmbeddingService';
 
 /**
@@ -15,14 +14,14 @@ import { embeddingService } from './EmbeddingService';
  */
 
 export interface CreateMemoryInput {
-  projectId: string | mongoose.Types.ObjectId;
+  projectId: string;
   type: MemoryType;
   title: string;
   content: string;
   context?: string;
   importance?: MemoryImportance;
   source?: {
-    taskId?: string | mongoose.Types.ObjectId;
+    taskId?: string;
     phase?: string;
     agentType?: string;
   };
@@ -30,7 +29,7 @@ export interface CreateMemoryInput {
 }
 
 export interface SearchMemoryOptions {
-  projectId: string | mongoose.Types.ObjectId;
+  projectId: string;
   query: string;
   types?: MemoryType[];
   minImportance?: MemoryImportance;
@@ -44,22 +43,16 @@ export interface MemorySearchResult {
 }
 
 class MemoryService {
-  private readonly VECTOR_INDEX_NAME = 'memory_vector_index';
-
   /**
    * Store a new memory with embedding
    */
   async remember(input: CreateMemoryInput): Promise<IMemory> {
-    const projectId = typeof input.projectId === 'string'
-      ? new mongoose.Types.ObjectId(input.projectId)
-      : input.projectId;
-
     // Generate embedding for the memory content
     const textToEmbed = `${input.title}\n\n${input.content}${input.context ? '\n\nContext: ' + input.context : ''}`;
     const embeddingResult = await embeddingService.embed(textToEmbed);
 
-    const memory = await Memory.create({
-      projectId,
+    const memory = MemoryRepository.create({
+      projectId: input.projectId,
       type: input.type,
       title: input.title,
       content: input.content,
@@ -68,14 +61,11 @@ class MemoryService {
       embedding: embeddingResult?.embedding,
       embeddingModel: embeddingResult?.model,
       source: input.source ? {
-        taskId: input.source.taskId ? new mongoose.Types.ObjectId(input.source.taskId as string) : undefined,
+        taskId: input.source.taskId,
         phase: input.source.phase,
         agentType: input.source.agentType,
       } : undefined,
       expiresAt: input.expiresAt,
-      accessCount: 0,
-      usefulness: 0.5,
-      archived: false,
     });
 
     console.log(`🧠 [Memory] Stored: "${input.title}" (${input.type}) with ${embeddingResult ? 'embedding' : 'no embedding'}`);
@@ -84,128 +74,34 @@ class MemoryService {
   }
 
   /**
-   * Search for relevant memories using semantic search
+   * Search for relevant memories using text search
+   * Note: Vector search removed as SQLite doesn't support it natively.
+   * For vector search, consider integrating with a dedicated vector DB.
    */
   async recall(options: SearchMemoryOptions): Promise<MemorySearchResult[]> {
-    const projectId = typeof options.projectId === 'string'
-      ? new mongoose.Types.ObjectId(options.projectId)
-      : options.projectId;
-
     const limit = options.limit || 5;
 
-    // Try vector search first if embeddings are available
-    if (embeddingService.isAvailable()) {
-      try {
-        const results = await this.vectorSearch(projectId, options.query, {
-          types: options.types,
-          minImportance: options.minImportance,
-          limit,
-          includeArchived: options.includeArchived,
-        });
-
-        if (results.length > 0) {
-          // Update access counts
-          await this.updateAccessCounts(results.map(r => r.memory._id));
-          return results;
-        }
-      } catch (error: any) {
-        console.warn(`⚠️  [Memory] Vector search failed, falling back to text search:`, error.message);
-      }
-    }
-
-    // Fallback to text search
-    return await this.textSearch(projectId, options.query, {
+    // Use text search
+    const results = await this.textSearch(options.projectId, options.query, {
       types: options.types,
       minImportance: options.minImportance,
       limit,
       includeArchived: options.includeArchived,
     });
+
+    // Update access counts
+    for (const result of results) {
+      MemoryRepository.incrementAccess(result.memory.id);
+    }
+
+    return results;
   }
 
   /**
-   * Vector search using MongoDB Atlas Vector Search
-   */
-  private async vectorSearch(
-    projectId: mongoose.Types.ObjectId,
-    query: string,
-    options: {
-      types?: MemoryType[];
-      minImportance?: MemoryImportance;
-      limit: number;
-      includeArchived?: boolean;
-    }
-  ): Promise<MemorySearchResult[]> {
-    // Generate query embedding
-    const queryEmbedding = await embeddingService.embed(query);
-    if (!queryEmbedding) {
-      throw new Error('Failed to generate query embedding');
-    }
-
-    // Build filter
-    const filter: any = {
-      projectId: projectId,
-    };
-
-    if (!options.includeArchived) {
-      filter.archived = false;
-    }
-
-    if (options.types && options.types.length > 0) {
-      filter.type = { $in: options.types };
-    }
-
-    if (options.minImportance) {
-      const importanceLevels = ['low', 'medium', 'high', 'critical'];
-      const minIndex = importanceLevels.indexOf(options.minImportance);
-      filter.importance = { $in: importanceLevels.slice(minIndex) };
-    }
-
-    // MongoDB Atlas Vector Search aggregation
-    const pipeline = [
-      {
-        $vectorSearch: {
-          index: this.VECTOR_INDEX_NAME,
-          path: 'embedding',
-          queryVector: queryEmbedding.embedding,
-          numCandidates: options.limit * 10, // Over-fetch for better results
-          limit: options.limit,
-          filter: filter,
-        },
-      },
-      {
-        $project: {
-          _id: 1,
-          projectId: 1,
-          type: 1,
-          importance: 1,
-          title: 1,
-          content: 1,
-          context: 1,
-          source: 1,
-          accessCount: 1,
-          lastAccessedAt: 1,
-          usefulness: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          archived: 1,
-          score: { $meta: 'vectorSearchScore' },
-        },
-      },
-    ];
-
-    const results = await Memory.aggregate(pipeline);
-
-    return results.map((doc: any) => ({
-      memory: doc as IMemory,
-      score: doc.score,
-    }));
-  }
-
-  /**
-   * Text search fallback when embeddings aren't available
+   * Text search using SQLite LIKE
    */
   private async textSearch(
-    projectId: mongoose.Types.ObjectId,
+    projectId: string,
     query: string,
     options: {
       types?: MemoryType[];
@@ -214,216 +110,200 @@ class MemoryService {
       includeArchived?: boolean;
     }
   ): Promise<MemorySearchResult[]> {
-    const filter: any = {
-      projectId,
-      $text: { $search: query },
-    };
+    // Get memories matching the search query
+    const memories = MemoryRepository.search(projectId, query, options.limit);
 
-    if (!options.includeArchived) {
-      filter.archived = false;
-    }
-
+    // Filter by type if specified
+    let filtered = memories;
     if (options.types && options.types.length > 0) {
-      filter.type = { $in: options.types };
+      filtered = filtered.filter(m => options.types!.includes(m.type));
     }
 
+    // Filter by importance if specified
     if (options.minImportance) {
-      const importanceLevels = ['low', 'medium', 'high', 'critical'];
+      const importanceLevels: MemoryImportance[] = ['low', 'medium', 'high', 'critical'];
       const minIndex = importanceLevels.indexOf(options.minImportance);
-      filter.importance = { $in: importanceLevels.slice(minIndex) };
+      filtered = filtered.filter(m => importanceLevels.indexOf(m.importance) >= minIndex);
     }
 
-    const results = await Memory.find(filter, {
-      score: { $meta: 'textScore' },
-    })
-      .sort({ score: { $meta: 'textScore' } })
-      .limit(options.limit)
-      .lean();
+    // Filter archived if not included
+    if (!options.includeArchived) {
+      filtered = filtered.filter(m => !m.archived);
+    }
 
-    // Normalize text search scores to 0-1 range
-    const maxScore = results.length > 0 ? Math.max(...results.map((r: any) => r.score || 0)) : 1;
-
-    return results.map((doc: any) => ({
-      memory: doc as IMemory,
-      score: maxScore > 0 ? (doc.score || 0) / maxScore : 0,
+    // Return with normalized scores (simple text match doesn't have scores)
+    return filtered.slice(0, options.limit).map((memory, index) => ({
+      memory,
+      score: 1 - (index * 0.1), // Decreasing score by position
     }));
-  }
-
-  /**
-   * Update access counts and last accessed time
-   */
-  private async updateAccessCounts(memoryIds: mongoose.Types.ObjectId[]): Promise<void> {
-    await Memory.updateMany(
-      { _id: { $in: memoryIds } },
-      {
-        $inc: { accessCount: 1 },
-        $set: { lastAccessedAt: new Date() },
-      }
-    );
   }
 
   /**
    * Mark a memory as useful or not (feedback from agents)
    */
-  async feedback(memoryId: string | mongoose.Types.ObjectId, wasUseful: boolean): Promise<void> {
-    const id = typeof memoryId === 'string' ? new mongoose.Types.ObjectId(memoryId) : memoryId;
-
-    // Exponential moving average for usefulness score
-    const alpha = 0.3; // Learning rate
-    const newValue = wasUseful ? 1 : 0;
-
-    const memory = await Memory.findById(id);
+  async feedback(memoryId: string, wasUseful: boolean): Promise<void> {
+    const memory = MemoryRepository.findById(memoryId);
     if (memory) {
+      // Exponential moving average for usefulness score
+      const alpha = 0.3; // Learning rate
+      const newValue = wasUseful ? 1 : 0;
       const newUsefulness = alpha * newValue + (1 - alpha) * memory.usefulness;
-      await Memory.updateOne({ _id: id }, { $set: { usefulness: newUsefulness } });
+      MemoryRepository.update(memoryId, { usefulness: newUsefulness });
     }
   }
 
   /**
    * Archive old or low-usefulness memories
    */
-  async cleanup(projectId: string | mongoose.Types.ObjectId): Promise<number> {
-    const id = typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
-
-    // Archive memories that:
-    // 1. Have low usefulness (< 0.2) AND accessed more than 5 times
-    // 2. Are expired
-    // 3. Haven't been accessed in 90 days AND have low importance
-
+  async cleanup(projectId: string): Promise<number> {
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
 
-    const result = await Memory.updateMany(
-      {
-        projectId: id,
-        archived: false,
-        $or: [
-          // Low usefulness after multiple accesses
-          { usefulness: { $lt: 0.2 }, accessCount: { $gt: 5 } },
-          // Expired
-          { expiresAt: { $lt: new Date() } },
-          // Old and low importance
-          {
-            importance: 'low',
-            lastAccessedAt: { $lt: ninetyDaysAgo },
-          },
-        ],
-      },
-      { $set: { archived: true } }
-    );
+    // Get all non-archived memories for the project
+    const memories = MemoryRepository.findByProjectId(projectId, { archived: false });
 
-    if (result.modifiedCount > 0) {
-      console.log(`🧹 [Memory] Archived ${result.modifiedCount} old/unused memories for project ${id}`);
+    let archivedCount = 0;
+
+    for (const memory of memories) {
+      const shouldArchive =
+        // Low usefulness after multiple accesses
+        (memory.usefulness < 0.2 && memory.accessCount > 5) ||
+        // Expired
+        (memory.expiresAt && memory.expiresAt < new Date()) ||
+        // Old and low importance
+        (memory.importance === 'low' && memory.lastAccessedAt && memory.lastAccessedAt < ninetyDaysAgo);
+
+      if (shouldArchive) {
+        MemoryRepository.archive(memory.id);
+        archivedCount++;
+      }
     }
 
-    return result.modifiedCount;
+    if (archivedCount > 0) {
+      console.log(`🧹 [Memory] Archived ${archivedCount} old/unused memories for project ${projectId}`);
+    }
+
+    return archivedCount;
   }
 
   /**
    * Get recent memories for a project (for context injection)
    */
   async getRecent(
-    projectId: string | mongoose.Types.ObjectId,
+    projectId: string,
     limit: number = 10,
     types?: MemoryType[]
-  ): Promise<any[]> {
-    const id = typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
-
-    const filter: any = {
-      projectId: id,
-      archived: false,
-    };
-
+  ): Promise<IMemory[]> {
     if (types && types.length > 0) {
-      filter.type = { $in: types };
+      // Get memories for each type and combine
+      const allMemories: IMemory[] = [];
+      for (const type of types) {
+        const memories = MemoryRepository.findByProjectId(projectId, {
+          type,
+          archived: false,
+          limit: limit * types.length, // Over-fetch to account for filtering
+        });
+        allMemories.push(...memories);
+      }
+      // Sort by createdAt and return top limit
+      return allMemories
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, limit);
     }
 
-    return await Memory.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean() as any[];
+    return MemoryRepository.findByProjectId(projectId, {
+      archived: false,
+      limit,
+    });
   }
 
   /**
    * Get important memories for a project (high/critical importance)
    */
   async getImportant(
-    projectId: string | mongoose.Types.ObjectId,
+    projectId: string,
     limit: number = 10
-  ): Promise<any[]> {
-    const id = typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
-
-    return await Memory.find({
-      projectId: id,
+  ): Promise<IMemory[]> {
+    const highMemories = MemoryRepository.findByProjectId(projectId, {
+      importance: 'high',
       archived: false,
-      importance: { $in: ['high', 'critical'] },
-    })
-      .sort({ usefulness: -1, createdAt: -1 })
-      .limit(limit)
-      .lean() as any[];
+      limit,
+    });
+
+    const criticalMemories = MemoryRepository.findByProjectId(projectId, {
+      importance: 'critical',
+      archived: false,
+      limit,
+    });
+
+    // Combine and sort by usefulness
+    const combined = [...criticalMemories, ...highMemories];
+    return combined
+      .sort((a, b) => b.usefulness - a.usefulness)
+      .slice(0, limit);
   }
 
   /**
    * Get memories by type
    */
   async getByType(
-    projectId: string | mongoose.Types.ObjectId,
+    projectId: string,
     type: MemoryType,
     limit: number = 20
-  ): Promise<any[]> {
-    const id = typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
-
-    return await Memory.find({
-      projectId: id,
+  ): Promise<IMemory[]> {
+    return MemoryRepository.findByProjectId(projectId, {
       type,
       archived: false,
-    })
-      .sort({ usefulness: -1, createdAt: -1 })
-      .limit(limit)
-      .lean() as any[];
+      limit,
+    });
   }
 
   /**
    * Count memories for a project
    */
-  async count(projectId: string | mongoose.Types.ObjectId): Promise<{
+  async count(projectId: string): Promise<{
     total: number;
     byType: Record<MemoryType, number>;
     byImportance: Record<MemoryImportance, number>;
   }> {
-    const id = typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
+    const memories = MemoryRepository.findByProjectId(projectId, { archived: false });
 
-    const pipeline = [
-      { $match: { projectId: id, archived: false } },
-      {
-        $facet: {
-          total: [{ $count: 'count' }],
-          byType: [{ $group: { _id: '$type', count: { $sum: 1 } } }],
-          byImportance: [{ $group: { _id: '$importance', count: { $sum: 1 } } }],
-        },
-      },
-    ];
+    const byType: Record<MemoryType, number> = {
+      codebase_pattern: 0,
+      error_resolution: 0,
+      user_preference: 0,
+      architecture_decision: 0,
+      api_contract: 0,
+      test_pattern: 0,
+      dependency_info: 0,
+      workflow_learned: 0,
+      agent_insight: 0,
+    };
 
-    const [result] = await Memory.aggregate(pipeline);
+    const byImportance: Record<MemoryImportance, number> = {
+      low: 0,
+      medium: 0,
+      high: 0,
+      critical: 0,
+    };
+
+    for (const memory of memories) {
+      byType[memory.type] = (byType[memory.type] || 0) + 1;
+      byImportance[memory.importance] = (byImportance[memory.importance] || 0) + 1;
+    }
 
     return {
-      total: result.total[0]?.count || 0,
-      byType: Object.fromEntries(
-        result.byType.map((r: any) => [r._id, r.count])
-      ) as Record<MemoryType, number>,
-      byImportance: Object.fromEntries(
-        result.byImportance.map((r: any) => [r._id, r.count])
-      ) as Record<MemoryImportance, number>,
+      total: memories.length,
+      byType,
+      byImportance,
     };
   }
 
   /**
    * Delete a memory permanently
    */
-  async forget(memoryId: string | mongoose.Types.ObjectId): Promise<boolean> {
-    const id = typeof memoryId === 'string' ? new mongoose.Types.ObjectId(memoryId) : memoryId;
-    const result = await Memory.deleteOne({ _id: id });
-    return result.deletedCount > 0;
+  async forget(memoryId: string): Promise<boolean> {
+    return MemoryRepository.delete(memoryId);
   }
 
   /**

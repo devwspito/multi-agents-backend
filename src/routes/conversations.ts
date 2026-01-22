@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { Conversation } from '../models/Conversation';
-import { Task } from '../models/Task';
+import { ConversationRepository, IMessage } from '../database/repositories/ConversationRepository.js';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { z } from 'zod';
 import crypto from 'crypto';
 
@@ -23,10 +23,7 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
     const { taskId } = req.params;
 
     // Verificar que la tarea pertenece al usuario
-    const task = await Task.findOne({
-      _id: taskId,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -37,10 +34,10 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Buscar o crear conversación
-    let conversation = await Conversation.findOne({ taskId });
+    let conversation = ConversationRepository.findByTaskId(taskId);
 
     if (!conversation) {
-      conversation = await Conversation.create({
+      conversation = ConversationRepository.create({
         taskId,
         userId: req.user!.id,
         messages: [],
@@ -70,10 +67,7 @@ router.post('/task/:taskId/messages', authenticate, async (req: AuthRequest, res
     const validatedData = addMessageSchema.parse(req.body);
 
     // Verificar que la tarea pertenece al usuario
-    const task = await Task.findOne({
-      _id: taskId,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -84,10 +78,10 @@ router.post('/task/:taskId/messages', authenticate, async (req: AuthRequest, res
     }
 
     // Buscar o crear conversación
-    let conversation = await Conversation.findOne({ taskId });
+    let conversation = ConversationRepository.findByTaskId(taskId);
 
     if (!conversation) {
-      conversation = await Conversation.create({
+      conversation = ConversationRepository.create({
         taskId,
         userId: req.user!.id,
         messages: [],
@@ -95,7 +89,7 @@ router.post('/task/:taskId/messages', authenticate, async (req: AuthRequest, res
     }
 
     // Agregar mensaje
-    const newMessage = {
+    const newMessage: IMessage = {
       id: `msg-${crypto.randomBytes(8).toString('hex')}`,
       role: validatedData.role,
       content: validatedData.content,
@@ -103,15 +97,17 @@ router.post('/task/:taskId/messages', authenticate, async (req: AuthRequest, res
       agent: validatedData.agent,
     };
 
-    conversation.messages.push(newMessage);
-    await conversation.save();
+    ConversationRepository.addMessage(taskId, newMessage);
+
+    // Re-fetch the updated conversation
+    const updatedConversation = ConversationRepository.findByTaskId(taskId);
 
     console.log(`💬 New message added to task ${taskId}: "${validatedData.content.substring(0, 50)}..."`);
 
     res.json({
       success: true,
       data: {
-        conversation,
+        conversation: updatedConversation,
         message: newMessage,
       },
     });
@@ -139,12 +135,9 @@ router.post('/task/:taskId/messages', authenticate, async (req: AuthRequest, res
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const conversation = await Conversation.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const conversation = ConversationRepository.findById(req.params.id);
 
-    if (!conversation) {
+    if (!conversation || conversation.userId !== req.user!.id) {
       res.status(404).json({
         success: false,
         message: 'Conversation not found',
@@ -173,12 +166,9 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
   try {
     const validatedData = addMessageSchema.parse(req.body);
 
-    const conversation = await Conversation.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const conversation = ConversationRepository.findById(req.params.id);
 
-    if (!conversation) {
+    if (!conversation || conversation.userId !== req.user!.id) {
       res.status(404).json({
         success: false,
         message: 'Conversation not found',
@@ -186,7 +176,7 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    const newMessage = {
+    const newMessage: IMessage = {
       id: `msg-${crypto.randomBytes(8).toString('hex')}`,
       role: validatedData.role,
       content: validatedData.content,
@@ -194,13 +184,15 @@ router.post('/:id/messages', authenticate, async (req: AuthRequest, res) => {
       agent: validatedData.agent,
     };
 
-    conversation.messages.push(newMessage);
-    await conversation.save();
+    ConversationRepository.addMessage(conversation.taskId, newMessage);
+
+    // Re-fetch the updated conversation
+    const updatedConversation = ConversationRepository.findById(req.params.id);
 
     res.json({
       success: true,
       data: {
-        conversation,
+        conversation: updatedConversation,
         message: newMessage,
       },
     });
@@ -231,10 +223,7 @@ router.get('/task/:taskId/unified', authenticate, async (req: AuthRequest, res) 
     const { taskId } = req.params;
 
     // Verificar tarea
-    const task = await Task.findOne({
-      _id: taskId,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -245,14 +234,14 @@ router.get('/task/:taskId/unified', authenticate, async (req: AuthRequest, res) 
     }
 
     // Obtener conversación
-    const conversation = await Conversation.findOne({ taskId });
+    const conversation = ConversationRepository.findByTaskId(taskId);
 
     res.json({
       success: true,
       data: {
         messages: conversation?.messages || [],
         task: {
-          id: task._id,
+          id: task.id,
           title: task.title,
           description: task.description,
           status: task.status,

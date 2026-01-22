@@ -16,6 +16,8 @@ import { unifiedMemoryService } from '../UnifiedMemoryService';
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { isEmpty } from './utils/ArrayHelpers';
 import { getEpicId } from './utils/IdNormalizer';
+// 📦 SQLite Repository
+import { TaskRepository } from '../../database/repositories/TaskRepository';
 import fs from 'fs';
 import path from 'path';
 
@@ -70,7 +72,7 @@ export class PlanningPhase extends BasePhase {
    */
   private async restoreEpicsOnSkip(context: OrchestrationContext, taskId: string): Promise<void> {
     const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-    const memoryEpics = resumption.executionMap?.epics;
+    const memoryEpics = resumption?.executionMap?.epics;
 
     if (!isEmpty(memoryEpics)) {
       const epics = memoryEpics!.map(e => ({ id: e.epicId, title: e.title }));
@@ -90,7 +92,7 @@ export class PlanningPhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const workspacePath = context.workspacePath;
     const repositories = context.repositories;
 
@@ -291,8 +293,8 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
           if (projectId) {
             try {
               await granularMemoryService.store({
-                projectId: new (await import('mongoose')).Types.ObjectId(projectId),
-                taskId: new (await import('mongoose')).Types.ObjectId(taskId),
+                projectId,
+                taskId,
                 scope: 'task',
                 phaseType: 'planning',
                 agentType: 'planning-agent',
@@ -302,9 +304,9 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
                 importance: 'medium',
                 confidence: 1.0,
               });
-              console.log(`💾 [Cache] Stored codebaseKnowledge in granular memory`);
+              console.log(`[Cache] Stored codebaseKnowledge in granular memory`);
             } catch (storeErr: any) {
-              console.warn(`⚠️ [Cache] Failed to store discovery: ${storeErr.message}`);
+              console.warn(`[Cache] Failed to store discovery: ${storeErr.message}`);
             }
           }
         } catch (error: any) {
@@ -376,8 +378,8 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
               if (projectId) {
                 try {
                   await granularMemoryService.store({
-                    projectId: new (await import('mongoose')).Types.ObjectId(projectId),
-                    taskId: new (await import('mongoose')).Types.ObjectId(taskId),
+                    projectId,
+                    taskId,
                     scope: 'task',
                     phaseType: 'planning',
                     agentType: 'planning-agent',
@@ -613,21 +615,20 @@ ${judgeFeedback}
 
       console.log(`✅ [Planning] Judge approved - ${planningJudgeResult.epicsCount} epic(s)`);
 
-      // 🔥 CRITICAL: Re-fetch task from DB to avoid Mongoose version conflicts
+      // 🔥 CRITICAL: Re-fetch task from DB to avoid stale data
       // During the agent execution (~2-3 min), WebSocket notifications may have updated the task
-      const Task = require('../../models/Task').Task;
-      const freshTask = await Task.findById(task._id);
+      const freshTask = TaskRepository.findById(task.id);
       if (!freshTask) {
-        throw new Error(`Task ${task._id} not found in database after agent execution`);
+        throw new Error(`Task ${task.id} not found in database after agent execution`);
       }
 
       // Update fresh task with results
-      freshTask.orchestration.planning = freshTask.orchestration.planning || {};
-      freshTask.orchestration.planning.status = 'completed';
-      freshTask.orchestration.planning.completedAt = new Date();
-      freshTask.orchestration.planning.output = result.output;
-      freshTask.orchestration.planning.epics = enrichedEpics;
-      freshTask.orchestration.planning.analysis = parsed.analysis;
+      const planning = (freshTask.orchestration.planning || { agent: 'planning', status: 'pending' }) as any;
+      planning.status = 'completed';
+      planning.completedAt = new Date();
+      planning.output = result.output;
+      planning.epics = enrichedEpics;
+      planning.analysis = parsed.analysis;
 
       // 🔥 MERGE: Combine agent's architectureBrief with programmatically discovered patterns
       // This ensures helperFunctions/entityCreationRules are ALWAYS present even if agent misses them
@@ -636,11 +637,12 @@ ${judgeFeedback}
         // Override with programmatic discovery (more reliable than agent discovery)
         ...(codebaseKnowledge ? CodebaseDiscoveryService.toArchitectureBriefFields(codebaseKnowledge) : {}),
       };
-      freshTask.orchestration.planning.architectureBrief = mergedArchitectureBrief; // 🏗️ Architecture insights for TechLead/Developers
-      freshTask.orchestration.planning.codebaseKnowledge = codebaseKnowledge; // 🔧 Raw programmatic discovery data
-      freshTask.orchestration.planning.sessionId = result.sessionId;
-      freshTask.orchestration.planning.usage = result.usage;
-      freshTask.orchestration.planning.cost_usd = result.cost;
+      planning.architectureBrief = mergedArchitectureBrief; // 🏗️ Architecture insights for TechLead/Developers
+      planning.codebaseKnowledge = codebaseKnowledge; // 🔧 Raw programmatic discovery data
+      planning.sessionId = result.sessionId;
+      planning.usage = result.usage;
+      planning.cost_usd = result.cost;
+      freshTask.orchestration.planning = planning;
 
       // NOTE: TechLead is NOT marked as completed here!
       // TechLead must still run to:
@@ -741,7 +743,7 @@ ${judgeFeedback}
       // Event sourcing
       const { eventStore } = await import('../EventStore');
       await eventStore.append({
-        taskId: task._id as any,
+        taskId: task.id as any,
         eventType: 'PlanningCompleted',
         agentName: 'planning-agent',
         payload: {
@@ -922,7 +924,7 @@ ${judgeFeedback}
     projectRadiographies?: Map<string, ProjectRadiography>
   ): string {
     const projectId = task.projectId?.toString() || '';
-    const taskId = task._id?.toString() || '';
+    const taskId = task.id?.toString() || '';
 
     // 🔥 DISCOVERED PATTERNS SECTION (from programmatic discovery)
     const discoveredPatternsSection = codebaseKnowledge

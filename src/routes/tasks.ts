@@ -1,13 +1,12 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { uploadMultipleImages } from '../middleware/upload';
-import { Task } from '../models/Task';
-import { Repository } from '../models/Repository';
+import { TaskRepository, ITask } from '../database/repositories/TaskRepository.js';
+import { RepositoryRepository } from '../database/repositories/RepositoryRepository.js';
 // v1 OrchestrationCoordinator - battle-tested with full prompts
 import { OrchestrationCoordinator } from '../services/orchestration/OrchestrationCoordinator';
 import { storageService } from '../services/storage/StorageService';
 import { z } from 'zod';
-import mongoose from 'mongoose';
 
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../services/UnifiedMemoryService';
@@ -85,11 +84,12 @@ const approveStorySchema = z.object({
 
 /**
  * GET /api/tasks
- * Obtener todas las tareas del usuario
+ * Obtener todas las tareas del usuario con paginación
+ * Query params: page (default 1), limit (default 5), status, priority, projectId
  */
 router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { status, priority, projectId, repositoryId } = req.query;
+    const { status, priority, projectId, repositoryId, page, limit } = req.query;
 
     // Check if user exists in the request
     if (!req.user || !req.user.id) {
@@ -100,52 +100,58 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const filter: any = { userId: req.user.id };
+    // Pagination params - default 5 per page
+    const pageNum = Math.max(1, parseInt(page as string) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 5));
+    const offset = (pageNum - 1) * limitNum;
 
-    if (status) filter.status = status;
-    if (priority) filter.priority = priority;
-    if (projectId) filter.projectId = projectId;
-    // Soporte para filtro por repositorio (singular o dentro del array)
-    if (repositoryId) {
-      filter.repositoryIds = repositoryId; // Mongoose busca automáticamente en el array
-    }
+    console.log('Tasks filter:', { userId: req.user.id, status, priority, projectId, page: pageNum, limit: limitNum });
 
-    console.log('Tasks filter:', filter);
-
-    // Execute query with timeout to prevent hanging
-    let tasks = [];
+    // Execute query - SQLite is synchronous, no timeout needed
+    let tasks: ITask[] = [];
+    let total = 0;
     try {
-      const query = Task.find(filter)
-        .select('_id title description status priority projectId repositoryIds tags createdAt updatedAt')
-        .sort({ updatedAt: -1 })
-        .limit(50)
-        .lean();
+      // Get total count for pagination
+      total = TaskRepository.count({
+        userId: req.user.id,
+        status: status as any,
+      });
 
-      // Use Promise.race to implement timeout (increased to 10s for large datasets)
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Query timeout')), 10000)
-      );
-
-      tasks = await Promise.race([query.exec(), timeoutPromise]) as any[];
-      console.log(`Tasks query successful: Found ${tasks?.length || 0} tasks`);
+      // Get paginated tasks
+      tasks = TaskRepository.findAll({
+        userId: req.user.id,
+        status: status as any,
+        priority: priority as string,
+        projectId: projectId as string,
+        repositoryId: repositoryId as string,
+        limit: limitNum,
+        offset: offset,
+        orderBy: 'updated_at',
+        orderDir: 'DESC',
+      });
+      console.log(`Tasks query successful: Found ${tasks.length} tasks (page ${pageNum}, total ${total})`);
     } catch (dbError: any) {
       console.error('Tasks database error:', dbError);
-      // Return empty array on error to not block frontend
       tasks = [];
     }
+
+    const totalPages = Math.ceil(total / limitNum);
 
     // Ensure response is always sent
     return res.json({
       success: true,
       data: {
-        tasks: tasks || [],
+        tasks: tasks,
         pagination: {
-          total: tasks?.length || 0,
-          page: 1,
-          limit: 50
+          total: total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
         }
       },
-      count: tasks?.length || 0,
+      count: tasks.length,
     });
   } catch (error) {
     console.error('Error fetching tasks:', error);
@@ -162,10 +168,7 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -199,7 +202,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     // 🔧 USE ONLY SELECTED REPOSITORIES
     // The frontend sends specific repositoryIds selected by the user
     // We should NEVER auto-populate all repositories from the project
-    let repositoryIds: any[] = validatedData.repositoryIds || [];
+    let repositoryIds: string[] = validatedData.repositoryIds || [];
 
     // Validate that repositories were selected
     if (repositoryIds.length === 0) {
@@ -210,10 +213,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       console.log(`✅ Task created with ${repositoryIds.length} selected repositories:`, repositoryIds);
 
       // Verify the selected repositories exist and are active
-      const validRepos = await Repository.find({
-        _id: { $in: repositoryIds },
-        isActive: true,
-      }).select('_id name githubRepoName');
+      const validRepos = RepositoryRepository.findByIds(repositoryIds);
 
       if (validRepos.length !== repositoryIds.length) {
         console.warn(`⚠️ Some selected repositories not found or inactive`);
@@ -226,17 +226,19 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const task = await Task.create({
-      ...validatedData,
-      repositoryIds, // ← Auto-populated from project if needed
+    const task = TaskRepository.create({
+      title: validatedData.title,
+      description: validatedData.description,
+      projectId: validatedData.projectId,
+      repositoryIds,
       userId: req.user!.id,
-      status: 'pending',
+      priority: validatedData.priority,
+      tags: validatedData.tags,
       orchestration: {
-        pipeline: [],
         totalCost: 0,
         totalTokens: 0,
         modelConfig: {
-          preset: validatedData.modelConfig || 'standard', // Use provided config or default to standard
+          preset: validatedData.modelConfig || 'standard',
         },
       },
     });
@@ -280,10 +282,7 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     console.log('🔍 [START] content field:', req.body.content);
     const validatedData = startTaskSchema.parse(req.body);
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -305,16 +304,13 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     if (task.projectId && (!task.repositoryIds || task.repositoryIds.length === 0)) {
       console.log(`📦 Task has projectId but no repositories, auto-populating from project...`);
 
-      const repositories = await Repository.find({
-        projectId: task.projectId,
-        isActive: true,
-      }).select('_id');
+      const repositories = RepositoryRepository.findByProjectId(task.projectId);
 
       if (repositories.length > 0) {
-        // Keep as ObjectIds (NOT strings) for Mongoose compatibility
-        task.repositoryIds = repositories.map((repo) => repo._id) as any;
-        await task.save();
-        console.log(`✅ Auto-populated ${repositories.length} repositories for task ${task._id}`);
+        const repoIds = repositories.map((repo) => repo.id);
+        TaskRepository.updateRepositoryIds(task.id, repoIds);
+        task.repositoryIds = repoIds;
+        console.log(`✅ Auto-populated ${repositories.length} repositories for task ${task.id}`);
       } else {
         console.warn(`⚠️  No active repositories found for project ${task.projectId}`);
       }
@@ -332,19 +328,13 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     }
 
     // Actualizar descripción desde el chat y estado
-    // Usar description si existe, si no usar content (compatibilidad)
-    task.description = validatedData.description || validatedData.content || '';
-    task.status = 'in_progress';
+    const description = validatedData.description || validatedData.content || '';
+    const attachments: string[] = task.attachments || [];
 
     // 🔥 PROCESS IMAGES - Upload to Firebase Storage (not local disk)
-    // req.files is populated by multer middleware with memoryStorage (buffer in memory)
     if ((req as any).files && (req as any).files.length > 0) {
       const uploadedFiles = (req as any).files as Express.Multer.File[];
       console.log(`📎 [START] ${uploadedFiles.length} image(s) to upload to Firebase`);
-
-      if (!task.attachments) {
-        task.attachments = [];
-      }
 
       // Upload each file to Firebase Storage
       for (const uploadedFile of uploadedFiles) {
@@ -358,26 +348,29 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
             uploadedFile.mimetype
           );
 
-          // Store Firebase path (e.g., "uploads/userId/timestamp-hash-filename.png")
-          task.attachments.push(storageFile.path);
+          attachments.push(storageFile.path);
           console.log(`📎 [START] Image uploaded to Firebase: ${storageFile.path}`);
         } catch (uploadError: any) {
           console.error(`❌ [START] Failed to upload ${uploadedFile.originalname}:`, uploadError.message);
-          // Continue with other files, don't fail the whole request
         }
       }
 
-      console.log(`📎 [START] Total ${task.attachments.length} attachments for this task`);
+      console.log(`📎 [START] Total ${attachments.length} attachments for this task`);
     }
 
-    await task.save();
+    // Update task with description, status, and attachments
+    TaskRepository.update(task.id, {
+      description,
+      status: 'in_progress',
+      attachments,
+    });
 
-    console.log(`🚀 Starting orchestration for task: ${task._id}`);
-    console.log(`📝 Task description: ${task.description}`);
-    console.log(`📎 Task attachments: ${task.attachments?.length || 0}`);
+    console.log(`🚀 Starting orchestration for task: ${task.id}`);
+    console.log(`📝 Task description: ${description}`);
+    console.log(`📎 Task attachments: ${attachments.length}`);
 
     // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
-    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
+    orchestrationCoordinator.orchestrateTask(task.id).catch((error) => {
       console.error('❌ Orchestration error:', error);
     });
 
@@ -385,9 +378,9 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
       success: true,
       message: 'Orchestration started',
       data: {
-        taskId: (task._id as any).toString(),
-        status: task.status,
-        description: task.description,
+        taskId: task.id,
+        status: 'in_progress',
+        description,
         info: 'Orchestration: Planning → TechLead → Developers → Judge → Verification → AutoMerge',
       },
     });
@@ -419,10 +412,7 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
   try {
     const validatedData = continueTaskSchema.parse(req.body);
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -456,35 +446,14 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
 
     // Append additional requirements to description
     const previousDescription = task.description || '';
-    task.description = `${previousDescription}\n\n--- CONTINUATION ---\n${validatedData.additionalRequirements}`;
-
-    // Reset orchestration status to restart
-    task.status = 'in_progress';
-
-    // Keep orchestration history but mark as continuation
-    if (!task.orchestration.continuations) {
-      task.orchestration.continuations = [];
-    }
-    task.orchestration.continuations.push({
-      timestamp: new Date(),
-      additionalRequirements: validatedData.additionalRequirements,
-      previousStatus: task.status,
-    });
-
-    // Clear paused state if any (DO NOT touch currentPhase - v2 OrchestrationEngine handles it)
-    task.orchestration.paused = false;
-    task.orchestration.cancelRequested = false;
+    const newDescription = `${previousDescription}\n\n--- CONTINUATION ---\n${validatedData.additionalRequirements}`;
+    const attachments: string[] = task.attachments || [];
 
     // 🔥 PROCESS IMAGES - Upload to Firebase Storage (not local disk)
     if ((req as any).files && (req as any).files.length > 0) {
       const uploadedFiles = (req as any).files as Express.Multer.File[];
       console.log(`📎 [CONTINUE] ${uploadedFiles.length} image(s) to upload to Firebase`);
 
-      if (!task.attachments) {
-        task.attachments = [];
-      }
-
-      // Upload each file to Firebase Storage
       for (const uploadedFile of uploadedFiles) {
         console.log(`📎 [CONTINUE] Uploading to Firebase: ${uploadedFile.originalname} (${(uploadedFile.size / 1024).toFixed(1)} KB)`);
 
@@ -496,25 +465,35 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
             uploadedFile.mimetype
           );
 
-          task.attachments.push(storageFile.path);
+          attachments.push(storageFile.path);
           console.log(`📎 [CONTINUE] Image uploaded to Firebase: ${storageFile.path}`);
         } catch (uploadError: any) {
           console.error(`❌ [CONTINUE] Failed to upload ${uploadedFile.originalname}:`, uploadError.message);
         }
       }
 
-      console.log(`📎 [CONTINUE] Total ${task.attachments.length} attachments for this task`);
+      console.log(`📎 [CONTINUE] Total ${attachments.length} attachments for this task`);
     }
 
-    await task.save();
+    // Update task
+    TaskRepository.update(task.id, {
+      description: newDescription,
+      status: 'in_progress',
+      attachments,
+    });
 
-    console.log(`🔄 Continuing orchestration for task: ${task._id}`);
+    // Add continuation record and clear paused state
+    TaskRepository.addContinuation(task.id, validatedData.additionalRequirements, task.status);
+    TaskRepository.setPaused(task.id, false);
+    TaskRepository.setCancelRequested(task.id, false);
+
+    console.log(`🔄 Continuing orchestration for task: ${task.id}`);
     console.log(`📝 Additional requirements: ${validatedData.additionalRequirements}`);
     console.log(`📦 Preserving ${task.repositoryIds.length} repositories`);
     console.log(`🌿 Preserving existing epic branches`);
 
     // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
-    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
+    orchestrationCoordinator.orchestrateTask(task.id).catch((error) => {
       console.error('❌ Orchestration continuation error:', error);
     });
 
@@ -522,8 +501,8 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
       success: true,
       message: 'Task continuation started - preserving repositories, branches, and previous work',
       data: {
-        taskId: (task._id as any).toString(),
-        status: task.status,
+        taskId: task.id,
+        status: 'in_progress',
         additionalRequirements: validatedData.additionalRequirements,
         preservedContext: {
           repositories: task.repositoryIds.length,
@@ -555,12 +534,7 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
  */
 router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('status orchestration')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -607,10 +581,7 @@ router.get('/:id/status', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id/logs', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).select('logs');
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -641,12 +612,7 @@ router.get('/:id/logs', authenticate, async (req: AuthRequest, res) => {
  */
 router.get('/:id/orchestration', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('orchestration')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -675,12 +641,9 @@ router.get('/:id/orchestration', authenticate, async (req: AuthRequest, res) => 
  */
 router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const deleted = TaskRepository.deleteByIdAndUser(req.params.id, req.user!.id);
 
-    if (!task) {
+    if (!deleted) {
       res.status(404).json({
         success: false,
         message: 'Task not found',
@@ -711,10 +674,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     const validatedData = approvePhaseSchema.parse(req.body);
     const { phase } = req.params;
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    let task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -724,87 +684,65 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       return;
     }
 
+    // Work with a mutable copy of orchestration
+    const orchestration = { ...task.orchestration };
+
     // Mapear phase URL param a field en orchestration
     let agentStep: any = null;
     let phaseName = '';
 
     // 🔥 DEBUG: Log orchestration state to understand why planning might be null
     console.log(`📋 [Approve] Phase: ${phase}, TaskId: ${req.params.id}`);
-    console.log(`📋 [Approve] orchestration.planning exists: ${!!task.orchestration?.planning}`);
-    console.log(`📋 [Approve] orchestration.planning.status: ${task.orchestration?.planning?.status}`);
-    console.log(`📋 [Approve] orchestration keys: ${Object.keys(task.orchestration || {}).join(', ')}`);
+    console.log(`📋 [Approve] orchestration.planning exists: ${!!orchestration?.planning}`);
+    console.log(`📋 [Approve] orchestration.planning.status: ${orchestration?.planning?.status}`);
+    console.log(`📋 [Approve] orchestration keys: ${Object.keys(orchestration || {}).join(', ')}`);
 
     switch (phase) {
       case 'planning':
         // 🔥 FIX: If planning phase data doesn't exist, create it to allow approval
-        // This handles cases where DB state is incomplete or recovery scenarios
-        if (!task.orchestration.planning) {
+        if (!orchestration.planning) {
           console.log(`🔧 [Approve] planning field missing in orchestration - creating synthetic step`);
-          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
-
-          const timestamp = task.orchestration.pendingApproval?.timestamp || new Date();
-
-          task.orchestration.planning = {
+          const timestamp = orchestration.pendingApproval?.timestamp || new Date();
+          orchestration.planning = {
             agent: 'planning-agent',
-            status: 'completed', // Mark as completed so approval can proceed
+            status: 'completed',
             startedAt: timestamp,
             completedAt: new Date(),
           } as any;
-          await task.save();
-          console.log(`✅ [Approve] Created synthetic planning step`);
-        } else if (task.orchestration.planning.status === 'in_progress') {
-          // 🔥 FIX: Planning phase is in_progress WHILE waiting for approval
-          // Mark as completed to pass the validation check
+                    console.log(`✅ [Approve] Created synthetic planning step`);
+        } else if (orchestration.planning.status === 'in_progress') {
           console.log(`🔧 [Approve] planning exists with status in_progress - marking as completed for approval`);
-          task.orchestration.planning.status = 'completed';
-          task.orchestration.planning.completedAt = new Date();
-          await task.save();
-          console.log(`✅ [Approve] Marked planning as completed for approval`);
+          orchestration.planning.status = 'completed';
+          orchestration.planning.completedAt = new Date();
+                    console.log(`✅ [Approve] Marked planning as completed for approval`);
         }
-        agentStep = task.orchestration.planning;
+        agentStep = orchestration.planning;
         phaseName = 'Planning (Unified)';
         break;
       case 'tech-lead':
-        // 🔥 FIX: If tech-lead phase data doesn't exist, create it to allow approval
-        // This handles cases where:
-        // 1. Multi-team mode doesn't initialize techLead in orchestration
-        // 2. New Judge pattern completes without creating the field
-        // 3. Recovery scenarios where DB state is incomplete
-        if (!task.orchestration.techLead) {
+        if (!orchestration.techLead) {
           console.log(`🔧 [Approve] tech-lead field missing in orchestration - creating synthetic step`);
-          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
-
-          // Use pendingApproval timestamp if available, otherwise use now
-          const timestamp = task.orchestration.pendingApproval?.timestamp || new Date();
-
-          task.orchestration.techLead = {
+          const timestamp = orchestration.pendingApproval?.timestamp || new Date();
+          orchestration.techLead = {
             agent: 'tech-lead',
-            status: 'completed', // Mark as completed so approval can proceed
+            status: 'completed',
             startedAt: timestamp,
             completedAt: new Date(),
           } as any;
-          await task.save();
-          console.log(`✅ [Approve] Created synthetic tech-lead step`);
-        } else if (task.orchestration.techLead.status === 'in_progress') {
-          // 🔥 FIX: TechLead phase is in_progress WHILE waiting for approval
-          // If pendingApproval exists OR we're explicitly trying to approve, allow it
-          console.log(`🔧 [Approve] tech-lead exists with status in_progress - checking if approval is valid`);
-          console.log(`🔧 [Approve] pendingApproval: ${JSON.stringify(task.orchestration.pendingApproval || 'none')}`);
-
-          // Mark as completed to pass the validation check (same pattern as team-orchestration)
-          task.orchestration.techLead.status = 'completed';
-          task.orchestration.techLead.completedAt = new Date();
-          await task.save();
-          console.log(`✅ [Approve] Marked tech-lead as completed for approval`);
+                    console.log(`✅ [Approve] Created synthetic tech-lead step`);
+        } else if (orchestration.techLead.status === 'in_progress') {
+          console.log(`🔧 [Approve] tech-lead exists with status in_progress - marking as completed for approval`);
+          orchestration.techLead.status = 'completed';
+          orchestration.techLead.completedAt = new Date();
+                    console.log(`✅ [Approve] Marked tech-lead as completed for approval`);
         }
-        agentStep = task.orchestration.techLead;
+        agentStep = orchestration.techLead;
         phaseName = 'Tech Lead';
         break;
       case 'development':
         // Development phase no tiene un agentStep único, es el team completo
-        // Validar que todos los developers hayan completado
-        const team = task.orchestration.team || [];
-        const allCompleted = team.every(m => m.status === 'completed');
+        const team = orchestration.team || [];
+        const allCompleted = team.every((m: any) => m.status === 'completed');
 
         if (!allCompleted) {
           res.status(400).json({
@@ -815,27 +753,26 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         }
 
         // Crear aprobación sintética para el team
-        if (!task.orchestration.judge) {
-          task.orchestration.judge = {
+        if (!orchestration.judge) {
+          orchestration.judge = {
             agent: 'judge',
             status: 'pending',
           } as any;
-        }
+                  }
 
-        const judgeStep = task.orchestration.judge;
+        const judgeStep = orchestration.judge;
         if (judgeStep && !judgeStep.approval) {
           judgeStep.approval = {
             status: 'pending',
             requestedAt: new Date(),
           };
-        }
+                  }
 
         agentStep = judgeStep;
         phaseName = 'Development Team';
         break;
       case 'judge':
-        // Judge phase validation
-        if (!task.orchestration.judge) {
+        if (!orchestration.judge) {
           console.log(`⚠️  [Approval] Judge phase not found for task ${req.params.id}`);
           res.status(400).json({
             success: false,
@@ -844,10 +781,9 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
           return;
         }
 
-        console.log(`🔍 [Approval] Judge status: ${task.orchestration.judge.status}, evaluations: ${task.orchestration.judge.evaluations?.length || 0}`);
+        console.log(`🔍 [Approval] Judge status: ${orchestration.judge.status}, evaluations: ${orchestration.judge.evaluations?.length || 0}`);
 
-        // Check if Judge has evaluations (completed at least one evaluation)
-        const judgeEvaluations = task.orchestration.judge.evaluations || [];
+        const judgeEvaluations = orchestration.judge.evaluations || [];
         if (judgeEvaluations.length === 0) {
           res.status(400).json({
             success: false,
@@ -856,11 +792,11 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
           return;
         }
 
-        agentStep = task.orchestration.judge;
+        agentStep = orchestration.judge;
         phaseName = 'Judge Evaluation';
         break;
       case 'auto-merge':
-        agentStep = (task.orchestration as any).autoMerge;
+        agentStep = (orchestration as any).autoMerge;
         phaseName = 'Auto-Merge';
         break;
       case 'verification':
@@ -945,6 +881,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
 
     // Phases that support re-execution with feedback (don't fail task)
     const reExecutablePhases = ['tech-lead', 'planning'];
+    let newTaskStatus = task.status;
 
     // Actualizar estado de aprobación
     if (validatedData.approved) {
@@ -959,11 +896,9 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       agentStep.approved = false;
 
       if (!reExecutablePhases.includes(phase)) {
-        // Only mark as failed for phases that don't support re-execution
-        task.status = 'failed';
+        newTaskStatus = 'failed';
         console.log(`❌ [Approval] ${phaseName} rejected by user ${req.user!.id} - task marked as failed`);
       } else {
-        // For re-executable phases, keep task in_progress - orchestrator will re-execute
         console.log(`🔄 [Approval] ${phaseName} rejected by user ${req.user!.id} - will re-execute with feedback`);
       }
     }
@@ -975,25 +910,26 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       }
     }
 
-    // 📝 Log to approval history
-    if (!task.orchestration.approvalHistory) {
-      task.orchestration.approvalHistory = [];
+    // Update task status if changed
+    if (newTaskStatus !== task.status) {
+      TaskRepository.update(task.id, { status: newTaskStatus });
     }
-    task.orchestration.approvalHistory.push({
-      phase: phase,
-      phaseName: phaseName,
+
+    // Update orchestration and add approval history
+    TaskRepository.updateOrchestration(task.id, orchestration);
+    TaskRepository.addApprovalHistory(task.id, {
+      phase,
+      phaseName,
       approved: validatedData.approved,
-      approvedBy: new mongoose.Types.ObjectId(req.user!.id),
+      approvedBy: req.user!.id,
       approvedAt: new Date(),
       comments: validatedData.comments,
-      autoApproved: false, // Manual approval
+      autoApproved: false,
     });
-
-    await task.save();
 
     // 📡 Emit approval event to notify waiting orchestrator (event-based, no polling)
     const { approvalEvents } = await import('../services/ApprovalEvents');
-    const taskId = (task._id as any).toString();
+    const taskId = task.id;
     approvalEvents.emitApproval(taskId, phase, validatedData.approved, validatedData.comments);
 
     // 🎯 UNIFIED MEMORY: Mark phase as approved (THE SOURCE OF TRUTH)
@@ -1007,7 +943,6 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     const { NotificationService } = await import('../services/NotificationService');
 
     if (validatedData.approved) {
-      // Emitir evento de aprobación concedida (limpia el prompt en el frontend)
       NotificationService.emitApprovalGranted(taskId, {
         phase,
         approved: true,
@@ -1019,7 +954,6 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         `✅ **${phaseName}** has been approved by user. Continuing orchestration...`
       );
     } else {
-      // Emitir evento de rechazo (puede incluir feedback para re-ejecución)
       NotificationService.emitApprovalGranted(taskId, {
         phase,
         approved: false,
@@ -1027,7 +961,6 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         willRetry: reExecutablePhases.includes(phase) && !!validatedData.comments,
       });
 
-      // Only show "failed" message if it's not a re-executable phase
       const message = reExecutablePhases.includes(phase) && validatedData.comments
         ? `🔄 **${phaseName}** was rejected with feedback. Re-executing phase...${validatedData.comments ? `\n\n**Feedback**: ${validatedData.comments}` : ''}`
         : `❌ **${phaseName}** was rejected by user. Task marked as failed.${validatedData.comments ? `\n\n**Comments**: ${validatedData.comments}` : ''}`;
@@ -1048,7 +981,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
         phase: phaseName,
         approved: validatedData.approved,
         approvalStatus: agentStep.approval.status,
-        taskStatus: task.status,
+        taskStatus: newTaskStatus,
       },
     });
   } catch (error) {
@@ -1077,10 +1010,7 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
   try {
     const validatedData = autoApprovalConfigSchema.parse(req.body);
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1090,38 +1020,31 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       return;
     }
 
+    // Determine phases to use
+    let phases = validatedData.phases as string[] | undefined;
+    if (phases === undefined && validatedData.enabled) {
+      phases = ['planning', 'team-orchestration', 'verification', 'auto-merge'];
+    }
+
     // Update auto-approval configuration
-    task.orchestration.autoApprovalEnabled = validatedData.enabled;
+    TaskRepository.updateAutoApproval(
+      task.id,
+      validatedData.enabled,
+      phases,
+      validatedData.supervisorThreshold
+    );
 
-    if (validatedData.phases !== undefined) {
-      task.orchestration.autoApprovalPhases = validatedData.phases as any[];
-    } else if (validatedData.enabled) {
-      // If enabling auto-approval without specifying phases, default to all main phases
-      // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
-      task.orchestration.autoApprovalPhases = [
-        'planning',
-        'team-orchestration',
-        'verification',
-        'auto-merge',
-      ] as any[];
-    }
-
-    // 🤖 Update Supervisor threshold (default 80 if not specified)
-    if (validatedData.supervisorThreshold !== undefined) {
-      task.orchestration.supervisorThreshold = validatedData.supervisorThreshold;
-    }
-
-    await task.save();
-
-    const threshold = task.orchestration.supervisorThreshold ?? 80;
-    console.log(`🚁 [Auto-Approval] Configuration updated for task ${req.params.id}: enabled=${validatedData.enabled}, phases=${task.orchestration.autoApprovalPhases?.join(', ')}, supervisorThreshold=${threshold}%`);
+    // Refresh task to get updated values
+    const updatedTask = TaskRepository.findById(task.id)!;
+    const threshold = updatedTask.orchestration.supervisorThreshold ?? 80;
+    console.log(`🚁 [Auto-Approval] Configuration updated for task ${req.params.id}: enabled=${validatedData.enabled}, phases=${updatedTask.orchestration.autoApprovalPhases?.join(', ')}, supervisorThreshold=${threshold}%`);
 
     res.json({
       success: true,
       message: `Auto-approval ${validatedData.enabled ? 'enabled' : 'disabled'}`,
       data: {
-        enabled: task.orchestration.autoApprovalEnabled,
-        phases: task.orchestration.autoApprovalPhases || [],
+        enabled: updatedTask.orchestration.autoApprovalEnabled,
+        phases: updatedTask.orchestration.autoApprovalPhases || [],
         supervisorThreshold: threshold,
       },
     });
@@ -1149,12 +1072,7 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
  */
 router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('orchestration.autoApprovalEnabled orchestration.autoApprovalPhases orchestration.supervisorThreshold')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1169,7 +1087,7 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       data: {
         enabled: task.orchestration.autoApprovalEnabled || false,
         phases: task.orchestration.autoApprovalPhases || [],
-        supervisorThreshold: task.orchestration.supervisorThreshold ?? 80, // Default 80%
+        supervisorThreshold: task.orchestration.supervisorThreshold ?? 80,
       },
     });
   } catch (error) {
@@ -1194,10 +1112,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
   try {
     const { enableAutoApproval = false, enableForAllPhases = false } = req.body;
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1209,7 +1124,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
 
     // Get the pending approval phase from persisted data
     const pendingApproval = task.orchestration?.pendingApproval;
-    const taskId = (task._id as any).toString();
+    const taskId = task.id;
 
     // 🔥 SMART PHASE DETECTION: Try to determine phase even if not persisted
     let phase: string;
@@ -1249,17 +1164,14 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
     console.log(`🔥 [Bypass] Force-approving pending phase: ${phase} (${phaseName})`);
 
     // Clear the pending approval from DB
-    task.orchestration.pendingApproval = undefined;
+    TaskRepository.clearPendingApproval(taskId);
 
     // Log to approval history
-    if (!task.orchestration.approvalHistory) {
-      task.orchestration.approvalHistory = [];
-    }
-    task.orchestration.approvalHistory.push({
+    TaskRepository.addApprovalHistory(taskId, {
       phase: phase,
       phaseName: phaseName,
       approved: true,
-      approvedBy: new mongoose.Types.ObjectId(req.user!.id),
+      approvedBy: req.user!.id,
       approvedAt: new Date(),
       comments: 'Bypassed by user (forced approval)',
       autoApproved: false,
@@ -1269,8 +1181,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
     if (enableAutoApproval) {
       if (enableForAllPhases) {
         // Enable for all main phases
-        task.orchestration.autoApprovalEnabled = true;
-        task.orchestration.autoApprovalPhases = [
+        TaskRepository.updateAutoApproval(taskId, true, [
           'planning',
           'team-orchestration',
           'verification',
@@ -1279,21 +1190,18 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
           'development',
           'judge',
           'verification-fixer',
-        ] as any[];
+        ] as any[]);
         console.log(`✅ [Bypass] Auto-approval enabled for ALL phases`);
       } else {
         // Enable just for this phase type
-        task.orchestration.autoApprovalEnabled = true;
         const currentPhases = task.orchestration.autoApprovalPhases || [];
         if (!currentPhases.includes(phase as any)) {
           currentPhases.push(phase as any);
-          task.orchestration.autoApprovalPhases = currentPhases;
         }
+        TaskRepository.updateAutoApproval(taskId, true, currentPhases);
         console.log(`✅ [Bypass] Auto-approval enabled for phase: ${phase}`);
       }
     }
-
-    await task.save();
 
     // 📡 Emit approval event to release the waiting orchestrator
     const { approvalEvents } = await import('../services/ApprovalEvents');
@@ -1350,13 +1258,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
  */
 router.get('/:id/approval-history', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    })
-      .select('orchestration.approvalHistory')
-      .populate('orchestration.approvalHistory.approvedBy', 'name email')
-      .lean();
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1387,11 +1289,9 @@ router.post('/:id/approve/story/:storyId', authenticate, async (req: AuthRequest
   try {
     const validatedData = approveStorySchema.parse(req.body);
     const { storyId } = req.params;
+    const taskId = req.params.id;
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1432,29 +1332,35 @@ router.post('/:id/approve/story/:storyId', authenticate, async (req: AuthRequest
       console.log(`❌ [Story Approval] Story "${story.title}" (${storyId}) rejected by user ${req.user!.id}`);
     }
 
-    // Mark modified for Mongoose
-    task.markModified('orchestration.planning.stories');
-    task.markModified('orchestration.techLead.stories');
+    // Update orchestration with story changes and approval history
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      // Update stories in planning or techLead
+      if (orch.planning?.stories) {
+        const idx = orch.planning.stories.findIndex((s: any) => s.id === storyId);
+        if (idx >= 0) orch.planning.stories[idx] = story;
+      }
+      if (orch.techLead?.stories) {
+        const idx = orch.techLead.stories.findIndex((s: any) => s.id === storyId);
+        if (idx >= 0) orch.techLead.stories[idx] = story;
+      }
 
-    // 📝 Log to approval history
-    if (!task.orchestration.approvalHistory) {
-      task.orchestration.approvalHistory = [];
-    }
-    task.orchestration.approvalHistory.push({
-      phase: `story-${storyId}`,
-      phaseName: `Story: ${story.title}`,
-      approved: validatedData.approved,
-      approvedBy: new mongoose.Types.ObjectId(req.user!.id),
-      approvedAt: new Date(),
-      comments: validatedData.comments,
-      autoApproved: false,
+      // Add to approval history
+      if (!orch.approvalHistory) orch.approvalHistory = [];
+      orch.approvalHistory.push({
+        phase: `story-${storyId}`,
+        phaseName: `Story: ${story.title}`,
+        approved: validatedData.approved,
+        approvedBy: req.user!.id,
+        approvedAt: new Date(),
+        comments: validatedData.comments,
+        autoApproved: false,
+      });
+
+      return orch;
     });
-
-    await task.save();
 
     // 📡 Emit approval event for story (event-based)
     const { approvalEvents } = await import('../services/ApprovalEvents');
-    const taskId = (task._id as any).toString();
     approvalEvents.emitApproval(taskId, `story-${storyId}`, validatedData.approved);
 
     // Emit WebSocket notification
@@ -1516,7 +1422,7 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
     const taskId = req.params.id;
 
     // Validar task ID
-    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+    if (!TaskRepository.isValidId(taskId)) {
       res.status(400).json({
         success: false,
         message: 'Invalid task ID',
@@ -1525,7 +1431,7 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Obtener task
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       res.status(404).json({
         success: false,
@@ -1573,10 +1479,8 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const taskId = req.params.id;
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1603,10 +1507,15 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Marcar como pausada
-    task.orchestration.paused = true;
-    task.orchestration.pausedAt = new Date();
-    task.orchestration.pausedBy = new mongoose.Types.ObjectId(req.user!.id);
-    await task.save();
+    const pausedAt = new Date();
+    TaskRepository.modifyOrchestration(taskId, (orch) => ({
+      ...orch,
+      paused: true,
+      pausedAt,
+      pausedBy: req.user!.id,
+    }));
+    // Update task reference for response
+    task.orchestration.pausedAt = pausedAt;
 
     console.log(`⏸️  [Pause] Task ${req.params.id} paused by user ${req.user!.id}`);
 
@@ -1647,10 +1556,8 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).populate('userId');
+    const taskId = req.params.id;
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1747,25 +1654,25 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       console.log(`▶️  [Resume] Task ${req.params.id} resumed by user ${req.user!.id}`);
     }
 
-    // Clear pause flags
-    task.orchestration.paused = false;
-    task.orchestration.pausedAt = undefined;
-    task.orchestration.pausedBy = undefined;
-
-    // If it was a billing error pause, reset status to in_progress
+    // Clear pause flags and update status if needed
     if (isBillingPaused) {
-      task.status = 'in_progress';
-
-      // Clear billing pause metadata but keep pending epics for retry
-      if (teamOrch) {
-        teamOrch.status = 'in_progress'; // Resume from paused_billing
-        teamOrch.pauseReason = undefined;
-        teamOrch.pausedAt = undefined;
-        // Keep pendingEpicIds so orchestration knows what to resume
-      }
+      TaskRepository.update(taskId, { status: 'in_progress' });
     }
 
-    await task.save();
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      orch.paused = false;
+      orch.pausedAt = undefined;
+      orch.pausedBy = undefined;
+
+      // Clear billing pause metadata but keep pending epics for retry
+      if (isBillingPaused && (orch as any).teamOrchestration) {
+        (orch as any).teamOrchestration.status = 'in_progress';
+        (orch as any).teamOrchestration.pauseReason = undefined;
+        (orch as any).teamOrchestration.pausedAt = undefined;
+      }
+
+      return orch;
+    });
 
     // Notificar via WebSocket
     const { NotificationService } = await import('../services/NotificationService');
@@ -1820,10 +1727,8 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const taskId = req.params.id;
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1842,12 +1747,17 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
     }
 
     // Marcar como cancelada
-    task.orchestration.cancelRequested = true;
-    task.orchestration.cancelRequestedAt = new Date();
-    task.orchestration.cancelRequestedBy = new mongoose.Types.ObjectId(req.user!.id);
-    task.status = 'cancelled';
-    task.orchestration.currentPhase = 'completed';
-    await task.save();
+    const cancelRequestedAt = new Date();
+    TaskRepository.update(taskId, { status: 'cancelled' });
+    TaskRepository.modifyOrchestration(taskId, (orch) => ({
+      ...orch,
+      cancelRequested: true,
+      cancelRequestedAt,
+      cancelRequestedBy: req.user!.id,
+      currentPhase: 'completed',
+    }));
+    // Update task reference for response
+    task.orchestration.cancelRequestedAt = cancelRequestedAt;
 
     console.log(`🛑 [Cancel] Task ${req.params.id} cancelled by user ${req.user!.id}`);
 
@@ -1889,10 +1799,8 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/inject-directive', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const taskId = req.params.id;
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -1942,18 +1850,18 @@ router.post('/:id/inject-directive', authenticate, async (req: AuthRequest, res)
       targetAgent: targetAgent || undefined,
       consumed: false,
       createdAt: new Date(),
-      createdBy: new mongoose.Types.ObjectId(req.user!.id),
+      createdBy: req.user!.id,
     };
 
-    // Initialize pendingDirectives array if it doesn't exist
-    if (!task.orchestration.pendingDirectives) {
-      task.orchestration.pendingDirectives = [];
-    }
-
     // Add directive to the pending queue
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      if (!orch.pendingDirectives) orch.pendingDirectives = [];
+      orch.pendingDirectives.push(directive as any);
+      return orch;
+    });
+    // Update task reference for response
+    if (!task.orchestration.pendingDirectives) task.orchestration.pendingDirectives = [];
     task.orchestration.pendingDirectives.push(directive as any);
-    task.markModified('orchestration.pendingDirectives');
-    await task.save();
 
     console.log(`💡 [Directive] Injected directive "${directiveId}" into task ${req.params.id}`);
     console.log(`   Priority: ${priority}`);
@@ -2004,10 +1912,7 @@ router.post('/:id/inject-directive', authenticate, async (req: AuthRequest, res)
  */
 router.get('/:id/directives', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2040,10 +1945,8 @@ router.get('/:id/directives', authenticate, async (req: AuthRequest, res) => {
  */
 router.delete('/:id/directives/:directiveId', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const taskId = req.params.id;
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2067,10 +1970,15 @@ router.delete('/:id/directives/:directiveId', authenticate, async (req: AuthRequ
     }
 
     // Remove the directive
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      const directives = orch.pendingDirectives || [];
+      const idx = directives.findIndex(d => d.id === directiveId);
+      if (idx >= 0) directives.splice(idx, 1);
+      orch.pendingDirectives = directives;
+      return orch;
+    });
+    // Update local reference
     pendingDirectives.splice(directiveIndex, 1);
-    task.orchestration.pendingDirectives = pendingDirectives;
-    task.markModified('orchestration.pendingDirectives');
-    await task.save();
 
     console.log(`🗑️  [Directive] Removed directive "${directiveId}" from task ${req.params.id}`);
 
@@ -2105,10 +2013,7 @@ router.delete('/:id/directives/:directiveId', authenticate, async (req: AuthRequ
  */
 router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2158,11 +2063,9 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
 router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
   try {
     const validatedData = modelConfigSchema.parse(req.body);
+    const taskId = req.params.id;
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2172,31 +2075,29 @@ router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Update model configuration
-    if (!task.orchestration.modelConfig) {
-      task.orchestration.modelConfig = {
-        preset: 'standard',
-      };
-    }
+    // Build new model config
+    const newModelConfig: any = task.orchestration.modelConfig || { preset: 'standard' };
 
     if (validatedData.preset) {
-      task.orchestration.modelConfig.preset = validatedData.preset;
-
-      // Clear custom config if not using custom preset
+      newModelConfig.preset = validatedData.preset;
       if (validatedData.preset !== 'custom') {
-        task.orchestration.modelConfig.customConfig = undefined;
+        newModelConfig.customConfig = undefined;
       }
     }
 
     if (validatedData.preset === 'custom' && validatedData.customConfig) {
-      task.orchestration.modelConfig.customConfig = validatedData.customConfig;
+      newModelConfig.customConfig = validatedData.customConfig;
     }
 
-    await task.save();
+    // Update orchestration
+    TaskRepository.modifyOrchestration(taskId, (orch) => ({
+      ...orch,
+      modelConfig: newModelConfig,
+    }));
 
     console.log(
-      `✅ [Model Config] Updated for task ${task._id}:`,
-      `Preset: ${task.orchestration.modelConfig.preset}`,
+      `✅ [Model Config] Updated for task ${taskId}:`,
+      `Preset: ${newModelConfig.preset}`,
       validatedData.customConfig ? 'with custom config' : ''
     );
 
@@ -2204,7 +2105,7 @@ router.put('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
       success: true,
       message: 'Model configuration updated successfully',
       data: {
-        modelConfig: task.orchestration.modelConfig,
+        modelConfig: newModelConfig,
       },
     });
   } catch (error: any) {
@@ -2240,12 +2141,12 @@ router.get('/:id/intervention', authenticate, async (req: AuthRequest, res) => {
   try {
     const taskId = req.params.id;
 
-    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+    if (!TaskRepository.isValidId(taskId)) {
       res.status(400).json({ success: false, message: 'Invalid task ID' });
       return;
     }
 
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       res.status(404).json({ success: false, message: 'Task not found' });
       return;
@@ -2281,12 +2182,12 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
     const taskId = req.params.id;
     const validatedData = humanInterventionSchema.parse(req.body);
 
-    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+    if (!TaskRepository.isValidId(taskId)) {
       res.status(400).json({ success: false, message: 'Invalid task ID' });
       return;
     }
 
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       res.status(404).json({ success: false, message: 'Task not found' });
       return;
@@ -2318,43 +2219,49 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
     }
     console.log(`${'✅'.repeat(20)}\n`);
 
-    // Update intervention status
-    task.orchestration.humanIntervention = {
-      ...intervention,
-      resolved: true,
-      resolvedAt: new Date(),
-      resolution: validatedData.resolution,
-      humanGuidance: validatedData.guidance,
-      resolvedBy: req.user?.id ? new mongoose.Types.ObjectId(req.user.id) : undefined,
-    };
-
-    // Handle different resolutions
-    switch (validatedData.resolution) {
-      case 'abort_task':
-        task.status = 'cancelled';
-        task.orchestration.cancelRequested = true;
-        task.orchestration.cancelRequestedAt = new Date();
-        task.orchestration.paused = false;
-        break;
-
-      case 'skip_story':
-        // Mark the story as skipped and unpause
-        // Note: The story status will be handled when orchestration resumes
-        // We just need to mark the intervention as resolved and unpause
-        task.orchestration.paused = false;
-        task.orchestration.humanIntervention!.required = false;
-        console.log(`⏭️  [Human Intervention] Story ${intervention.storyId} will be skipped`);
-        break;
-
-      case 'fixed_manually':
-      case 'retry_with_guidance':
-        // Unpause and let orchestration continue
-        task.orchestration.paused = false;
-        task.orchestration.humanIntervention!.required = false;
-        break;
+    // Update task status if aborting
+    if (validatedData.resolution === 'abort_task') {
+      TaskRepository.update(taskId, { status: 'cancelled' });
     }
 
-    await task.save();
+    // Update orchestration with intervention resolution
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      // Update intervention status
+      orch.humanIntervention = {
+        ...intervention,
+        resolved: true,
+        resolvedAt: new Date(),
+        resolution: validatedData.resolution,
+        humanGuidance: validatedData.guidance,
+        resolvedBy: req.user?.id,
+      };
+
+      // Handle different resolutions
+      switch (validatedData.resolution) {
+        case 'abort_task':
+          orch.cancelRequested = true;
+          orch.cancelRequestedAt = new Date();
+          orch.paused = false;
+          break;
+
+        case 'skip_story':
+          orch.paused = false;
+          orch.humanIntervention!.required = false;
+          console.log(`⏭️  [Human Intervention] Story ${intervention.storyId} will be skipped`);
+          break;
+
+        case 'fixed_manually':
+        case 'retry_with_guidance':
+          orch.paused = false;
+          orch.humanIntervention!.required = false;
+          break;
+      }
+
+      return orch;
+    });
+
+    // Get updated task for response
+    const updatedTask = TaskRepository.findById(taskId)!;
 
     // Emit notification
     const { NotificationService } = await import('../services/NotificationService');
@@ -2378,8 +2285,8 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
       message: `Human intervention resolved with: ${validatedData.resolution}`,
       data: {
         resolution: validatedData.resolution,
-        taskStatus: task.status,
-        paused: task.orchestration.paused,
+        taskStatus: updatedTask.status,
+        paused: updatedTask.orchestration.paused,
       },
     });
   } catch (error: any) {
@@ -2694,10 +2601,7 @@ router.post('/:id/user-code-edit', authenticate, async (req: AuthRequest, res) =
     const validatedData = userCodeEditSchema.parse(req.body);
     const taskId = req.params.id;
 
-    const task = await Task.findOne({
-      _id: taskId,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2712,11 +2616,6 @@ router.post('/:id/user-code-edit', authenticate, async (req: AuthRequest, res) =
     console.log(`   Was edited by user: ${validatedData.wasEdited}`);
     console.log(`   Agent: ${validatedData.agentName || 'unknown'}`);
 
-    // Initialize userCodeEdits array if it doesn't exist
-    if (!(task.orchestration as any).userCodeEdits) {
-      (task.orchestration as any).userCodeEdits = [];
-    }
-
     // Record the user edit
     const editRecord = {
       id: `edit-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -2726,40 +2625,38 @@ router.post('/:id/user-code-edit', authenticate, async (req: AuthRequest, res) =
       wasEdited: validatedData.wasEdited,
       agentName: validatedData.agentName,
       editedAt: new Date(),
-      editedBy: new mongoose.Types.ObjectId(req.user!.id),
+      editedBy: req.user!.id,
     };
 
-    (task.orchestration as any).userCodeEdits.push(editRecord);
-    task.markModified('orchestration.userCodeEdits');
+    // Build user edit note if edited
+    const userEditNote = validatedData.wasEdited ? {
+      id: `user-edit-note-${Date.now()}`,
+      content: `IMPORTANT: User manually edited "${validatedData.file}". The user's version should be respected. Key differences from agent's version may indicate user preferences.`,
+      priority: 'high' as const,
+      consumed: false,
+      createdAt: new Date(),
+      createdBy: req.user!.id,
+      metadata: {
+        type: 'user_code_edit',
+        file: validatedData.file,
+      },
+    } : null;
 
-    // If user made changes, inject a directive for future agent context
-    if (validatedData.wasEdited) {
-      // Initialize pendingDirectives array if it doesn't exist
-      if (!task.orchestration.pendingDirectives) {
-        task.orchestration.pendingDirectives = [];
+    // Update orchestration with edit and optional directive
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      // Add user code edit
+      if (!(orch as any).userCodeEdits) (orch as any).userCodeEdits = [];
+      (orch as any).userCodeEdits.push(editRecord);
+
+      // Add directive note if user made changes
+      if (userEditNote) {
+        if (!orch.pendingDirectives) orch.pendingDirectives = [];
+        orch.pendingDirectives.push(userEditNote as any);
+        console.log(`   📝 Added user edit note to agent context`);
       }
 
-      // Add a note about the user's edit for agent context
-      const userEditNote = {
-        id: `user-edit-note-${Date.now()}`,
-        content: `IMPORTANT: User manually edited "${validatedData.file}". The user's version should be respected. Key differences from agent's version may indicate user preferences.`,
-        priority: 'high' as const,
-        consumed: false,
-        createdAt: new Date(),
-        createdBy: new mongoose.Types.ObjectId(req.user!.id),
-        metadata: {
-          type: 'user_code_edit',
-          file: validatedData.file,
-        },
-      };
-
-      task.orchestration.pendingDirectives.push(userEditNote as any);
-      task.markModified('orchestration.pendingDirectives');
-
-      console.log(`   📝 Added user edit note to agent context`);
-    }
-
-    await task.save();
+      return orch;
+    });
 
     // Emit notification via WebSocket
     const { NotificationService } = await import('../services/NotificationService');
@@ -2824,10 +2721,7 @@ router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) =
     const validatedData = codeDirectiveSchema.parse(req.body);
     const taskId = req.params.id;
 
-    const task = await Task.findOne({
-      _id: taskId,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(taskId, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -2842,11 +2736,6 @@ router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) =
     console.log(`   Directive: ${validatedData.directive.substring(0, 100)}...`);
     console.log(`   Agent: ${validatedData.agentName || 'any'}`);
 
-    // Initialize pendingDirectives array if it doesn't exist
-    if (!task.orchestration.pendingDirectives) {
-      task.orchestration.pendingDirectives = [];
-    }
-
     // Create a file-specific directive
     const directiveId = `code-dir-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const directive = {
@@ -2856,7 +2745,7 @@ router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) =
       targetAgent: validatedData.agentName || undefined,
       consumed: false,
       createdAt: new Date(),
-      createdBy: new mongoose.Types.ObjectId(req.user!.id),
+      createdBy: req.user!.id,
       metadata: {
         type: 'code_directive',
         file: validatedData.file,
@@ -2864,9 +2753,12 @@ router.post('/:id/code-directive', authenticate, async (req: AuthRequest, res) =
       },
     };
 
-    task.orchestration.pendingDirectives.push(directive as any);
-    task.markModified('orchestration.pendingDirectives');
-    await task.save();
+    // Add directive to pending queue
+    TaskRepository.modifyOrchestration(taskId, (orch) => {
+      if (!orch.pendingDirectives) orch.pendingDirectives = [];
+      orch.pendingDirectives.push(directive as any);
+      return orch;
+    });
 
     // Emit notification via WebSocket
     const { NotificationService } = await import('../services/NotificationService');
@@ -2972,6 +2864,12 @@ router.post('/:id/sync-to-mongodb', authenticate, async (req: AuthRequest, res) 
       return;
     }
 
+    // Convert Maps to arrays for response
+    const phasesArray = map.phases ? Array.from(map.phases.keys()) : [];
+    const planningPhase = map.phases?.get('Planning');
+    const epicsInPhases = (planningPhase?.output as any)?.epics?.length || 0;
+    const epicsInTracking = map.epics ? map.epics.size : 0;
+
     res.json({
       success: true,
       message: `Execution map for task ${taskId} is now synced`,
@@ -2979,9 +2877,9 @@ router.post('/:id/sync-to-mongodb', authenticate, async (req: AuthRequest, res) 
         taskId: map.taskId,
         status: map.status,
         currentPhase: map.currentPhase,
-        phases: Object.keys(map.phases || {}),
-        epicsInPhases: (map.phases?.Planning?.output as any)?.epics?.length || 0,
-        epicsInTracking: map.epics?.length || 0,
+        phases: phasesArray,
+        epicsInPhases,
+        epicsInTracking,
       },
     });
   } catch (error: any) {

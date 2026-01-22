@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
 import { RealisticCostEstimator } from '../RealisticCostEstimator';
@@ -51,8 +52,8 @@ export class TechLeadPhase extends BasePhase {
 
       // Check if THIS SPECIFIC EPIC's TechLead was completed
       const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-      const epicData = resumption.executionMap?.epics?.find(
-        e => e.epicId === teamEpic.id && e.techLeadCompleted
+      const epicData = resumption?.executionMap?.epics?.find(
+        (e: any) => e.epicId === teamEpic.id && e.techLeadCompleted
       );
 
       if (epicData) {
@@ -96,7 +97,8 @@ export class TechLeadPhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
+    const taskShortId = taskId.substring(0, 8); // For branch naming
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
 
@@ -106,11 +108,9 @@ export class TechLeadPhase extends BasePhase {
 
     // Update task status - 🔥 ALWAYS use atomic updates to avoid version conflicts
     const startTime = new Date();
-    const Task = require('../../models/Task').Task;
 
-    // 🔥 FIRE-AND-FORGET: Non-blocking update to avoid MongoDB bottleneck
-    // This prevents "No matching document found for id" version conflict errors
-    updateTaskFireAndForget(task._id, {
+    // 🔥 FIRE-AND-FORGET: Non-blocking update to avoid bottleneck
+    updateTaskFireAndForget(task.id, {
       $set: {
         'orchestration.techLead.agent': 'tech-lead',
         'orchestration.techLead.status': 'in_progress',
@@ -128,9 +128,9 @@ export class TechLeadPhase extends BasePhase {
     console.log(`📝 [TechLead] Initialized orchestration.techLead atomically${multiTeamMode ? ' (multi-team mode)' : ''}`);
 
     // 🔥 CRITICAL: Reload task to get latest version to avoid future conflicts
-    const freshTask = await Task.findById(task._id);
+    const freshTask = TaskRepository.findById(task.id);
     if (freshTask) {
-      Object.assign(task, freshTask.toObject());
+      Object.assign(task, freshTask);
     }
 
     // Notify agent started
@@ -771,7 +771,7 @@ ${judgeFeedback}
         }
 
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'EpicCreated',
           agentName: 'tech-lead',
           payload: {
@@ -788,19 +788,37 @@ ${judgeFeedback}
         // 🔥 CRITICAL: Stories INHERIT targetRepository from their epic
         const normalizedEpicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
         for (const story of epic.stories) {
+          const normalizedStoryId = getStoryId(story);
+
+          // 🔥🔥🔥 CRITICAL: TechLead creates story branch name BEFORE Developer starts 🔥🔥🔥
+          // This ensures: 1) No race conditions 2) Developer knows exactly which branch to use
+          const storySlug = story.title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '')
+            .substring(0, 30);
+          const storyHash = normalizedStoryId.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
+          const storyBranchName = `story/${taskShortId}-${storySlug}-${storyHash}`;
+
+          console.log(`   🌿 [TechLead] Assigned branch for story "${story.title}": ${storyBranchName}`);
+
+          // Save to UnifiedMemoryService BEFORE emitting event
+          unifiedMemoryService.saveStoryBranch(taskId, normalizedStoryId, storyBranchName);
+
           await eventStore.append({
-            taskId: task._id as any,
+            taskId: task.id as any,
             eventType: 'StoryCreated',
             agentName: 'tech-lead',
             payload: {
-              id: getStoryId(story), // 🔥 CENTRALIZED: Use IdNormalizer
+              id: normalizedStoryId, // 🔥 CENTRALIZED: Use IdNormalizer
               epicId: normalizedEpicId, // 🔥 CENTRALIZED: Use normalized epicId
               title: story.title,
               description: story.description,
               priority: story.priority,
               complexity: story.estimatedComplexity,
               estimatedComplexity: story.estimatedComplexity, // For backward compatibility
-              assignedTo: parsed.storyAssignments?.find((a: any) => a.storyId === getStoryId(story))?.assignedTo,
+              assignedTo: parsed.storyAssignments?.find((a: any) => a.storyId === normalizedStoryId)?.assignedTo,
+              branchName: storyBranchName, // 🔥 CRITICAL: Branch assigned by TechLead
               filesToRead: story.filesToRead || [],
               filesToModify: story.filesToModify || [],
               filesToCreate: story.filesToCreate || [],
@@ -808,12 +826,24 @@ ${judgeFeedback}
               targetRepository: epic.targetRepository, // 🔥 INHERIT from epic
             },
           });
+
+          // 🔥 Also emit StoryBranchCreated for explicit branch tracking
+          await eventStore.append({
+            taskId: task.id as any,
+            eventType: 'StoryBranchCreated',
+            agentName: 'tech-lead',
+            payload: {
+              storyId: normalizedStoryId,
+              branchName: storyBranchName,
+              createdBy: 'tech-lead', // Flag that TechLead created it
+            },
+          });
         }
       }
 
       // Emit team composition event
       await eventStore.append({
-        taskId: task._id as any,
+        taskId: task.id as any,
         eventType: 'TeamCompositionDefined',
         agentName: 'tech-lead',
         payload: parsed.teamComposition,
@@ -830,7 +860,7 @@ ${judgeFeedback}
 
         // Emit EnvironmentConfigDefined event for TeamOrchestrationPhase
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'EnvironmentConfigDefined',
           agentName: 'tech-lead',
           payload: parsed.environmentConfig,
@@ -838,7 +868,11 @@ ${judgeFeedback}
 
         // Store in task.orchestration for persistence (survives server restart)
         task.orchestration.environmentConfig = parsed.environmentConfig;
-        task.markModified('orchestration.environmentConfig');
+        // SQLite: No need for markModified, just update the task
+        TaskRepository.modifyOrchestration(task.id, (orch) => ({
+          ...orch,
+          environmentConfig: parsed.environmentConfig,
+        }));
 
         console.log(`✅ [TechLead] EnvironmentConfigDefined event emitted + stored in task`);
       } else {
@@ -1024,7 +1058,7 @@ ${judgeFeedback}
         },
       };
 
-      updateTaskFireAndForget(task._id, atomicUpdate, 'techLead completed');
+      updateTaskFireAndForget(task.id, atomicUpdate, 'techLead completed');
       console.log(`📝 [TechLead] Saved completion (fire-and-forget)`);
 
       // Update in-memory for subsequent code
@@ -1077,7 +1111,7 @@ ${judgeFeedback}
       // 🔥 EVENT SOURCING: Emit completion event
       // 🔥 CRITICAL FIX: Include epicId in multi-team mode so shouldSkip can filter correctly
       await eventStore.append({
-        taskId: task._id as any,
+        taskId: task.id as any,
         eventType: 'TechLeadCompleted',
         agentName: 'tech-lead',
         payload: {
@@ -1274,7 +1308,7 @@ ${judgeFeedback}
       }
 
       // 🔥 FIRE-AND-FORGET: Update failure status without blocking
-      updateTaskFireAndForget(task._id, {
+      updateTaskFireAndForget(task.id, {
         $set: {
           'orchestration.techLead.status': 'failed',
           'orchestration.techLead.error': error.message,
@@ -1293,7 +1327,7 @@ ${judgeFeedback}
       // 🔥 EVENT SOURCING: Emit failure event to prevent infinite loop
       const { eventStore } = await import('../EventStore');
       await eventStore.append({
-        taskId: task._id as any,
+        taskId: task.id as any,
         eventType: 'TechLeadCompleted', // Mark as completed even on error
         agentName: 'tech-lead',
         payload: {
@@ -1819,7 +1853,7 @@ Explore first, then output JSON.`;
 
     // 🔥 UNIFIED MEMORY FALLBACK: Check local file as THIRD source of truth
     // Priority: 1) MongoDB (techLead object) 2) UnifiedMemory 3) EventStore
-    const taskId = (context.task._id as any).toString();
+    const taskId = (context.task.id as any).toString();
     try {
       // Check UnifiedMemory for teamComposition if not in DB
       if (!techLead?.teamComposition) {
@@ -1845,7 +1879,7 @@ Explore first, then output JSON.`;
     // Try to restore epics and storiesMap from EventStore (THIRD fallback)
     try {
       const { eventStore } = await import('../EventStore');
-      const events = await eventStore.getEvents(context.task._id as any);
+      const events = await eventStore.getEvents(context.task.id as any);
 
       // 🔥 FIX: Detect multi-team mode to filter stories by current epic
       const teamEpic = context.getData<any>('teamEpic');

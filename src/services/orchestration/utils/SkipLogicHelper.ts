@@ -48,7 +48,7 @@ export interface SkipCheckOptions {
  * Get task ID as string from context
  */
 function getTaskIdFromContext(context: OrchestrationContext): string {
-  return (context.task._id as any)?.toString() || '';
+  return (context.task.id as any)?.toString() || '';
 }
 
 /**

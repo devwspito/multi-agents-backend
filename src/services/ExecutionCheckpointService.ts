@@ -1,5 +1,5 @@
-import { ExecutionCheckpoint, IExecutionCheckpoint } from '../models/ExecutionCheckpoint';
-import { Task } from '../models/Task';
+import { ExecutionCheckpointRepository, IExecutionCheckpoint } from '../database/repositories/ExecutionCheckpointRepository.js';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { NotificationService } from './NotificationService';
 import { safeGitExecSync } from '../utils/safeGitExecution';
 
@@ -35,7 +35,7 @@ export class ExecutionCheckpointService {
     // Get project ID from task
     let projectId;
     try {
-      const task = await Task.findById(params.taskId);
+      const task = TaskRepository.findById(params.taskId);
       projectId = task?.projectId;
     } catch {
       // Ignore
@@ -44,13 +44,12 @@ export class ExecutionCheckpointService {
     // Get git state
     const gitState = await this.getGitState(params.workspacePath);
 
-    const checkpoint = new ExecutionCheckpoint({
+    const checkpoint = ExecutionCheckpointRepository.create({
       taskId: params.taskId,
       projectId,
       agentType: params.agentType,
       agentName: params.agentName,
       phaseName: params.phaseName,
-      status: 'active',
       workspacePath: params.workspacePath,
       modelId: params.modelId,
       originalPrompt: params.prompt.substring(0, 100000), // Limit size
@@ -59,16 +58,9 @@ export class ExecutionCheckpointService {
         stories: params.context.getData?.('stories')?.slice(0, 20),
       } : undefined,
       gitState,
-      turnsCompleted: 0,
-      messagesReceived: 0,
-      startedAt: new Date(),
-      lastCheckpointAt: new Date(),
-      filesModified: [],
     });
 
-    await checkpoint.save();
-
-    console.log(`💾 [Checkpoint] Created for ${params.agentType} (${checkpoint._id})`);
+    console.log(`💾 [Checkpoint] Created for ${params.agentType} (${checkpoint.id})`);
 
     return checkpoint;
   }
@@ -86,33 +78,24 @@ export class ExecutionCheckpointService {
     }
   ): Promise<void> {
     try {
-      const checkpoint = await ExecutionCheckpoint.findById(checkpointId);
+      const checkpoint = ExecutionCheckpointRepository.findById(checkpointId);
       if (!checkpoint || checkpoint.status !== 'active') {
         return;
       }
 
-      // Update progress
-      if (updates.turnsCompleted !== undefined) {
-        checkpoint.turnsCompleted = updates.turnsCompleted;
-      }
-      if (updates.messagesReceived !== undefined) {
-        checkpoint.messagesReceived = updates.messagesReceived;
-      }
-      if (updates.filesModified) {
-        // Merge new files with existing
-        const allFiles = new Set([...checkpoint.filesModified, ...updates.filesModified]);
-        checkpoint.filesModified = Array.from(allFiles);
-      }
+      // Get updated git state
+      const gitState = await this.getGitState(checkpoint.workspacePath);
 
-      checkpoint.lastTurnAt = new Date();
-      checkpoint.lastCheckpointAt = new Date();
+      // Update progress using repository method
+      ExecutionCheckpointRepository.updateProgress(checkpointId, {
+        turnsCompleted: updates.turnsCompleted,
+        messagesReceived: updates.messagesReceived,
+        filesModified: updates.filesModified,
+        gitState,
+      });
 
-      // Update git state
-      checkpoint.gitState = await this.getGitState(checkpoint.workspacePath);
-
-      await checkpoint.save();
-
-      console.log(`💾 [Checkpoint] Updated ${checkpointId}: turn ${checkpoint.turnsCompleted}, ${checkpoint.filesModified.length} files`);
+      const updated = ExecutionCheckpointRepository.findById(checkpointId);
+      console.log(`💾 [Checkpoint] Updated ${checkpointId}: turn ${updated?.turnsCompleted || 0}, ${updated?.filesModified.length || 0} files`);
     } catch (error: any) {
       console.error(`❌ [Checkpoint] Failed to update ${checkpointId}:`, error.message);
     }
@@ -123,11 +106,7 @@ export class ExecutionCheckpointService {
    */
   static async completeCheckpoint(checkpointId: string): Promise<void> {
     try {
-      await ExecutionCheckpoint.findByIdAndUpdate(checkpointId, {
-        status: 'completed',
-        completedAt: new Date()
-      });
-
+      ExecutionCheckpointRepository.markCompleted(checkpointId);
       console.log(`✅ [Checkpoint] Completed ${checkpointId}`);
     } catch (error: any) {
       console.error(`❌ [Checkpoint] Failed to complete ${checkpointId}:`, error.message);
@@ -137,14 +116,9 @@ export class ExecutionCheckpointService {
   /**
    * Mark checkpoint as failed when execution fails
    */
-  static async failCheckpoint(checkpointId: string, error?: string): Promise<void> {
+  static async failCheckpoint(checkpointId: string, _error?: string): Promise<void> {
     try {
-      await ExecutionCheckpoint.findByIdAndUpdate(checkpointId, {
-        status: 'failed',
-        completedAt: new Date(),
-        ...(error && { 'contextSnapshot.lastError': error })
-      });
-
+      ExecutionCheckpointRepository.markFailed(checkpointId);
       console.log(`❌ [Checkpoint] Failed ${checkpointId}`);
     } catch (err: any) {
       console.error(`❌ [Checkpoint] Failed to mark as failed ${checkpointId}:`, err.message);
@@ -156,11 +130,7 @@ export class ExecutionCheckpointService {
    */
   static async abandonCheckpoint(checkpointId: string): Promise<void> {
     try {
-      await ExecutionCheckpoint.findByIdAndUpdate(checkpointId, {
-        status: 'abandoned',
-        completedAt: new Date()
-      });
-
+      ExecutionCheckpointRepository.abandon(checkpointId);
       console.log(`🗑️ [Checkpoint] Abandoned ${checkpointId}`);
     } catch (error: any) {
       console.error(`❌ [Checkpoint] Failed to abandon ${checkpointId}:`, error.message);
@@ -171,13 +141,7 @@ export class ExecutionCheckpointService {
    * Find active checkpoints that need recovery (called on server restart)
    */
   static async findActiveCheckpoints(): Promise<IExecutionCheckpoint[]> {
-    // Only recover checkpoints less than 1 hour old
-    const cutoff = new Date(Date.now() - 60 * 60 * 1000);
-
-    return ExecutionCheckpoint.find({
-      status: 'active',
-      lastCheckpointAt: { $gte: cutoff }
-    }).sort({ lastCheckpointAt: -1 });
+    return ExecutionCheckpointRepository.findActiveForRecovery();
   }
 
   /**
@@ -208,16 +172,16 @@ export class ExecutionCheckpointService {
         console.log(`   Last checkpoint: ${checkpoint.lastCheckpointAt.toISOString()}`);
 
         // Check if task still exists and is valid for recovery
-        const task = await Task.findById(checkpoint.taskId);
+        const task = TaskRepository.findById(checkpoint.taskId?.toString() || '');
         if (!task) {
           console.log(`   ⚠️ Task not found, abandoning checkpoint`);
-          await this.abandonCheckpoint(checkpoint._id?.toString() || '');
+          await this.abandonCheckpoint(checkpoint.id || '');
           continue;
         }
 
         if (task.status === 'completed' || task.status === 'cancelled') {
           console.log(`   ⚠️ Task already ${task.status}, abandoning checkpoint`);
-          await this.abandonCheckpoint(checkpoint._id?.toString() || '');
+          await this.abandonCheckpoint(checkpoint.id || '');
           continue;
         }
 
@@ -228,10 +192,10 @@ export class ExecutionCheckpointService {
 
         // Mark task for recovery
         task.status = 'pending';
-        await task.save();
+        TaskRepository.update(task.id, { status: 'pending' });
 
         // Mark checkpoint as abandoned (new execution will create new checkpoint)
-        await this.abandonCheckpoint(checkpoint._id?.toString() || '');
+        await this.abandonCheckpoint(checkpoint.id || '');
 
         // Resume orchestration
         recoveryService.resumeFailedTask(checkpoint.taskId.toString()).catch((error) => {
@@ -246,8 +210,8 @@ export class ExecutionCheckpointService {
 
         recovered++;
       } catch (error: any) {
-        console.error(`❌ [Checkpoint] Failed to recover ${checkpoint._id}:`, error.message);
-        await this.abandonCheckpoint(checkpoint._id?.toString() || '');
+        console.error(`❌ [Checkpoint] Failed to recover ${checkpoint.id}:`, error.message);
+        await this.abandonCheckpoint(checkpoint.id);
       }
     }
 
@@ -320,14 +284,8 @@ export class ExecutionCheckpointService {
    * Cleanup old checkpoints (call periodically)
    */
   static async cleanupOld(daysOld: number = 1): Promise<number> {
-    const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
-
-    const result = await ExecutionCheckpoint.deleteMany({
-      status: { $in: ['completed', 'abandoned', 'failed'] },
-      completedAt: { $lt: cutoff }
-    });
-
-    console.log(`🗑️ [Checkpoint] Cleaned up ${result.deletedCount} old checkpoints`);
-    return result.deletedCount;
+    const deleted = ExecutionCheckpointRepository.cleanupOld(daysOld);
+    console.log(`🗑️ [Checkpoint] Cleaned up ${deleted} old checkpoints`);
+    return deleted;
   }
 }

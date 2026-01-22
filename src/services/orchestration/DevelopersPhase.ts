@@ -1,5 +1,5 @@
 import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
-import { ITeamMember } from '../../models/Task';
+import { ITeamMember, TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
 import { LogService } from '../logging/LogService';
@@ -233,7 +233,9 @@ export class DevelopersPhase extends BasePhase {
     }
 
     const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-    const epic = resumption.executionMap?.epics?.find(e => e.epicId === teamEpic.id);
+    if (!resumption) return false;
+
+    const epic = resumption.executionMap?.epics?.find((e: any) => e.epicId === teamEpic.id);
 
     // Check if ALL stories for THIS EPIC are completed
     if (epic && epic.status === 'completed') {
@@ -245,7 +247,7 @@ export class DevelopersPhase extends BasePhase {
 
     // Check partial recovery (some stories done, some pending)
     if (epic && !isEmpty(epic.stories)) {
-      const completedStories = epic.stories!.filter(s => s.status === 'completed');
+      const completedStories = epic.stories!.filter((s: any) => s.status === 'completed');
       const totalStories = epic.stories!.length;
 
       if (completedStories.length > 0 && completedStories.length < totalStories) {
@@ -272,7 +274,7 @@ export class DevelopersPhase extends BasePhase {
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
     const task = context.task;
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const repositories = context.repositories;
     const workspacePath = context.workspacePath;
     const workspaceStructure = context.getData<string>('workspaceStructure') || '';
@@ -388,19 +390,19 @@ export class DevelopersPhase extends BasePhase {
     try {
       // 🔥 EVENT SOURCING: Rebuild state from events
       const { eventStore } = await import('../EventStore');
-      const state = await eventStore.getCurrentState(task._id as any);
+      const state = await eventStore.getCurrentState(task.id as any);
 
       console.log(`📝 [Developers] Rebuilt state from events: ${state.epics.length} epics, ${state.stories.length} stories`);
 
       // Validate state
-      const validation = await eventStore.validateState(task._id as any);
+      const validation = await eventStore.validateState(task.id as any);
       if (!validation.valid) {
         console.error('❌ CRITICAL: State validation failed:');
         validation.errors.forEach(err => console.error(`  - ${err}`));
 
         // 🔥 CRITICAL: Emit completion event to prevent infinite loop
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
           payload: {
@@ -439,7 +441,7 @@ export class DevelopersPhase extends BasePhase {
       if (epics.length === 0) {
         // 🔥 CRITICAL: Emit completion event to prevent infinite loop
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
           payload: {
@@ -480,7 +482,7 @@ export class DevelopersPhase extends BasePhase {
         console.error(`\n   🛑 STOPPING PHASE - HUMAN INTERVENTION REQUIRED`);
 
         // Mark task as failed (fire-and-forget - error thrown after)
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
           $set: {
             status: 'failed',
             'orchestration.developers': {
@@ -626,7 +628,7 @@ export class DevelopersPhase extends BasePhase {
 
       // Save team to task (fire-and-forget)
       if (!multiTeamMode) {
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
           $set: { 'orchestration.team': team },
         }, 'save team');
       }
@@ -755,7 +757,7 @@ export class DevelopersPhase extends BasePhase {
             // 🔥 EVENT SOURCING: Emit StoryStarted event for recovery tracking
             const { eventStore } = await import('../EventStore');
             await eventStore.append({
-              taskId: task._id as any,
+              taskId: task.id as any,
               eventType: 'StoryStarted',
               agentName: 'developer',
               payload: {
@@ -857,7 +859,7 @@ export class DevelopersPhase extends BasePhase {
       const assignedStoriesCount = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
 
       // Count ACTUALLY COMPLETED stories (from EventStore - source of truth)
-      const allEvents = await eventStore.getEvents(task._id as any);
+      const allEvents = await eventStore.getEvents(task.id as any);
       const storyCompletedEvents = allEvents.filter((e: any) => e.eventType === 'StoryCompleted');
       const actuallyCompletedCount = storyCompletedEvents.length;
 
@@ -874,7 +876,7 @@ export class DevelopersPhase extends BasePhase {
         console.error(`   🚨 Emitting DevelopersCompleted with failed=true to prevent false success`);
 
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
           payload: {
@@ -891,7 +893,7 @@ export class DevelopersPhase extends BasePhase {
       } else {
         // 🔥 EVENT SOURCING: Emit completion event (TRUE SUCCESS CASE)
         await eventStore.append({
-          taskId: task._id as any,
+          taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
           payload: {
@@ -953,14 +955,11 @@ export class DevelopersPhase extends BasePhase {
 
       // 🔥 COST TRACKING: Save costs to task.orchestration (atomic update to avoid version conflicts)
       if (!multiTeamMode) {
-        const Task = require('../../models/Task').Task;
-        // ⚡ OPTIMIZATION: Only fetch totalCost field
-        const currentTask = await Task.findById(task._id)
-          .select('orchestration.totalCost')
-          .lean();
+        // ⚡ OPTIMIZATION: Fetch current task to get totalCost
+        const currentTask = TaskRepository.findById(task.id);
         const currentTotalCost = currentTask?.orchestration?.totalCost || 0;
 
-        updateTaskFireAndForget(task._id, {
+        updateTaskFireAndForget(task.id, {
           $set: {
             'orchestration.team': team,
             'orchestration.judge': {
@@ -1013,7 +1012,7 @@ export class DevelopersPhase extends BasePhase {
       // 🔥 EVENT SOURCING: Emit failure event to prevent infinite loop
       const { eventStore } = await import('../EventStore');
       await eventStore.append({
-        taskId: task._id as any,
+        taskId: task.id as any,
         eventType: 'DevelopersCompleted', // Mark as completed even on error
         agentName: 'developer',
         payload: {
@@ -1066,7 +1065,7 @@ export class DevelopersPhase extends BasePhase {
     judgeTokens: { input: number; output: number };
     conflictResolutionUsage: { input_tokens: number; output_tokens: number };
   }> {
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
     const fs = require('fs');
     const { execSync } = require('child_process');
 
@@ -1209,7 +1208,7 @@ export class DevelopersPhase extends BasePhase {
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
       // Mark task as FAILED (fire-and-forget - error thrown after)
-      updateTaskFireAndForget(task._id, {
+      updateTaskFireAndForget(task.id, {
         $set: {
           status: 'failed',
           'orchestration.developers': {
@@ -1234,7 +1233,7 @@ export class DevelopersPhase extends BasePhase {
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
       // Mark task as FAILED (fire-and-forget - error thrown after)
-      updateTaskFireAndForget(task._id, {
+      updateTaskFireAndForget(task.id, {
         $set: {
           status: 'failed',
           'orchestration.developers': {
@@ -1322,7 +1321,7 @@ export class DevelopersPhase extends BasePhase {
       // 🔔 Emit to frontend so user sees developer starting work
       const { NotificationService } = await import('../NotificationService');
       NotificationService.emitConsoleLog(
-        (task._id as any).toString(),
+        (task.id as any).toString(),
         'info',
         `👨‍💻 Developer ${developer.instanceId} starting: "${story.title}"`
       );
@@ -1421,7 +1420,7 @@ export class DevelopersPhase extends BasePhase {
               // Emit completion events
               const { eventStore } = await import('../EventStore');
               await eventStore.append({
-                taskId: task._id as any,
+                taskId: task.id as any,
                 eventType: 'StoryCompleted',
                 agentName: 'developer',
                 payload: {
@@ -1488,12 +1487,59 @@ export class DevelopersPhase extends BasePhase {
       // 🔥 CHECKPOINT 1: Mark story as "code_generating"
       await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_generating');
 
+      // 🔥🔥🔥 STORY BRANCH: TechLead already created it, Developer just checks out 🔥🔥🔥
+      const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+      const storyBranchName = story.branchName || unifiedMemoryService.getStoryBranch(taskId, normalizedStoryId);
+
+      if (!storyBranchName) {
+        console.error(`\n❌❌❌ [DevelopersPhase] CRITICAL: Story has NO branchName!`);
+        console.error(`   Story: ${story.title} (${story.id})`);
+        console.error(`   This means TechLead did NOT assign a branch to this story.`);
+        console.error(`   🔥 TechLead MUST create story branches when emitting StoryCreated events.`);
+        throw new Error(`HUMAN_REQUIRED: Story "${story.title}" has no branchName - TechLead must assign branches`);
+      }
+
+      console.log(`\n🌿 [DevelopersPhase] Checking out story branch assigned by TechLead: ${storyBranchName}`);
+      console.log(`   Repository: ${repoPath}`);
+
+      try {
+        // 🔥 Developer just does: git fetch + git checkout (branch already exists)
+        safeGitExecSync(`git fetch origin`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.FETCH });
+
+        // Try to checkout the branch
+        try {
+          safeGitExecSync(`git checkout ${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`✅ [DevelopersPhase] Checked out story branch: ${storyBranchName}`);
+        } catch {
+          // Branch might not exist locally, try tracking remote
+          try {
+            safeGitExecSync(`git checkout -b ${storyBranchName} origin/${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [DevelopersPhase] Created local tracking branch: ${storyBranchName}`);
+          } catch {
+            // Branch doesn't exist on remote either - create from epic branch
+            // This is for first developer to work on the story
+            console.log(`   ℹ️ Branch not on remote yet, creating from epic branch...`);
+            safeGitExecSync(`git checkout ${epicBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+            safeGitExecSync(`git checkout -b ${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [DevelopersPhase] Created story branch from epic: ${storyBranchName}`);
+          }
+        }
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🌿 Developer ${developer.instanceId}: Working on branch ${storyBranchName}`
+        );
+      } catch (gitError: any) {
+        console.error(`❌ [DevelopersPhase] Failed to checkout story branch: ${gitError.message}`);
+        throw new Error(`Git checkout failed for ${storyBranchName}: ${gitError.message}`);
+      }
+
       // 🔄 CHECKPOINT: Create rollback point before developer execution
       const { rollbackService } = await import('../RollbackService');
-      const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
       const checkpoint = await rollbackService.createCheckpoint(
         repoPath,
-        (task._id as any).toString(),
+        (task.id as any).toString(),
         `Before ${developer.instanceId}: ${story.title}`,
         {
           phase: 'development',
@@ -1570,7 +1616,7 @@ export class DevelopersPhase extends BasePhase {
       if (developerCost > 0) {
         console.log(`💰 [Developer ${developer.instanceId}] Cost: $${developerCost.toFixed(4)} (${developerTokens.input + developerTokens.output} tokens)`);
         NotificationService.emitConsoleLog(
-          (task._id as any).toString(),
+          (task.id as any).toString(),
           'info',
           `✅ Developer ${developer.instanceId} finished: "${story.title}" ($${developerCost.toFixed(4)})`
         );
@@ -1588,7 +1634,7 @@ export class DevelopersPhase extends BasePhase {
       console.log(`✅ [PIPELINE] Wait complete - proceeding to verification`);
 
       // Verify story has branch
-      const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task._id as any);
+      const updatedState = await (await import('../EventStore')).eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       if (!updatedStory || !updatedStory.branchName) {
@@ -1753,7 +1799,7 @@ export class DevelopersPhase extends BasePhase {
           try {
             const { eventStore } = await import('../EventStore');
             await eventStore.verifyStoryPush({
-              taskId: task._id as any,
+              taskId: task.id as any,
               storyId: story.id,
               branchName: storyBranch,
               repoPath,
@@ -2338,7 +2384,7 @@ export class DevelopersPhase extends BasePhase {
         // 🔄 GRANULAR RECOVERY: Persist story completion via EventStore
         // EventStore is the source of truth for story completion
         try {
-          const taskId = (task._id as any).toString();
+          const taskId = (task.id as any).toString();
 
           // Update story status in-memory
           story.status = 'completed';
@@ -2349,7 +2395,7 @@ export class DevelopersPhase extends BasePhase {
           // This is CRITICAL - EventStore.buildState() uses this to mark stories as completed
           const { eventStore } = await import('../EventStore');
           await eventStore.append({
-            taskId: task._id as any,
+            taskId: task.id as any,
             eventType: 'StoryCompleted',
             agentName: 'developer',
             payload: {
@@ -2458,7 +2504,7 @@ export class DevelopersPhase extends BasePhase {
 
         // Emit notification so user sees this in the UI
         const { NotificationService } = await import('../NotificationService');
-        const taskId = (task._id as any).toString();
+        const taskId = (task.id as any).toString();
         NotificationService.emitConsoleLog(
           taskId,
           'error',
@@ -2473,7 +2519,7 @@ export class DevelopersPhase extends BasePhase {
           // 🔥 EVENT SOURCING: Emit StoryFailed event for recovery tracking
           const { eventStore } = await import('../EventStore');
           await eventStore.append({
-            taskId: task._id as any,
+            taskId: task.id as any,
             eventType: 'StoryFailed',
             agentName: 'developer',
             payload: {
@@ -2719,7 +2765,7 @@ export class DevelopersPhase extends BasePhase {
                 // Emit StoryCompleted event
                 const { eventStore } = await import('../EventStore');
                 await eventStore.append({
-                  taskId: task._id as any,
+                  taskId: task.id as any,
                   eventType: 'StoryCompleted',
                   agentName: 'developer',
                   payload: {
@@ -2758,7 +2804,7 @@ export class DevelopersPhase extends BasePhase {
               // Judge rejected - mark as failed
               const { eventStore } = await import('../EventStore');
               await eventStore.append({
-                taskId: task._id as any,
+                taskId: task.id as any,
                 eventType: 'StoryFailed',
                 agentName: 'developer',
                 payload: {
@@ -2839,7 +2885,7 @@ export class DevelopersPhase extends BasePhase {
 
                   const { eventStore } = await import('../EventStore');
                   await eventStore.append({
-                    taskId: task._id as any,
+                    taskId: task.id as any,
                     eventType: 'StoryCompleted',
                     agentName: 'developer',
                     payload: {
@@ -3101,7 +3147,7 @@ export class DevelopersPhase extends BasePhase {
 
       // Get updated story with branch info
       const { eventStore } = await import('../EventStore');
-      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedState = await eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       if (!updatedStory || !updatedStory.branchName) {
@@ -3228,7 +3274,7 @@ export class DevelopersPhase extends BasePhase {
           try {
             const { eventStore } = await import('../EventStore');
             await eventStore.verifyStoryPush({
-              taskId: task._id as any,
+              taskId: task.id as any,
               storyId: story.id,
               branchName: storyBranch,
               repoPath,
@@ -3332,7 +3378,7 @@ export class DevelopersPhase extends BasePhase {
     try {
       // Get updated story
       const { eventStore } = await import('../EventStore');
-      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedState = await eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       // Sync workspace with remote
@@ -3463,7 +3509,7 @@ export class DevelopersPhase extends BasePhase {
     try {
       // Get updated story
       const { eventStore } = await import('../EventStore');
-      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedState = await eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       // Merge to epic branch

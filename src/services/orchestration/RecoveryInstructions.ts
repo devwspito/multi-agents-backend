@@ -6,7 +6,7 @@
  * instructions based on the failure type to guide the agent.
  */
 
-import { FailureType } from '../../models/FailedExecution';
+import { FailureType } from '../../database/repositories/FailedExecutionRepository.js';
 
 interface RecoveryContext {
   failureType: FailureType;

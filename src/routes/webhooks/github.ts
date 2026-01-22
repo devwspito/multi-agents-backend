@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { Task } from '../../models/Task';
+import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { GitHubService } from '../../services/GitHubService';
 import { BranchCleanupService } from '../../services/cleanup/BranchCleanupService';
 import { LogService } from '../../services/logging/LogService';
@@ -89,8 +89,10 @@ router.post('/', async (req: Request, res: Response): Promise<any> => {
     }
 
     // Find task that created this epic branch
-    const task = await Task.findOne({
-      'orchestration.teamOrchestration.teams.epic.branchName': branchName,
+    const allTasks = TaskRepository.findAll();
+    const task = allTasks.find((t: any) => {
+      const teams = t.orchestration?.teamOrchestration?.teams || [];
+      return teams.some((team: any) => team.epic?.branchName === branchName);
     });
 
     if (!task) {
@@ -98,7 +100,7 @@ router.post('/', async (req: Request, res: Response): Promise<any> => {
       return res.status(200).json({ message: 'Task not found for this epic branch' });
     }
 
-    const taskId = (task._id as any).toString();
+    const taskId = (task.id as any).toString();
 
     console.log(`✅ Found task: ${taskId}`);
     console.log(`   Task title: ${task.title}`);

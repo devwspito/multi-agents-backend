@@ -489,27 +489,17 @@ export class NotificationService {
 
     // 2. Persistir en base de datos para sobrevivir refresh
     try {
-      // Validate taskId is a valid ObjectId (24 hex chars)
-      const mongoose = await import('mongoose');
-      if (!mongoose.default.Types.ObjectId.isValid(taskId)) {
+      const { TaskRepository } = await import('../database/repositories/TaskRepository.js');
+      if (!TaskRepository.isValidId(taskId)) {
         // Skip DB persistence for invalid IDs (e.g., "system", "unknown")
         return;
       }
 
-      const { Task } = await import('../models/Task');
-      await Task.findByIdAndUpdate(
-        taskId,
-        {
-          $push: {
-            logs: {
-              level,
-              message,
-              timestamp,
-            },
-          },
-        },
-        { new: false } // No necesitamos retornar el documento
-      );
+      TaskRepository.appendLog(taskId, {
+        level,
+        message,
+        timestamp,
+      });
     } catch (error) {
       console.error(`❌ Error persisting log to DB:`, error);
       // No lanzar error - los logs no deben romper la orquestación

@@ -10,11 +10,11 @@
 
 import {
   Router,
-  mongoose,
   authenticate,
   AuthRequest,
-  Task,
+  TaskRepository,
   orchestrationCoordinator,
+  isValidObjectId,
 } from './shared';
 
 const router = Router();
@@ -27,7 +27,7 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
   try {
     const taskId = req.params.id;
 
-    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+    if (!isValidObjectId(taskId)) {
       res.status(400).json({
         success: false,
         message: 'Invalid task ID',
@@ -35,7 +35,7 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       res.status(404).json({
         success: false,
@@ -82,10 +82,7 @@ router.post('/:id/compact', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -111,10 +108,12 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    task.orchestration.paused = true;
-    task.orchestration.pausedAt = new Date();
-    task.orchestration.pausedBy = new mongoose.Types.ObjectId(req.user!.id);
-    await task.save();
+    TaskRepository.modifyOrchestration(task.id, (orch) => ({
+      ...orch,
+      paused: true,
+      pausedAt: new Date(),
+      pausedBy: req.user!.id,
+    }));
 
     console.log(`⏸️  [Pause] Task ${req.params.id} paused by user ${req.user!.id}`);
 
@@ -149,10 +148,7 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).populate('userId');
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -213,21 +209,28 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       console.log(`▶️  [Resume] Task ${req.params.id} resumed`);
     }
 
-    // Clear pause flags
-    task.orchestration.paused = false;
-    task.orchestration.pausedAt = undefined;
-    task.orchestration.pausedBy = undefined;
+    // Clear pause flags and update status
+    TaskRepository.modifyOrchestration(task.id, (orch) => ({
+      ...orch,
+      paused: false,
+      pausedAt: undefined,
+      pausedBy: undefined,
+    }));
 
     if (isBillingPaused) {
-      task.status = 'in_progress';
+      TaskRepository.update(task.id, { status: 'in_progress' });
       if (teamOrch) {
-        teamOrch.status = 'in_progress';
-        teamOrch.pauseReason = undefined;
-        teamOrch.pausedAt = undefined;
+        TaskRepository.modifyOrchestration(task.id, (orch) => ({
+          ...orch,
+          teamOrchestration: {
+            ...(orch as any).teamOrchestration,
+            status: 'in_progress',
+            pauseReason: undefined,
+            pausedAt: undefined,
+          },
+        }));
       }
     }
-
-    await task.save();
 
     const { NotificationService } = await import('../../services/NotificationService');
 
@@ -276,10 +279,7 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
  */
 router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -297,12 +297,14 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    task.orchestration.cancelRequested = true;
-    task.orchestration.cancelRequestedAt = new Date();
-    task.orchestration.cancelRequestedBy = new mongoose.Types.ObjectId(req.user!.id);
-    task.status = 'cancelled';
-    task.orchestration.currentPhase = 'completed';
-    await task.save();
+    TaskRepository.update(task.id, { status: 'cancelled' });
+    TaskRepository.modifyOrchestration(task.id, (orch) => ({
+      ...orch,
+      cancelRequested: true,
+      cancelRequestedAt: new Date(),
+      cancelRequestedBy: req.user!.id,
+      currentPhase: 'completed',
+    }));
 
     console.log(`🛑 [Cancel] Task ${req.params.id} cancelled`);
 

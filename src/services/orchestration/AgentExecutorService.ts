@@ -15,8 +15,8 @@
  * - Session management for resume capability
  */
 
-import { Task, ITask } from '../../models/Task';
-import { FailedExecution, FailureType } from '../../models/FailedExecution';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
+import { FailedExecutionRepository, FailureType } from '../../database/repositories/FailedExecutionRepository.js';
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { OrchestrationContext } from './Phase';
@@ -192,19 +192,12 @@ export class AgentExecutorService {
     let repositoryType: 'frontend' | 'backend' | 'unknown' = 'unknown';
     if (taskId && agentType === 'developer') {
       try {
-        const task = await Task.findById(taskId).populate('projectId');
+        const task = TaskRepository.findById(taskId);
         if (task?.projectId) {
-          const project = task.projectId as any;
-          if (project.repositories && project.repositories.length > 0) {
-            const types = project.repositories.map((r: any) => r.type).filter(Boolean);
-            if (types.length === 0) {
-              repositoryType = 'unknown';
-            } else {
-              const validType = types.find((t: string) => t === 'backend' || t === 'frontend');
-              repositoryType = validType || 'unknown';
-            }
-          } else if (project.repository) {
-            repositoryType = project.repository.type || 'unknown';
+          const { ProjectRepository } = await import('../../database/repositories/ProjectRepository.js');
+          const project = ProjectRepository.findById(task.projectId);
+          if (project?.type) {
+            repositoryType = project.type === 'frontend' || project.type === 'backend' ? project.type : 'unknown';
           }
         }
       } catch (error: any) {
@@ -319,12 +312,12 @@ export class AgentExecutorService {
 
       smartContextBlock = injectedContext.formattedContext;
 
-      // Granular memory from MongoDB
+      // Granular memory from database
       if (taskId) {
         try {
-          const taskDoc = await Task.findById(taskId).select('projectId').lean();
+          const taskDoc = TaskRepository.findById(taskId);
           if (taskDoc?.projectId) {
-            const projectId = taskDoc.projectId.toString();
+            const projectId = taskDoc.projectId;
 
             const granularMemories = await granularMemoryService.getPhaseMemories({
               projectId,
@@ -945,30 +938,25 @@ export class AgentExecutorService {
    */
   private async saveFailedExecution(params: SaveFailedExecutionParams): Promise<void> {
     try {
-      const failedExecution = new FailedExecution({
-        taskId: params.taskId,
+      const failedExecution = FailedExecutionRepository.create({
+        taskId: params.taskId || '',
         agentType: params.agentType,
         agentName: params.agentName,
         prompt: params.prompt.substring(0, 50000), // Limit prompt size
         workspacePath: params.workspacePath,
-        model: params.model,
+        modelId: params.model || '',
         permissionMode: params.permissionMode,
-        error: {
-          message: params.error.message,
-          code: params.error.code,
-          stack: params.error.stack?.substring(0, 5000),
-          isTimeout: params.error.isTimeout || false,
-          isLoopDetection: params.error.isLoopDetection || false,
-          isHistoryOverflow: params.error.isHistoryOverflow || false,
-          isUserAbort: params.error.isUserAbort || false,
-        },
-        diagnostics: params.diagnostics,
         failureType: this.classifyFailure(params.error),
-        createdAt: new Date(),
+        errorMessage: params.error.message || 'Unknown error',
+        errorStack: params.error.stack?.substring(0, 5000),
+        messagesReceived: params.diagnostics?.messagesReceived || 0,
+        historyMessages: params.diagnostics?.historyMessages || 0,
+        turnsCompleted: params.diagnostics?.turnsCompleted || 0,
+        lastMessageTypes: params.diagnostics?.lastMessageTypes || [],
+        streamDurationMs: params.diagnostics?.streamDurationMs || 0,
       });
 
-      await failedExecution.save();
-      console.log(`💾 [AgentExecutor] Saved failed execution for retry: ${failedExecution._id}`);
+      console.log(`💾 [AgentExecutor] Saved failed execution for retry: ${failedExecution.id}`);
     } catch (saveError: any) {
       console.error(`❌ [AgentExecutor] Failed to save execution for retry: ${saveError.message}`);
     }

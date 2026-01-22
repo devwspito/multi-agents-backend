@@ -4,8 +4,8 @@
  * Cleans up corrupted workspaces from tasks with wrong repository assignments
  */
 
-import { Task } from '../../models/Task';
-import { Repository } from '../../models/Repository';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
+import { RepositoryRepository, IRepository } from '../../database/repositories/RepositoryRepository.js';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -50,11 +50,11 @@ export class WorkspaceCleanupService {
 
     try {
       // Find all tasks with repositories
-      const tasks = await Task.find({
-        repositoryIds: { $exists: true, $ne: [] },
-      }).select('_id title status repositoryIds createdAt');
+      const tasks = TaskRepository.findAll().filter(
+        (t: ITask) => t.repositoryIds && t.repositoryIds.length > 0
+      );
 
-      console.log(`\n🔍 Scanning ${tasks.length} tasks for corrupted workspaces...`);
+      console.log(`\nScanning ${tasks.length} tasks for corrupted workspaces...`);
 
       for (const task of tasks) {
         if (!task.repositoryIds || task.repositoryIds.length === 0) {
@@ -62,20 +62,18 @@ export class WorkspaceCleanupService {
         }
 
         // Get repository details
-        const repositories = await Repository.find({
-          _id: { $in: task.repositoryIds },
-        }).select('name');
+        const repositories = RepositoryRepository.findByIds(task.repositoryIds);
 
         // Check if any repository is a system repository
         const corruptedRepos = repositories
-          .filter(repo => this.isSystemRepository(repo.name))
-          .map(repo => repo.name);
+          .filter((repo: IRepository) => this.isSystemRepository(repo.name))
+          .map((repo: IRepository) => repo.name);
 
         if (corruptedRepos.length > 0) {
-          const workspacePath = path.join(this.workspaceDir, `task-${task._id}`);
+          const workspacePath = path.join(this.workspaceDir, `task-${task.id}`);
 
           corruptedTasks.push({
-            taskId: String(task._id),
+            taskId: task.id,
             title: task.title,
             status: task.status,
             corruptedRepos,
@@ -83,17 +81,17 @@ export class WorkspaceCleanupService {
             createdAt: task.createdAt,
           });
 
-          console.log(`   ❌ Found corrupted task: ${task._id}`);
+          console.log(`   Found corrupted task: ${task.id}`);
           console.log(`      Title: ${task.title}`);
           console.log(`      System repos: ${corruptedRepos.join(', ')}`);
         }
       }
 
-      console.log(`\n✅ Scan complete: ${corruptedTasks.length} corrupted workspaces found`);
+      console.log(`\nScan complete: ${corruptedTasks.length} corrupted workspaces found`);
 
       return corruptedTasks;
     } catch (error: any) {
-      console.error('❌ Error scanning for corrupted workspaces:', error);
+      console.error('Error scanning for corrupted workspaces:', error);
       throw error;
     }
   }
@@ -108,21 +106,21 @@ export class WorkspaceCleanupService {
       // Check if workspace exists
       await fs.access(workspacePath);
 
-      console.log(`   🧹 Deleting workspace: ${workspacePath}`);
+      console.log(`   Deleting workspace: ${workspacePath}`);
 
       // Delete the workspace directory
       await fs.rm(workspacePath, { recursive: true, force: true });
 
-      console.log(`   ✅ Workspace deleted successfully`);
+      console.log(`   Workspace deleted successfully`);
 
       return true;
     } catch (error: any) {
       if (error.code === 'ENOENT') {
-        console.log(`   ⚠️  Workspace doesn't exist (already clean): ${workspacePath}`);
+        console.log(`   Workspace doesn't exist (already clean): ${workspacePath}`);
         return true; // Consider it a success if it doesn't exist
       }
 
-      console.error(`   ❌ Failed to delete workspace: ${error.message}`);
+      console.error(`   Failed to delete workspace: ${error.message}`);
       return false;
     }
   }
@@ -131,9 +129,9 @@ export class WorkspaceCleanupService {
    * Clean up ALL corrupted workspaces
    */
   async cleanupAllCorruptedWorkspaces(dryRun: boolean = false): Promise<CleanupResult> {
-    console.log(`\n${'🧹'.repeat(40)}`);
-    console.log(`🧹 WORKSPACE CLEANUP ${dryRun ? '(DRY RUN)' : '(ACTUAL)'}`);
-    console.log(`${'🧹'.repeat(40)}\n`);
+    console.log(`\n${'='.repeat(40)}`);
+    console.log(`WORKSPACE CLEANUP ${dryRun ? '(DRY RUN)' : '(ACTUAL)'}`);
+    console.log(`${'='.repeat(40)}\n`);
 
     const result: CleanupResult = {
       totalTasksScanned: 0,
@@ -151,34 +149,34 @@ export class WorkspaceCleanupService {
       result.corruptedTasks = corruptedTasks;
 
       if (corruptedTasks.length === 0) {
-        console.log('\n✅ No corrupted workspaces found. System is clean!');
+        console.log('\nNo corrupted workspaces found. System is clean!');
         return result;
       }
 
-      console.log(`\n${'🔥'.repeat(40)}`);
-      console.log(`🔥 Found ${corruptedTasks.length} corrupted workspace(s)`);
-      console.log(`${'🔥'.repeat(40)}\n`);
+      console.log(`\n${'='.repeat(40)}`);
+      console.log(`Found ${corruptedTasks.length} corrupted workspace(s)`);
+      console.log(`${'='.repeat(40)}\n`);
 
       if (dryRun) {
-        console.log('⚠️  DRY RUN MODE - No changes will be made\n');
+        console.log('DRY RUN MODE - No changes will be made\n');
 
         for (const task of corruptedTasks) {
-          console.log(`📋 Task: ${task.taskId} - ${task.title}`);
+          console.log(`Task: ${task.taskId} - ${task.title}`);
           console.log(`   Status: ${task.status}`);
           console.log(`   Corrupted repos: ${task.corruptedRepos.join(', ')}`);
           console.log(`   Workspace: ${task.workspacePath}`);
           console.log(`   Would be: DELETED\n`);
         }
 
-        console.log(`\n✅ DRY RUN COMPLETE - ${corruptedTasks.length} workspaces would be deleted`);
+        console.log(`\nDRY RUN COMPLETE - ${corruptedTasks.length} workspaces would be deleted`);
         return result;
       }
 
       // ACTUAL CLEANUP
-      console.log('🔥 Starting ACTUAL cleanup...\n');
+      console.log('Starting ACTUAL cleanup...\n');
 
       for (const task of corruptedTasks) {
-        console.log(`\n🧹 Cleaning task: ${task.taskId} - ${task.title}`);
+        console.log(`\nCleaning task: ${task.taskId} - ${task.title}`);
 
         try {
           const success = await this.cleanupWorkspace(task.taskId);
@@ -187,15 +185,15 @@ export class WorkspaceCleanupService {
             result.workspacesDeleted++;
 
             // Mark task as requiring reconfiguration
-            await Task.findByIdAndUpdate(task.taskId, {
-              $set: {
-                'metadata.workspaceCorrupted': true,
-                'metadata.workspaceCleanedAt': new Date(),
-                'metadata.requiresReconfiguration': true,
+            TaskRepository.update(task.taskId, {
+              metadata: {
+                workspaceCorrupted: true,
+                workspaceCleanedAt: new Date(),
+                requiresReconfiguration: true,
               },
-            });
+            } as any);
 
-            console.log(`   ✅ Task marked for reconfiguration`);
+            console.log(`   Task marked for reconfiguration`);
           } else {
             result.errors.push({
               taskId: task.taskId,
@@ -203,7 +201,7 @@ export class WorkspaceCleanupService {
             });
           }
         } catch (error: any) {
-          console.error(`   ❌ Error cleaning task ${task.taskId}: ${error.message}`);
+          console.error(`   Error cleaning task ${task.taskId}: ${error.message}`);
           result.errors.push({
             taskId: task.taskId,
             error: error.message,
@@ -211,17 +209,17 @@ export class WorkspaceCleanupService {
         }
       }
 
-      console.log(`\n${'✅'.repeat(40)}`);
-      console.log(`✅ CLEANUP COMPLETE`);
-      console.log(`${'✅'.repeat(40)}`);
+      console.log(`\n${'='.repeat(40)}`);
+      console.log(`CLEANUP COMPLETE`);
+      console.log(`${'='.repeat(40)}`);
       console.log(`   Corrupted tasks found: ${result.corruptedTasksFound}`);
       console.log(`   Workspaces deleted: ${result.workspacesDeleted}`);
       console.log(`   Errors: ${result.errors.length}`);
-      console.log(`${'✅'.repeat(40)}\n`);
+      console.log(`${'='.repeat(40)}\n`);
 
       return result;
     } catch (error: any) {
-      console.error('❌ Fatal error during cleanup:', error);
+      console.error('Fatal error during cleanup:', error);
       throw error;
     }
   }
@@ -239,13 +237,11 @@ export class WorkspaceCleanupService {
    * Validate that repository IDs don't point to system repositories
    */
   async validateRepositoryIds(repositoryIds: string[]): Promise<{ valid: boolean; invalidRepos: string[] }> {
-    const repositories = await Repository.find({
-      _id: { $in: repositoryIds },
-    }).select('name');
+    const repositories = RepositoryRepository.findByIds(repositoryIds);
 
     const invalidRepos = repositories
-      .filter(repo => this.isSystemRepository(repo.name))
-      .map(repo => repo.name);
+      .filter((repo: IRepository) => this.isSystemRepository(repo.name))
+      .map((repo: IRepository) => repo.name);
 
     return {
       valid: invalidRepos.length === 0,

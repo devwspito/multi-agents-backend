@@ -43,7 +43,7 @@ export class JudgeStageExecutor {
     try {
       // Get updated story from event store
       const { eventStore } = await import('../../../EventStore');
-      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedState = await eventStore.getCurrentState(task.id as any);
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       // Sync workspace with remote

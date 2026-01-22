@@ -1,32 +1,21 @@
-import { MongoMemoryServer } from 'mongodb-memory-server';
-import mongoose from 'mongoose';
+/**
+ * Test Setup - SQLite in-memory database for testing
+ */
 
-let mongoServer: MongoMemoryServer;
+import { initDb, closeDb, getDb } from '../database/index';
 
 // Setup before all tests
 beforeAll(async () => {
-  // Create MongoDB Memory Server
-  mongoServer = await MongoMemoryServer.create();
-  const mongoUri = mongoServer.getUri();
-
-  // Connect to in-memory database
-  await mongoose.connect(mongoUri);
-  console.log('✅ Connected to in-memory MongoDB');
+  // Initialize SQLite database (uses file-based DB by default)
+  initDb();
+  console.log('✅ SQLite database initialized for tests');
 });
-
-// Note: Individual test suites should handle their own cleanup in afterAll
-// We don't clear collections between tests to preserve beforeAll data
 
 // Cleanup after all tests
 afterAll(async () => {
-  // Disconnect from database
-  await mongoose.disconnect();
-
-  // Stop MongoDB Memory Server
-  if (mongoServer) {
-    await mongoServer.stop();
-  }
-  console.log('✅ Disconnected from in-memory MongoDB');
+  // Close database connection
+  closeDb();
+  console.log('✅ SQLite database closed');
 });
 
 // Global test timeout

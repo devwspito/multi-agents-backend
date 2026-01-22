@@ -2,20 +2,21 @@
  * LogService - Centralized Structured Logging System
  *
  * Replaces scattered console.log statements with structured, queryable logs
- * Stores logs in MongoDB for frontend consumption and debugging
+ * Stores logs in SQLite for frontend consumption and debugging
  * Provides human-readable console output with colors and emojis
  * Includes automatic secrets sanitization for security
  */
 
-import mongoose from 'mongoose';
-import { TaskLog, LogLevel, LogCategory } from '../../models/TaskLog';
+import { TaskLogRepository, LogLevel, LogCategory, ITaskLog } from '../../database/repositories/TaskLogRepository.js';
 import { SecretsSanitizer } from '../../utils/secretsSanitizer';
+
+export { LogLevel, LogCategory };
 
 /**
  * Log Context - Everything you might want to include in a log
  */
 export interface LogContext {
-  taskId: string | mongoose.Types.ObjectId;
+  taskId: string;
   level?: LogLevel;
   category?: LogCategory;
   phase?: 'analysis' | 'planning' | 'architecture' | 'development' | 'judge' | 'merge' | 'auto-merge' | 'completed' | 'multi-team' | 'error-resolution';
@@ -71,19 +72,19 @@ const emojis = {
 };
 
 export class LogService {
-  // ⚡ OPTIMIZATION: Skip MongoDB writes during high-throughput operations
-  // Console + WebSocket provide real-time visibility, MongoDB is for historical queries
-  private static skipMongoDb = process.env.LOG_SKIP_MONGODB === 'true';
+  // ⚡ OPTIMIZATION: Skip SQLite writes during high-throughput operations
+  // Console + WebSocket provide real-time visibility, SQLite is for historical queries
+  private static skipDatabase = process.env.LOG_SKIP_DATABASE === 'true';
 
   /**
-   * Disable MongoDB logging temporarily (for performance during orchestration)
+   * Disable database logging temporarily (for performance during orchestration)
    */
-  static setSkipMongoDb(skip: boolean): void {
-    this.skipMongoDb = skip;
+  static setSkipDatabase(skip: boolean): void {
+    this.skipDatabase = skip;
     if (skip) {
-      console.log('⚡ [LogService] MongoDB logging DISABLED for performance');
+      console.log('⚡ [LogService] Database logging DISABLED for performance');
     } else {
-      console.log('📝 [LogService] MongoDB logging ENABLED');
+      console.log('📝 [LogService] Database logging ENABLED');
     }
   }
 
@@ -169,11 +170,9 @@ export class LogService {
     // 1. Format and print to console
     this.logToConsole(sanitizedMessage, sanitizedContext, timestamp);
 
-    // 2. Store in MongoDB (async, don't block) - SKIP if disabled for performance
-    if (!this.skipMongoDb) {
-      this.storeInDatabase(sanitizedMessage, sanitizedContext, timestamp).catch((err) => {
-        console.error('[LogService] Failed to store log:', err.message);
-      });
+    // 2. Store in SQLite (sync, fast) - SKIP if disabled for performance
+    if (!this.skipDatabase) {
+      this.storeInDatabase(sanitizedMessage, sanitizedContext, timestamp);
     }
 
     // 3. Emit to WebSocket for real-time frontend updates
@@ -247,15 +246,15 @@ export class LogService {
   }
 
   /**
-   * Store log in MongoDB
+   * Store log in SQLite
    */
-  private static async storeInDatabase(
+  private static storeInDatabase(
     message: string,
     context: LogContext & { level: LogLevel; category: LogCategory },
     timestamp: Date
-  ): Promise<void> {
+  ): void {
     try {
-      await TaskLog.create({
+      TaskLogRepository.create({
         taskId: context.taskId,
         timestamp,
         level: context.level,
@@ -289,7 +288,7 @@ export class LogService {
     // Import NotificationService dynamically to avoid circular dependencies
     const { NotificationService } = await import('../NotificationService');
 
-    // Convert taskId to string if it's an ObjectId
+    // Convert taskId to string if needed
     const taskIdStr = context.taskId.toString();
 
     // Map LogLevel to console levels
@@ -480,25 +479,31 @@ export class LogService {
       startDate?: Date;
       endDate?: Date;
     }
-  ) {
-    const query: any = { taskId: new mongoose.Types.ObjectId(taskId) };
+  ): Promise<ITaskLog[]> {
+    let logs = TaskLogRepository.findByTaskId(taskId, {
+      level: filters?.level,
+      category: filters?.category,
+      limit: filters?.limit || 1000,
+    });
 
-    if (filters?.level) query.level = filters.level;
-    if (filters?.category) query.category = filters.category;
-    if (filters?.agentType) query.agentType = filters.agentType;
-    if (filters?.epicId) query.epicId = filters.epicId;
-    if (filters?.storyId) query.storyId = filters.storyId;
-
-    if (filters?.startDate || filters?.endDate) {
-      query.timestamp = {};
-      if (filters.startDate) query.timestamp.$gte = filters.startDate;
-      if (filters.endDate) query.timestamp.$lte = filters.endDate;
+    // Additional filtering not supported directly by repository
+    if (filters?.agentType) {
+      logs = logs.filter(log => log.agentType === filters.agentType);
+    }
+    if (filters?.epicId) {
+      logs = logs.filter(log => log.epicId === filters.epicId);
+    }
+    if (filters?.storyId) {
+      logs = logs.filter(log => log.storyId === filters.storyId);
+    }
+    if (filters?.startDate) {
+      logs = logs.filter(log => log.timestamp >= filters.startDate!);
+    }
+    if (filters?.endDate) {
+      logs = logs.filter(log => log.timestamp <= filters.endDate!);
     }
 
-    return await TaskLog.find(query)
-      .sort({ timestamp: -1 })
-      .limit(filters?.limit || 1000)
-      .lean();
+    return logs;
   }
 
   /**

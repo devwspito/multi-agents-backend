@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import { LogService } from './logging/LogService';
 import { OrchestrationCoordinator } from './orchestration/OrchestrationCoordinator';
-import { Task } from '../models/Task';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
 
 /**
  * Slash Command Result
@@ -347,7 +347,7 @@ export class CommandService {
       throw new Error('Task ID is required for /compact command');
     }
 
-    const task = await Task.findById(taskId);
+    const task = TaskRepository.findById(taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }

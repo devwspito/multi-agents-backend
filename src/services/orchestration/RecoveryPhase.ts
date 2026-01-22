@@ -101,12 +101,12 @@ export class RecoveryPhase extends BasePhase {
       console.log(`\n🔍 [Step 2/4] Verifying story pushes against GitHub...`);
       try {
         const { eventStore } = await import('../EventStore');
-        const unverifiedStories = await eventStore.getUnverifiedStories(context.task?._id as any);
+        const unverifiedStories = await eventStore.getUnverifiedStories(context.task?.id as any);
 
         if (unverifiedStories.length > 0) {
-          console.log(`   ⚠️ Found ${unverifiedStories.length} unverified stories - checking GitHub...`);
+          console.log(`   Found ${unverifiedStories.length} unverified stories - checking GitHub...`);
           const verifyResult = await eventStore.verifyAllPushes({
-            taskId: context.task?._id as any,
+            taskId: context.task?.id as any,
             repoPath,
           });
 

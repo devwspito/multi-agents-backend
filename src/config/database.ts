@@ -1,107 +1,71 @@
-import mongoose from 'mongoose';
-import { env } from './env';
+/**
+ * Database Configuration
+ *
+ * SQLite database initialization (replaced MongoDB)
+ */
 
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_INTERVAL = 5000; // 5 seconds
+import { initializeDatabase, closeDatabase } from '../database/index.js';
 
+let isInitialized = false;
+
+/**
+ * Initialize SQLite database
+ */
 export async function connectDatabase(): Promise<void> {
   try {
-    await mongoose.connect(env.MONGODB_URI, {
-      maxPoolSize: 10,
-      minPoolSize: 5,
-      socketTimeoutMS: 45000,
-      serverSelectionTimeoutMS: 10000,
-    });
+    if (isInitialized) {
+      console.log('✅ SQLite already initialized');
+      return;
+    }
 
-    console.log('✅ MongoDB connected successfully');
-    reconnectAttempts = 0; // Reset on successful connection
+    // Initialize SQLite database and create tables
+    initializeDatabase();
+    isInitialized = true;
 
-    mongoose.connection.on('error', (error) => {
-      console.error('❌ MongoDB connection error:', error);
-    });
+    console.log('✅ SQLite database initialized successfully');
 
-    mongoose.connection.on('disconnected', () => {
-      console.warn('⚠️ MongoDB disconnected - attempting reconnect...');
-      attemptReconnect();
-    });
-
-    mongoose.connection.on('reconnected', () => {
-      console.log('✅ MongoDB reconnected successfully');
-      reconnectAttempts = 0;
-    });
-
-    // Only close MongoDB on SIGINT if it's a real shutdown (not just Ctrl+C in terminal)
+    // Handle graceful shutdown
     let sigintCount = 0;
-    process.on('SIGINT', async () => {
+    process.on('SIGINT', () => {
       sigintCount++;
       if (sigintCount >= 2) {
         // Second Ctrl+C = force shutdown
-        console.log('\n🔌 Force shutdown - closing MongoDB connection...');
-        await mongoose.connection.close();
-        console.log('🔌 MongoDB connection closed');
+        console.log('\n🔌 Force shutdown - closing SQLite connection...');
+        closeDatabase();
+        console.log('🔌 SQLite connection closed');
         process.exit(0);
       } else {
-        console.log('\n⚠️  Press Ctrl+C again to shutdown (MongoDB still connected)');
+        console.log('\n⚠️  Press Ctrl+C again to shutdown');
         // Reset count after 3 seconds
         setTimeout(() => { sigintCount = 0; }, 3000);
       }
     });
   } catch (error) {
-    console.error('❌ Failed to connect to MongoDB:', error);
+    console.error('❌ Failed to initialize SQLite database:', error);
     process.exit(1);
   }
 }
 
-async function attemptReconnect(): Promise<void> {
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error(`❌ MongoDB: Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Giving up.`);
-    return;
-  }
-
-  reconnectAttempts++;
-  console.log(`🔄 MongoDB reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
-
-  setTimeout(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) { // disconnected
-        await mongoose.connect(env.MONGODB_URI, {
-          maxPoolSize: 10,
-          minPoolSize: 5,
-          socketTimeoutMS: 45000,
-          serverSelectionTimeoutMS: 10000,
-        });
-      }
-    } catch (error) {
-      console.error(`❌ MongoDB reconnect attempt ${reconnectAttempts} failed:`, error);
-      attemptReconnect(); // Try again
-    }
-  }, RECONNECT_INTERVAL);
-}
-
 /**
- * Check if MongoDB is connected
+ * Check if database is initialized
  */
 export function isMongoConnected(): boolean {
-  return mongoose.connection.readyState === 1;
+  // For SQLite, we're always "connected" once initialized
+  return isInitialized;
 }
 
 /**
- * Wait for MongoDB connection (with timeout)
+ * Wait for database connection (immediate for SQLite)
  */
-export async function waitForMongoConnection(timeoutMs: number = 30000): Promise<boolean> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < timeoutMs) {
-    if (isMongoConnected()) {
-      return true;
-    }
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-
-  return false;
+export async function waitForMongoConnection(_timeoutMs: number = 30000): Promise<boolean> {
+  // SQLite is synchronous, so we're immediately ready
+  return isInitialized;
 }
 
+/**
+ * Disconnect database
+ */
 export async function disconnectDatabase(): Promise<void> {
-  await mongoose.connection.close();
+  closeDatabase();
+  isInitialized = false;
 }

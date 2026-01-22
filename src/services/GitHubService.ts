@@ -2,9 +2,9 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import { User } from '../models/User';
+import { UserRepository } from '../database/repositories/UserRepository.js';
 import { EnvService } from './EnvService';
-import { IEnvVariable } from '../models/Repository';
+import { IEnvVariable } from '../database/repositories/RepositoryRepository.js';
 import { safeGitExec, safeFetch, safePull, fixGitRemoteAuth } from '../utils/safeGitExecution';
 
 const execAsync = promisify(exec);
@@ -49,7 +49,7 @@ export class GitHubService {
    * @param customPath - Ruta personalizada para clonar (útil para multi-repo)
    */
   async cloneRepository(project: any, userId: string, customPath?: string): Promise<string> {
-    const user = await User.findById(userId).select('+accessToken');
+    const user = UserRepository.findById(userId);
     if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
     const workspacePath = customPath || this.getWorkspacePath(project.workspaceId);
@@ -254,7 +254,7 @@ export class GitHubService {
    */
   async pushBranch(branchName: string, workspacePath: string, userId: string): Promise<void> {
     try {
-      const user = await User.findById(userId).select('+accessToken');
+      const user = UserRepository.findById(userId);
       if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
       // Push usando el token del usuario WITH TIMEOUT (GitHub tokens NOT encrypted)
@@ -299,7 +299,7 @@ export class GitHubService {
       }
 
       // Get any user's access token (we just need valid credentials)
-      const user = await User.findOne({ accessToken: { $exists: true, $ne: null } }).select('+accessToken');
+      const user = UserRepository.findWithAccessToken();
       if (!user || !user.accessToken) {
         throw new Error('No user with GitHub access token found');
       }
@@ -337,7 +337,7 @@ export class GitHubService {
     options: GitHubPROptions
   ): Promise<{ url: string; number: number }> {
     try {
-      const user = await User.findById(userId).select('+accessToken');
+      const user = UserRepository.findById(userId);
       if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
       const [owner, repo] = project.githubRepoName.split('/');
@@ -480,7 +480,7 @@ export class GitHubService {
    */
   async getPR(repository: any, userId: string, prNumber: number): Promise<any> {
     try {
-      const user = await User.findById(userId).select('+accessToken');
+      const user = UserRepository.findById(userId);
       if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
       const [owner, repo] = repository.githubRepoName.split('/');
@@ -510,7 +510,7 @@ export class GitHubService {
    */
   async getPRFiles(repository: any, userId: string, prNumber: number): Promise<string[]> {
     try {
-      const user = await User.findById(userId).select('+accessToken');
+      const user = UserRepository.findById(userId);
       if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
       const [owner, repo] = repository.githubRepoName.split('/');
@@ -546,7 +546,7 @@ export class GitHubService {
     mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash'
   ): Promise<void> {
     try {
-      const user = await User.findById(userId).select('+accessToken');
+      const user = UserRepository.findById(userId);
       if (!user || !user.accessToken) throw new Error('User not found or no GitHub token');
 
       const [owner, repo] = repository.githubRepoName.split('/');
@@ -713,7 +713,7 @@ export class GitHubService {
     filename: string
   ): Promise<string> {
     try {
-      const user = await User.findById(userId);
+      const user = UserRepository.findById(userId);
       if (!user) throw new Error('User not found');
 
       const [owner, repo] = repository.githubRepoName.split('/');

@@ -455,7 +455,7 @@ export const validateSecurityComplianceTool = tool(
 // ============================================================================
 
 import { memoryService } from '../services/MemoryService';
-import { MemoryType, MemoryImportance } from '../models/Memory';
+import { MemoryType, MemoryImportance } from '../database/repositories/MemoryRepository.js';
 
 /**
  * Custom Tool: Remember
@@ -505,7 +505,7 @@ export const rememberTool = tool(
             type: 'text',
             text: JSON.stringify({
               success: true,
-              memoryId: memory._id.toString(),
+              memoryId: memory.id,
               title: memory.title,
               type: memory.type,
               message: `Memory stored successfully: "${memory.title}"`,
@@ -579,7 +579,7 @@ export const recallTool = tool(
       }
 
       const formattedMemories = results.map(r => ({
-        id: r.memory._id?.toString(),
+        id: r.memory.id,
         title: r.memory.title,
         type: r.memory.type,
         importance: r.memory.importance,

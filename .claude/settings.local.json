@@ -152,7 +152,18 @@
       "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/services/AgentPermissionService.ts)",
       "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/services/orchestration/AgentDefinitions.ts)",
       "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/tools/extraTools.ts)",
-      "Bash(top:*)"
+      "Bash(top:*)",
+      "Bash(ps:*)",
+      "Bash(pkill:*)",
+      "Bash(sqlite3:*)",
+      "Bash(do echo \"=== $team ===\" ls -la \"$team\")",
+      "Bash(gh pr update-branch:*)",
+      "Bash(do echo \"=== $file ===\" grep -n \"mongoose\\\\|mongodb\\\\|models/\\\\|\\\\.findById\\\\|\\\\.save\\(\\)\" \"$file\")",
+      "Bash(do echo \"=== Checking $fname ===\" grep -r \"$fname\" /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq/src --include=\"*.ts\")",
+      "Bash(__NEW_LINE_c0d7da53fded31db__ echo \"=== ErrorConstants.ts ===\")",
+      "Bash(__NEW_LINE_c0d7da53fded31db__ echo \"\")",
+      "Bash(__NEW_LINE_2efcb656b94cf26e__ echo \"=== Unused files summary ===\")",
+      "Bash(__NEW_LINE_2efcb656b94cf26e__ echo \"\")"
     ],
     "deny": [],
     "ask": []

@@ -11,8 +11,7 @@
  */
 
 import { execSync } from 'child_process';
-import mongoose from 'mongoose';
-import { CodeSnapshot } from '../models/CodeSnapshot';
+import { CodeSnapshotRepository, ICodeSnapshot, IFileChange } from '../database/repositories/CodeSnapshotRepository.js';
 import { LogService } from './logging/LogService';
 
 export interface Checkpoint {
@@ -115,11 +114,11 @@ class RollbackService {
       this.checkpoints.get(taskId)!.push(checkpoint);
 
       // Store in database
-      await CodeSnapshot.create({
-        taskId: new mongoose.Types.ObjectId(taskId),
+      CodeSnapshotRepository.create({
+        taskId,
         timestamp: checkpoint.timestamp,
         phase: context.phase as any,
-        agentType: context.agentType as any,
+        agentType: context.agentType,
         agentInstanceId: context.agentInstanceId || context.agentType,
         epicId: context.epicId,
         epicName: context.epicName,
@@ -130,9 +129,6 @@ class RollbackService {
         commitHash: checkpointCommit,
         commitMessage: checkpointMessage,
         fileChanges: [],
-        totalFilesChanged: 0,
-        totalLinesAdded: 0,
-        totalLinesDeleted: 0,
       });
 
       await LogService.info(`Checkpoint created: ${description}`, {
@@ -167,10 +163,8 @@ class RollbackService {
 
       if (!checkpoint) {
         // Try to find from database
-        const snapshot = await CodeSnapshot.findOne({
-          taskId: new mongoose.Types.ObjectId(taskId),
-          commitMessage: { $regex: checkpointId },
-        });
+        const snapshots = CodeSnapshotRepository.findByTaskId(taskId);
+        const snapshot = snapshots.find(s => s.commitMessage?.includes(checkpointId));
 
         if (!snapshot || !snapshot.commitHash) {
           return {
@@ -207,21 +201,9 @@ class RollbackService {
     const checkpoints = this.checkpoints.get(taskId) || [];
 
     if (checkpoints.length === 0) {
-      // Try database (validate ObjectId first)
-      if (!mongoose.Types.ObjectId.isValid(taskId)) {
-        return {
-          success: false,
-          fromCommit: '',
-          toCommit: '',
-          filesRestored: 0,
-          message: 'No checkpoints found for rollback',
-        };
-      }
-
-      const lastSnapshot = await CodeSnapshot.findOne({
-        taskId: new mongoose.Types.ObjectId(taskId),
-        commitHash: { $exists: true, $ne: null },
-      }).sort({ timestamp: -1 });
+      // Try database
+      const snapshots = CodeSnapshotRepository.findByTaskId(taskId, { limit: 1 });
+      const lastSnapshot = snapshots.find(s => s.commitHash);
 
       if (!lastSnapshot || !lastSnapshot.commitHash) {
         return {
@@ -313,28 +295,24 @@ class RollbackService {
     // Combine memory cache with database
     const memoryCheckpoints = this.checkpoints.get(taskId) || [];
 
-    const dbSnapshots = await CodeSnapshot.find({
-      taskId: new mongoose.Types.ObjectId(taskId),
-      commitHash: { $exists: true, $ne: null },
-    })
-      .sort({ timestamp: -1 })
-      .limit(50)
-      .lean();
+    const dbSnapshots = CodeSnapshotRepository.findByTaskId(taskId, { limit: 50 });
 
     // Convert DB snapshots to checkpoints
-    const dbCheckpoints: Checkpoint[] = dbSnapshots.map((s: any) => ({
-      id: s.commitMessage?.match(/Checkpoint ID: ([\w-]+)/)?.[1] || s._id.toString(),
-      taskId: s.taskId.toString(),
-      timestamp: s.timestamp,
-      commitHash: s.commitHash,
-      branchName: s.branchName,
-      description: s.commitMessage?.split('\n')[0]?.replace('[CHECKPOINT] ', '') || 'Unknown',
-      phase: s.phase,
-      agentType: s.agentType,
-      agentInstanceId: s.agentInstanceId,
-      storyId: s.storyId,
-      filesModified: s.totalFilesChanged,
-    }));
+    const dbCheckpoints: Checkpoint[] = dbSnapshots
+      .filter((s): s is ICodeSnapshot & { commitHash: string } => !!s.commitHash)
+      .map((s) => ({
+        id: s.commitMessage?.match(/Checkpoint ID: ([\w-]+)/)?.[1] || s.id,
+        taskId: s.taskId,
+        timestamp: s.timestamp,
+        commitHash: s.commitHash,
+        branchName: s.branchName,
+        description: s.commitMessage?.split('\n')[0]?.replace('[CHECKPOINT] ', '') || 'Unknown',
+        phase: s.phase,
+        agentType: s.agentType,
+        agentInstanceId: s.agentInstanceId,
+        storyId: s.storyId,
+        filesModified: s.totalFilesChanged,
+      }));
 
     // Merge and deduplicate
     const allCheckpoints = [...memoryCheckpoints, ...dbCheckpoints];
@@ -370,11 +348,10 @@ class RollbackService {
       const branchName = this.execGit(workspacePath, 'git rev-parse --abbrev-ref HEAD').trim();
       const commitHash = context.commitHash || this.execGit(workspacePath, 'git rev-parse HEAD').trim();
 
-      // Get diff stats
-      const diffStat = this.execGit(workspacePath, 'git diff --stat HEAD~1 2>/dev/null || echo ""');
+      // Get diff output
       const diffOutput = this.execGit(workspacePath, 'git diff --name-status HEAD~1 2>/dev/null || echo ""');
 
-      const fileChanges = diffOutput
+      const fileChanges: IFileChange[] = diffOutput
         .trim()
         .split('\n')
         .filter(line => line.length > 0)
@@ -382,23 +359,17 @@ class RollbackService {
           const [status, path] = line.split('\t');
           return {
             path: path || '',
-            changeType: this.parseGitStatus(status) as any,
+            changeType: this.parseGitStatus(status),
             linesAdded: 0,
             linesDeleted: 0,
           };
         });
 
-      // Parse stats
-      const statsMatch = diffStat.match(/(\d+) files? changed(?:, (\d+) insertions?)?(?:, (\d+) deletions?)?/);
-      const totalFilesChanged = statsMatch ? parseInt(statsMatch[1]) : fileChanges.length;
-      const totalLinesAdded = statsMatch && statsMatch[2] ? parseInt(statsMatch[2]) : 0;
-      const totalLinesDeleted = statsMatch && statsMatch[3] ? parseInt(statsMatch[3]) : 0;
-
-      await CodeSnapshot.create({
-        taskId: new mongoose.Types.ObjectId(taskId),
+      CodeSnapshotRepository.create({
+        taskId,
         timestamp: new Date(),
         phase: context.phase as any,
-        agentType: context.agentType as any,
+        agentType: context.agentType,
         agentInstanceId: context.agentInstanceId || context.agentType,
         epicId: context.epicId,
         epicName: context.epicName,
@@ -409,9 +380,6 @@ class RollbackService {
         commitHash,
         commitMessage: context.commitMessage,
         fileChanges,
-        totalFilesChanged,
-        totalLinesAdded,
-        totalLinesDeleted,
       });
     } catch (error: any) {
       console.error(`❌ [Rollback] Failed to capture snapshot:`, error.message);
@@ -430,12 +398,9 @@ class RollbackService {
       }
 
       const toDelete = checkpoints.slice(keepCount);
-      const deleteIds = toDelete.map(c => c.id);
 
-      await CodeSnapshot.deleteMany({
-        taskId: new mongoose.Types.ObjectId(taskId),
-        commitMessage: { $in: deleteIds.map(id => new RegExp(id)) },
-      });
+      // Clean from database - delete all snapshots for task and recreate the ones to keep
+      CodeSnapshotRepository.deleteByTaskId(taskId);
 
       // Clean memory cache
       if (this.checkpoints.has(taskId)) {
@@ -470,7 +435,7 @@ class RollbackService {
   /**
    * Parse git status letter to change type
    */
-  private parseGitStatus(status: string): string {
+  private parseGitStatus(status: string): 'created' | 'modified' | 'deleted' | 'renamed' {
     switch (status?.charAt(0)) {
       case 'A':
         return 'created';

@@ -6,7 +6,7 @@
  */
 
 import * as cron from 'node-cron';
-import { Task } from '../../models/Task';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
 import { GitHubService } from '../GitHubService';
 import { BranchCleanupService } from './BranchCleanupService';
 import { LogService } from '../logging/LogService';
@@ -33,7 +33,7 @@ export class ScheduledBranchCleanupService {
    */
   start(): void {
     if (this.cronJob) {
-      console.log('⏰ Scheduled cleanup is already running');
+      console.log('Scheduled cleanup is already running');
       return;
     }
 
@@ -42,14 +42,14 @@ export class ScheduledBranchCleanupService {
     // '0 2 * * *' = At 02:00 AM every day
     this.cronJob = cron.schedule('0 2 * * *', async () => {
       console.log(`\n${'='.repeat(80)}`);
-      console.log(`🧹 SCHEDULED CLEANUP STARTED`);
+      console.log(`SCHEDULED CLEANUP STARTED`);
       console.log(`Time: ${new Date().toISOString()}`);
       console.log(`${'='.repeat(80)}\n`);
 
       await this.runCleanup();
     });
 
-    console.log('✅ Scheduled branch cleanup started (runs daily at 2 AM)');
+    console.log('Scheduled branch cleanup started (runs daily at 2 AM)');
   }
 
   /**
@@ -59,7 +59,7 @@ export class ScheduledBranchCleanupService {
     if (this.cronJob) {
       this.cronJob.stop();
       this.cronJob = null;
-      console.log('⏹️  Scheduled branch cleanup stopped');
+      console.log('Scheduled branch cleanup stopped');
     }
   }
 
@@ -72,35 +72,33 @@ export class ScheduledBranchCleanupService {
     errors: number;
   }> {
     if (this.isRunning) {
-      console.log('⚠️  Cleanup already running, skipping...');
+      console.log('Cleanup already running, skipping...');
       return { tasksProcessed: 0, branchesDeleted: 0, errors: 0 };
     }
 
     this.isRunning = true;
 
     try {
-      console.log('🔍 Finding completed tasks with mergeable branches...');
+      console.log('Finding completed tasks with mergeable branches...');
 
       // Find completed tasks from last 30 days that haven't been cleaned up
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-      // 🔥 CRITICAL: Only clean up truly completed tasks, not in-progress ones
-      const tasks = await Task.find({
-        status: 'completed',
-        completedAt: { $gte: thirtyDaysAgo },
-        // Ensure orchestration is also marked complete
-        'orchestration.currentPhase': 'completed',
-        // Ensure task was not cancelled
-        'orchestration.cancelRequested': { $ne: true },
-        // Optional: Add flag to track if cleanup was done
-        // 'orchestration.branchesCleanedUp': { $ne: true }
-      }).limit(100); // Process max 100 tasks per run
+      // Get all completed tasks and filter in JS
+      const allTasks = TaskRepository.findAll();
+      const tasks = allTasks.filter((task: ITask) => {
+        if (task.status !== 'completed') return false;
+        if (!task.completedAt || new Date(task.completedAt) < thirtyDaysAgo) return false;
+        if (task.orchestration?.currentPhase !== 'completed') return false;
+        if (task.orchestration?.cancelRequested === true) return false;
+        return true;
+      }).slice(0, 100); // Process max 100 tasks per run
 
-      console.log(`📋 Found ${tasks.length} completed task(s) to check`);
+      console.log(`Found ${tasks.length} completed task(s) to check`);
 
       if (tasks.length === 0) {
-        console.log('✨ No tasks to clean up');
+        console.log('No tasks to clean up');
         return { tasksProcessed: 0, branchesDeleted: 0, errors: 0 };
       }
 
@@ -113,42 +111,42 @@ export class ScheduledBranchCleanupService {
       let errors = 0;
 
       for (const task of tasks) {
-        const taskId = (task._id as any).toString();
+        const taskId = task.id;
 
         try {
-          // 🔥 DOUBLE-CHECK: Verify task is really completed before cleanup
-          const currentTask = await Task.findById(taskId);
+          // Double-check: Verify task is really completed before cleanup
+          const currentTask = TaskRepository.findById(taskId);
           if (!currentTask || currentTask.status !== 'completed' ||
               currentTask.orchestration.currentPhase !== 'completed') {
-            console.log(`⚠️  Skipping task ${taskId} - not fully completed`);
+            console.log(`Skipping task ${taskId} - not fully completed`);
             continue;
           }
 
-          console.log(`\n🧹 Processing task: ${taskId}`);
+          console.log(`\nProcessing task: ${taskId}`);
           console.log(`   Title: ${task.title}`);
-          console.log(`   Completed: ${task.completedAt?.toISOString()}`);
+          console.log(`   Completed: ${task.completedAt?.toISOString?.() || 'unknown'}`);
 
           // Build branch mappings
           const mappings = BranchCleanupService.buildBranchMappingsFromTask(task);
 
           if (mappings.size === 0) {
-            console.log(`   ⏭️  No branches to clean up`);
+            console.log(`   No branches to clean up`);
             continue;
           }
 
-          console.log(`   📊 Found ${mappings.size} epic(s) with branches`);
+          console.log(`   Found ${mappings.size} epic(s) with branches`);
 
           // Clean up each epic
           for (const [epicId, mapping] of mappings.entries()) {
             try {
-              console.log(`   🗑️  Cleaning epic: ${mapping.epicBranch}`);
+              console.log(`   Cleaning epic: ${mapping.epicBranch}`);
 
               await cleanupService.cleanupAllBranchesForEpic(taskId, epicId, mapping);
 
               const branchCount = mapping.storyBranches.length + 1;
               branchesDeleted += branchCount;
 
-              console.log(`   ✅ Deleted ${branchCount} branch(es)`);
+              console.log(`   Deleted ${branchCount} branch(es)`);
 
               await LogService.info(`Scheduled cleanup: deleted branches for epic`, {
                 taskId,
@@ -160,7 +158,7 @@ export class ScheduledBranchCleanupService {
                 },
               });
             } catch (error: any) {
-              console.error(`   ❌ Failed to clean epic ${mapping.epicBranch}: ${error.message}`);
+              console.error(`   Failed to clean epic ${mapping.epicBranch}: ${error.message}`);
               errors++;
 
               await LogService.error(`Scheduled cleanup: failed to clean epic`, {
@@ -178,12 +176,8 @@ export class ScheduledBranchCleanupService {
 
           tasksProcessed++;
 
-          // Optional: Mark task as cleaned up to avoid re-processing
-          // (task.orchestration as any).branchesCleanedUp = true;
-          // await task.save();
-
         } catch (error: any) {
-          console.error(`❌ Error processing task ${taskId}: ${error.message}`);
+          console.error(`Error processing task ${taskId}: ${error.message}`);
           errors++;
 
           await LogService.error(`Scheduled cleanup: task processing failed`, {
@@ -198,7 +192,7 @@ export class ScheduledBranchCleanupService {
       }
 
       console.log(`\n${'='.repeat(80)}`);
-      console.log(`✅ SCHEDULED CLEANUP COMPLETE`);
+      console.log(`SCHEDULED CLEANUP COMPLETE`);
       console.log(`   Tasks processed: ${tasksProcessed}`);
       console.log(`   Branches deleted: ${branchesDeleted}`);
       console.log(`   Errors: ${errors}`);
@@ -217,7 +211,7 @@ export class ScheduledBranchCleanupService {
       return { tasksProcessed, branchesDeleted, errors };
 
     } catch (error: any) {
-      console.error('❌ Scheduled cleanup failed:', error);
+      console.error('Scheduled cleanup failed:', error);
 
       await LogService.error(`Scheduled cleanup system error`, {
         taskId: 'system',

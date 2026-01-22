@@ -20,13 +20,21 @@ jest.mock('./logging/LogService', () => ({
 
 // Import after mocking
 import { rollbackService } from './RollbackService';
-import { CodeSnapshot } from '../models/CodeSnapshot';
+import { CodeSnapshotRepository } from '../database/repositories/CodeSnapshotRepository';
+import { UserRepository } from '../database/repositories/UserRepository';
+import { ProjectRepository } from '../database/repositories/ProjectRepository';
+import { TaskRepository } from '../database/repositories/TaskRepository';
 
 describe('RollbackService', () => {
   let testRepoPath: string;
-  const testTaskId = '507f1f77bcf86cd799439011';
+  let testTaskId: string;
+  let testUserId: string;
+  let testProjectId: string;
 
   beforeAll(async () => {
+    // Create unique IDs for this test run
+    const uniqueSuffix = Date.now().toString(36) + Math.random().toString(36).substring(2);
+
     // Create a temporary git repo for testing
     testRepoPath = path.join(os.tmpdir(), `test-repo-${Date.now()}`);
     fs.mkdirSync(testRepoPath, { recursive: true });
@@ -40,6 +48,31 @@ describe('RollbackService', () => {
     fs.writeFileSync(path.join(testRepoPath, 'README.md'), '# Test Repo\n');
     execSync('git add .', { cwd: testRepoPath });
     execSync('git commit -m "Initial commit"', { cwd: testRepoPath });
+
+    // Create user, project, and task for FK constraints
+    const user = UserRepository.create({
+      username: `rollbacktest_${uniqueSuffix}`,
+      email: `rollback_${uniqueSuffix}@example.com`,
+      githubId: `rollback_${uniqueSuffix}`,
+      accessToken: `test-token-${uniqueSuffix}`,
+    });
+    testUserId = user.id;
+
+    const project = ProjectRepository.create({
+      name: `Rollback Test Project ${uniqueSuffix}`,
+      userId: testUserId,
+      isActive: true,
+    });
+    testProjectId = project.id;
+
+    const task = TaskRepository.create({
+      projectId: testProjectId,
+      userId: testUserId,
+      title: `Test Task ${uniqueSuffix}`,
+      description: 'Test task for RollbackService',
+      status: 'pending',
+    });
+    testTaskId = task.id;
   });
 
   afterAll(async () => {
@@ -47,11 +80,25 @@ describe('RollbackService', () => {
     if (testRepoPath && fs.existsSync(testRepoPath)) {
       fs.rmSync(testRepoPath, { recursive: true, force: true });
     }
+
+    // Clean up database records
+    if (testTaskId) {
+      CodeSnapshotRepository.deleteByTaskId(testTaskId);
+      TaskRepository.delete(testTaskId);
+    }
+    if (testProjectId) {
+      ProjectRepository.delete(testProjectId);
+    }
+    if (testUserId) {
+      UserRepository.delete(testUserId);
+    }
   });
 
   beforeEach(async () => {
     // Clean up snapshots between tests
-    await CodeSnapshot.deleteMany({});
+    if (testTaskId) {
+      CodeSnapshotRepository.deleteByTaskId(testTaskId);
+    }
   });
 
   describe('createCheckpoint', () => {
@@ -89,7 +136,7 @@ describe('RollbackService', () => {
         }
       );
 
-      const snapshots = await CodeSnapshot.find({ taskId: testTaskId });
+      const snapshots = CodeSnapshotRepository.findByTaskId(testTaskId);
       expect(snapshots.length).toBeGreaterThan(0);
     });
 
@@ -228,7 +275,7 @@ describe('RollbackService', () => {
         commitMessage: 'Test snapshot',
       });
 
-      const snapshots = await CodeSnapshot.find({ taskId: testTaskId });
+      const snapshots = CodeSnapshotRepository.findByTaskId(testTaskId);
       expect(snapshots.length).toBeGreaterThan(0);
     });
   });

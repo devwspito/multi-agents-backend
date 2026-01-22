@@ -14,8 +14,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import mongoose from 'mongoose';
-import { Task } from '../../models/Task';
+import { TaskRepository } from '../../database/repositories/TaskRepository.js';
+import db from '../../database/index.js';
 import { NotificationService } from '../NotificationService';
 import { unifiedMemoryService } from '../UnifiedMemoryService';
 import {
@@ -35,7 +35,7 @@ export interface HealthStatus {
   healthy: boolean;
   timestamp: Date;
   checks: {
-    mongodb: CheckResult;
+    database: CheckResult;
     filesystem: CheckResult;
     memory: CheckResult;
     circuitBreakers: CheckResult;
@@ -102,8 +102,8 @@ class HealthCheckServiceImpl {
     const recommendations: string[] = [];
 
     // Run all checks in parallel
-    const [mongodb, filesystem, memory, circuitBreakers, runningTasks] = await Promise.all([
-      this.checkMongoDB(),
+    const [database, filesystem, memory, circuitBreakers, runningTasks] = await Promise.all([
+      this.checkDatabase(),
       this.checkFilesystem(),
       this.checkMemory(),
       this.checkCircuitBreakers(),
@@ -111,12 +111,12 @@ class HealthCheckServiceImpl {
     ]);
 
     // Collect issues from each check
-    if (mongodb.status === 'error') {
+    if (database.status === 'error') {
       issues.push({
         severity: 'critical',
         category: 'database',
-        message: mongodb.message,
-        suggestion: 'Check MongoDB connection string and server status',
+        message: database.message,
+        suggestion: 'Check SQLite database file and permissions',
       });
     }
 
@@ -191,7 +191,7 @@ class HealthCheckServiceImpl {
       healthy,
       timestamp: new Date(),
       checks: {
-        mongodb,
+        database,
         filesystem,
         memory,
         circuitBreakers,
@@ -216,21 +216,17 @@ class HealthCheckServiceImpl {
   // INDIVIDUAL CHECKS
   // ============================================================================
 
-  private async checkMongoDB(): Promise<CheckResult> {
+  private async checkDatabase(): Promise<CheckResult> {
     try {
-      const state = mongoose.connection.readyState;
-      // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
-      if (state === 1) {
-        // Verify with a simple operation
-        await mongoose.connection.db?.admin().ping();
-        return { status: 'ok', message: 'MongoDB connected and responsive' };
-      } else if (state === 2) {
-        return { status: 'warning', message: 'MongoDB connecting...' };
-      } else {
-        return { status: 'error', message: `MongoDB disconnected (state: ${state})` };
+      // SQLite is always "connected" if the db object exists
+      // Verify with a simple query
+      const result = db.prepare('SELECT 1 as test').get() as { test: number } | undefined;
+      if (result && result.test === 1) {
+        return { status: 'ok', message: 'SQLite database connected and responsive' };
       }
+      return { status: 'error', message: 'SQLite database not responding' };
     } catch (error: any) {
-      return { status: 'error', message: `MongoDB error: ${error.message}` };
+      return { status: 'error', message: `SQLite error: ${error.message}` };
     }
   }
 
@@ -320,7 +316,7 @@ class HealthCheckServiceImpl {
 
   private async checkCircuitBreakers(): Promise<CheckResult> {
     // Check known circuit breakers
-    const knownBreakers = ['anthropic-api', 'github-api', 'mongodb-write'];
+    const knownBreakers = ['anthropic-api', 'github-api', 'database-write'];
     const openBreakers: string[] = [];
 
     for (const name of knownBreakers) {
@@ -343,9 +339,7 @@ class HealthCheckServiceImpl {
 
   private async checkRunningTasks(): Promise<CheckResult> {
     try {
-      const runningTasks = await Task.find({
-        status: 'in_progress',
-      }).select('_id status orchestration.currentPhase orchestration.lastUpdatedAt updatedAt').lean();
+      const runningTasks = TaskRepository.findAll({ status: 'in_progress' });
 
       const now = Date.now();
       const stuckTasks: Array<{ taskId: string; stuckDuration: number }> = [];
@@ -357,7 +351,7 @@ class HealthCheckServiceImpl {
           const stuckDuration = now - new Date(lastUpdate).getTime();
           if (stuckDuration > this.STUCK_TASK_THRESHOLD_MS) {
             stuckTasks.push({
-              taskId: (task._id as any).toString(),
+              taskId: task.id,
               stuckDuration,
             });
           }
@@ -396,7 +390,7 @@ class HealthCheckServiceImpl {
    */
   async checkTaskHealth(taskId: string): Promise<TaskHealthStatus> {
     try {
-      const task = await Task.findById(taskId).lean();
+      const task = TaskRepository.findById(taskId);
       if (!task) {
         return {
           taskId,

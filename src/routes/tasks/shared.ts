@@ -6,11 +6,10 @@
 
 import { Router } from 'express';
 import { z } from 'zod';
-import mongoose from 'mongoose';
 import { authenticate, AuthRequest } from '../../middleware/auth';
 import { uploadMultipleImages } from '../../middleware/upload';
-import { Task } from '../../models/Task';
-import { Repository } from '../../models/Repository';
+import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
+import { RepositoryRepository, IRepository } from '../../database/repositories/RepositoryRepository.js';
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { storageService } from '../../services/storage/StorageService';
 import { unifiedMemoryService } from '../../services/UnifiedMemoryService';
@@ -20,12 +19,13 @@ import { granularMemoryService } from '../../services/GranularMemoryService';
 export {
   Router,
   z,
-  mongoose,
   authenticate,
   AuthRequest,
   uploadMultipleImages,
-  Task,
-  Repository,
+  TaskRepository,
+  ITask,
+  RepositoryRepository,
+  IRepository,
   storageService,
   unifiedMemoryService,
   granularMemoryService,
@@ -104,18 +104,18 @@ export const approveStorySchema = z.object({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Validate MongoDB ObjectId
+ * Validate task ID
  */
 export function isValidObjectId(id: string): boolean {
-  return mongoose.Types.ObjectId.isValid(id);
+  return TaskRepository.isValidId(id);
 }
 
 /**
  * Get task by ID with user validation
  */
-export async function getTaskByIdForUser(taskId: string, userId: string) {
+export function getTaskByIdForUser(taskId: string, userId: string) {
   if (!isValidObjectId(taskId)) {
     return null;
   }
-  return Task.findOne({ _id: taskId, userId });
+  return TaskRepository.findByIdAndUser(taskId, userId);
 }

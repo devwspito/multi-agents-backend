@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { Project } from '../models/Project';
-import { Repository } from '../models/Repository';
-import { WebhookApiKey } from '../models/WebhookApiKey';
+import { ProjectRepository, IDevAuth } from '../database/repositories/ProjectRepository.js';
+import { RepositoryRepository } from '../database/repositories/RepositoryRepository.js';
+import { WebhookApiKeyRepository } from '../database/repositories/WebhookApiKeyRepository.js';
+import { UserRepository } from '../database/repositories/UserRepository.js';
 import { GitHubService } from '../services/GitHubService';
 import { z } from 'zod';
 import path from 'path';
@@ -121,8 +122,6 @@ function getRepositoryConfig(type: 'backend' | 'frontend' | 'mobile' | 'shared',
  */
 router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const { isActive } = req.query;
-
     // Check if user exists in the request
     if (!req.user || !req.user.id) {
       console.error('No user found in request after authentication');
@@ -132,59 +131,34 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
       });
     }
 
-    const filter: any = { userId: req.user.id };
-    if (isActive !== undefined) {
-      filter.isActive = isActive === 'true';
-    }
+    console.log('Fetching projects for user:', req.user.id);
 
-    console.log('Projects filter:', filter);
+    // SQLite: Get projects for user (findByUserId already filters by isActive=1)
+    const projects = ProjectRepository.findByUserId(req.user.id);
+    console.log(`Projects query successful: Found ${projects.length} projects`);
 
-    let projects;
-    try {
-      const query = Project.find(filter)
-        .sort({ createdAt: -1 })
-        .select('-__v')
-        .lean();
+    // Get repositories for each project
+    const projectsWithRepos = projects.map((project) => {
+      const repositories = RepositoryRepository.findByProjectId(project.id);
 
-      // Use Promise.race to implement timeout
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Query timeout')), 5000)
-      );
-
-      projects = await Promise.race([query.exec(), timeoutPromise]) as any[];
-      console.log(`Projects query successful: Found ${projects?.length || 0} projects`);
-    } catch (dbError: any) {
-      console.error('Projects database error:', dbError);
-      projects = []; // Return empty array on error instead of throwing
-    }
-
-    // Obtener repositorios para cada proyecto
-    const projectsWithRepos = await Promise.all(
-      projects.map(async (project) => {
-        const projectObj = project.toObject ? project.toObject() : project;
-
-        // Fetch repositories for this project
-        let repositories: any[] = [];
-        try {
-          repositories = await Repository.find({ projectId: projectObj._id })
-            .select('-__v')
-            .lean();
-        } catch (repoError) {
-          console.error(`Error fetching repositories for project ${projectObj._id}:`, repoError);
-        }
-
-        return {
-          _id: projectObj._id,
-          name: projectObj.name,
-          description: projectObj.description,
-          repositoryUrl: projectObj.repositoryUrl,
-          userId: projectObj.userId,
-          createdAt: projectObj.createdAt,
-          updatedAt: projectObj.updatedAt,
-          repositories: repositories
-        };
-      })
-    );
+      return {
+        _id: project.id,
+        name: project.name,
+        description: project.description,
+        userId: project.userId,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+        repositories: repositories.map(r => ({
+          _id: r.id,
+          name: r.name,
+          description: r.description,
+          githubRepoUrl: r.githubRepoUrl,
+          githubRepoName: r.githubRepoName,
+          githubBranch: r.githubBranch,
+          type: r.type,
+        })),
+      };
+    });
 
     console.log('Returning projects:', projectsWithRepos.map(p => ({ id: p._id, name: p.name, repoCount: p.repositories?.length || 0 })));
 
@@ -215,12 +189,9 @@ router.get('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).lean();
+    const project = ProjectRepository.findById(req.params.id);
 
-    if (!project) {
+    if (!project || project.userId !== req.user!.id) {
       res.status(404).json({
         success: false,
         message: 'Project not found',
@@ -228,16 +199,37 @@ router.get('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
       return;
     }
 
-    // Obtener repositorios del proyecto
-    const repositories = await Repository.find({ projectId: project._id })
-      .select('-__v')
-      .lean();
+    // Get repositories for project
+    const repositories = RepositoryRepository.findByProjectId(project.id);
 
     res.json({
       success: true,
       data: {
-        ...project,
-        repositories,
+        _id: project.id,
+        name: project.name,
+        description: project.description,
+        type: project.type,
+        status: project.status,
+        userId: project.userId,
+        settings: project.settings,
+        stats: project.stats,
+        tokenStats: project.tokenStats,
+        isActive: project.isActive,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+        repositories: repositories.map(r => ({
+          _id: r.id,
+          name: r.name,
+          description: r.description,
+          githubRepoUrl: r.githubRepoUrl,
+          githubRepoName: r.githubRepoName,
+          githubBranch: r.githubBranch,
+          workspaceId: r.workspaceId,
+          type: r.type,
+          pathPatterns: r.pathPatterns,
+          executionOrder: r.executionOrder,
+          isActive: r.isActive,
+        })),
       },
     });
   } catch (error) {
@@ -258,48 +250,45 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
     const validatedData = createProjectSchema.parse(req.body);
     const { repositories, ...projectData } = validatedData;
 
-    // Crear el proyecto
-    const project = await Project.create({
+    // Create project
+    const project = ProjectRepository.create({
       ...projectData,
       userId: req.user!.id,
-      isActive: true,
     });
 
-    // Crear los repositorios si vienen
+    // Create repositories if provided
     const createdRepositories = [];
     if (repositories && repositories.length > 0) {
-      // Obtener usuario con GitHub access token
-      const { User } = await import('../models/User');
-      const userWithToken = await User.findById(req.user!.id).select('accessToken username');
+      // Get user with GitHub access token
+      const userWithToken = UserRepository.findById(req.user!.id, true);
 
       if (!userWithToken || !userWithToken.accessToken) {
-        // Si no tiene token, crear repos con la info que viene
+        // No token, create repos with provided info
         for (const repo of repositories) {
           const repoConfig = getRepositoryConfig(repo.type, repo.name);
-          const repository = await Repository.create({
+          const repository = RepositoryRepository.create({
             name: repo.name,
             description: `Repository ${repo.name}`,
-            projectId: project._id,
+            projectId: project.id,
             githubRepoUrl: repo.clone_url || repo.html_url || `https://github.com/${repo.full_name}`,
             githubRepoName: repo.full_name,
             githubBranch: repo.default_branch || 'main',
             workspaceId: `ws-${Math.random().toString(36).substring(7)}`,
-            type: repo.type, // Save repository type (backend/frontend)
-            pathPatterns: repoConfig.pathPatterns, // Auto-generated patterns
-            executionOrder: repoConfig.executionOrder, // Auto-generated order
-            isActive: true,
+            type: repo.type,
+            pathPatterns: repoConfig.pathPatterns,
+            executionOrder: repoConfig.executionOrder,
           });
           createdRepositories.push(repository);
         }
       } else {
-        // Si tiene token, obtener info completa de GitHub si es necesario
+        // Has token, fetch full info from GitHub if needed
         const { Octokit } = await import('@octokit/rest');
         const octokit = new Octokit({ auth: userWithToken.accessToken });
 
         for (const repo of repositories) {
           let fullRepoData: any = repo;
 
-          // Si falta clone_url, obtenerlo de GitHub
+          // If clone_url is missing, get it from GitHub
           if (!repo.clone_url && repo.name) {
             try {
               console.log(`📦 Fetching full repository data for: ${repo.name}`);
@@ -311,23 +300,21 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
               fullRepoData = repoInfo;
             } catch (error) {
               console.warn(`Warning: Could not fetch repo ${repo.name} from GitHub:`, error);
-              // Continuar con los datos que tenemos
             }
           }
 
           const repoConfig = getRepositoryConfig(repo.type, fullRepoData.name);
-          const repository = await Repository.create({
+          const repository = RepositoryRepository.create({
             name: fullRepoData.name,
             description: fullRepoData.description || `Repository ${fullRepoData.name}`,
-            projectId: project._id,
+            projectId: project.id,
             githubRepoUrl: fullRepoData.clone_url || fullRepoData.html_url || `https://github.com/${fullRepoData.full_name}`,
             githubRepoName: fullRepoData.full_name || fullRepoData.name,
             githubBranch: fullRepoData.default_branch || 'main',
             workspaceId: `ws-${Math.random().toString(36).substring(7)}`,
-            type: repo.type, // Save repository type (backend/frontend)
-            pathPatterns: repoConfig.pathPatterns, // Auto-generated patterns
-            executionOrder: repoConfig.executionOrder, // Auto-generated order
-            isActive: true,
+            type: repo.type,
+            pathPatterns: repoConfig.pathPatterns,
+            executionOrder: repoConfig.executionOrder,
           });
           createdRepositories.push(repository);
         }
@@ -338,8 +325,24 @@ router.post('/', authenticate, async (req: AuthRequest, res): Promise<any> => {
       success: true,
       data: {
         project: {
-          ...project.toObject(),
-          repositories: createdRepositories,
+          _id: project.id,
+          name: project.name,
+          description: project.description,
+          type: project.type,
+          status: project.status,
+          userId: project.userId,
+          isActive: project.isActive,
+          createdAt: project.createdAt,
+          updatedAt: project.updatedAt,
+          repositories: createdRepositories.map(r => ({
+            _id: r.id,
+            name: r.name,
+            description: r.description,
+            githubRepoUrl: r.githubRepoUrl,
+            githubRepoName: r.githubRepoName,
+            githubBranch: r.githubBranch,
+            type: r.type,
+          })),
         },
       },
       message: `Project created successfully with ${createdRepositories.length} repositories!`,
@@ -370,14 +373,17 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
   try {
     const validatedData = updateProjectSchema.parse(req.body);
 
-    const project = await Project.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        userId: req.user!.id,
-      },
-      { $set: validatedData },
-      { new: true, runValidators: true }
-    );
+    // Verify ownership first
+    const existing = ProjectRepository.findById(req.params.id);
+    if (!existing || existing.userId !== req.user!.id) {
+      res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+      return;
+    }
+
+    const project = ProjectRepository.update(req.params.id, validatedData);
 
     if (!project) {
       res.status(404).json({
@@ -389,7 +395,16 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
 
     res.json({
       success: true,
-      data: project,
+      data: {
+        _id: project.id,
+        name: project.name,
+        description: project.description,
+        type: project.type,
+        status: project.status,
+        isActive: project.isActive,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt,
+      },
       message: 'Project updated successfully',
     });
   } catch (error) {
@@ -416,12 +431,9 @@ router.put('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => 
  */
 router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    const project = ProjectRepository.findById(req.params.id);
 
-    if (!project) {
+    if (!project || project.userId !== req.user!.id) {
       res.status(404).json({
         success: false,
         message: 'Project not found',
@@ -429,19 +441,18 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> 
       return;
     }
 
-    // Obtener todos los repositorios del proyecto
-    const repositories = await Repository.find({ projectId: project._id });
+    // Get all repositories for the project
+    const repositories = RepositoryRepository.findByProjectId(project.id);
 
-    // Limpiar workspaces de todos los repositorios
+    // Cleanup workspaces for all repositories
     for (const repo of repositories) {
       await githubService.cleanupWorkspace(repo.workspaceId);
+      // Delete repository
+      RepositoryRepository.delete(repo.id);
     }
 
-    // Eliminar todos los repositorios
-    await Repository.deleteMany({ projectId: project._id });
-
-    // Eliminar proyecto
-    await project.deleteOne();
+    // Soft delete project (sets is_active = 0)
+    ProjectRepository.delete(project.id);
 
     res.json({
       success: true,
@@ -463,12 +474,9 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res): Promise<any> 
  */
 router.get('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).select('+apiKey');
+    const project = ProjectRepository.findById(req.params.id, true);
 
-    if (!project) {
+    if (!project || project.userId !== req.user!.id) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
@@ -476,27 +484,27 @@ router.get('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<
     }
 
     // If project has its own API key, return it (masked)
-    if (project.apiKey) {
+    const projectApiKey = ProjectRepository.getDecryptedApiKey(req.params.id);
+    if (projectApiKey) {
       return res.json({
         success: true,
         data: {
           hasApiKey: true,
-          maskedKey: `sk-ant-...${project.apiKey.slice(-4)}`,
+          maskedKey: `sk-ant-...${projectApiKey.slice(-4)}`,
           source: 'project',
         },
       });
     }
 
     // Otherwise, check if user has a default API key
-    const { User } = await import('../models/User');
-    const user = await User.findById(req.user!.id).select('+defaultApiKey');
+    const userApiKey = UserRepository.getDecryptedApiKey(req.user!.id);
 
-    if (user?.defaultApiKey) {
+    if (userApiKey) {
       return res.json({
         success: true,
         data: {
           hasApiKey: true,
-          maskedKey: `sk-ant-...${user.defaultApiKey.slice(-4)}`,
+          maskedKey: `sk-ant-...${userApiKey.slice(-4)}`,
           source: 'user_default',
         },
       });
@@ -536,20 +544,16 @@ router.put('/:id/api-key', authenticate, async (req: AuthRequest, res): Promise<
       });
     }
 
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
-
-    if (!project) {
+    // Verify ownership first
+    const existing = ProjectRepository.findById(req.params.id);
+    if (!existing || existing.userId !== req.user!.id) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    project.apiKey = apiKey || undefined;
-    await project.save();
+    ProjectRepository.update(req.params.id, { apiKey: apiKey || undefined });
 
     res.json({
       success: true,
@@ -576,12 +580,9 @@ router.put('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise
   try {
     const validatedData = devAuthSchema.parse(req.body);
 
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
-
-    if (!project) {
+    // Verify ownership first
+    const existing = ProjectRepository.findById(req.params.id);
+    if (!existing || existing.userId !== req.user!.id) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
@@ -589,7 +590,7 @@ router.put('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise
     }
 
     // Update devAuth configuration
-    project.devAuth = {
+    const devAuth: IDevAuth = {
       method: validatedData.method,
       // Token method fields
       token: validatedData.token,
@@ -604,9 +605,9 @@ router.put('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise
       tokenResponsePath: validatedData.tokenResponsePath || 'token',
     };
 
-    await project.save();
+    ProjectRepository.update(req.params.id, { devAuth });
 
-    console.log(`✅ Updated devAuth for project ${project.name}: method=${validatedData.method}`);
+    console.log(`✅ Updated devAuth for project ${existing.name}: method=${validatedData.method}`);
 
     res.json({
       success: true,
@@ -641,19 +642,17 @@ router.put('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise
  */
 router.get('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise<any> => {
   try {
-    const project = await Project.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    }).select('+devAuth.token +devAuth.credentials.password');
+    const project = ProjectRepository.findById(req.params.id);
 
-    if (!project) {
+    if (!project || project.userId !== req.user!.id) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    const devAuth = project.devAuth || { method: 'none' };
+    // Get decrypted devAuth (with sensitive fields decrypted)
+    const devAuth = ProjectRepository.getDecryptedDevAuth(req.params.id) || { method: 'none' as const };
 
     res.json({
       success: true,
@@ -713,29 +712,20 @@ router.post('/:id/webhook-keys', authenticate, async (req: AuthRequest, res): Pr
     const body = createWebhookKeySchema.parse(req.body);
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    // Generate secure API key
-    const apiKey = WebhookApiKey.generateApiKey();
-
-    // Create webhook key document
-    const webhookKey = await WebhookApiKey.create({
-      apiKey,
+    // Create webhook key with auto-generated API key
+    const webhookKey = WebhookApiKeyRepository.create({
       projectId,
       name: body.name,
       rateLimit: body.rateLimit,
-      isActive: true,
-      requestCount: 0,
     });
 
     console.log(`✅ Created webhook key: ${body.name} for project ${projectId}`);
@@ -744,8 +734,8 @@ router.post('/:id/webhook-keys', authenticate, async (req: AuthRequest, res): Pr
       success: true,
       message: 'Webhook API key created successfully',
       data: {
-        keyId: webhookKey._id,
-        apiKey: apiKey, // ⚠️ ONLY returned on creation
+        keyId: webhookKey.id,
+        apiKey: webhookKey.apiKey, // ⚠️ ONLY returned on creation
         name: webhookKey.name,
         rateLimit: webhookKey.rateLimit,
         isActive: webhookKey.isActive,
@@ -780,35 +770,32 @@ router.get('/:id/webhook-keys', authenticate, async (req: AuthRequest, res): Pro
     const userId = req.user!.id;
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    // Get all webhook keys (hide full API key)
-    const webhookKeys = await WebhookApiKey.find({ projectId })
-      .select('-apiKey') // Don't return full API key
-      .sort({ createdAt: -1 });
+    // Get all webhook keys for project
+    const webhookKeys = WebhookApiKeyRepository.findByProjectId(projectId);
 
     // Add masked key preview
-    const keysWithMasked = await Promise.all(
-      webhookKeys.map(async (key) => {
-        const fullKey = await WebhookApiKey.findById(key._id).select('apiKey');
-        return {
-          ...key.toObject(),
-          maskedKey: fullKey?.apiKey
-            ? `${fullKey.apiKey.substring(0, 10)}...${fullKey.apiKey.slice(-4)}`
-            : 'whk_...',
-        };
-      })
-    );
+    const keysWithMasked = webhookKeys.map((key) => ({
+      _id: key.id,
+      name: key.name,
+      rateLimit: key.rateLimit,
+      isActive: key.isActive,
+      requestCount: key.requestCount,
+      lastUsedAt: key.lastUsedAt,
+      createdAt: key.createdAt,
+      updatedAt: key.updatedAt,
+      maskedKey: key.apiKey
+        ? `${key.apiKey.substring(0, 10)}...${key.apiKey.slice(-4)}`
+        : 'whk_...',
+    }));
 
     res.json({
       success: true,
@@ -836,25 +823,19 @@ router.get('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, re
     const userId = req.user!.id;
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    // Get webhook key (hide full API key)
-    const webhookKey = await WebhookApiKey.findOne({
-      _id: keyId,
-      projectId,
-    });
+    // Get webhook key
+    const webhookKey = WebhookApiKeyRepository.findById(keyId);
 
-    if (!webhookKey) {
+    if (!webhookKey || webhookKey.projectId !== projectId) {
       return res.status(404).json({
         success: false,
         message: 'Webhook API key not found',
@@ -867,7 +848,7 @@ router.get('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, re
     res.json({
       success: true,
       data: {
-        keyId: webhookKey._id,
+        keyId: webhookKey.id,
         name: webhookKey.name,
         maskedKey,
         rateLimit: webhookKey.rateLimit,
@@ -900,24 +881,26 @@ router.patch('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, 
     const body = updateWebhookKeySchema.parse(req.body);
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
+    // Verify webhook key belongs to project
+    const existing = WebhookApiKeyRepository.findById(keyId);
+    if (!existing || existing.projectId !== projectId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Webhook API key not found',
+      });
+    }
+
     // Update webhook key
-    const webhookKey = await WebhookApiKey.findOneAndUpdate(
-      { _id: keyId, projectId },
-      { $set: body },
-      { new: true, runValidators: true }
-    );
+    const webhookKey = WebhookApiKeyRepository.update(keyId, body);
 
     if (!webhookKey) {
       return res.status(404).json({
@@ -932,7 +915,7 @@ router.patch('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest, 
       success: true,
       message: 'Webhook API key updated successfully',
       data: {
-        keyId: webhookKey._id,
+        keyId: webhookKey.id,
         name: webhookKey.name,
         rateLimit: webhookKey.rateLimit,
         isActive: webhookKey.isActive,
@@ -966,31 +949,26 @@ router.delete('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest,
     const userId = req.user!.id;
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
       });
     }
 
-    // Soft delete: Set isActive = false
-    const webhookKey = await WebhookApiKey.findOneAndUpdate(
-      { _id: keyId, projectId },
-      { $set: { isActive: false } },
-      { new: true }
-    );
-
-    if (!webhookKey) {
+    // Verify webhook key belongs to project
+    const existing = WebhookApiKeyRepository.findById(keyId);
+    if (!existing || existing.projectId !== projectId) {
       return res.status(404).json({
         success: false,
         message: 'Webhook API key not found',
       });
     }
+
+    // Soft delete: Set isActive = false
+    WebhookApiKeyRepository.deactivate(keyId);
 
     console.log(`🗑️  Deactivated webhook key: ${keyId} for project ${projectId}`);
 
@@ -998,7 +976,7 @@ router.delete('/:id/webhook-keys/:keyId', authenticate, async (req: AuthRequest,
       success: true,
       message: 'Webhook API key deactivated successfully',
       data: {
-        keyId: webhookKey._id,
+        keyId: keyId,
         isActive: false,
       },
     });
@@ -1021,12 +999,9 @@ router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: Aut
     const userId = req.user!.id;
 
     // Verify project ownership
-    const project = await Project.findOne({
-      _id: projectId,
-      userId,
-    });
+    const project = ProjectRepository.findById(projectId);
 
-    if (!project) {
+    if (!project || project.userId !== userId) {
       return res.status(404).json({
         success: false,
         message: 'Project not found',
@@ -1034,12 +1009,9 @@ router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: Aut
     }
 
     // Find existing key
-    const oldKey = await WebhookApiKey.findOne({
-      _id: keyId,
-      projectId,
-    });
+    const oldKey = WebhookApiKeyRepository.findById(keyId);
 
-    if (!oldKey) {
+    if (!oldKey || oldKey.projectId !== projectId) {
       return res.status(404).json({
         success: false,
         message: 'Webhook API key not found',
@@ -1047,13 +1019,14 @@ router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: Aut
     }
 
     // Generate new API key
-    const newApiKey = WebhookApiKey.generateApiKey();
+    const newApiKey = WebhookApiKeyRepository.generateApiKey();
 
     // Update with new key and reset request count
-    oldKey.apiKey = newApiKey;
-    oldKey.requestCount = 0;
-    oldKey.lastUsedAt = undefined;
-    await oldKey.save();
+    WebhookApiKeyRepository.update(keyId, {
+      apiKey: newApiKey,
+      requestCount: 0,
+      lastUsedAt: undefined,
+    });
 
     console.log(`🔄 Regenerated webhook key: ${keyId} for project ${projectId}`);
 
@@ -1061,7 +1034,7 @@ router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: Aut
       success: true,
       message: 'Webhook API key regenerated successfully',
       data: {
-        keyId: oldKey._id,
+        keyId: keyId,
         apiKey: newApiKey, // ⚠️ ONLY returned on regeneration
         name: oldKey.name,
         rateLimit: oldKey.rateLimit,

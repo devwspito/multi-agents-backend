@@ -12,8 +12,9 @@ import {
   authenticate,
   AuthRequest,
   uploadMultipleImages,
-  Task,
-  Repository,
+  TaskRepository,
+  RepositoryRepository,
+  IRepository,
   storageService,
   orchestrationCoordinator,
   startTaskSchema,
@@ -30,14 +31,11 @@ const router = Router();
  */
 router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRequest, res) => {
   try {
-    console.log('🔍 [START] Received body:', JSON.stringify(req.body, null, 2));
-    console.log('🔍 [START] Task ID:', req.params.id);
+    console.log('[START] Received body:', JSON.stringify(req.body, null, 2));
+    console.log('[START] Task ID:', req.params.id);
     const validatedData = startTaskSchema.parse(req.body);
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    let task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -57,17 +55,17 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
 
     // Auto-populate repositories if missing
     if (task.projectId && (!task.repositoryIds || task.repositoryIds.length === 0)) {
-      console.log(`📦 Task has projectId but no repositories, auto-populating...`);
+      console.log(`Task has projectId but no repositories, auto-populating...`);
 
-      const repositories = await Repository.find({
-        projectId: task.projectId,
-        isActive: true,
-      }).select('_id');
+      const repositories = RepositoryRepository.findByProjectId(task.projectId).filter(
+        (repo: IRepository) => repo.isActive
+      );
 
       if (repositories.length > 0) {
-        task.repositoryIds = repositories.map((repo) => repo._id) as any;
-        await task.save();
-        console.log(`✅ Auto-populated ${repositories.length} repositories`);
+        const repoIds = repositories.map((repo: IRepository) => repo.id);
+        TaskRepository.update(task.id, { repositoryIds: repoIds });
+        task = TaskRepository.findById(task.id)!;
+        console.log(`Auto-populated ${repositories.length} repositories`);
       }
     }
 
@@ -83,20 +81,16 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
     }
 
     // Update description and status
-    task.description = validatedData.description || validatedData.content || '';
-    task.status = 'in_progress';
+    const description = validatedData.description || validatedData.content || '';
+    let attachments = task.attachments || [];
 
     // Process images - upload to Firebase Storage
     if ((req as any).files && (req as any).files.length > 0) {
       const uploadedFiles = (req as any).files as Express.Multer.File[];
-      console.log(`📎 [START] ${uploadedFiles.length} image(s) to upload`);
-
-      if (!task.attachments) {
-        task.attachments = [];
-      }
+      console.log(`[START] ${uploadedFiles.length} image(s) to upload`);
 
       for (const uploadedFile of uploadedFiles) {
-        console.log(`📎 Uploading: ${uploadedFile.originalname}`);
+        console.log(`Uploading: ${uploadedFile.originalname}`);
 
         try {
           const storageFile = await storageService.saveUpload(
@@ -106,37 +100,41 @@ router.post('/:id/start', authenticate, uploadMultipleImages, async (req: AuthRe
             uploadedFile.mimetype
           );
 
-          task.attachments.push(storageFile.path);
-          console.log(`📎 Uploaded to: ${storageFile.path}`);
+          attachments.push(storageFile.path);
+          console.log(`Uploaded to: ${storageFile.path}`);
         } catch (uploadError: any) {
-          console.error(`❌ Upload failed: ${uploadError.message}`);
+          console.error(`Upload failed: ${uploadError.message}`);
         }
       }
     }
 
-    await task.save();
+    TaskRepository.update(task.id, {
+      description,
+      status: 'in_progress',
+      attachments,
+    });
 
-    console.log(`🚀 Starting orchestration for task: ${task._id}`);
-    console.log(`📝 Description: ${task.description}`);
+    console.log(`Starting orchestration for task: ${task.id}`);
+    console.log(`Description: ${description}`);
 
     // Start orchestration (fire-and-forget)
-    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
-      console.error('❌ Orchestration error:', error);
+    orchestrationCoordinator.orchestrateTask(task.id).catch((error) => {
+      console.error('Orchestration error:', error);
     });
 
     res.json({
       success: true,
       message: 'Orchestration started',
       data: {
-        taskId: (task._id as any).toString(),
-        status: task.status,
-        description: task.description,
-        info: 'Orchestration: Planning → TechLead → Developers → Judge → Verification → AutoMerge',
+        taskId: task.id,
+        status: 'in_progress',
+        description: description,
+        info: 'Orchestration: Planning > TechLead > Developers > Judge > Verification > AutoMerge',
       },
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      console.error('🔍 [START] Validation error:', error.errors);
+      console.error('[START] Validation error:', error.errors);
       res.status(400).json({
         success: false,
         message: 'Invalid start data',
@@ -162,10 +160,7 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
   try {
     const validatedData = continueTaskSchema.parse(req.body);
 
-    const task = await Task.findOne({
-      _id: req.params.id,
-      userId: req.user!.id,
-    });
+    let task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
     if (!task) {
       res.status(404).json({
@@ -183,7 +178,7 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
       return;
     }
 
-    console.log(`🔄 [Continue] From status: ${task.status}`);
+    console.log(`[Continue] From status: ${task.status}`);
 
     if (!task.repositoryIds || task.repositoryIds.length === 0) {
       res.status(400).json({
@@ -195,31 +190,15 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
 
     // Append additional requirements
     const previousDescription = task.description || '';
-    task.description = `${previousDescription}\n\n--- CONTINUATION ---\n${validatedData.additionalRequirements}`;
+    const newDescription = `${previousDescription}\n\n--- CONTINUATION ---\n${validatedData.additionalRequirements}`;
+    const previousStatus = task.status;
 
-    task.status = 'in_progress';
-
-    // Track continuation history
-    if (!task.orchestration.continuations) {
-      task.orchestration.continuations = [];
-    }
-    task.orchestration.continuations.push({
-      timestamp: new Date(),
-      additionalRequirements: validatedData.additionalRequirements,
-      previousStatus: task.status,
-    });
-
-    task.orchestration.paused = false;
-    task.orchestration.cancelRequested = false;
+    let attachments = task.attachments || [];
 
     // Process images
     if ((req as any).files && (req as any).files.length > 0) {
       const uploadedFiles = (req as any).files as Express.Multer.File[];
-      console.log(`📎 [CONTINUE] ${uploadedFiles.length} image(s) to upload`);
-
-      if (!task.attachments) {
-        task.attachments = [];
-      }
+      console.log(`[CONTINUE] ${uploadedFiles.length} image(s) to upload`);
 
       for (const uploadedFile of uploadedFiles) {
         try {
@@ -230,29 +209,49 @@ router.post('/:id/continue', authenticate, uploadMultipleImages, async (req: Aut
             uploadedFile.mimetype
           );
 
-          task.attachments.push(storageFile.path);
-          console.log(`📎 Uploaded: ${storageFile.path}`);
+          attachments.push(storageFile.path);
+          console.log(`Uploaded: ${storageFile.path}`);
         } catch (uploadError: any) {
-          console.error(`❌ Upload failed: ${uploadError.message}`);
+          console.error(`Upload failed: ${uploadError.message}`);
         }
       }
     }
 
-    await task.save();
+    TaskRepository.update(task.id, {
+      description: newDescription,
+      status: 'in_progress',
+      attachments,
+    });
 
-    console.log(`🔄 Continuing task: ${task._id}`);
+    // Track continuation history in orchestration
+    TaskRepository.modifyOrchestration(task.id, (orch) => {
+      const continuations = orch.continuations || [];
+      continuations.push({
+        timestamp: new Date(),
+        additionalRequirements: validatedData.additionalRequirements,
+        previousStatus,
+      });
+      return {
+        ...orch,
+        continuations,
+        paused: false,
+        cancelRequested: false,
+      };
+    });
+
+    console.log(`Continuing task: ${task.id}`);
 
     // Start orchestration continuation
-    orchestrationCoordinator.orchestrateTask((task._id as any).toString()).catch((error) => {
-      console.error('❌ Continuation error:', error);
+    orchestrationCoordinator.orchestrateTask(task.id).catch((error) => {
+      console.error('Continuation error:', error);
     });
 
     res.json({
       success: true,
       message: 'Task continuation started',
       data: {
-        taskId: (task._id as any).toString(),
-        status: task.status,
+        taskId: task.id,
+        status: 'in_progress',
         additionalRequirements: validatedData.additionalRequirements,
         preservedContext: {
           repositories: task.repositoryIds.length,
