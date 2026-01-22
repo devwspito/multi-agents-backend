@@ -46,10 +46,12 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Verification → AutoMerge
+    // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
     z.enum([
       'planning',           // Main phase
       'team-orchestration', // Main phase (contains TechLead → Developers → Judge)
+      'recovery',           // Main phase (verify work, complete pending)
+      'integration',        // Main phase (merge branches, resolve conflicts)
       'verification',       // Main phase
       'auto-merge',         // Main phase
       // Sub-phases (for granular control)
@@ -1658,14 +1660,15 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Check if task is paused (either manually or due to billing error) or failed
+    // Check if task is paused (either manually or due to billing error), failed, or interrupted
     const isManuallyPaused = task.orchestration.paused === true;
     const isBillingPaused = task.status === 'paused';
     const isFailed = task.status === 'failed';
+    const isInterrupted = task.status === 'interrupted'; // Server restart interrupted the task
     const teamOrch = (task.orchestration as any).teamOrchestration;
     const isBillingError = teamOrch?.pauseReason === 'billing_error';
 
-    if (!isManuallyPaused && !isBillingPaused && !isFailed) {
+    if (!isManuallyPaused && !isBillingPaused && !isFailed && !isInterrupted) {
       res.status(400).json({
         success: false,
         message: `Task cannot be resumed (status: ${task.status})`,
@@ -1698,6 +1701,37 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
           taskId: req.params.id,
           currentPhase: task.orchestration.currentPhase,
           resumeType: 'failed_task_recovery',
+        },
+      });
+      return;
+    }
+
+    // Handle interrupted task resume (server restart) - use same recovery service
+    if (isInterrupted) {
+      console.log(`\n🔄 [Resume] Resuming INTERRUPTED task ${req.params.id}`);
+      console.log(`   Current phase: ${task.orchestration.currentPhase}`);
+      console.log(`   Interrupted at: ${(task.orchestration as any).interruptedAt}`);
+
+      const { OrchestrationRecoveryService } = await import('../services/orchestration/OrchestrationRecoveryService');
+      const recoveryService = new OrchestrationRecoveryService();
+
+      const result = await recoveryService.resumeFailedTask(req.params.id);
+
+      if (!result.success) {
+        res.status(400).json({
+          success: false,
+          message: result.message,
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: result.message,
+        data: {
+          taskId: req.params.id,
+          currentPhase: task.orchestration.currentPhase,
+          resumeType: 'interrupted_task_recovery',
         },
       });
       return;

@@ -1,4 +1,4 @@
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { AgentActivityService } from '../AgentActivityService';
@@ -108,15 +108,15 @@ export class TechLeadPhase extends BasePhase {
     const startTime = new Date();
     const Task = require('../../models/Task').Task;
 
-    // 🔥 ATOMIC: Use findByIdAndUpdate for BOTH single-team and multi-team modes
+    // 🔥 FIRE-AND-FORGET: Non-blocking update to avoid MongoDB bottleneck
     // This prevents "No matching document found for id" version conflict errors
-    await Task.findByIdAndUpdate(task._id, {
+    updateTaskFireAndForget(task._id, {
       $set: {
         'orchestration.techLead.agent': 'tech-lead',
         'orchestration.techLead.status': 'in_progress',
         'orchestration.techLead.startedAt': startTime,
       },
-    });
+    }, 'techLead in_progress');
 
     // Update in-memory object for subsequent code
     if (!task.orchestration.techLead) {
@@ -249,23 +249,6 @@ export class TechLeadPhase extends BasePhase {
         ? `\n## Workspace Structure:\n\`\`\`\n${workspaceStructure}\`\`\`\n\nDesign architecture considering all repositories.`
         : '';
 
-      // Previous output for revision (if any) - ALWAYS include if exists (for continuations)
-      const previousOutput = task.orchestration.techLead.output;
-      const hasRevision = !!previousOutput;
-
-      let revisionSection = '';
-      if (hasRevision) {
-        revisionSection = `
-
-# Previous Architecture Available
-Your previous architecture design is available if needed for reference:
-\`\`\`
-${previousOutput}
-\`\`\`
-`;
-      }
-
-      // 🔥 MULTI-TEAM MODE: Different prompt for epic breakdown into stories
       const firstRepoName = context.repositories[0]?.full_name || context.repositories[0]?.githubRepoName || 'repository-name';
 
       // 🔥 NEW: Get Master Epic context for contract awareness
@@ -391,244 +374,8 @@ ${judgeFeedback}
         }
       }
 
-      const memoryProjectId = task.projectId?.toString() || '';
-      const memoryContext = `
-## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
-- **Project ID**: \`${memoryProjectId}\`
-- **Task ID**: \`${taskId}\`
-
-Use these when calling \`recall()\` and \`remember()\` tools.
-`;
-
-      // 🏗️ Build Architecture Brief section if available from PlanningPhase
-      let architectureBriefSection = '';
-      if (architectureBrief) {
-        architectureBriefSection = `
-## 🏗️ ARCHITECTURE BRIEF (from Planning Analysis)
-**CRITICAL: Follow these patterns discovered from the codebase!**
-
-${architectureBrief.codePatterns ? `### Code Patterns
-- **Naming Convention**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
-- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
-- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
-- **Testing**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
-
-${architectureBrief.dataModels?.length > 0 ? `### Data Models
-${architectureBrief.dataModels.map((m: any) => `- **${m.name}** (${m.file}): ${m.relationships?.join(', ') || 'no relationships'}`).join('\n')}` : ''}
-
-${architectureBrief.prInsights ? `### PR Insights (What Gets Approved)
-- Recent PRs analyzed: ${architectureBrief.prInsights.recentPRs || 0}
-- Common patterns: ${architectureBrief.prInsights.commonPatterns?.join(', ') || 'None specified'}
-- Rejection reasons: ${architectureBrief.prInsights.rejectionReasons?.join(', ') || 'None specified'}` : ''}
-
-${architectureBrief.conventions?.length > 0 ? `### Project Conventions
-${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
-
-${architectureBrief.helperFunctions?.length > 0 ? `### 🔧 HELPER FUNCTIONS (MANDATORY TO USE!)
-| Function | File | Usage | Anti-Pattern |
-|----------|------|-------|--------------|
-${architectureBrief.helperFunctions.map((h: any) => `| \`${h.name}()\` | ${h.file} | ${h.usage} | ❌ ${h.antiPattern} |`).join('\n')}
-
-**⚠️ Stories MUST specify these helpers. Developers MUST use them.**` : ''}
-
-${architectureBrief.entityCreationRules?.length > 0 ? `### 📋 ENTITY CREATION RULES (CRITICAL!)
-| Entity | MUST Use | NEVER Use |
-|--------|----------|-----------|
-${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | \`${r.mustUse || 'Check codebase'}\` | ❌ \`${r.mustNotUse}\` |`).join('\n')}
-
-**🔴 Code that ignores these rules will be REJECTED by Judge.**` : ''}
-
-**USE THESE PATTERNS** when creating stories - code that doesn't follow these patterns will be rejected.
-`;
-      }
-
-      // 🔬 Build Project Radiography section (LANGUAGE AGNOSTIC)
-      let radiographySection = '';
-      if (projectRadiographies && projectRadiographies.size > 0) {
-        radiographySection = `
-## 🔬 PROJECT RADIOGRAPHY (Complete Codebase Analysis - READ CAREFULLY!)
-
-**This is a programmatic X-Ray of the codebase. This data is MORE RELIABLE than exploration.**
-
-`;
-        for (const [repoName, radiography] of projectRadiographies.entries()) {
-          radiographySection += `
-### 📁 ${repoName}
-${ProjectRadiographyService.formatForPrompt(radiography)}
-`;
-        }
-
-        radiographySection += `
----
-**⚠️ CRITICAL FOR STORY CREATION**:
-- USE the routes, models, services listed above when writing stories
-- MATCH the detected conventions (naming, file structure)
-- INCLUDE the entry points in dependencies when relevant
-- Reference ACTUAL file paths from the radiography
----
-`;
-      }
-
-      // 💡 USER DIRECTIVES - Incorporate any user-injected instructions
-      const directivesBlock = context.getDirectivesBlock('tech-lead');
-
-      const prompt = multiTeamMode ? this.buildMultiTeamPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories, architectureBrief, projectRadiographies) : `${retrySection}Act as the tech-lead agent.
-${memoryContext}
-${architectureBriefSection}
-${radiographySection}
-${directivesBlock}
-# Architecture & Planning
-${revisionSection}
-## Task: ${task.title}
-${task.description ? `Description: ${task.description}` : ''}
-
-## Workspace: ${workspacePath}
-${repoInfo}
-
-## 🔍 CRITICAL: VALIDATE & EXPAND REQUIREMENTS (DO THIS FIRST!)
-
-**Before creating stories, VALIDATE that the task is well-defined:**
-
-### If the Task Description is VAGUE:
-1. **Search for existing implementations:**
-   \`\`\`bash
-   # Find related code to understand what already exists
-   Grep("related-keyword|feature-name")
-   Glob("**/related-folder/**")
-   \`\`\`
-
-2. **Expand into a COMPREHENSIVE feature list:**
-   - What data models are needed? (not just one - ALL of them)
-   - What APIs/endpoints? (CRUD at minimum)
-   - What UI components? (list, detail, forms, etc.)
-   - What validations? (input, business rules)
-   - What error handling?
-   - What tests?
-
-3. **Document your expansion:**
-   Add an "inferredRequirements" section to your output explaining what you added.
-
-### ⚠️ YOUR STORIES ARE TOO SHALLOW IF:
-- You only create 1-2 stories for a complex feature
-- A backend story has no corresponding frontend story
-- No validation or error handling mentioned
-- No tests specified
-- You didn't include acceptance criteria
-
-### ✅ A COMPLETE STORY BREAKDOWN INCLUDES:
-- **Data Layer**: Models, schemas, migrations
-- **API Layer**: Endpoints, validation, error responses
-- **Service Layer**: Business logic, helpers
-- **UI Layer**: Components, pages, forms
-- **Integration**: How parts connect to each other
-- **Testing**: Unit, integration, e2e tests
-
-## 🎯 INSTRUCTIONS (Be concise and efficient):
-
-1. **EXPLORE** (max 3 minutes): Scan codebase structure to find real file paths
-2. **DISCOVER PATTERNS**: Search for existing helper functions (createProject, createUser, etc.)
-3. **CREATE 2-4 EPICS**: Major feature groups
-4. **CREATE 3-5 STORIES PER EPIC**: Each 1-3 hours of work with PATTERNS included
-
-## 🔍 MANDATORY: PATTERN DISCOVERY (Before Creating Stories)
-${this.getPatternDiscoveryCommands(context.repositories)}
-**Stories MUST tell developers to use existing patterns/helpers instead of reinventing the wheel.**
-
-## STORY FORMAT (MUST include all sections):
-- **Acceptance Criteria**: Given/When/Then format
-- **Files**: Exact paths to read/modify/create
-- **Technical Details**: Functions, APIs, types to implement
-- **🔧 PATTERNS TO USE**: Which existing functions to use
-- **⚠️ ANTI-PATTERNS TO AVOID**: What NOT to do
-- **Code Examples**: Show developer exactly HOW to implement
-- **Testing**: What tests to write
-- **Done Criteria**: Checklist for completion
-
-## JSON OUTPUT ONLY:
-\`\`\`json
-{
-  "epics": [
-    {
-      "id": "epic-1",
-      "name": "Epic Name",
-      "description": "Brief description",
-      "branchName": "epic/epic-name",
-      "targetRepository": "${context.repositories[0]?.name || 'repository'}",
-      "stories": [
-        {
-          "id": "story-1",
-          "title": "Story title",
-          "description": "Complete description with acceptance criteria and requirements",
-          "epicId": "epic-1",
-          "priority": 1,
-          "estimatedComplexity": "simple|moderate|complex",
-          "dependencies": [],
-          "status": "pending",
-          "filesToRead": ["real/path/file.ts"],
-          "filesToModify": ["real/path/file2.ts"],
-          "filesToCreate": ["real/path/new.ts"],
-          "acceptanceCriteria": [
-            "Given X, When Y, Then Z",
-            "Given A, When B, Then C"
-          ],
-          "mustUseHelpers": [
-            {"function": "createProject", "from": "src/utils/helpers.ts", "reason": "Sets up required relationships"}
-          ],
-          "antiPatterns": [
-            {"bad": "new Project({ name })", "why": "Missing agents, teams, defaultTeam", "good": "await createProject({ name })"}
-          ],
-          "codeExamples": [
-            {
-              "description": "How to create a project correctly",
-              "code": "const project = await createProject({ name, description });\\n// This automatically creates: agents, teams, defaultTeam",
-              "doNot": "const project = new Project({ name }); // ❌ Missing relationships!"
-            }
-          ],
-          "testRequirements": ["Unit test for createProject", "Integration test for API endpoint"]
-        }
-      ],
-      "status": "pending"
-    }
-  ],
-  "architectureDesign": "Technical architecture: system design, data flow, APIs, security, error handling",
-  "teamComposition": {
-    "developers": 3,
-    "reasoning": "3 stories = 3 developers (1 DEV = 1 STORY rule)"
-  },
-  "storyAssignments": [
-    {"storyId": "story-1", "assignedTo": "dev-1"},
-    {"storyId": "story-2", "assignedTo": "dev-2"},
-    {"storyId": "story-3", "assignedTo": "dev-3"}
-  ]
-}
-\`\`\`
-
-**🔥🔥🔥 CRITICAL RULES - SYSTEM WILL FAIL WITHOUT THESE 🔥🔥🔥**
-
-**RULE 1: 1 DEVELOPER = 1 STORY**
-- NEVER assign 2+ stories to same developer
-- Number of developers MUST equal number of stories
-- Example: 5 stories → 5 developers (dev-1 to dev-5)
-
-**RULE 2: NO FILE OVERLAPS BETWEEN STORIES**
-- NEVER have 2 stories modify the same file
-- Each file can only appear in ONE story's filesToModify/filesToCreate
-- If 2 features need same file → PUT THEM IN THE SAME STORY
-- This prevents merge conflicts when developers work in parallel
-
-❌ WRONG (will cause merge conflict):
-  story-1: filesToModify: ["src/app.ts"]
-  story-2: filesToModify: ["src/app.ts"]  ← SAME FILE!
-
-✅ CORRECT (no overlap):
-${this.getFileOverlapExamples(context.repositories)}
-
-**RULES**:
-- EXPLORE FIRST: Use ls, find, Read to get real file paths
-- USE REAL PATHS: No placeholders
-- COMPLETE STORIES: Each must include acceptance criteria, files, technical specs, tests
-- 1:1 ASSIGNMENT: Each story to UNIQUE developer (story-1→dev-1, story-2→dev-2, etc.)
-- NO OVERLAPS: Each file in only ONE story`;
+      // 🔥 SIMPLIFIED: Single unified prompt (always multi-team, sequential execution)
+      const prompt = this.buildPrompt(teamEpic, repoInfo, workspaceInfo, workspacePath || process.cwd(), firstRepoName, epicBranch, masterEpic, context.repositories, architectureBrief, projectRadiographies, retrySection);
 
       // 🔥 CRITICAL: Retrieve processed attachments from context (shared from Planning phase)
       // This ensures ALL agents receive the same multimedia context without re-processing
@@ -973,11 +720,27 @@ ${this.getFileOverlapExamples(context.repositories)}
 
       console.log(`✅ [TechLead] No file overlaps detected - parallel execution is safe`);
 
-      // 🔥 CRITICAL: VALIDATE and INHERIT targetRepository for multi-team mode
+      // 🔥 CRITICAL: VALIDATE and INHERIT targetRepository AND epicId for multi-team mode
       if (multiTeamMode && teamEpic) {
-        console.log(`\n🔍 [TechLead] Validating targetRepository for multi-team epic...`);
+        console.log(`\n🔍 [TechLead] Validating and normalizing epics for multi-team mode...`);
+        const teamEpicId = getEpicId(teamEpic); // Original ID from Planning
 
         for (const epic of parsed.epics) {
+          // 🔥🔥🔥 CRITICAL FIX: Override agent-generated epicId with original Planning epicId
+          // Without this, registerStories() fails because IDs don't match
+          // Agent may generate "epic-1" but Planning registered "epic-backend-foundation"
+          const agentEpicId = epic.id;
+          if (agentEpicId !== teamEpicId) {
+            console.log(`   🔄 [TechLead] Overriding agent epicId: "${agentEpicId}" → "${teamEpicId}"`);
+            epic.id = teamEpicId;
+            // Also update story epicIds to match
+            for (const story of (epic.stories || [])) {
+              if (story.epicId && story.epicId !== teamEpicId) {
+                story.epicId = teamEpicId;
+              }
+            }
+          }
+
           // 🔥 FIX: If agent didn't return targetRepository, inherit from teamEpic
           if (!epic.targetRepository) {
             console.warn(`⚠️  [TechLead] Epic ${epic.id} missing targetRepository in agent response`);
@@ -1261,8 +1024,8 @@ ${this.getFileOverlapExamples(context.repositories)}
         },
       };
 
-      await Task.findByIdAndUpdate(task._id, atomicUpdate);
-      console.log(`📝 [TechLead] Saved completion atomically (no version conflicts)`);
+      updateTaskFireAndForget(task._id, atomicUpdate, 'techLead completed');
+      console.log(`📝 [TechLead] Saved completion (fire-and-forget)`);
 
       // Update in-memory for subsequent code
       task.orchestration.techLead.status = 'completed';
@@ -1510,13 +1273,13 @@ ${this.getFileOverlapExamples(context.repositories)}
         );
       }
 
-      // 🔥 ATOMIC: Update failure status without version conflicts
-      await Task.findByIdAndUpdate(task._id, {
+      // 🔥 FIRE-AND-FORGET: Update failure status without blocking
+      updateTaskFireAndForget(task._id, {
         $set: {
           'orchestration.techLead.status': 'failed',
           'orchestration.techLead.error': error.message,
         },
-      });
+      }, 'techLead failed');
       task.orchestration.techLead.status = 'failed';
       task.orchestration.techLead.error = error.message;
 
@@ -1562,14 +1325,13 @@ ${this.getFileOverlapExamples(context.repositories)}
   }
 
   /**
-   * Build prompt for Multi-Team mode (epic breakdown into stories + dev assignment)
-   * 🔥 NEW: Includes Master Epic context for contract awareness
-   * 🏗️ NEW: Includes Architecture Brief from PlanningPhase
+   * Build prompt for TechLead (epic breakdown into stories + dev assignment)
+   * Includes Master Epic context and Architecture Brief from PlanningPhase
    */
-  private buildMultiTeamPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[], architectureBrief?: any, projectRadiographies?: Map<string, ProjectRadiography>): string {
+  private buildPrompt(epic: any, repoInfo: string, _workspaceInfo: string, workspacePath: string, _firstRepo?: string, branchName?: string, masterEpic?: any, repositories?: any[], architectureBrief?: any, projectRadiographies?: Map<string, ProjectRadiography>, retrySection?: string): string {
     // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
     if (!epic.targetRepository) {
-      console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository in buildMultiTeamPrompt!`);
+      console.error(`\n❌❌❌ [TechLead] CRITICAL ERROR: Epic has NO targetRepository!`);
       console.error(`   Epic: ${epic.title || epic.name}`);
       console.error(`   Epic ID: ${epic.id}`);
       console.error(`\n   💀 WE DON'T KNOW WHICH REPOSITORY THIS EPIC BELONGS TO`);
@@ -1718,7 +1480,7 @@ ${ProjectRadiographyService.formatForPrompt(targetRadiography)}
       }
     }
 
-    return `TECH LEAD - MULTI-TEAM MODE
+    return `${retrySection || ''}TECH LEAD
 ${masterEpicContext}
 ${archBriefSection}
 ${radiographySection}
@@ -1789,6 +1551,15 @@ ${epic.technicalNotes}
 - 🔧 **PATTERNS TO USE**: Which existing functions to use (e.g., "Use createProject() NOT new Project()")
 - ⚠️ **ANTI-PATTERNS TO AVOID**: What NOT to do (code that compiles but won't work)
 
+## 🚨🚨🚨 MANDATORY RULE: 1 DEV = 1 STORY 🚨🚨🚨
+
+**THIS IS NON-NEGOTIABLE. THE SYSTEM WILL REJECT YOUR OUTPUT IF YOU VIOLATE THIS.**
+
+- 3 stories → 3 developers (dev-1, dev-2, dev-3)
+- 5 stories → 5 developers (dev-1, dev-2, dev-3, dev-4, dev-5)
+- NEVER assign 2+ stories to the same developer
+- teamComposition.developers MUST EQUAL the number of stories
+
 ## JSON OUTPUT ONLY:
 \`\`\`json
 {
@@ -1801,39 +1572,64 @@ ${epic.technicalNotes}
     "stories": [
       {
         "id": "${epic.id}-story-1",
-        "title": "Story title",
-        "description": "Technical details: Functions/APIs to implement, 🔧 PATTERNS TO USE, ⚠️ ANTI-PATTERNS TO AVOID",
+        "title": "First story",
+        "description": "Technical details",
         "epicId": "${epic.id}",
         "priority": 1,
-        "estimatedComplexity": "simple|moderate|complex",
+        "estimatedComplexity": "simple",
         "dependencies": [],
         "status": "pending",
-        "filesToRead": ["real/path.ts"],
-        "filesToModify": ["real/path2.ts"],
-        "filesToCreate": ["real/new.ts"],
-        "acceptanceCriteria": [
-          "Given X, When Y, Then Z",
-          "Given A, When B, Then C"
-        ]
+        "filesToRead": ["src/models/User.ts"],
+        "filesToModify": ["src/routes/auth.ts"],
+        "filesToCreate": [],
+        "acceptanceCriteria": ["Given X, When Y, Then Z"]
+      },
+      {
+        "id": "${epic.id}-story-2",
+        "title": "Second story",
+        "description": "Technical details",
+        "epicId": "${epic.id}",
+        "priority": 2,
+        "estimatedComplexity": "moderate",
+        "dependencies": [],
+        "status": "pending",
+        "filesToRead": [],
+        "filesToModify": ["src/services/auth.ts"],
+        "filesToCreate": [],
+        "acceptanceCriteria": ["Given A, When B, Then C"]
+      },
+      {
+        "id": "${epic.id}-story-3",
+        "title": "Third story",
+        "description": "Technical details",
+        "epicId": "${epic.id}",
+        "priority": 3,
+        "estimatedComplexity": "simple",
+        "dependencies": [],
+        "status": "pending",
+        "filesToRead": [],
+        "filesToModify": ["src/middleware/auth.ts"],
+        "filesToCreate": [],
+        "acceptanceCriteria": ["Given P, When Q, Then R"]
       }
     ],
     "status": "pending"
   }],
   "architectureDesign": "Technical design",
-  "teamComposition": {"developers": 1, "reasoning": "1 story = 1 developer (1:1 rule)"},
+  "teamComposition": {"developers": 3, "reasoning": "3 stories = 3 devs (1 DEV = 1 STORY rule)"},
   "storyAssignments": [
-    {"storyId": "${epic.id}-story-1", "assignedTo": "dev-1"}
+    {"storyId": "${epic.id}-story-1", "assignedTo": "dev-1"},
+    {"storyId": "${epic.id}-story-2", "assignedTo": "dev-2"},
+    {"storyId": "${epic.id}-story-3", "assignedTo": "dev-3"}
   ]
 }
 \`\`\`
 
-**⚠️ REQUIRED FIELDS (Judge will reject if missing):**
-- \`acceptanceCriteria\`: Array of Given/When/Then statements (REQUIRED)
-- \`filesToModify\` or \`filesToCreate\`: At least one must have files (REQUIRED)
-
-**🔥🔥🔥 CRITICAL RULES 🔥🔥🔥**
-1. **1 DEV = 1 STORY**: Number of developers = Number of stories
-2. **NO FILE OVERLAPS**: Each file in only ONE story (prevents merge conflicts)
+**⚠️ VALIDATION RULES (System will REJECT if violated):**
+1. \`teamComposition.developers\` MUST equal number of stories
+2. Each story MUST be assigned to a UNIQUE developer
+3. \`acceptanceCriteria\`: Required array
+4. \`filesToModify\` or \`filesToCreate\`: At least one must have files
 
 Explore first, then output JSON.`;
   }
@@ -1993,58 +1789,6 @@ Explore first, then output JSON.`;
         score: judgeResult.score || 0,
       },
     };
-  }
-
-  /**
-   * Generate repository-specific pattern discovery commands
-   * Shows relevant search patterns based on repo type
-   */
-  private getPatternDiscoveryCommands(repositories: any[]): string {
-    const hasBackend = repositories.some(r => r.type === 'backend');
-    const hasFrontend = repositories.some(r => r.type === 'frontend');
-
-    let commands = '```bash\n';
-
-    if (hasBackend) {
-      commands += `# 🔧 BACKEND helper functions for entity creation:
-Grep("createProject|createUser|createTeam|new Project")
-Grep("export.*function.*create|export.*class.*Service")
-`;
-    }
-
-    if (hasFrontend) {
-      commands += `# 🎨 FRONTEND patterns (hooks, contexts, services):
-Grep("export.*function.*use[A-Z]|export.*const.*use[A-Z]")  # Custom hooks
-Grep("createContext|useContext")  # Context patterns
-Grep("export.*api|export.*fetch|axios")  # API service patterns
-`;
-    }
-
-    commands += '```';
-    return commands;
-  }
-
-  /**
-   * Generate repository-specific file overlap examples
-   * Shows frontend examples for frontend repos, backend for backend repos
-   */
-  private getFileOverlapExamples(repositories: any[]): string {
-    const hasBackend = repositories.some(r => r.type === 'backend');
-    const hasFrontend = repositories.some(r => r.type === 'frontend');
-
-    if (hasFrontend && !hasBackend) {
-      // Frontend only
-      return `  story-1: filesToModify: ["src/components/UserList.tsx"]
-  story-2: filesToModify: ["src/components/ProductList.tsx"]`;
-    } else if (hasBackend && !hasFrontend) {
-      // Backend only
-      return `  story-1: filesToModify: ["src/routes/users.ts"]
-  story-2: filesToModify: ["src/routes/products.ts"]`;
-    } else {
-      // Both or unknown - show mixed examples
-      return `  story-1: filesToModify: ["src/routes/users.ts"]  ← backend story
-  story-2: filesToModify: ["src/components/UserList.tsx"]  ← frontend story`;
-    }
   }
 
   /**

@@ -1,4 +1,4 @@
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, saveTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { AgentActivityService } from '../AgentActivityService';
@@ -120,7 +120,7 @@ export class PlanningPhase extends BasePhase {
 
     task.orchestration.planning!.status = 'in_progress';
     task.orchestration.planning!.startedAt = startTime;
-    await task.save();
+    saveTaskFireAndForget(task, 'planning in_progress');
 
     NotificationService.emitAgentStarted(taskId, 'Planning Agent');
     NotificationService.emitConsoleLog(
@@ -649,12 +649,12 @@ ${judgeFeedback}
       // 3. Assign stories to developers (storyAssignments)
       // PlanningPhase only creates EPICS, TechLead creates STORIES from epics
 
-      // Update costs
+      // Update costs (fire-and-forget)
       freshTask.orchestration.totalCost = (freshTask.orchestration.totalCost || 0) + (result.cost || 0);
       freshTask.orchestration.totalTokens = (freshTask.orchestration.totalTokens || 0) +
         (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
 
-      await freshTask.save();
+      saveTaskFireAndForget(freshTask, 'planning costs update');
 
       // 📦 GITHUB BACKUP: Save epics to GitHub as backup
       // MongoDB has the data (above), now push to GitHub for disaster recovery
@@ -859,7 +859,7 @@ ${judgeFeedback}
       task.orchestration.planning!.status = 'failed';
       task.orchestration.planning!.completedAt = new Date();
       task.orchestration.planning!.error = error.message;
-      await task.save();
+      saveTaskFireAndForget(task, 'planning failed');
 
       NotificationService.emitAgentFailed(taskId, 'Planning Agent', error.message);
 
@@ -891,7 +891,7 @@ ${judgeFeedback}
       task.orchestration.planning!.status = 'failed';
       task.orchestration.planning!.completedAt = new Date();
       task.orchestration.planning!.error = outerError.message;
-      await task.save();
+      saveTaskFireAndForget(task, 'planning setup failed');
 
       NotificationService.emitAgentFailed(taskId, 'Planning Agent', outerError.message);
 

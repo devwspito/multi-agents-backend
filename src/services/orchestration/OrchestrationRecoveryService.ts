@@ -5,27 +5,41 @@ import { LogService } from '../logging/LogService';
 // ⚡ OPTIMIZATION: Removed eventStore and AgentArtifactService imports
 // Recovery now delegates to orchestrator which handles it more efficiently
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+
+/**
+ * 🔥 AUTO-RECOVERY DISABLED BY DEFAULT
+ * Recovery is now MANUAL by default. Use "Resume" or "Retry" from frontend.
+ *
+ * To enable automatic recovery on startup, set:
+ *   ENABLE_AUTO_RECOVERY=true
+ *
+ * Even with auto-recovery enabled, only projects with autoRecoveryEnabled=true
+ * will have their tasks automatically recovered.
+ */
+const AUTO_RECOVERY_ENABLED = process.env.ENABLE_AUTO_RECOVERY === 'true';
 
 /**
  * OrchestrationRecoveryService
  *
  * Recupera y reanuda orquestaciones interrumpidas cuando el servidor se reinicia.
  *
- * Estrategia de recuperación:
- * 1. Buscar tasks con status='in_progress' al iniciar servidor
- * 2. Verificar integridad de workspace y repositorios
- * 3. Reconstruir contexto desde MongoDB, Local y EventStore (con fallback)
- * 4. Reanudar desde la última fase completada
+ * Estrategia de recuperación (LOCAL-FIRST):
+ * 1. 🔥 PRIMERO: Escanear workspaces locales para `.agent-memory/execution-summary.md`
+ * 2. Buscar tasks con status='in_progress' en MongoDB como FALLBACK
+ * 3. Verificar integridad de workspace y repositorios
+ * 4. Reconstruir contexto desde Local EventStore (fuente primaria)
+ * 5. Reanudar desde la última fase completada
  *
  * Fuentes de datos (en orden de prioridad):
- * - MongoDB: Principal y en tiempo real
- * - Local: Fallback si MongoDB está vacío/incompleto
+ * - Local: 🔥 PRIMARIO - `.agent-memory/` es la fuente de verdad
+ * - MongoDB: FALLBACK si local no tiene datos
  * - GitHub: Último recurso (clone del repo con .agents/)
  *
  * Manejo de fases:
- * - Fases completadas: Skip (ya tienen output en DB)
+ * - Fases completadas: Skip (ya tienen output en Local/DB)
  * - Fase en progreso: Re-ejecutar desde el inicio
  * - Fases pendientes: Ejecutar normalmente
  */
@@ -38,9 +52,97 @@ export class OrchestrationRecoveryService {
   }
 
   /**
+   * 🔥 LOCAL-FIRST: Escanea workspaces locales para encontrar tasks interrumpidas
+   * Busca en agent-workspace-prod/task-* directorios con .agent-memory/execution-summary.md
+   *
+   * 🔧 OPTIMIZED: Uses async file operations to avoid blocking event loop
+   */
+  private async scanLocalWorkspacesForInterruptedTasks(): Promise<Array<{ taskId: string; workspacePath: string; phase: string; title: string }>> {
+    const interruptedTasks: Array<{ taskId: string; workspacePath: string; phase: string; title: string }> = [];
+
+    // Get workspace base path from env or default
+    const workspaceBase = process.env.AGENT_WORKSPACE_PATH || path.join(os.homedir(), 'agent-workspace-prod');
+
+    try {
+      await fsPromises.access(workspaceBase);
+    } catch {
+      console.log(`📂 [Recovery] Workspace base not found: ${workspaceBase}`);
+      return interruptedTasks;
+    }
+
+    console.log(`📂 [Recovery] Scanning local workspaces in: ${workspaceBase}`);
+
+    try {
+      // 🔧 ASYNC: Use async readdir instead of sync
+      const entries = await fsPromises.readdir(workspaceBase, { withFileTypes: true });
+
+      // 🔧 PARALLEL: Check all task directories in parallel (with limit)
+      const taskChecks = entries
+        .filter(entry => entry.isDirectory() && entry.name.startsWith('task-'))
+        .slice(0, 20) // Limit to 20 most recent tasks to avoid overwhelming
+        .map(async (entry) => {
+          const taskId = entry.name.replace('task-', '');
+          const taskWorkspace = path.join(workspaceBase, entry.name);
+          const summaryPath = path.join(taskWorkspace, '.agent-memory', 'execution-summary.md');
+
+          try {
+            // 🔧 ASYNC: Use async readFile
+            const summaryContent = await fsPromises.readFile(summaryPath, 'utf8');
+
+            // Parse status from markdown
+            const statusMatch = summaryContent.match(/\*\*Status:\*\*\s*(\w+)/);
+            const phaseMatch = summaryContent.match(/\*\*Current Phase:\*\*\s*(\w+)/);
+            const titleMatch = summaryContent.match(/^#\s+(.+)$/m) || ['', 'Unknown Task'];
+
+            const status = statusMatch ? statusMatch[1] : 'unknown';
+            const phase = phaseMatch ? phaseMatch[1] : 'unknown';
+
+            if (status === 'in_progress') {
+              console.log(`   📍 Found in_progress task locally: ${taskId} (Phase: ${phase})`);
+              return {
+                taskId,
+                workspacePath: taskWorkspace,
+                phase,
+                title: titleMatch[1] || 'Unknown',
+              };
+            }
+          } catch {
+            // File doesn't exist or can't be read - skip silently
+          }
+          return null;
+        });
+
+      // Wait for all checks to complete
+      const results = await Promise.all(taskChecks);
+
+      // Filter out nulls and add to result
+      for (const result of results) {
+        if (result) {
+          interruptedTasks.push(result);
+        }
+      }
+    } catch (scanError: any) {
+      console.error(`❌ [Recovery] Error scanning workspaces: ${scanError.message}`);
+    }
+
+    return interruptedTasks;
+  }
+
+  /**
    * Recupera TODAS las orquestaciones interrumpidas al iniciar servidor
+   *
+   * 🔥 DISABLED BY DEFAULT - Recovery is now MANUAL
+   * Enable with ENABLE_AUTO_RECOVERY=true environment variable
    */
   async recoverAllInterruptedOrchestrations(): Promise<void> {
+    // 🔧 AUTO-RECOVERY: Disabled by default
+    if (!AUTO_RECOVERY_ENABLED) {
+      console.log('⏭️  [Recovery] Auto-recovery DISABLED (use frontend to Resume/Retry tasks)');
+      // 🔥 Mark all in_progress tasks as 'interrupted' so frontend shows Resume button
+      await this.markInProgressTasksAsInterrupted();
+      return;
+    }
+
     if (this.isRecoveryInProgress) {
       console.log('⏭️  [Recovery] Recovery already in progress, skipping');
       return;
@@ -49,20 +151,66 @@ export class OrchestrationRecoveryService {
     this.isRecoveryInProgress = true;
 
     try {
-      console.log('🔄 [Recovery] Starting orchestration recovery...');
+      console.log('🔄 [Recovery] Starting orchestration recovery (LOCAL-FIRST)...');
 
-      // Buscar tasks interrumpidas usando lean() para evitar validación de esquema
-      // Explicitly exclude cancelled tasks for safety
-      const interruptedTasksRaw = await Task.find({
-        status: 'in_progress',
-        'orchestration.paused': { $ne: true }, // Excluir tasks pausadas manualmente
-        'orchestration.cancelRequested': { $ne: true }, // Excluir tasks canceladas
-      })
-        .lean()
-        .exec();
+      // 🔥 STEP 1: Scan LOCAL workspaces first (PRIMARY source)
+      console.log('\n📂 [Recovery] STEP 1: Scanning LOCAL workspaces...');
+      const localInterruptedTasks = await this.scanLocalWorkspacesForInterruptedTasks();
+
+      let interruptedTasksRaw: any[] = [];
+
+      if (localInterruptedTasks.length > 0) {
+        console.log(`✅ [Recovery] Found ${localInterruptedTasks.length} interrupted task(s) LOCALLY`);
+
+        // For local tasks, we need to either find them in MongoDB or create minimal task objects
+        for (const localTask of localInterruptedTasks) {
+          // Try to find in MongoDB first
+          const mongoTask = await Task.findById(localTask.taskId).lean().exec() as any;
+
+          if (mongoTask) {
+            // 🔥 CHECK STATUS: Skip cancelled/completed tasks
+            if (mongoTask.status === 'cancelled' || mongoTask.status === 'completed') {
+              console.log(`   ⏭️ Task ${localTask.taskId}: SKIPPED (status: ${mongoTask.status})`);
+              continue;
+            }
+            console.log(`   ✅ Task ${localTask.taskId}: Found in MongoDB (status: ${mongoTask.status})`);
+            interruptedTasksRaw.push(mongoTask);
+          } else {
+            // Task exists locally but not in MongoDB - reconstruct from local EventStore
+            console.log(`   🔄 Task ${localTask.taskId}: NOT in MongoDB, will recover from LOCAL EventStore`);
+
+            // Create minimal task object for recovery
+            // The actual state will be loaded from local EventStore
+            const minimalTask = {
+              _id: localTask.taskId,
+              title: localTask.title,
+              status: 'in_progress',
+              orchestration: {
+                currentPhase: localTask.phase,
+                paused: false,
+                cancelRequested: false,
+              },
+              _recoverySource: 'local', // Mark that this came from local
+              _workspacePath: localTask.workspacePath,
+            };
+            interruptedTasksRaw.push(minimalTask);
+          }
+        }
+      } else {
+        // 🔥 STEP 2: FALLBACK to MongoDB only if LOCAL found nothing
+        console.log('\n💾 [Recovery] STEP 2: No local tasks found, checking MongoDB as FALLBACK...');
+
+        interruptedTasksRaw = await Task.find({
+          status: 'in_progress',
+          'orchestration.paused': { $ne: true },
+          'orchestration.cancelRequested': { $ne: true },
+        })
+          .lean()
+          .exec();
+      }
 
       if (interruptedTasksRaw.length === 0) {
-        console.log('✅ [Recovery] No interrupted orchestrations found');
+        console.log('✅ [Recovery] No interrupted orchestrations found (checked LOCAL + MongoDB)');
         return;
       }
 
@@ -270,8 +418,8 @@ export class OrchestrationRecoveryService {
         return { success: false, message: 'Task was cancelled and cannot be resumed' };
       }
 
-      // Allow resuming 'failed' or 'pending' tasks
-      if (task.status !== 'failed' && task.status !== 'pending') {
+      // Allow resuming 'failed', 'pending', or 'interrupted' tasks
+      if (task.status !== 'failed' && task.status !== 'pending' && task.status !== 'interrupted') {
         return { success: false, message: `Cannot resume task with status: ${task.status}` };
       }
 
@@ -332,5 +480,40 @@ export class OrchestrationRecoveryService {
       .sort({ updatedAt: -1 })
       .limit(20)
       .lean();
+  }
+
+  /**
+   * 🔥 Mark all in_progress tasks as 'interrupted' on server startup
+   * This is called when auto-recovery is disabled, so users can manually Resume from frontend
+   */
+  private async markInProgressTasksAsInterrupted(): Promise<void> {
+    try {
+      // Find all tasks that are in_progress (they were running when server stopped)
+      const inProgressTasks = await Task.find({ status: 'in_progress' }).exec();
+
+      if (inProgressTasks.length === 0) {
+        console.log('✅ [Recovery] No in_progress tasks to mark as interrupted');
+        return;
+      }
+
+      console.log(`🔄 [Recovery] Marking ${inProgressTasks.length} in_progress task(s) as 'interrupted'...`);
+
+      for (const task of inProgressTasks) {
+        const taskId = (task._id as any).toString();
+
+        // Update status to 'interrupted'
+        await Task.findByIdAndUpdate(taskId, {
+          status: 'interrupted',
+          'orchestration.interruptedAt': new Date(),
+          'orchestration.interruptReason': 'server_restart',
+        });
+
+        console.log(`   ⏸️  Task ${taskId}: marked as 'interrupted' (was: in_progress)`);
+      }
+
+      console.log(`✅ [Recovery] ${inProgressTasks.length} task(s) marked as 'interrupted' - users can Resume from frontend`);
+    } catch (error: any) {
+      console.error(`❌ [Recovery] Error marking tasks as interrupted: ${error.message}`);
+    }
   }
 }

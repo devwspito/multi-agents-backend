@@ -1,11 +1,10 @@
 import { Task, ITask } from '../../models/Task';
 import { Repository } from '../../models/Repository';
-import { FailedExecution, FailureType } from '../../models/FailedExecution';
 import { GitHubService } from '../GitHubService';
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { AgentArtifactService } from '../AgentArtifactService';
-import { OrchestrationContext, IPhase, PhaseResult } from './Phase';
+import { OrchestrationContext, IPhase, PhaseResult, saveTaskFireAndForget, updateTaskFireAndForget, saveTaskCritical } from './Phase';
 import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
 // Legacy phases REMOVED: ProductManagerPhase, ProjectManagerPhase, ProblemAnalystPhase
@@ -27,37 +26,26 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
 import { eventStore } from '../EventStore';
-import { AGENT_TIMEOUTS } from './constants/Timeouts';
 
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
-// 🔧 MCP Tools - Custom tools for enhanced agent capabilities
-import { createCustomToolsServer } from '../../tools/customTools';
-import { createExtraToolsServer } from '../../tools/extraTools';
-import { createExploratoryToolsServer } from '../../tools/exploratoryTools';
-import { createAutonomousToolsServer } from '../../tools/autonomousTools';
+// 🔒 ROBUSTNESS: Fault-tolerant utilities available at '../../utils/robustness'
+// Import when needed: withCircuitBreaker, withRetry, validateWorkspacePath, validateTaskId, isOk, Result
 
-// 🧠 Smart Context & Memory - Pre-execution intelligence for ALL agents
-import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
-import { AgentMemoryBridge } from '../AgentMemoryBridge';
-import { granularMemoryService } from '../GranularMemoryService';
-
-// 🚀 Autonomous Services - Full integration for maximum agent capability
+// 🚀 Autonomous Services (only BackgroundTaskService and SlashCommandService used)
 import { BackgroundTaskService } from '../BackgroundTaskService';
-import { SessionService } from '../SessionService';
 import { SlashCommandService } from '../SlashCommandService';
-import { AgentHooksService } from '../AgentHooksService';
-import { ExecutionControlService } from '../ExecutionControlService';
-import { StreamingService } from '../StreamingService';
-
-// 🧠 Advanced AI Features - Extended Thinking & Dynamic Model Routing
-import { ExtendedThinkingService } from '../ExtendedThinkingService';
-import { DynamicModelRouter } from '../DynamicModelRouter';
 
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
+
+// 🔥 REFACTORED: Agent execution extracted to separate service
+import { agentExecutorService, AgentExecutionResult, ResumeOptions } from './AgentExecutorService';
+
+// 🔥 REFACTORED: Developer prompt building extracted to separate builder
+import { DeveloperPromptBuilder } from './DeveloperPromptBuilder';
 
 /**
  * OrchestrationCoordinator
@@ -585,7 +573,7 @@ export class OrchestrationCoordinator {
                 preset: 'custom',
                 customConfig: escalatedConfig,
               };
-              await task.save();
+              saveTaskFireAndForget(task, 'escalate model config');
 
               console.log(`🚀 [${phaseName}] Escalated all agents to ${topModelName} for timeout retry`);
 
@@ -604,14 +592,14 @@ export class OrchestrationCoordinator {
 
                 // Restore previous model config
                 task.orchestration.modelConfig = previousModelConfig;
-                await task.save();
+                saveTaskFireAndForget(task, 'restore model config after retry fail');
 
                 throw retryError; // Re-throw to fail the phase
               }
 
               // Restore previous model config for next phases
               task.orchestration.modelConfig = previousModelConfig;
-              await task.save();
+              saveTaskFireAndForget(task, 'restore model config');
             } else {
               throw error; // Can't retry without task
             }
@@ -1098,20 +1086,23 @@ export class OrchestrationCoordinator {
     }
 
     // Move consumed directives to history
-    if (!freshTask.orchestration.directiveHistory) {
-      freshTask.orchestration.directiveHistory = [];
-    }
-    freshTask.orchestration.directiveHistory.push(...matchingDirectives as any);
+    const directiveHistory = freshTask.orchestration.directiveHistory || [];
+    directiveHistory.push(...matchingDirectives as any);
 
     // Remove consumed directives from pending
-    freshTask.orchestration.pendingDirectives = pendingDirectives.filter(d => !d.consumed);
+    const newPendingDirectives = pendingDirectives.filter(d => !d.consumed);
 
-    freshTask.markModified('orchestration.pendingDirectives');
-    freshTask.markModified('orchestration.directiveHistory');
-    await freshTask.save();
+    // Fire-and-forget update to MongoDB
+    updateTaskFireAndForget(task._id, {
+      $set: {
+        'orchestration.pendingDirectives': newPendingDirectives,
+        'orchestration.directiveHistory': directiveHistory,
+      }
+    }, 'consume directives');
 
     // Update the task reference with fresh data
-    Object.assign(task.orchestration, freshTask.orchestration);
+    task.orchestration.pendingDirectives = newPendingDirectives;
+    task.orchestration.directiveHistory = directiveHistory;
 
     return consumedDirectives;
   }
@@ -1319,137 +1310,12 @@ ${formattedDirectives}
   }
 
   /**
-   * Save a failed execution for later retry
-   *
-   * Persists all context needed to retry the execution:
-   * - Agent type, prompt, workspace
-   * - Failure type and diagnostics
-   * - Context snapshot for retry
-   */
-  private async saveFailedExecution(params: {
-    taskId?: string;
-    agentType: string;
-    agentName?: string;
-    phaseName?: string;
-    prompt: string;
-    workspacePath: string;
-    model: string;
-    permissionMode?: string;
-    error: Error & {
-      isTimeout?: boolean;
-      isHistoryOverflow?: boolean;
-      isLoopDetection?: boolean;
-    };
-    diagnostics: {
-      messagesReceived: number;
-      historyMessages: number;
-      turnsCompleted: number;
-      lastMessageTypes: string[];
-      streamDurationMs: number;
-    };
-    context?: OrchestrationContext;
-  }): Promise<void> {
-    try {
-      // Determine failure type from error flags
-      let failureType: FailureType = 'unknown';
-      if (params.error.isTimeout) {
-        failureType = 'timeout';
-      } else if (params.error.isHistoryOverflow) {
-        failureType = 'history_overflow';
-      } else if (params.error.isLoopDetection) {
-        failureType = 'loop_detection';
-      } else if (params.error.message?.includes('SDK query failed')) {
-        failureType = 'sdk_error';
-      } else if (params.error.message?.includes('API') || params.error.message?.includes('rate limit')) {
-        failureType = 'api_error';
-      } else if (params.error.message?.includes('git')) {
-        failureType = 'git_error';
-      }
-
-      // Get task for project ID
-      let projectId;
-      if (params.taskId) {
-        const task = await Task.findById(params.taskId);
-        projectId = task?.projectId;
-      }
-
-      // Snapshot context for retry (only essential data from sharedData)
-      const contextSnapshot = params.context ? {
-        epics: params.context.getData<any[]>('epics')?.slice(0, 10), // Limit size
-        stories: params.context.getData<any[]>('stories')?.slice(0, 20),
-        currentPhase: Array.from(params.context.phaseResults.keys()).pop(), // Last phase name
-        taskId: params.context.task._id?.toString(),
-        // Don't include full phaseResults - too large
-      } : undefined;
-
-      // Calculate retry delay based on failure type
-      // Timeout/overflow: wait longer, Loop: don't auto-retry
-      const retryDelayMs = failureType === 'loop_detection'
-        ? null // Don't auto-retry loops
-        : failureType === 'timeout' || failureType === 'history_overflow'
-          ? 5 * 60 * 1000 // 5 minutes for heavy failures
-          : 60 * 1000; // 1 minute for light failures
-
-      const failedExec = new FailedExecution({
-        taskId: params.taskId,
-        projectId,
-        agentType: params.agentType,
-        agentName: params.agentName,
-        phaseName: params.phaseName,
-        prompt: params.prompt.substring(0, 50000), // Limit prompt size
-        workspacePath: params.workspacePath,
-        modelId: params.model,
-        permissionMode: params.permissionMode || 'bypassPermissions',
-        failureType,
-        errorMessage: params.error.message,
-        errorStack: params.error.stack?.substring(0, 5000),
-        messagesReceived: params.diagnostics.messagesReceived,
-        historyMessages: params.diagnostics.historyMessages,
-        turnsCompleted: params.diagnostics.turnsCompleted,
-        lastMessageTypes: params.diagnostics.lastMessageTypes.slice(-20),
-        streamDurationMs: params.diagnostics.streamDurationMs,
-        retryStatus: failureType === 'loop_detection' ? 'abandoned' : 'pending',
-        retryCount: 0,
-        maxRetries: 3,
-        nextRetryAt: retryDelayMs ? new Date(Date.now() + retryDelayMs) : undefined,
-        contextSnapshot,
-      });
-
-      await failedExec.save();
-
-      console.log(`💾 [FailedExecution] Saved failed execution for retry:`);
-      console.log(`   ID: ${failedExec._id}`);
-      console.log(`   Agent: ${params.agentType}`);
-      console.log(`   Failure: ${failureType}`);
-      console.log(`   Retry status: ${failedExec.retryStatus}`);
-      if (failedExec.nextRetryAt) {
-        console.log(`   Next retry: ${failedExec.nextRetryAt.toISOString()}`);
-      }
-
-      // Emit notification for visibility
-      if (params.taskId) {
-        NotificationService.emitConsoleLog(
-          params.taskId,
-          'warn',
-          `💾 Execution saved for retry: ${params.agentType} (${failureType})`
-        );
-      }
-    } catch (saveError: any) {
-      // Don't let save failure break the main error flow
-      console.error(`❌ [FailedExecution] Failed to save:`, saveError.message);
-    }
-  }
-
-  /**
    * Execute a single agent with SDK query function
    *
-   * This is the low-level agent execution used by all phases.
-   * Following SDK pattern: single query() call per agent action.
+   * 🔥 REFACTORED: Delegated to AgentExecutorService to reduce file size
+   * This wrapper maintains backwards compatibility with existing code.
    *
-   * SDK Documentation:
-   * https://docs.claude.com/en/api/agent-sdk/streaming-vs-single-mode
-   *
-   * Using single-mode (non-streaming) for reliability and simplicity.
+   * @see AgentExecutorService.executeAgent for full implementation
    */
   public async executeAgent(
     agentType: string,
@@ -1465,1335 +1331,27 @@ ${formattedDirectives}
       timeout?: number;
     },
     contextOverride?: OrchestrationContext,
-    skipOptimization?: boolean, // 🔥 Skip optimizeConfigForBudget (used for retry with forceTopModel)
-    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan', // 🔥 SDK permission mode
-    // 🔄 SESSION RESUME: Continue from interrupted execution
-    resumeOptions?: {
-      resumeSessionId?: string;    // SDK session ID to resume from
-      resumeAtMessage?: string;    // Specific message UUID to resume from (optional)
-      isResume?: boolean;          // Flag to indicate this is a resume
-    }
-  ): Promise<any> {
-    const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
-
-    // Get repository type from task or context for developer specialization
-    // 🔥 ONLY 'frontend' | 'backend' | 'unknown' - NO OTHER TYPES EXIST
-    let repositoryType: 'frontend' | 'backend' | 'unknown' = 'unknown';
-    if (taskId && agentType === 'developer') {
-      try {
-        const task = await Task.findById(taskId).populate('projectId');
-        if (task?.projectId) {
-          const project = task.projectId as any;
-
-          // 🔥 CRITICAL: Repository.type enum is ONLY 'backend' | 'frontend'
-          if (project.repositories && project.repositories.length > 0) {
-            const types = project.repositories.map((r: any) => r.type).filter(Boolean);
-
-            if (types.length === 0) {
-              // No types assigned, use unknown
-              repositoryType = 'unknown';
-            } else {
-              // Use first valid type found (all must be backend or frontend)
-              const validType = types.find((t: string) => t === 'backend' || t === 'frontend');
-              repositoryType = validType || 'unknown';
-            }
-          } else if (project.repository) {
-            repositoryType = project.repository.type || 'unknown';
-          }
-        }
-      } catch (error: any) {
-        console.warn(`[OrchestrationCoordinator] Failed to get repository type for specialization: ${error.message}`);
-      }
-    }
-
-    // Get agent configuration with specialization
-    // - Developers: get repository-specific specialization (frontend/backend)
-    const needsSpecialization = agentType === 'developer';
-    const agentDef = needsSpecialization
-      ? getAgentDefinitionWithSpecialization(agentType, repositoryType)
-      : getAgentDefinition(agentType);
-
-    if (!agentDef) {
-      throw new Error(`Agent type "${agentType}" not found in agent definitions`);
-    }
-
-    // 🔥 HARDCODED: All agents use Opus - ignoring task config
-    const configs = await import('../../config/ModelConfigurations');
-    const modelConfig: AgentModelConfig = configs.ALL_OPUS_CONFIG;
-    console.log(`🔥 [ExecuteAgent] Using ALL_OPUS_CONFIG (hardcoded) for agent: ${agentType}`);
-
-    // 🎯 DYNAMIC MODEL ROUTING: Select model based on task complexity
-    // This replaces static per-agent model assignment with intelligent runtime selection
-    let model: string;
-    let modelAlias: string;
-    let thinkingBudget = 0;
-
-    if (DynamicModelRouter.isEnabled() && !skipOptimization) {
-      // Use dynamic routing based on complexity analysis
-      const modelSelection = DynamicModelRouter.selectModel(
-        taskId,
-        agentType,
-        prompt,
-        {
-          forceTopModel: skipOptimization,
-        }
-      );
-
-      model = modelSelection.modelId;
-      modelAlias = modelSelection.tier;
-
-      // 🎯 Emit Dynamic Routing to Activity (not just console)
-      const routingMsg = `🎯 Model: ${modelSelection.tier.toUpperCase()} | Complexity: ${(modelSelection.complexity * 100).toFixed(0)}% | ${modelSelection.reason}`;
-      AgentActivityService.emitMessage(taskId || '', agentType, routingMsg);
-      NotificationService.emitConsoleLog(taskId || '', 'info', `[DynamicRouter] ${routingMsg}`);
-
-      // 🧠 EXTENDED THINKING: Get thinking budget for complex tasks
-      thinkingBudget = ExtendedThinkingService.getThinkingBudget(
-        taskId,
-        agentType,
-        prompt,
-        {}
-      );
-
-      if (thinkingBudget > 0) {
-        // 🧠 Emit Extended Thinking to Activity
-        const thinkingMsg = `🧠 Extended Thinking: ${thinkingBudget.toLocaleString()} token budget`;
-        AgentActivityService.emitMessage(taskId || '', agentType, thinkingMsg);
-        NotificationService.emitConsoleLog(taskId || '', 'info', `[ExtendedThinking] Enabled for ${agentType} with ${thinkingBudget} tokens`);
-      }
-    } else {
-      // Fallback to static config (when dynamic routing disabled or forceTopModel)
-      modelAlias = getAgentModel(agentType, modelConfig);
-      model = configs.getExplicitModelId(modelAlias);
-      const staticMsg = `📊 Static Config: ${modelAlias.toUpperCase()} (dynamic routing disabled)`;
-      AgentActivityService.emitMessage(taskId || '', agentType, staticMsg);
-      NotificationService.emitConsoleLog(taskId || '', 'info', `[StaticConfig] Using ${modelAlias} for ${agentType}`);
-    }
-
-    // 🔥 CRITICAL VALIDATION: workspacePath MUST be a string
-    // The SDK's query() function requires options.cwd to be a string
-    if (typeof workspacePath !== 'string') {
-      console.error(`❌❌❌ [ExecuteAgent] CRITICAL ERROR: workspacePath is NOT a string!`);
-      console.error(`   Type received: ${typeof workspacePath}`);
-      console.error(`   Value: ${JSON.stringify(workspacePath)}`);
-      console.error(`   Agent type: ${agentType}`);
-      console.error(`   This would cause SDK error: "options.cwd property must be of type string"`);
-      throw new Error(
-        `CRITICAL: workspacePath must be a string, received ${typeof workspacePath}: ${JSON.stringify(workspacePath)}`
-      );
-    }
-
-    // 🤖 Emit agent start to Activity
-    AgentActivityService.emitMessage(taskId || '', agentType, `🤖 Starting ${agentType}`);
-    NotificationService.emitConsoleLog(taskId || '', 'info', `[ExecuteAgent] Starting ${agentType} | Model: ${modelAlias} | Dir: ${workspacePath}`);
-
-    // 🔗 PRE-EXECUTION HOOKS - Run before agent starts
-    const executionStartTime = Date.now();
-    try {
-      const preHookResult = await AgentHooksService.runPreExecutionHooks({
-        agentType,
-        taskId: taskId || 'unknown',
-        workspacePath,
-        prompt: prompt.substring(0, 500), // Truncate for hooks
-      });
-
-      if (preHookResult.blocked) {
-        console.warn(`⚠️ [ExecuteAgent] Pre-execution hook blocked: ${preHookResult.reason}`);
-        NotificationService.emitConsoleLog(taskId || '', 'warn', `⚠️ Agent ${agentType} blocked by pre-hook: ${preHookResult.reason}`);
-        throw new Error(`Agent blocked by pre-execution hook: ${preHookResult.reason}`);
-      }
-
-      if (preHookResult.warnings.length > 0) {
-        console.log(`⚠️ [ExecuteAgent] Pre-hook warnings: ${preHookResult.warnings.join(', ')}`);
-      }
-    } catch (hookError: any) {
-      if (hookError.message?.includes('blocked by pre-execution')) {
-        throw hookError; // Re-throw if it's a deliberate block
-      }
-      console.warn(`⚠️ [ExecuteAgent] Pre-execution hook error (non-critical): ${hookError.message}`);
-    }
-
-    // 📊 SESSION - Load previous context if available
-    let sessionContext: any = {};
-    if (sessionId && taskId) {
-      try {
-        const existingSession = await SessionService.getSession(sessionId);
-        if (existingSession?.context) {
-          sessionContext = existingSession.context;
-          console.log(`📂 [ExecuteAgent] Loaded session context: ${Object.keys(sessionContext).length} keys`);
-        }
-      } catch (sessionError: any) {
-        console.warn(`⚠️ [ExecuteAgent] Session load error (non-critical): ${sessionError.message}`);
-      }
-    }
-
-    // 🧠 SMART CONTEXT INJECTION - Pre-execution intelligence for ALL agents
-    let smartContextBlock = '';
-    try {
-      const contextInjector = SmartContextInjector.getInstance();
-      await contextInjector.initialize(workspacePath);
-
-      const memoryBridge = AgentMemoryBridge.getInstance();
-      await memoryBridge.initialize(workspacePath);
-
-      // Map agent type to phase
-      const phaseMapping: Record<string, AgentPhase> = {
-        'planning-agent': 'planning-agent',
-        'tech-lead': 'tech-lead',
-        'developer': 'developer',
-        'judge': 'judge',
-        'verification-fixer': 'verification-fixer',
-        'recovery-analyst': 'recovery-analyst',
-        'auto-merge': 'auto-merge'
-      };
-
-      const phase = phaseMapping[agentType] || 'developer';
-
-      // Generate smart context
-      const injectedContext = await contextInjector.generateContext({
-        phase,
-        taskDescription: prompt.substring(0, 500), // First 500 chars for context
-        workspacePath,
-        focusAreas: [] // Could extract from prompt
-      });
-
-      smartContextBlock = injectedContext.formattedContext;
-
-      // 🧠 GRANULAR MEMORY (PRIMARY) - Get memories from MongoDB
-      if (taskId) {
-        try {
-          // Get task to extract projectId
-          const taskDoc = await Task.findById(taskId).select('projectId').lean();
-          if (taskDoc?.projectId) {
-            const projectId = taskDoc.projectId.toString();
-
-            // Get relevant memories for this phase
-            const granularMemories = await granularMemoryService.getPhaseMemories({
-              projectId,
-              taskId,
-              phaseType: phase,
-              limit: 30,
-            });
-
-            if (granularMemories.length > 0) {
-              smartContextBlock += granularMemoryService.formatForPrompt(
-                granularMemories,
-                'GRANULAR MEMORY (What you did before - USE THIS!)'
-              );
-              console.log(`🧠 [ExecuteAgent] Injected ${granularMemories.length} granular memories`);
-            }
-
-            // Get errors to avoid
-            const errorsToAvoid = await granularMemoryService.getErrorsToAvoid({
-              projectId,
-              taskId,
-              limit: 5,
-            });
-
-            if (errorsToAvoid.length > 0) {
-              smartContextBlock += '\n\n🚫 ERRORS TO AVOID (from previous runs):\n';
-              for (const err of errorsToAvoid) {
-                smartContextBlock += `• ${err.title}\n`;
-                if (err.error?.avoidanceRule) {
-                  smartContextBlock += `  → ${err.error.avoidanceRule}\n`;
-                }
-              }
-            }
-
-            // Get patterns and conventions (project-level)
-            const patterns = await granularMemoryService.getPatternsAndConventions({
-              projectId,
-              limit: 10,
-            });
-
-            if (patterns.length > 0) {
-              smartContextBlock += '\n\n📏 PROJECT CONVENTIONS:\n';
-              for (const p of patterns) {
-                smartContextBlock += `• ${p.title}: ${p.content.substring(0, 200)}\n`;
-              }
-            }
-          }
-        } catch (memError: any) {
-          console.warn(`⚠️ [ExecuteAgent] Granular memory retrieval failed: ${memError.message}`);
-        }
-      }
-
-      // 🧠 AGENT MEMORY BRIDGE (SECONDARY) - File-based memory
-      const memories = memoryBridge.recallForPhase(phase, 8);
-      if (memories.length > 0) {
-        smartContextBlock += memoryBridge.formatForPrompt(memories, 'ADDITIONAL MEMORIES FROM FILE SYSTEM');
-      }
-
-      console.log(`🧠 [ExecuteAgent] Smart context injected: ${smartContextBlock.length} chars`);
-    } catch (contextError) {
-      console.warn(`⚠️ [ExecuteAgent] Smart context generation failed (non-critical):`, contextError);
-      // Continue without smart context - not a critical failure
-    }
-
-    // Build final prompt with smart context
-    // When images are present, use generator function (required by SDK)
-    let promptContent: string | AsyncGenerator;
-
-    if (attachments && attachments.length > 0) {
-      console.log(`📸 [ExecuteAgent] Building prompt with ${attachments.length} image(s) using generator`);
-
-      const content: any[] = [
-        {
-          type: 'text',
-          text: `${agentDef.prompt}\n\n${smartContextBlock}\n\n${prompt}`
-        }
-      ];
-
-      for (const attachment of attachments) {
-        if (attachment.type === 'image' && attachment.source) {
-          content.push({
-            type: 'image',
-            source: attachment.source,
-          });
-        }
-      }
-
-      console.log(`📸 [ExecuteAgent] Content blocks: ${content.length} (${content.filter(c => c.type === 'image').length} images)`);
-
-      // Generator function required by SDK for images
-      promptContent = (async function*() {
-        yield {
-          type: "user" as const,
-          message: {
-            role: "user" as const,
-            content,
-          }
-        };
-      })();
-    } else {
-      // Simple string prompt when no images - include smart context
-      promptContent = `${agentDef.prompt}\n\n${smartContextBlock}\n\n${prompt}`;
-    }
-
-    // 🔥 RETRY MECHANISM for SDK errors (JSON parsing, connection issues)
-    const MAX_SDK_RETRIES = 3;
-    let lastError: any = null;
-
-    for (let sdkAttempt = 1; sdkAttempt <= MAX_SDK_RETRIES; sdkAttempt++) {
-      try {
-        if (sdkAttempt > 1) {
-          console.log(`\n🔄 [ExecuteAgent] SDK RETRY attempt ${sdkAttempt}/${MAX_SDK_RETRIES} for ${agentType}`);
-          // Wait before retry (exponential backoff)
-          const delay = Math.min(5000 * Math.pow(2, sdkAttempt - 2), 30000);
-          console.log(`   Waiting ${delay}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-
-        // Execute agent using SDK query() with correct API
-        // https://docs.claude.com/en/api/agent-sdk/streaming-vs-single-mode
-
-        // NO LIMIT on turns - agents need to explore codebase thoroughly
-        // maxTurns = number of conversation rounds (user→assistant→tools→assistant)
-        // Not "retry attempts" - it's legitimate exploration with tools
-
-        // Let SDK manage everything - tools, turns, iterations
-        console.log(`🤖 [ExecuteAgent] Starting ${agentType} agent with SDK (attempt ${sdkAttempt}/${MAX_SDK_RETRIES})`);
-
-      // 🔑 Get API key from context (project-specific or user default)
-      let apiKey: string | undefined = process.env.ANTHROPIC_API_KEY;
-      let apiKeySource: string = 'environment';
-
-      if (taskId && contextOverride) {
-        const contextApiKey = contextOverride.getData('anthropicApiKey') as string | undefined;
-        const contextSource = contextOverride.getData('apiKeySource') as string | undefined;
-
-        if (contextApiKey) {
-          apiKey = contextApiKey;
-          apiKeySource = contextSource || 'context';
-        }
-      }
-
-      console.log(`🔑 [ExecuteAgent] API Key check:`, {
-        hasApiKey: !!apiKey,
-        keyLength: apiKey?.length || 0,
-        source: apiKeySource,
-        nodeVersion: process.version,
-        platform: process.platform,
-      });
-
-      if (!apiKey) {
-        throw new Error(
-          `No Anthropic API key available for agent execution. ` +
-          `Please configure a project API key, user default API key, or ANTHROPIC_API_KEY environment variable.`
-        );
-      }
-
-      // SDK query - with MCP tools for enhanced capabilities
-      console.log(`📡 [ExecuteAgent] Calling SDK with model: ${model}`);
-      console.log(`🔧 [ExecuteAgent] Including MCP tools: custom-dev-tools, extra-tools`);
-
-      // 🔥 PERMISSION MODE: All agents use 'bypassPermissions' for autonomous execution
-      // NOTE: 'plan' mode causes INTERACTIVE behavior (asks questions) - NOT suitable for autonomous agents
-      // We rely on prompts to restrict agents to appropriate operations (read-only for planning, etc.)
-      const effectivePermissionMode = permissionMode || 'bypassPermissions';
-
-      console.log(`🔐 [ExecuteAgent] Permission mode: ${effectivePermissionMode}`);
-
-      // Create MCP servers for custom tools
-      const customToolsServer = createCustomToolsServer();
-      const extraToolsServer = createExtraToolsServer();
-      const exploratoryToolsServer = createExploratoryToolsServer();
-      const autonomousToolsServer = createAutonomousToolsServer();
-
-      let stream;
-      try {
-        // 🧠 Build query options with optional extended thinking
-        const queryOptions: any = {
-          cwd: workspacePath,
-          model, // Explicit model ID: claude-haiku-4-5-*, claude-sonnet-4-5-*, claude-opus-4-5-*
-          // NO maxTurns limit - let Claude iterate freely (can handle 100k+ turns/min)
-          permissionMode: effectivePermissionMode,
-          env: {
-            ...process.env,
-            ANTHROPIC_API_KEY: apiKey, // Use project/user-specific API key
-          },
-          // 🔧 MCP Tools - Enhanced agent capabilities (ALL tools for maximum autonomy)
-          mcpServers: {
-            'custom-dev-tools': customToolsServer,
-            'extra-tools': extraToolsServer,
-            'exploratory-tools': exploratoryToolsServer,
-            'autonomous-tools': autonomousToolsServer,
-          },
-        };
-
-        // 🔄 SESSION RESUME: Add resume options if provided
-        // This allows continuing from an interrupted execution exactly where it left off
-        if (resumeOptions?.isResume && resumeOptions?.resumeSessionId) {
-          queryOptions.resume = resumeOptions.resumeSessionId;
-          console.log(`\n🔄🔄🔄 [SESSION RESUME] Resuming from session: ${resumeOptions.resumeSessionId}`);
-
-          if (resumeOptions.resumeAtMessage) {
-            queryOptions.resumeSessionAt = resumeOptions.resumeAtMessage;
-            console.log(`   → Resuming at message: ${resumeOptions.resumeAtMessage}`);
-          }
-
-          NotificationService.emitConsoleLog(
-            taskId || '',
-            'info',
-            `🔄 [SESSION RESUME] Continuing ${agentType} from previous session`
-          );
-          AgentActivityService.emitMessage(
-            taskId || '',
-            agentType,
-            `🔄 Resuming from previous session...`
-          );
-        }
-
-        // 🧠 EXTENDED THINKING: Add maxThinkingTokens for complex tasks
-        // SDK uses maxThinkingTokens option directly (NOT thinking: {...})
-        if (thinkingBudget > 0) {
-          queryOptions.maxThinkingTokens = thinkingBudget;
-
-          // 🧠 Emit to Activity - Claude is now THINKING deeply
-          AgentActivityService.emitThinking(
-            taskId || '',
-            agentType,
-            `Deep reasoning enabled with ${thinkingBudget.toLocaleString()} token budget`
-          );
-          NotificationService.emitConsoleLog(
-            taskId || '',
-            'info',
-            `🧠 [ExtendedThinking] ACTIVE for ${agentType} - ${thinkingBudget} tokens allocated`
-          );
-        }
-
-        // 🔄 For resume mode, use continuation prompt instead of full prompt
-        const effectivePrompt = (resumeOptions?.isResume && resumeOptions?.resumeSessionId)
-          ? 'Continue your work from where you left off. Complete any remaining tasks.'
-          : promptContent;
-
-        stream = query({
-          prompt: effectivePrompt as any,
-          options: queryOptions,
-        });
-
-        console.log(`✅ [ExecuteAgent] SDK query() call successful, stream created`);
-
-        // 🎮 START EXECUTION TRACKING: Enable mid-turn intervention
-        if (taskId) {
-          ExecutionControlService.startExecution(taskId, agentType, 'executing');
-        }
-
-      } catch (queryError: any) {
-        console.error(`❌ [ExecuteAgent] Failed to create SDK stream:`, {
-          message: queryError.message,
-          stack: queryError.stack,
-          code: queryError.code,
-          fullError: queryError
-        });
-        throw new Error(`SDK query failed: ${queryError.message}`);
-      }
-
-      // 📺 TRUE TOKEN STREAMING: Start streaming session for real-time token delivery
-      let streamId: string | null = null;
-      if (taskId) {
-        streamId = StreamingService.startStream(taskId, agentType);
-        console.log(`📺 [TokenStreaming] Stream started: ${streamId}`);
-      }
-
-      // 🔥 TRUST THE SDK: Let SDK handle all timeouts and error recovery
-      // We simply consume the stream and collect messages
-      let finalResult: any = null;
-      const allMessages: any[] = [];
-      let turnCount = 0;
-
-      // 🔥 LOOP DETECTION: Detect stuck agents by counting messages without tool activity
-      // SDK sends assistant/user messages that CONTAIN tool_use/tool_result as content blocks
-      let messagesWithoutToolUse = 0;
-      const MAX_MESSAGES_WITHOUT_TOOL_USE = 100; // Higher threshold - only catch truly stuck agents
-
-      // 🔥 HISTORY DETECTION: Track if we've received first turn_start (agent is actually active)
-      // SDK may send conversation history (assistant/user messages) before agent starts working
-      let agentStarted = false;
-
-      // 🎯 ACTIVITY TRACKING: Map tool_use calls to their results for AgentActivityService
-      // Key: tool_use ID, Value: { name, input }
-      const pendingToolCalls = new Map<string, { name: string; input: any }>();
-      let historyMessagesReceived = 0;
-
-      // 💰 USAGE TRACKING: Accumulate tokens from stream messages
-      // Agent SDK doesn't return usage in finalResult - we must accumulate from stream events
-      const accumulatedUsage = {
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      };
-      const MAX_HISTORY_MESSAGES = 200; // Fail-safe: abort if too much history without agent starting
-      const startTime = Date.now();
-
-      // 🔄 SESSION TRACKING: Capture session_id and message UUIDs for resume capability
-      // These are essential for mid-execution recovery
-      let sdkSessionId: string | undefined;
-      let lastMessageUuid: string | undefined;
-
-      console.log(`🔄 [ExecuteAgent] Starting to consume stream messages...`);
-      console.log(`   SDK will handle timeouts and error recovery automatically`);
-      console.log(`   Loop detection: ${MAX_MESSAGES_WITHOUT_TOOL_USE} messages without tool activity`);
-      console.log(`   History limit: ${MAX_HISTORY_MESSAGES} messages before agent must start`);
-      console.log(`   🔥 Total timeout: ${Math.floor(AGENT_TIMEOUTS.TOTAL_MAX / 60000)} minutes (absolute max)`);
-
-      // 🔥 EXTERNAL WATCHDOG: Timer that fires if no message received for too long
-      // This catches cases where stream.next() blocks forever
-      const MESSAGE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max between messages
-      // 🔥 TOTAL TIMEOUT: Maximum execution time regardless of activity
-      // Prevents infinite loops where agent keeps sending messages but makes no real progress
-      const TOTAL_TIMEOUT_MS = AGENT_TIMEOUTS.TOTAL_MAX; // 30 minutes absolute maximum
-      let lastMessageTime = Date.now();
-      let watchdogTriggered = false;
-      let totalTimeoutTriggered = false;
-
-      const watchdogInterval = setInterval(() => {
-        const timeSinceLastMessage = Date.now() - lastMessageTime;
-        const totalElapsed = Date.now() - startTime;
-
-        // 🔥 CHECK 1: No message timeout (agent stuck waiting)
-        if (timeSinceLastMessage > MESSAGE_TIMEOUT_MS) {
-          console.error(`\n${'='.repeat(80)}`);
-          console.error(`🚨 WATCHDOG TIMEOUT: No message received in ${Math.floor(timeSinceLastMessage / 1000)}s`);
-          console.error(`   Agent: ${agentType}`);
-          console.error(`   Total elapsed: ${Math.floor(totalElapsed / 1000)}s`);
-          console.error(`   Messages received: ${allMessages.length}`);
-          console.error(`   Turns completed: ${turnCount}`);
-          console.error(`${'='.repeat(80)}\n`);
-          watchdogTriggered = true;
-          // Note: We can't abort the stream from here, but we set a flag
-          // The main loop will check this flag on each iteration
-        }
-
-        // 🔥 CHECK 2: Total timeout (agent running too long even with activity)
-        if (totalElapsed > TOTAL_TIMEOUT_MS && !totalTimeoutTriggered) {
-          console.error(`\n${'='.repeat(80)}`);
-          console.error(`🚨 TOTAL TIMEOUT: Agent exceeded maximum execution time`);
-          console.error(`   Agent: ${agentType}`);
-          console.error(`   Total elapsed: ${Math.floor(totalElapsed / 1000)}s (max: ${Math.floor(TOTAL_TIMEOUT_MS / 1000)}s)`);
-          console.error(`   Messages received: ${allMessages.length}`);
-          console.error(`   Turns completed: ${turnCount}`);
-          console.error(`   This prevents infinite loops where agent keeps messaging without completing`);
-          console.error(`${'='.repeat(80)}\n`);
-          totalTimeoutTriggered = true;
-          // The main loop will check this flag and abort
-        }
-      }, 30000); // Check every 30 seconds
-
-      try {
-        // Simple stream consumption - SDK handles everything
-        for await (const message of stream) {
-          // Update watchdog timer
-          lastMessageTime = Date.now();
-
-          // 🔥 CHECK WATCHDOG: If triggered while we were waiting, abort now
-          if (watchdogTriggered) {
-            const error = new Error(`Agent ${agentType} stream timeout - watchdog triggered`);
-            (error as any).isTimeout = true;
-            (error as any).isWatchdogTimeout = true;
-            throw error;
-          }
-
-          // 🔥 CHECK TOTAL TIMEOUT: Agent running too long even with activity
-          if (totalTimeoutTriggered) {
-            const error = new Error(`Agent ${agentType} exceeded maximum execution time (${Math.floor(TOTAL_TIMEOUT_MS / 60000)} min)`);
-            (error as any).isTimeout = true;
-            (error as any).isTotalTimeout = true;
-            throw error;
-          }
-
-          // 🎮 MID-EXECUTION INTERVENTION: Check for pause/abort requests
-          if (taskId) {
-            // Check for abort request
-            if (ExecutionControlService.shouldAbort(taskId)) {
-              const error = new Error(`Agent ${agentType} aborted by supervisor/user`);
-              (error as any).isUserAbort = true;
-              throw error;
-            }
-
-            // Check for pause request - wait until resumed
-            if (ExecutionControlService.shouldPause(taskId)) {
-              console.log(`⏸️ [ExecuteAgent] Paused by supervisor/user - waiting for resume...`);
-              await ExecutionControlService.waitForResume(taskId);
-              console.log(`▶️ [ExecuteAgent] Resumed - continuing execution`);
-
-              // After resume, check if we should abort instead
-              if (ExecutionControlService.shouldAbort(taskId)) {
-                const error = new Error(`Agent ${agentType} aborted after pause`);
-                (error as any).isUserAbort = true;
-                throw error;
-              }
-            }
-
-            // Update execution state
-            ExecutionControlService.updateState(taskId, { turnCount });
-          }
-
-          allMessages.push(message);
-
-          // 🔄 SESSION CAPTURE: Extract session_id and uuid for resume capability
-          // SDK messages include session_id and uuid fields per sdk.d.ts
-          const msgSessionId = (message as any).session_id;
-          const msgUuid = (message as any).uuid;
-          if (msgSessionId && !sdkSessionId) {
-            sdkSessionId = msgSessionId;
-            console.log(`🔄 [SESSION] Captured SDK session_id: ${sdkSessionId}`);
-          }
-          if (msgUuid) {
-            lastMessageUuid = msgUuid; // Always update to track last message
-          }
-
-          // 🔥 LOOP DETECTION: Check if this message contains tool activity
-          const messageType = (message as any).type;
-          const messageContent = (message as any).message?.content || [];
-
-          // 🔍 DEBUG: Log ALL message types to understand SDK structure
-          if (turnCount <= 3) { // Only log first 3 turns to avoid spam
-            console.log(`🔍 [SDK Message] type=${messageType}, hasContent=${messageContent.length > 0}`);
-            if (messageContent.length > 0) {
-              const contentTypes = messageContent.map((b: any) => b.type).join(', ');
-              console.log(`   Content blocks: ${contentTypes}`);
-            }
-          }
-
-          // 🎯 ACTIVITY: Process tool_use blocks nested in message.content
-          if (Array.isArray(messageContent)) {
-            for (const block of messageContent) {
-              if (block.type === 'tool_use') {
-                const tool = block.name || 'unknown';
-                const input = block.input || {};
-                const toolId = block.id;
-
-                console.log(`🔧 [Activity] Found tool_use in content: ${tool} (id: ${toolId?.substring(0, 8)}...)`);
-
-                if (toolId) {
-                  pendingToolCalls.set(toolId, { name: tool, input });
-                }
-
-                // Emit activity event
-                if (taskId) {
-                  AgentActivityService.emitToolUse(taskId, agentType, tool, input);
-                }
-              } else if (block.type === 'tool_result') {
-                const toolUseId = block.tool_use_id;
-                const result = block.content || '';
-
-                console.log(`📤 [Activity] Found tool_result in content (id: ${toolUseId?.substring(0, 8)}...)`);
-
-                if (taskId && toolUseId) {
-                  const pendingCall = pendingToolCalls.get(toolUseId);
-                  if (pendingCall) {
-                    console.log(`📡 [Activity] Emitting activity for: ${pendingCall.name}`);
-                    AgentActivityService.processToolResult(
-                      taskId,
-                      agentType,
-                      pendingCall.name,
-                      pendingCall.input,
-                      result
-                    );
-                    pendingToolCalls.delete(toolUseId);
-                  }
-                }
-              }
-            }
-          }
-
-          // Check for tool activity in message content (SDK nests tool_use inside assistant messages)
-          const hasToolActivity =
-            messageType === 'result' ||
-            messageType === 'turn_start' ||
-            (Array.isArray(messageContent) && messageContent.some((block: any) =>
-              block.type === 'tool_use' || block.type === 'tool_result'
-            ));
-
-          // 🔥 AGENT STARTED: First turn_start means agent is actively working
-          if (messageType === 'turn_start') {
-            if (!agentStarted) {
-              console.log(`✅ [ExecuteAgent] Agent started after ${historyMessagesReceived} history messages`);
-              agentStarted = true;
-            }
-          }
-
-          // 🔥 HISTORY PROTECTION: Count messages before agent starts
-          if (!agentStarted) {
-            historyMessagesReceived++;
-
-            // Fail-safe: too much history without agent starting
-            if (historyMessagesReceived >= MAX_HISTORY_MESSAGES) {
-              const lastFewTypes = allMessages.slice(-10).map(m => (m as any).type).join(', ');
-              console.error(`\n${'='.repeat(80)}`);
-              console.error(`🚨 HISTORY OVERFLOW: ${historyMessagesReceived} messages without agent starting`);
-              console.error(`   Agent: ${agentType}`);
-              console.error(`   Last 10 message types: ${lastFewTypes}`);
-              console.error(`${'='.repeat(80)}\n`);
-
-              const error = new Error(
-                `Agent ${agentType} failed to start: ${historyMessagesReceived} messages without turn_start. ` +
-                `SDK may be stuck replaying history. Last message types: ${lastFewTypes}`
-              );
-              (error as any).isHistoryOverflow = true;
-              throw error;
-            }
-
-            // Don't count history messages toward loop detection - skip to next message
-            continue;
-          }
-
-          if (hasToolActivity) {
-            // Reset counter on tool activity
-            messagesWithoutToolUse = 0;
-          } else {
-            // Increment counter for messages without tool activity
-            messagesWithoutToolUse++;
-
-            // Check if stuck (only after many messages without ANY tool use)
-            if (messagesWithoutToolUse >= MAX_MESSAGES_WITHOUT_TOOL_USE) {
-              const lastFewTypes = allMessages.slice(-10).map(m => (m as any).type).join(', ');
-              console.error(`\n${'='.repeat(80)}`);
-              console.error(`🚨 LOOP DETECTED: ${messagesWithoutToolUse} consecutive messages without tool activity`);
-              console.error(`   Agent: ${agentType}`);
-              console.error(`   Turn count: ${turnCount}`);
-              console.error(`   Last 10 message types: ${lastFewTypes}`);
-              console.error(`${'='.repeat(80)}\n`);
-
-              if (taskId) {
-                NotificationService.emitConsoleLog(
-                  taskId,
-                  'error',
-                  `🚨 Agent ${agentType} stuck in loop - aborting after ${messagesWithoutToolUse} messages without tool activity`
-                );
-              }
-
-              // Throw error to break out of the stream
-              const loopError = new Error(
-                `Agent ${agentType} stuck in loop: ${messagesWithoutToolUse} consecutive messages without tool activity. ` +
-                `Last message types: ${lastFewTypes}`
-              );
-              (loopError as any).isLoopDetection = true;
-              throw loopError;
-            }
-          }
-
-          // 🔥 CRITICAL: Log FULL message if it has an error flag
-          if ((message as any).is_error === true) {
-            console.error(`\n${'='.repeat(80)}`);
-            console.error(`🔥 ERROR MESSAGE DETECTED IN STREAM`);
-            console.error(`${'='.repeat(80)}`);
-            console.error(`Message type: ${message.type}`);
-            console.error(`Full message object:`);
-            console.error(JSON.stringify(message, null, 2));
-            console.error(`${'='.repeat(80)}\n`);
-          }
-
-          // Log every message type for debugging
-          if ((message as any).type !== 'tool_use' && (message as any).type !== 'tool_result' && (message as any).type !== 'text') {
-            console.log(`📨 [ExecuteAgent] Received message type: ${message.type}`, {
-              hasSubtype: !!(message as any).subtype,
-              isError: !!(message as any).is_error,
-            });
-          }
-
-          // 🔥 REAL-TIME VISIBILITY: Log what the agent is doing
-          if ((message as any).type === 'turn_start') {
-            turnCount++;
-            console.log(`\n🔄 [${agentType}] Turn ${turnCount} started`);
-            if (taskId) {
-              NotificationService.emitConsoleLog(taskId, 'info', `🔄 Turn ${turnCount} - Agent working...`);
-            }
-          }
-
-          if ((message as any).type === 'tool_use') {
-            const tool = (message as any).name || 'unknown';
-            const input = (message as any).input || {};
-            const toolId = (message as any).id;
-            console.log(`🔧 [${agentType}] Turn ${turnCount}: Using tool ${tool}`);
-
-            // 🎯 Store pending tool call for matching with result
-            if (toolId) {
-              pendingToolCalls.set(toolId, { name: tool, input });
-              console.log(`📝 [Activity] Stored tool call: ${tool} (id: ${toolId.substring(0, 8)}...)`);
-            } else {
-              console.warn(`⚠️ [Activity] tool_use missing ID, cannot track: ${tool}`);
-            }
-
-            // 🎯 Emit structured activity for real-time frontend display
-            if (taskId) {
-              // Emit tool use event (will be paired with result)
-              AgentActivityService.emitToolUse(taskId, agentType, tool, input);
-              console.log(`📡 [Activity] Emitted tool_use: ${tool}`);
-
-              // 📺 TOOL STREAMING: Emit tool start event for real-time UI
-              StreamingService.streamToolStart(taskId, agentType, tool, toolId || 'unknown', input);
-            }
-
-            // Log file operations for visibility
-            if (tool === 'Read' && input.file_path) {
-              console.log(`   📖 Reading: ${input.file_path}`);
-              if (taskId) {
-                NotificationService.emitConsoleLog(taskId, 'info', `📖 Reading ${input.file_path}`);
-              }
-            } else if (tool === 'Edit' && input.file_path) {
-              console.log(`   ✏️  Editing: ${input.file_path}`);
-              if (taskId) {
-                NotificationService.emitConsoleLog(taskId, 'info', `✏️ Editing ${input.file_path}`);
-              }
-            } else if (tool === 'Write' && input.file_path) {
-              console.log(`   📝 Writing: ${input.file_path}`);
-              if (taskId) {
-                NotificationService.emitConsoleLog(taskId, 'info', `📝 Writing ${input.file_path}`);
-              }
-            } else if (tool === 'Bash' && input.command) {
-              const cmd = input.command;
-
-              // 🔥 DETAILED GIT LOGGING - Show full command for git operations
-              if (cmd.includes('git')) {
-                console.log(`   🌿 GIT COMMAND: ${cmd}`);
-                if (taskId) {
-                  NotificationService.emitConsoleLog(taskId, 'info', `🌿 GIT: ${cmd}`);
-                }
-              } else {
-                const cmdPreview = cmd.substring(0, 80);
-                console.log(`   💻 Running: ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
-                if (taskId) {
-                  NotificationService.emitConsoleLog(taskId, 'info', `💻 ${cmdPreview}${cmd.length > 80 ? '...' : ''}`);
-                }
-              }
-            }
-          }
-
-          if ((message as any).type === 'tool_result') {
-            const status = (message as any).is_error ? '❌' : '✅';
-            const result = (message as any).content || (message as any).result || '';
-            const toolUseId = (message as any).tool_use_id;
-
-            // 🔥 LOG TOOL RESULT - especially for git commands
-            console.log(`${status} [${agentType}] Tool completed`);
-
-            if (result && typeof result === 'string' && result.length > 0) {
-              // Show result preview
-              const resultPreview = result.substring(0, 200).replace(/\n/g, ' ');
-              console.log(`   📤 Result: ${resultPreview}${result.length > 200 ? '...' : ''}`);
-            }
-
-            // 🎯 ACTIVITY: Emit structured activity with tool result
-            if (taskId && toolUseId) {
-              const pendingCall = pendingToolCalls.get(toolUseId);
-              if (pendingCall) {
-                console.log(`📡 [Activity] Processing tool result: ${pendingCall.name} (id: ${toolUseId.substring(0, 8)}...)`);
-                AgentActivityService.processToolResult(
-                  taskId,
-                  agentType,
-                  pendingCall.name,
-                  pendingCall.input,
-                  result
-                );
-
-                // 📺 TOOL STREAMING: Emit tool complete event for real-time UI
-                const isError = (message as any).is_error === true;
-                StreamingService.streamToolComplete(
-                  taskId,
-                  agentType,
-                  pendingCall.name,
-                  toolUseId,
-                  result,
-                  0, // Duration not tracked at this level
-                  !isError
-                );
-
-                // 📺 FILE CHANGE STREAMING: Emit file change for Edit/Write operations
-                if (!isError && (pendingCall.name === 'Edit' || pendingCall.name === 'Write')) {
-                  const filePath = pendingCall.input?.file_path || pendingCall.input?.path;
-                  if (filePath) {
-                    StreamingService.streamFileChange(
-                      taskId,
-                      agentType,
-                      filePath,
-                      pendingCall.name === 'Write' ? 'created' : 'modified'
-                    );
-                  }
-                }
-
-                // 📺 COMMAND OUTPUT STREAMING: Emit command output for Bash operations
-                if (pendingCall.name === 'Bash') {
-                  const command = pendingCall.input?.command || '';
-                  StreamingService.streamCommandOutput(
-                    taskId,
-                    agentType,
-                    command,
-                    {
-                      stdout: typeof result === 'string' ? result : JSON.stringify(result),
-                      exitCode: isError ? 1 : 0
-                    }
-                  );
-                }
-
-                pendingToolCalls.delete(toolUseId); // Clean up
-              } else {
-                console.warn(`⚠️ [Activity] No pending call for tool_use_id: ${toolUseId.substring(0, 8)}...`);
-              }
-            } else {
-              console.warn(`⚠️ [Activity] Cannot process tool_result: taskId=${!!taskId}, toolUseId=${!!toolUseId}`);
-            }
-          }
-
-          if ((message as any).type === 'text') {
-            const text = (message as any).text || '';
-            if (text.length > 0) {
-              // 💬 Emit agent text to Activity (truncate if too long)
-              const displayText = text.length > 500 ? text.substring(0, 500) + '...' : text;
-              if (taskId) {
-                AgentActivityService.emitMessage(taskId, agentType, `💬 ${displayText}`);
-              }
-
-              // 📺 TRUE TOKEN STREAMING: Stream text to frontend in real-time
-              if (streamId) {
-                StreamingService.streamToken(streamId, text);
-              }
-            }
-          }
-
-          // 📺 CONTENT BLOCK STREAMING: Also stream text blocks from message.content array
-          // SDK sometimes sends text as content blocks inside assistant messages
-          if (Array.isArray(messageContent)) {
-            for (const block of messageContent) {
-              if (block.type === 'text' && block.text) {
-                // 💬 Emit text block to Activity
-                const displayText = block.text.length > 500 ? block.text.substring(0, 500) + '...' : block.text;
-                if (taskId && displayText.length > 10) { // Only emit meaningful text
-                  AgentActivityService.emitMessage(taskId, agentType, `💬 ${displayText}`);
-                }
-                if (streamId) {
-                  StreamingService.streamToken(streamId, block.text);
-                }
-              }
-            }
-          }
-
-          // 💰 USAGE ACCUMULATION: Extract tokens from various message types
-          // Agent SDK sends usage in multiple places - accumulate from all sources
-          const msgUsage = (message as any).usage ||
-                          (message as any).message?.usage ||
-                          (message as any).data?.usage;
-          if (msgUsage) {
-            if (msgUsage.input_tokens) accumulatedUsage.input_tokens += msgUsage.input_tokens;
-            if (msgUsage.output_tokens) accumulatedUsage.output_tokens += msgUsage.output_tokens;
-            if (msgUsage.cache_creation_input_tokens) accumulatedUsage.cache_creation_input_tokens += msgUsage.cache_creation_input_tokens;
-            if (msgUsage.cache_read_input_tokens) accumulatedUsage.cache_read_input_tokens += msgUsage.cache_read_input_tokens;
-          }
-
-          if (message.type === 'result') {
-            finalResult = message;
-
-            // 🔥 CHECK FOR ERROR RESULT
-            if ((message as any).is_error || (message as any).subtype === 'error') {
-              console.error(`❌ [ExecuteAgent] SDK returned error result:`, {
-                subtype: (message as any).subtype,
-                is_error: (message as any).is_error,
-                result: (message as any).result,
-                error: (message as any).error,
-                error_message: (message as any).error_message,
-                fullMessage: JSON.stringify(message, null, 2),
-              });
-            }
-
-            console.log(`✅ [ExecuteAgent] Agent ${agentType} completed after ${turnCount} turns`);
-            console.log(`💰 [ExecuteAgent] Accumulated usage: input=${accumulatedUsage.input_tokens}, output=${accumulatedUsage.output_tokens}`);
-
-            // 📺 END TOKEN STREAMING: Close stream on successful completion
-            if (streamId) {
-              StreamingService.endStream(streamId);
-              console.log(`📺 [TokenStreaming] Stream ended: ${streamId}`);
-            }
-          }
-        }
-      } catch (streamError: any) {
-        // 📺 END TOKEN STREAMING on error
-        if (streamId) {
-          StreamingService.endStream(streamId);
-          console.log(`📺 [TokenStreaming] Stream ended (error): ${streamId}`);
-        }
-        // Clear watchdog on error
-        clearInterval(watchdogInterval);
-
-        // 🎮 END EXECUTION TRACKING on error
-        if (taskId) {
-          ExecutionControlService.endExecution(taskId);
-        }
-        const streamDurationMs = Date.now() - startTime;
-        const lastMessageTypes = allMessages.slice(-20).map(m => (m as any).type);
-
-        console.error(`❌ [ExecuteAgent] Error consuming stream:`, {
-          message: streamError.message,
-          stack: streamError.stack,
-          code: streamError.code,
-          turnCount,
-          streamDurationMs,
-          lastMessages: allMessages.slice(-3),
-          isLoopDetection: streamError.isLoopDetection || false,
-          isTimeout: streamError.isTimeout || false,
-          isHistoryOverflow: streamError.isHistoryOverflow || false,
-        });
-
-        // 🔥 LOOP DETECTION: Don't retry loop errors - they won't magically fix themselves
-        if (streamError.isLoopDetection) {
-          console.error(`🚨 [ExecuteAgent] Loop detected - NOT retrying (would just loop again)`);
-          // Mark as non-retryable by adding specific flag
-          streamError.isNonRetryable = true;
-        }
-
-        // 💾 PERSIST FAILED EXECUTION for later retry
-        await this.saveFailedExecution({
-          taskId,
-          agentType,
-          agentName: _agentName,
-          prompt: typeof promptContent === 'string' ? promptContent : prompt,
-          workspacePath,
-          model,
-          permissionMode: effectivePermissionMode,
-          error: streamError,
-          diagnostics: {
-            messagesReceived: allMessages.length,
-            historyMessages: historyMessagesReceived,
-            turnsCompleted: turnCount,
-            lastMessageTypes,
-            streamDurationMs,
-          },
-          context: contextOverride,
-        });
-
-        // Re-throw - SDK already provides detailed error info
-        throw streamError;
-      }
-
-      // Clear watchdog on successful completion
-      clearInterval(watchdogInterval);
-
-      // 🎮 END EXECUTION TRACKING on success
-      if (taskId) {
-        ExecutionControlService.endExecution(taskId);
-      }
-
-      console.log(`✅ [ExecuteAgent] ${agentType} completed successfully`);
-
-      // 🔍 DEBUG: Log the structure of finalResult to understand what SDK returns
-      console.log('\n🔍 [DEBUG] finalResult structure:');
-      console.log('  - Type:', typeof finalResult);
-      console.log('  - Keys:', finalResult ? Object.keys(finalResult) : 'null');
-      console.log('  - Has content:', finalResult?.content ? 'yes' : 'no');
-      if (finalResult?.content) {
-        console.log('  - Content type:', Array.isArray(finalResult.content) ? 'array' : typeof finalResult.content);
-        console.log('  - Content length:', Array.isArray(finalResult.content) ? finalResult.content.length : 'N/A');
-      }
-      console.log('  - Full finalResult:', JSON.stringify(finalResult, null, 2).substring(0, 500));
-
-      // Extract output text from result
-      const output = this.extractOutputText(finalResult, allMessages) || '';
-
-      console.log(`\n📝 [ExecuteAgent] Extracted output length: ${output.length} chars`);
-      console.log(`📝 [ExecuteAgent] Output preview: ${output.substring(0, 200)}...`);
-
-      // Calculate cost with ACTUAL pricing for Claude models (from official docs)
-      // Source: https://docs.anthropic.com/en/docs/about-claude/pricing
-      //
-      // Claude 4.5 Models (per million tokens):
-      // - Haiku 4.5:  Input $1, Output $5
-      // - Sonnet 4.5: Input $3, Output $15
-      // - Opus 4.5:   Input $5, Output $25
-      //
-      // Prompt Caching (multipliers on input price):
-      // - cache_creation_input_tokens: 1.25x input price
-      // - cache_read_input_tokens: 0.1x input price
-
-      // Use accumulated usage from stream (fallback to finalResult.usage for backwards compatibility)
-      const usage = accumulatedUsage.input_tokens > 0 || accumulatedUsage.output_tokens > 0
-        ? accumulatedUsage
-        : ((finalResult as any)?.usage || {});
-      const inputTokens = usage.input_tokens || 0;
-      const outputTokens = usage.output_tokens || 0;
-      const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
-      const cacheReadTokens = usage.cache_read_input_tokens || 0;
-
-      // Log which source we used for usage data
-      const usageSource = accumulatedUsage.input_tokens > 0 || accumulatedUsage.output_tokens > 0
-        ? 'stream accumulation'
-        : 'finalResult.usage';
-      console.log(`💰 [ExecuteAgent] Usage source: ${usageSource}`);
-
-      // Determine pricing based on model alias (haiku, sonnet, opus)
-      const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
-
-      const pricing = MODEL_PRICING[modelAlias as keyof typeof MODEL_PRICING];
-      if (!pricing) {
-        throw new Error(
-          `❌ [ExecuteAgent] No pricing found for model alias "${modelAlias}". ` +
-          `Valid aliases: ${Object.keys(MODEL_PRICING).join(', ')}`
-        );
-      }
-      const inputPricePerMillion = pricing.inputPerMillion;
-      const outputPricePerMillion = pricing.outputPerMillion;
-
-      console.log(`   Model: ${model} (alias: ${modelAlias})`);
-
-      // Calculate cost including cache tokens
-      // - Regular input: inputPrice
-      // - Cache creation: 1.25x inputPrice
-      // - Cache read: 0.1x inputPrice (big discount for reusing cache)
-      const inputCost = (inputTokens * inputPricePerMillion) / 1_000_000;
-      const outputCost = (outputTokens * outputPricePerMillion) / 1_000_000;
-      const cacheCreationCost = (cacheCreationTokens * inputPricePerMillion * 1.25) / 1_000_000;
-      const cacheReadCost = (cacheReadTokens * inputPricePerMillion * 0.1) / 1_000_000;
-      const cost = inputCost + outputCost + cacheCreationCost + cacheReadCost;
-
-      console.log(`💰 [ExecuteAgent] ${agentType} cost calculation:`);
-      console.log(`   Input tokens: ${inputTokens} @ $${inputPricePerMillion}/MTok = $${inputCost.toFixed(4)}`);
-      console.log(`   Output tokens: ${outputTokens} @ $${outputPricePerMillion}/MTok = $${outputCost.toFixed(4)}`);
-      if (cacheCreationTokens > 0) {
-        console.log(`   Cache creation: ${cacheCreationTokens} @ $${(inputPricePerMillion * 1.25).toFixed(2)}/MTok = $${cacheCreationCost.toFixed(4)}`);
-      }
-      if (cacheReadTokens > 0) {
-        console.log(`   Cache read: ${cacheReadTokens} @ $${(inputPricePerMillion * 0.1).toFixed(2)}/MTok = $${cacheReadCost.toFixed(4)}`);
-      }
-      console.log(`   Total cost: $${cost.toFixed(4)}`);
-
-      // 🔗 POST-EXECUTION HOOKS - Run after agent completes
-      const executionDuration = Date.now() - executionStartTime;
-      try {
-        await AgentHooksService.runPostExecutionHooks({
-          agentType,
-          taskId: taskId || 'unknown',
-          workspacePath,
-          success: true,
-          output: output.substring(0, 1000), // Truncate for hooks
-          duration: executionDuration,
-          cost,
-          tokens: inputTokens + outputTokens,
-        });
-        console.log(`✅ [ExecuteAgent] Post-execution hooks completed`);
-      } catch (postHookError: any) {
-        console.warn(`⚠️ [ExecuteAgent] Post-execution hook error (non-critical): ${postHookError.message}`);
-      }
-
-      // 💾 SESSION - Save context for future reference
-      if (sessionId && taskId) {
-        try {
-          await SessionService.updateContext(sessionId, {
-            lastAgentType: agentType,
-            lastOutput: output.substring(0, 2000), // Keep relevant output
-            lastCost: cost,
-            lastTokens: inputTokens + outputTokens,
-            totalExecutions: (sessionContext.totalExecutions || 0) + 1,
-            totalCost: (sessionContext.totalCost || 0) + cost,
-            updatedAt: new Date().toISOString(),
-          });
-          console.log(`💾 [ExecuteAgent] Session context saved`);
-        } catch (sessionSaveError: any) {
-          console.warn(`⚠️ [ExecuteAgent] Session save error (non-critical): ${sessionSaveError.message}`);
-        }
-      }
-
-      // 📊 STATISTICS - Track agent execution
-      AgentHooksService.recordExecution({
-        agentType,
-        duration: executionDuration,
-        success: true,
-        cost,
-        tokens: inputTokens + outputTokens,
-      });
-
-      return {
-        output: output,
-        usage: (finalResult as any)?.usage || {},
-        cost: cost,
-        stopReason: (finalResult as any)?.stop_reason,
-        sessionId: sessionId,
-        canResume: !!sdkSessionId, // 🔄 Can resume if we captured SDK session
-        rawResult: finalResult,
-        allMessages,
-        executionDuration, // Added for tracking
-        // 🔄 SESSION RESUME DATA: Essential for mid-execution recovery
-        sdkSessionId,        // SDK session ID for resume parameter
-        lastMessageUuid,     // Last message UUID for precise resumption point
-      };
-      } catch (error: any) {
-        console.error(`❌ [ExecuteAgent] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
-        console.error(`❌ [ExecuteAgent] Error type:`, error.constructor.name);
-        console.error(`❌ [ExecuteAgent] Error code:`, error.code);
-        console.error(`❌ [ExecuteAgent] Exit code:`, error.exitCode);
-        console.error(`❌ [ExecuteAgent] Signal:`, error.signal);
-        console.error(`❌ [ExecuteAgent] Full error object:`, JSON.stringify(error, null, 2));
-        console.error(`❌ [ExecuteAgent] Stack:`, error.stack);
-
-        lastError = error;
-
-        // 🔥 LOOP DETECTION: Never retry loop errors - they won't fix themselves
-        if (error.isNonRetryable || error.isLoopDetection) {
-          console.error(`🚨 [ExecuteAgent] Non-retryable error (loop detection or explicit flag) - failing immediately`);
-          throw error;
-        }
-
-        // 🔥 Check if this is a retryable error (JSON parsing, connection issues)
-        const isRetryableError = (
-          error.message?.includes('Unterminated string in JSON') ||
-          error.message?.includes('JSON') ||
-          error.message?.includes('ECONNRESET') ||
-          error.message?.includes('ETIMEDOUT') ||
-          error.message?.includes('socket hang up') ||
-          error.constructor.name === 'SyntaxError'
-        );
-
-        if (isRetryableError && sdkAttempt < MAX_SDK_RETRIES) {
-          console.log(`🔄 [ExecuteAgent] Retryable error detected, will retry...`);
-          console.log(`   Error: ${error.message}`);
-          continue; // Retry
-        }
-
-        // Non-retryable error or max retries reached
-        console.error(`❌ [ExecuteAgent] ${isRetryableError ? 'Max retries reached' : 'Non-retryable error'}`);
-
-        // Check if workspace still exists
-        const fs = require('fs');
-        const workspaceStillExists = fs.existsSync(workspacePath);
-        console.error(`❌ [ExecuteAgent] Workspace exists after error:`, workspaceStillExists);
-
-        // Check if .env has API key
-        const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
-        console.error(`❌ [ExecuteAgent] ANTHROPIC_API_KEY still set:`, hasEnvKey);
-
-        throw error;
-      }
-    }
-
-    // This should never be reached (loop always returns or throws)
-    throw lastError || new Error(`${agentType} failed after ${MAX_SDK_RETRIES} attempts`);
+    skipOptimization?: boolean,
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan',
+    resumeOptions?: ResumeOptions
+  ): Promise<AgentExecutionResult> {
+    // 🔥 DELEGATE to extracted service
+    return agentExecutorService.executeAgent(
+      agentType,
+      prompt,
+      workspacePath,
+      taskId,
+      _agentName,
+      sessionId,
+      _fork,
+      attachments,
+      _options,
+      contextOverride,
+      skipOptimization,
+      permissionMode,
+      resumeOptions
+    );
   }
-
-  /**
-   * Extract text output from SDK query result
-   *
-   * Tries multiple strategies to extract text from SDK messages:
-   * 1. finalResult.content[] (standard SDK format)
-   * 2. Search all messages for 'assistant' messages with text content
-   * 3. Search all messages for any text blocks
-   */
-  private extractOutputText(result: any, allMessages?: any[]): string {
-    const outputs: string[] = [];
-
-    console.log('\n🔍 [extractOutputText] Starting extraction...');
-
-    // Strategy 1: Extract from finalResult.content
-    if (result?.content && Array.isArray(result.content)) {
-      console.log('  ✅ Strategy 1: Found result.content array');
-      const textBlocks = result.content
-        .filter((block: any) => block.type === 'text')
-        .map((block: any) => block.text);
-
-      if (textBlocks.length > 0) {
-        outputs.push(...textBlocks);
-        console.log(`  ✅ Extracted ${textBlocks.length} text block(s) from result.content`);
-      }
-    } else {
-      console.log('  ⚠️  Strategy 1 failed: result.content not found or not array');
-    }
-
-    // Strategy 2: Search all messages for assistant responses
-    if (allMessages && allMessages.length > 0) {
-      console.log(`  🔍 Strategy 2: Searching ${allMessages.length} messages for assistant responses`);
-
-      for (const msg of allMessages) {
-        // Look for message.message.content (SDK might nest it)
-        if (msg?.message?.role === 'assistant' && msg?.message?.content) {
-          const content = msg.message.content;
-          if (Array.isArray(content)) {
-            const textBlocks = content
-              .filter((block: any) => block.type === 'text')
-              .map((block: any) => block.text);
-
-            if (textBlocks.length > 0) {
-              outputs.push(...textBlocks);
-              console.log(`  ✅ Found ${textBlocks.length} text block(s) in assistant message`);
-            }
-          }
-        }
-
-        // Also check top-level content
-        if (msg?.content && Array.isArray(msg.content)) {
-          const textBlocks = msg.content
-            .filter((block: any) => block.type === 'text')
-            .map((block: any) => block.text);
-
-          if (textBlocks.length > 0) {
-            outputs.push(...textBlocks);
-            console.log(`  ✅ Found ${textBlocks.length} text block(s) in message.content`);
-          }
-        }
-      }
-    }
-
-    // Strategy 3: Fallback - try to extract any text field
-    if (outputs.length === 0 && result) {
-      console.log('  ⚠️  Strategy 3: Fallback - searching for any text fields');
-
-      // Try result.text
-      if (typeof result.text === 'string') {
-        outputs.push(result.text);
-        console.log('  ✅ Found result.text');
-      }
-
-      // Try result.output
-      if (typeof result.output === 'string') {
-        outputs.push(result.output);
-        console.log('  ✅ Found result.output');
-      }
-    }
-
-    const finalOutput = outputs.join('\n\n').trim();
-    console.log(`\n✅ [extractOutputText] Final output: ${finalOutput.length} chars`);
-
-    return finalOutput;
-  }
-
   /**
    * Execute a developer agent (specialized for code writing)
    *
@@ -2922,13 +1480,8 @@ ${formattedDirectives}
         console.error(`   Available repositories: ${repositories.map(r => r.name || r.githubRepoName).join(', ')}`);
         console.error(`   🔥 CRITICAL: This should have been set by TechLeadPhase - check EventStore`);
 
-        // Mark task as failed instead of using dangerous fallback
-        const Task = require('../../models/Task').Task;
-        const dbTask = await Task.findById(task._id);
-        if (dbTask) {
-          dbTask.status = 'failed';
-          await dbTask.save();
-        }
+        // Mark task as failed instead of using dangerous fallback (fire-and-forget)
+        updateTaskFireAndForget(task._id, { status: 'failed' }, 'mark failed - no targetRepository');
 
         throw new Error(`Story ${story.id} has no targetRepository - cannot execute developer. Task marked as FAILED.`);
       }
@@ -2946,404 +1499,8 @@ ${formattedDirectives}
       console.log(`📂 [Developer ${member.instanceId}] Repository directory: ${repoName}`);
       console.log(`📂 [Developer ${member.instanceId}] Workspace: ${workspacePath}`);
 
-      // Build developer prompt - Rich context per SDK philosophy
-      const projectId = task.projectId?.toString() || '';
-
-      // 💡 Get any injected directives for developers from task
-      const directivesBlock = await this.getDirectivesForAgent(task._id as any, 'developer');
-
-      // Extract story-specific guidance (from TechLead enhanced format)
-      const storyHelpers = story.mustUseHelpers || [];
-      const storyAntiPatterns = story.antiPatterns || [];
-      const storyCodeExamples = story.codeExamples || [];
-      const storyAcceptanceCriteria = story.acceptanceCriteria || [];
-
-      // 🔍 Smart file analysis - understand dependencies and impact
-      let fileAnalysisSection = '';
-      const filesToModify = story.filesToModify || [];
-      const filesToCreate = story.filesToCreate || [];
-
-      if (filesToModify.length > 0 || filesToCreate.length > 0) {
-        try {
-          const { SmartCodeAnalyzer } = await import('../SmartCodeAnalyzer');
-          const targetFiles = [...filesToModify, ...filesToCreate];
-          const suggestions = SmartCodeAnalyzer.getSuggestedReads(targetFiles, workspacePath, 8);
-
-          if (suggestions.length > 0) {
-            fileAnalysisSection = `
-## 📊 SMART FILE ANALYSIS
-
-Before making changes, understand these file relationships:
-
-| File | Why Read This |
-|------|---------------|
-${suggestions.map(s => `| \`${s.file}\` | ${s.reason} |`).join('\n')}
-
-**Read these files first** to understand the existing patterns and avoid breaking changes.
-`;
-          }
-        } catch (error: any) {
-          console.log(`   ⚠️ Smart analysis skipped: ${error.message}`);
-        }
-      }
-
-      let prompt = `${directivesBlock}
-# 🚀 DEVELOPER AGENT - IMPLEMENTATION MODE
-
-## 💡 YOUR PHILOSOPHY: BE A DOER, NOT A TALKER
-
-**You are an IMPLEMENTER, not a planner.** Your job is to WRITE CODE, not describe what code you would write.
-
-### ⚡ GOLDEN RULES:
-1. **USE TOOLS IMMEDIATELY** - Don't describe, DO
-   - ❌ WRONG: "I would read the file to understand..."
-   - ✅ RIGHT: \`Read("src/services/UserService.ts")\` → then analyze
-
-2. **READ BEFORE WRITE** - SDK requires this
-   - ❌ WRONG: \`Edit("file.ts", "old", "new")\` without reading first
-   - ✅ RIGHT: \`Read("file.ts")\` → then \`Edit("file.ts", "old", "new")\`
-
-3. **VERIFY YOUR WORK** - Run commands, don't assume
-   - ❌ WRONG: "The code should work now"
-   - ✅ RIGHT: \`Bash("npm run build")\` → see actual output
-
-4. **COMMIT AND PUSH** - Your work doesn't exist until it's pushed
-   - ❌ WRONG: Making changes but not committing
-   - ✅ RIGHT: \`Bash("git add . && git commit -m 'feat: ...' && git push")\`
-
-5. **ONE STORY, COMPLETE IMPLEMENTATION** - You own this story end-to-end
-   - All code changes
-   - All tests (if applicable)
-   - All verification
-   - Final push
-
----
-
-# Story: ${story.title}
-
-${story.description}
-
-${storyAcceptanceCriteria.length > 0 ? `## ✅ ACCEPTANCE CRITERIA (ALL MUST BE MET!)
-${storyAcceptanceCriteria.map((ac: string, i: number) => `${i + 1}. ${ac}`).join('\n')}
-
-**⚠️ Your PR will be REJECTED if any criterion is not met.**
-` : ''}
-${fileAnalysisSection}
-${storyHelpers.length > 0 ? `## 🔧 REQUIRED HELPERS (YOU MUST USE THESE!)
-${storyHelpers.map((h: any) => `- **\`${h.function}()\`** from \`${h.from}\`
-  - Reason: ${h.reason}`).join('\n')}
-` : ''}
-${storyAntiPatterns.length > 0 ? `## ❌ ANTI-PATTERNS (DO NOT DO THIS!)
-${storyAntiPatterns.map((ap: any) => `- ❌ BAD: \`${ap.bad}\`
-  - Why: ${ap.why}
-  - ✅ GOOD: \`${ap.good}\``).join('\n\n')}
-` : ''}
-${storyCodeExamples.length > 0 ? `## 📝 CODE EXAMPLES (Follow These!)
-${storyCodeExamples.map((ex: any) => `### ${ex.description}
-\`\`\`typescript
-${ex.code}
-\`\`\`
-${ex.doNot ? `❌ DO NOT: \`${ex.doNot}\`` : ''}`).join('\n\n')}
-` : ''}
-## 🎯 TARGET REPOSITORY: ${targetRepository}
-**CRITICAL**: You MUST work ONLY in the "${targetRepository}" directory.
-- All file paths must start with: ${targetRepository}/
-- Navigate to this repository first: cd ${workspacePath}/${targetRepository}
-- DO NOT modify files in other repositories
-
-## 🧠 MEMORY CONTEXT (Use these IDs for memory tools)
-- **Project ID**: \`${projectId}\`
-- **Task ID**: \`${taskId}\`
-- **Story ID**: \`${story.id}\`
-
-Use these when calling \`recall()\` and \`remember()\` tools.`;
-
-      // 🏗️ Add Architecture Brief section from PlanningPhase
-      if (architectureBrief) {
-        prompt += `\n\n## 🏗️ ARCHITECTURE BRIEF (CRITICAL - Follow These Patterns!)
-
-**This project has established patterns. You MUST follow them to get your PR approved.**
-
-${architectureBrief.codePatterns ? `### Code Patterns (from existing codebase)
-- **Naming Convention**: ${architectureBrief.codePatterns.namingConvention || 'Not specified'}
-- **File Structure**: ${architectureBrief.codePatterns.fileStructure || 'Not specified'}
-- **Error Handling**: ${architectureBrief.codePatterns.errorHandling || 'Not specified'}
-- **Testing Pattern**: ${architectureBrief.codePatterns.testing || 'Not specified'}` : ''}
-
-${architectureBrief.dataModels?.length > 0 ? `### Data Models (understand relationships before modifying)
-${architectureBrief.dataModels.map((m: any) => `- **${m.name}** (${m.file}): ${m.relationships?.join(', ') || 'standalone'}`).join('\n')}` : ''}
-
-${architectureBrief.prInsights ? `### What Gets Approved (from recent PRs)
-- ${architectureBrief.prInsights.commonPatterns?.join('\n- ') || 'No patterns documented'}
-
-**Rejection reasons to avoid**:
-- ${architectureBrief.prInsights.rejectionReasons?.join('\n- ') || 'None documented'}` : ''}
-
-${architectureBrief.conventions?.length > 0 ? `### Project Conventions
-${architectureBrief.conventions.map((c: string) => `- ${c}`).join('\n')}` : ''}
-
-${architectureBrief.helperFunctions?.length > 0 ? `### 🔧 MANDATORY HELPER FUNCTIONS (USE THESE!)
-| Function | File | What to Use | What NOT to Use |
-|----------|------|-------------|-----------------|
-${architectureBrief.helperFunctions.map((h: any) => `| \`${h.name}()\` | ${h.file} | ✅ ${h.usage} | ❌ ${h.antiPattern} |`).join('\n')}
-
-**🚨 CRITICAL: You MUST use these helper functions. DO NOT create entities manually!**` : ''}
-
-${architectureBrief.entityCreationRules?.length > 0 ? `### 📋 ENTITY CREATION RULES (MANDATORY!)
-| Entity | MUST Use | NEVER Use |
-|--------|----------|-----------|
-${architectureBrief.entityCreationRules.map((r: any) => `| ${r.entity} | ✅ \`${r.mustUse || 'Check codebase for helper'}\` | ❌ \`${r.mustNotUse}\` |`).join('\n')}
-
-**🔴 FAILURE TO FOLLOW THESE RULES = AUTOMATIC REJECTION**
-If you use \`new Model()\` instead of \`createModel()\`, the Judge will REJECT your code.` : ''}
-
-⚠️ **Code that doesn't follow these patterns will be REJECTED by the Judge.**
-`;
-      }
-
-      // 🔬 Add Project Radiography section from PlanningPhase (language-agnostic analysis)
-      if (projectRadiographies && projectRadiographies.size > 0) {
-        const targetRadiography = projectRadiographies.get(repoName) || projectRadiographies.get(targetRepository);
-        if (targetRadiography) {
-          const { ProjectRadiographyService } = await import('../ProjectRadiographyService');
-          prompt += `\n\n## 🔬 PROJECT RADIOGRAPHY (${repoName} - Complete Analysis)
-
-**This is a programmatic X-Ray of the codebase. Use this as the source of truth for patterns and file locations.**
-
-${ProjectRadiographyService.formatForPrompt(targetRadiography)}
-
----
-**⚠️ CRITICAL**:
-- USE the routes, models, services listed above when implementing your story
-- MATCH the detected conventions (naming: ${targetRadiography.conventions?.namingConvention}, file structure: ${targetRadiography.conventions?.fileStructure})
-- Reference ACTUAL file paths from the radiography
----
-`;
-        }
-      }
-
-      // Add Judge feedback if this is a retry
-      if (judgeFeedback) {
-        prompt += `\n\n## 🔄 JUDGE REJECTED YOUR PREVIOUS CODE - RETRY REQUIRED
-
-### Judge Feedback (WHY IT WAS REJECTED):
-${judgeFeedback}
-
-### What You MUST Do:
-1. Read the files you modified to see your previous code
-2. Understand what the Judge said was wrong
-3. Fix ONLY the issues mentioned
-4. Write corrected code using Edit() or Write()
-5. Commit your changes to the CURRENT branch
-6. Push to the CURRENT branch
-7. NO documentation, NO explanations - JUST FIX THE CODE
-
-### ⚠️ CRITICAL - BRANCH RULES FOR RETRY:
-- You are ALREADY on the correct branch: ${story.branchName || 'your story branch'}
-- **DO NOT create a new branch** - work on the existing branch
-- **DO NOT run git checkout -b** - the branch already exists
-- Simply make your changes, commit, and push to the current branch
-- The branch was already pushed in your previous attempt
-
-**This is a RETRY attempt. Focus on fixing what was rejected. DO NOT create new branches.**
-`;
-      }
-
-      // 🔐 Add devAuth section - either configured or not
-      if (devAuth && devAuth.method !== 'none') {
-        // ✅ DevAuth IS configured - developer can test authenticated endpoints
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `🔐 [Developer ${member.instanceId}] DevAuth configured: method=${devAuth.method} - Can test authenticated endpoints`
-        );
-
-        prompt += `\n\n## 🔐 API AUTHENTICATION (for testing endpoints)
-
-**Method**: ${devAuth.method}
-**Status**: ✅ CONFIGURED - You can test authenticated endpoints
-`;
-        if (devAuth.method === 'token') {
-          prompt += `
-**Token**: \`${devAuth.token}\`
-**Type**: ${devAuth.tokenType || 'bearer'}
-**Header**: ${devAuth.tokenHeader || 'Authorization'}
-**Prefix**: "${devAuth.tokenPrefix || 'Bearer '}"
-
-**Usage in curl**:
-\`\`\`bash
-curl -H "${devAuth.tokenHeader || 'Authorization'}: ${devAuth.tokenPrefix || 'Bearer '}${devAuth.token}" http://localhost:PORT/api/endpoint
-\`\`\`
-
-**Usage in code**:
-\`\`\`javascript
-const headers = { "${devAuth.tokenHeader || 'Authorization'}": "${devAuth.tokenPrefix || 'Bearer '}${devAuth.token}" };
-fetch('/api/endpoint', { headers });
-\`\`\`
-`;
-        } else if (devAuth.method === 'credentials') {
-          prompt += `
-**Login Endpoint**: ${devAuth.loginEndpoint}
-**Login Method**: ${devAuth.loginMethod || 'POST'}
-**Username**: ${devAuth.credentials?.username || ''}
-**Password**: ${devAuth.credentials?.password || ''}
-**Token Response Path**: ${devAuth.tokenResponsePath || 'token'}
-
-**Step 1 - Login to get token**:
-\`\`\`bash
-TOKEN=$(curl -s -X ${devAuth.loginMethod || 'POST'} ${devAuth.loginEndpoint} \\
-  -H "Content-Type: ${devAuth.loginContentType || 'application/json'}" \\
-  -d '{"username":"${devAuth.credentials?.username}","password":"${devAuth.credentials?.password}"}' \\
-  | jq -r '.${devAuth.tokenResponsePath || 'token'}')
-\`\`\`
-
-**Step 2 - Use token**:
-\`\`\`bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:PORT/api/endpoint
-\`\`\`
-`;
-        }
-        prompt += `
-⚠️ **CRITICAL**: DELETE method is ALWAYS FORBIDDEN - only use GET, POST, PUT, PATCH!
-
-🔍 **If authentication fails**: Log the error clearly so we can debug the devAuth configuration.
-`;
-      } else {
-        // ❌ DevAuth NOT configured - developer should continue but expect 401 errors
-        NotificationService.emitConsoleLog(
-          taskId,
-          'warn',
-          `⚠️ [Developer ${member.instanceId}] DevAuth NOT configured - Authenticated endpoints will return 401. Developer will continue without auth testing.`
-        );
-
-        prompt += `\n\n## ⚠️ NO API AUTHENTICATION CONFIGURED
-
-**Status**: ❌ NOT CONFIGURED - No authentication credentials provided
-
-**What this means**:
-- If you try to access protected endpoints, you will get **401 Unauthorized** errors
-- This is EXPECTED - the project owner has not provided authentication credentials
-- **DO NOT** let 401 errors block your work
-
-**How to proceed**:
-1. Write the code as if auth works (implement the logic correctly)
-2. If you get 401 when testing → Log it and continue
-3. Focus on code correctness, not on passing authentication
-4. The auth testing will be done later when credentials are provided
-
-**Example handling**:
-\`\`\`javascript
-// When testing and you get 401, log and continue
-try {
-  const response = await fetch('/api/protected');
-  if (response.status === 401) {
-    console.log('⚠️ 401 Unauthorized - No devAuth configured, skipping auth test');
-    // Continue with your work
-  }
-} catch (error) {
-  console.log('⚠️ Auth test skipped - no credentials configured');
-}
-\`\`\`
-
-⚠️ **IMPORTANT**: Don't waste time trying to fix auth errors - just log them and move on!
-`;
-      }
-
-      // 🔧 DYNAMIC VERIFICATION: Add project-specific verification commands and markers
-      // This OVERRIDES the generic markers in AgentDefinitions.ts with project-specific ones
-      if (environmentCommands) {
-        console.log(`🔧 [Developer ${member.instanceId}] Adding dynamic verification commands from environmentConfig`);
-
-        // Build the list of required markers based on available commands
-        const markers: string[] = ['✅ ENVIRONMENT_READY (after setup commands succeed)'];
-        const verificationSteps: string[] = [];
-
-        // Typecheck (only if command exists and is not empty)
-        if (environmentCommands.typecheck && environmentCommands.typecheck !== 'N/A') {
-          markers.push('✅ TYPECHECK_PASSED');
-          verificationSteps.push(`1. **Typecheck**: \`${environmentCommands.typecheck}\` → Output: ✅ TYPECHECK_PASSED`);
-        } else {
-          verificationSteps.push(`1. **Typecheck**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
-        }
-
-        // Tests (only if command exists and is not empty)
-        if (environmentCommands.test && environmentCommands.test !== 'N/A' && environmentCommands.test !== 'npm run build') {
-          markers.push('✅ TESTS_PASSED');
-          verificationSteps.push(`2. **Tests**: \`${environmentCommands.test}\` → Output: ✅ TESTS_PASSED`);
-        } else {
-          verificationSteps.push(`2. **Tests**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
-        }
-
-        // Lint (only if command exists and is not empty)
-        if (environmentCommands.lint && environmentCommands.lint !== 'N/A') {
-          markers.push('✅ LINT_PASSED');
-          verificationSteps.push(`3. **Lint**: \`${environmentCommands.lint}\` → Output: ✅ LINT_PASSED`);
-        } else {
-          verificationSteps.push(`3. **Lint**: ⚠️ NOT CONFIGURED for this project - skip this marker`);
-        }
-
-        // Build (only if command exists)
-        if (environmentCommands.build) {
-          verificationSteps.push(`4. **Build**: \`${environmentCommands.build}\` (verify build passes)`);
-        }
-
-        // Always required markers
-        markers.push('✅ EXHAUSTIVE_VERIFICATION_PASSED (all verification loops complete)');
-        markers.push('📍 Commit SHA: [40-character SHA]');
-        markers.push('✅ DEVELOPER_FINISHED_SUCCESSFULLY');
-
-        prompt += `
-
-## 🔧 PROJECT-SPECIFIC VERIFICATION (OVERRIDES DEFAULT MARKERS)
-
-**⚠️ IMPORTANT: This project has CUSTOM verification commands from TechLead.**
-**Only use the markers listed below - ignore generic markers from system prompt.**
-
-### Verification Commands for this project:
-${verificationSteps.join('\n')}
-
-### Required Markers (output ONLY these):
-${markers.map((m, i) => `${i}. ${m}`).join('\n')}
-
-### Workflow:
-1. Run available verification commands
-2. Output the corresponding marker ONLY if the command exists
-3. If a command is "NOT CONFIGURED", skip that marker entirely
-4. Always end with ✅ DEVELOPER_FINISHED_SUCCESSFULLY
-
-**Example for this project:**
-\`\`\`
-${environmentCommands.install ? `Bash("${environmentCommands.install}")` : '# No install command'}
-✅ ENVIRONMENT_READY
-
-${environmentCommands.typecheck && environmentCommands.typecheck !== 'N/A' ?
-  `Bash("${environmentCommands.typecheck}")
-✅ TYPECHECK_PASSED` :
-  '# No typecheck for this project'}
-
-${environmentCommands.test && environmentCommands.test !== 'N/A' && environmentCommands.test !== 'npm run build' ?
-  `Bash("${environmentCommands.test}")
-✅ TESTS_PASSED` :
-  '# No tests for this project'}
-
-${environmentCommands.lint && environmentCommands.lint !== 'N/A' ?
-  `Bash("${environmentCommands.lint}")
-✅ LINT_PASSED` :
-  '# No lint for this project'}
-
-✅ EXHAUSTIVE_VERIFICATION_PASSED
-git commit and push...
-📍 Commit SHA: abc123...
-✅ DEVELOPER_FINISHED_SUCCESSFULLY
-\`\`\`
-`;
-      }
-
-      // Prefix all file paths with repository name
-      const prefixPath = (f: string) => `${targetRepository}/${f}`;
-
-      // 🔥🔥🔥 DEVELOPER CREATES STORY BRANCH (simplified - no fetch/pull needed)
-      // Developer creates a new branch locally and will push it after working
+      // 🔥🔥🔥 BRANCH CREATION (FIRST - before prompt building)
+      // Developer creates story branch locally and will push after working
       const repoPath = `${workspacePath}/${repoName}`;
 
       // Generate unique branch name if not already set
@@ -3352,11 +1509,8 @@ git commit and push...
 
       if (!branchName) {
         // First attempt - create DETERMINISTIC branch name
-        // 🔥 CRITICAL: Branch names must be DETERMINISTIC for predictable recovery
-        // Using only taskId + storyId (no Date.now() or Math.random())
         const taskShortId = taskId.slice(-8);
         const storySlug = story.id.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 30);
-        // Use simple hash of storyId for uniqueness without randomness
         const storyHash = story.id.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
         branchName = `story/${taskShortId}-${storySlug}-${storyHash}`;
       }
@@ -3365,7 +1519,6 @@ git commit and push...
 
       try {
         if (isRetry) {
-          // RETRY: Branch already exists, just checkout
           console.log(`   (Retry - branch already exists)`);
           try {
             safeGitExecSync(`git fetch origin ${branchName}`, { cwd: repoPath, encoding: 'utf8', timeout: 90000 });
@@ -3379,12 +1532,24 @@ git commit and push...
           }
           console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
         } else {
-          // FIRST ATTEMPT: Create new branch (no fetch/pull needed - branch doesn't exist yet!)
-          safeGitExecSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
-          console.log(`✅ [Developer ${member.instanceId}] Created new branch: ${branchName}`);
+          try {
+            safeGitExecSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+            console.log(`✅ [Developer ${member.instanceId}] Created new branch: ${branchName}`);
+          } catch (createErr: any) {
+            if (createErr.message.includes('already exists')) {
+              console.log(`   ℹ️ Branch already exists (resume scenario), checking out...`);
+              try {
+                safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+              } catch {
+                safeGitExecSync(`git checkout -b ${branchName} origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
+              }
+              console.log(`✅ [Developer ${member.instanceId}] Checked out existing branch: ${branchName}`);
+            } else {
+              throw createErr;
+            }
+          }
         }
 
-        // Save branchName to story for later phases
         story.branchName = branchName;
 
         NotificationService.emitConsoleLog(
@@ -3397,190 +1562,34 @@ git commit and push...
         throw new Error(`Git branch failed for ${branchName}: ${gitError.message}`);
       }
 
-      prompt += `
+      // 🔥 Build developer prompt using extracted builder (Rich context per SDK philosophy)
+      const projectId = task.projectId?.toString() || '';
+      const directivesBlock = await this.getDirectivesForAgent(task._id as any, 'developer');
 
-## Files to work with:
+      // Get project radiography for this repo
+      let projectRadiography: any = undefined;
+      if (projectRadiographies && projectRadiographies.size > 0) {
+        projectRadiography = projectRadiographies.get(repoName) || projectRadiographies.get(targetRepository);
+      }
 
-**Read these files first** (understand existing code):
-${story.filesToRead && story.filesToRead.length > 0 ? story.filesToRead.map((f: string) => `- ${prefixPath(f)}`).join('\n') : '- (explore as needed)'}
+      const prompt = await DeveloperPromptBuilder.build({
+        story,
+        targetRepository,
+        repoName,
+        workspacePath,
+        projectId,
+        taskId,
+        memberId: member.instanceId,
+        directivesBlock,
+        branchName,
+        judgeFeedback,
+        devAuth,
+        architectureBrief,
+        projectRadiography,
+        environmentCommands,
+      });
 
-**Modify these existing files**:
-${story.filesToModify && story.filesToModify.length > 0 ? story.filesToModify.map((f: string) => `- ${prefixPath(f)}`).join('\n') : '- (none specified)'}
-
-**Create these new files**:
-${story.filesToCreate && story.filesToCreate.length > 0 ? story.filesToCreate.map((f: string) => `- ${prefixPath(f)}`).join('\n') : '- (none specified)'}
-
-## Working directory:
-You are in: ${workspacePath}
-Target repository: ${targetRepository}/
-
-All file paths must be prefixed with: ${targetRepository}/
-
-## 🔄 ITERATIVE DEVELOPMENT WORKFLOW (CLAUDE CODE STYLE)
-
-**You MUST follow this exact pattern for EVERY file:**
-
-\`\`\`
-┌─────────────────────────────────────────┐
-│  1. READ file completely                │
-│  2. EDIT with your changes              │
-│  3. VERIFY: npx tsc --noEmit            │
-│  4. If ERROR → FIX NOW, then verify     │
-│  5. If CLEAN → next file or commit      │
-└─────────────────────────────────────────┘
-\`\`\`
-
-**🚨 CRITICAL: After EVERY Edit(), run verification:**
-\`\`\`bash
-cd ${targetRepository} && npx tsc --noEmit 2>&1 | head -20
-\`\`\`
-
-**If you see an error:**
-1. READ the error message (file:line)
-2. FIX the issue IMMEDIATELY (don't continue)
-3. VERIFY again
-4. Only proceed when clean
-
-**Example flow:**
-\`\`\`
-Read("${targetRepository}/src/services/MyService.ts")
-Edit("${targetRepository}/src/services/MyService.ts", old, new)
-Bash("cd ${targetRepository} && npx tsc --noEmit 2>&1 | head -20")
-# If error → fix it, verify again
-# If clean → proceed
-\`\`\`
-
-**DO NOT:**
-- Skip verification after edits
-- Continue to next file with errors
-- Use @ts-ignore or // @ts-expect-error
-- Commit code that doesn't compile
-
-## 🔧 INLINE ERROR RECOVERY
-
-When you see a TypeScript error, fix it IMMEDIATELY:
-
-| Error Pattern | Fix |
-|--------------|-----|
-| \`Cannot find module 'X'\` | Add import: \`import { X } from './path'\` |
-| \`Property 'X' does not exist\` | Check interface or use \`obj?.X\` |
-| \`Type 'X' not assignable to 'Y'\` | Cast: \`value as Type\` or fix source |
-| \`'X' is declared but never used\` | Remove or prefix with \`_\` |
-| \`Object is possibly undefined\` | Add null check: \`if (x) { }\` |
-
-**Error workflow:**
-1. READ error (file:line:column)
-2. READ that section of the file
-3. UNDERSTAND why (missing import? wrong type? typo?)
-4. FIX the root cause (not a workaround)
-5. VERIFY with tsc again
-
-## 🔍 ADAPTIVE EXPLORATION
-
-**When unsure, EXPLORE first - don't guess!**
-
-| Need | Search |
-|------|--------|
-| Find a file | \`Glob("**/FileName.ts")\` |
-| Find a function | \`Grep("function funcName", path="src")\` |
-| Find a type | \`Grep("interface TypeName", path="src")\` |
-| Find usage | \`Grep("funcName(", path="src")\` |
-| Find tests | \`Glob("**/*.test.ts")\` |
-
-**Before creating anything new:**
-1. Search if it exists
-2. Find similar code for patterns
-3. Understand the structure
-4. THEN implement
-
-## 🧪 MANDATORY: WRITE TESTS
-
-For every function/class you create, you MUST write tests:
-
-1. **Create test file** alongside source: \`MyService.test.ts\`
-2. **Test cases required:**
-   - Basic functionality (happy path)
-   - Edge cases (empty strings, zero, null)
-   - Error handling (invalid inputs)
-3. **Run tests after writing:**
-   \`\`\`bash
-   cd ${targetRepository} && npm test -- --passWithNoTests
-   \`\`\`
-4. **Fix failing tests before committing**
-
-**Test Template:**
-\`\`\`typescript
-import { MyFunction } from './MyFile';
-
-describe('MyFunction', () => {
-  it('should work with valid input', () => {
-    expect(MyFunction('valid')).toBeDefined();
-  });
-
-  it('should handle empty input', () => {
-    expect(MyFunction('')).toThrow();
-  });
-
-  it('should handle errors', () => {
-    expect(() => MyFunction(null)).toThrow();
-  });
-});
-\`\`\`
-
-## 📚 LEARN FROM PATTERNS
-
-**Before coding:**
-1. Find similar implementations in codebase
-2. Use existing helper functions (DON'T create new ones if they exist)
-3. Follow the same patterns you find
-
-**Example - finding helpers:**
-\`\`\`
-Grep("export function", path="src/utils")
-Grep("export const", path="src/helpers")
-\`\`\`
-
-## 🚦 QUALITY CHECKLIST (Before Commit)
-
-- [ ] Code compiles: \`npx tsc --noEmit\`
-- [ ] Tests pass: \`npm test\`
-- [ ] No console.log/debugger left in code
-- [ ] No empty catch blocks
-- [ ] Used existing helpers instead of creating new ones
-- [ ] All imports resolve correctly
-
-## Your task:
-${judgeFeedback ? 'Fix the code based on Judge feedback above.' : 'Implement this story completely with production-ready code. Work iteratively - read, edit, verify, repeat.'}
-
-## 🚨 MANDATORY: Git workflow (MUST DO):
-⚠️ **You are already on branch: ${branchName}** (branch was created for you)
-
-After writing code, you MUST follow this EXACT sequence:
-1. cd ${targetRepository}
-2. git add .
-3. git commit -m "Implement: ${story.title}"
-4. git push origin ${branchName}
-5. **MANDATORY: Print commit SHA**:
-   \`\`\`bash
-   git rev-parse HEAD
-   \`\`\`
-   Then output: 📍 Commit SHA: <the-40-character-sha>
-
-6. **MANDATORY: Verify push succeeded**:
-   \`\`\`bash
-   git ls-remote origin ${branchName}
-   \`\`\`
-   Check that output shows your commit SHA
-
-7. **MANDATORY: Print SUCCESS marker**:
-   Output exactly this line:
-   ✅ DEVELOPER_FINISHED_SUCCESSFULLY
-
-**CRITICAL RULES:**
-- You MUST see "✅ DEVELOPER_FINISHED_SUCCESSFULLY" in your output
-- Judge will ONLY review if you print this success marker
-- If git push fails, retry it until it succeeds
-- If you cannot push, print "❌ DEVELOPER_FAILED" and explain why`;
+      console.log(`📝 [Developer ${member.instanceId}] Prompt built (${prompt.length} chars)`);
 
       // 🔥 DEBUG: Log if attachments are being passed
       if (attachments && attachments.length > 0) {
@@ -3857,9 +1866,9 @@ After writing code, you MUST follow this EXACT sequence:
       }
     }
 
-    // Mark developer as completed
+    // Mark developer as completed (fire-and-forget)
     member.status = 'completed';
-    await task.save();
+    saveTaskFireAndForget(task, 'developer completed');
 
     console.log(`✅ [Developer ${member.instanceId}] All stories completed`);
 
@@ -3957,9 +1966,9 @@ After writing code, you MUST follow this EXACT sequence:
    */
   private async handlePhaseFailed(task: ITask, phaseName: string, result: PhaseResult): Promise<void> {
     task.status = 'failed';
-    // Map phase names to enum values
+    // Map phase names to enum values (fire-and-forget - fail notification follows)
     task.orchestration.currentPhase = this.mapPhaseToEnum(phaseName);
-    await task.save();
+    saveTaskFireAndForget(task, 'phase failed');
 
     NotificationService.emitTaskFailed((task._id as any).toString(), {
       phase: phaseName,
@@ -3975,7 +1984,7 @@ After writing code, you MUST follow this EXACT sequence:
   private async handleOrchestrationComplete(task: ITask, _context: OrchestrationContext): Promise<void> {
     task.status = 'completed';
     task.orchestration.currentPhase = 'completed';
-    await task.save();
+    await saveTaskCritical(task, 'orchestration completed');
 
     // Calculate detailed cost breakdown by phase
     const breakdown: { phase: string; cost: number; inputTokens: number; outputTokens: number }[] = [];
@@ -4069,7 +2078,7 @@ After writing code, you MUST follow this EXACT sequence:
     // Update task with final totals
     task.orchestration.totalCost = realTotalCost;
     task.orchestration.totalTokens = realTotalTokens;
-    await task.save();
+    saveTaskFireAndForget(task, 'update cost/tokens');
 
     // Collect PRs from epics
     const pullRequests: { epicName: string; prNumber: number; prUrl: string; repository: string }[] = [];
@@ -4134,11 +2143,8 @@ After writing code, you MUST follow this EXACT sequence:
    * Handle orchestration error
    */
   private async handleOrchestrationError(taskId: string, error: Error): Promise<void> {
-    const task = await Task.findById(taskId);
-    if (task) {
-      task.status = 'failed';
-      await task.save();
-    }
+    // Fire-and-forget status update - error notification follows
+    updateTaskFireAndForget(taskId, { status: 'failed' }, 'orchestration error');
 
     NotificationService.emitTaskFailed(taskId, {
       error: error.message,

@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { TechLeadPhase } from './TechLeadPhase';
@@ -22,10 +22,11 @@ import { unifiedMemoryService } from '../UnifiedMemoryService';
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { CostAccumulator } from './utils/CostAccumulator';
 import { getEpicId, getEpicIdSafe, validateEpicIds } from './utils/IdNormalizer';
-import { Task } from '../../models/Task';
+// ⏱️ Centralized timeout constants
+import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
 
-// TechLead approval timeout (1 hour)
-const TECH_LEAD_APPROVAL_TIMEOUT_MS = 1 * 60 * 60 * 1000;
+// TechLead approval timeout - use centralized constant
+const TECH_LEAD_APPROVAL_TIMEOUT_MS = APPROVAL_TIMEOUTS.TECH_LEAD_APPROVAL;
 
 /**
  * Team Orchestration Phase
@@ -171,13 +172,13 @@ export class TeamOrchestrationPhase extends BasePhase {
     (context.task.orchestration as any).teamOrchestration.status = 'in_progress';
     (context.task.orchestration as any).teamOrchestration.startedAt = startTime;
 
-    // 🔥 ATOMIC: Avoid version conflicts
-    await Task.findByIdAndUpdate(task._id, {
+    // 🔥 FIRE-AND-FORGET: Non-blocking update to avoid MongoDB bottleneck
+    updateTaskFireAndForget(task._id, {
       $set: {
         'orchestration.teamOrchestration.status': 'in_progress',
         'orchestration.teamOrchestration.startedAt': startTime,
       },
-    });
+    }, 'teamOrch in_progress');
 
     NotificationService.emitAgentStarted(taskId, 'Team Orchestration');
 
@@ -238,16 +239,15 @@ export class TeamOrchestrationPhase extends BasePhase {
             context.setData('epics', planningEpics);
             console.log(`   ✅ Restored ${planningEpics.length} epics from Unified Memory (phases.Planning.output)`);
 
-            // Also restore to task model for consistency (atomic to avoid version conflicts)
-            const Task = require('../../models/Task').Task;
-            await Task.findByIdAndUpdate(task._id, {
+            // Also restore to task model for consistency (fire-and-forget)
+            updateTaskFireAndForget(task._id, {
               $set: {
                 'orchestration.planning.epics': planningEpics,
                 'orchestration.planning.restoredFromUnifiedMemory': true,
                 'orchestration.planning.restoredAt': new Date(),
               },
-            });
-            console.log(`   💾 Synced restored epics to task model (atomic)`);
+            }, 'restore epics from unified memory');
+            console.log(`   💾 Synced restored epics to task model (fire-and-forget)`);
           } else {
             // Fallback: Check if executionMap.epics has data (for backwards compatibility)
             if (resumption.executionMap?.epics && resumption.executionMap.epics.length > 0) {
@@ -431,81 +431,73 @@ export class TeamOrchestrationPhase extends BasePhase {
       for (const [order, epics] of orderedGroups) {
         console.log(`\n🔧 [Phase ${order}] Executing ${epics.length} epic(s)...\n`);
 
-        // 🔥 CRITICAL FIX: Check for git conflicts BEFORE parallel execution
-        // If multiple epics use SAME repository → CANNOT execute in parallel (git race condition)
+        // 🔥🔥🔥 SIMPLIFICATION: ALWAYS SEQUENTIAL EXECUTION 🔥🔥🔥
+        // Parallel execution was causing:
+        // - Race conditions even with different repos
+        // - Difficult debugging (interleaved logs)
+        // - State divergence between EventStore/MongoDB
+        // - 60%+ failure rate
+        //
+        // Sequential execution provides:
+        // - Predictable, traceable execution
+        // - Easy debugging (one epic at a time)
+        // - Clear checkpoints between epics
+        // - Better recovery (know exactly where we stopped)
         const reposInGroup = epics.map((e: any) => e.targetRepository);
         const uniqueRepos = new Set(reposInGroup);
-        const hasGitConflict = uniqueRepos.size !== epics.length;
 
-        if (hasGitConflict) {
-          console.warn(`\n⚠️  [RACE CONDITION PREVENTION] Multiple epics targeting SAME repository detected!`);
-          console.warn(`   Epics: ${epics.length}, Unique repos: ${uniqueRepos.size}`);
-          console.warn(`   Repositories: ${Array.from(uniqueRepos).join(', ')}`);
-          console.warn(`   🔒 EXECUTING SEQUENTIALLY to prevent git conflicts`);
-          console.warn(`   ⚠️  Parallel execution would cause: checkout conflicts, lost changes, branch corruption\n`);
+        console.log(`\n🔒 [SEQUENTIAL MODE] Executing ${epics.length} epic(s) ONE AT A TIME`);
+        console.log(`   Repositories: ${Array.from(uniqueRepos).join(', ')}`);
+        console.log(`   ⚡ This ensures reliable, traceable execution\n`);
 
-          NotificationService.emitConsoleLog(
-            taskId,
-            'warn',
-            `⚠️  Phase ${order}: Git conflict detected - executing ${epics.length} epic(s) SEQUENTIALLY`
-          );
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔧 Phase ${order}: ${epics.length} epic(s) SEQUENTIAL (reliable mode)`
+        );
 
-          // SEQUENTIAL execution (safe - no git conflicts)
-          for (const epic of epics) {
-            const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
-            console.log(`   🔧 Executing epic: ${epicId} → ${epic.targetRepository} (sequential mode)`);
-            try {
-              const result = await this.executeTeam(epic, ++teamCounter, context);
-              // 🔥 FIX: Wrap result with epic info to prevent index mismatch
-              teamResults.push({
-                result: { status: 'fulfilled', value: result },
-                epicId: epicId,
-                epicTitle: epic.title || epicId,
-                targetRepository: epic.targetRepository,
-              });
+        // SEQUENTIAL execution - one epic at a time, with checkpoint after each
+        for (let epicIndex = 0; epicIndex < epics.length; epicIndex++) {
+          const epic = epics[epicIndex];
+          const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
 
-              // 🔥🔥🔥 CHECKPOINT: Save epic completion to DB immediately 🔥🔥🔥
-              if (result.success) {
-                await this.saveEpicCheckpoint(task._id, epicId, taskId);
-              }
-            } catch (error) {
-              // 🔥 FIX: Wrap error with epic info
-              teamResults.push({
-                result: { status: 'rejected', reason: error },
-                epicId: epicId,
-                epicTitle: epic.title || epicId,
-                targetRepository: epic.targetRepository,
-              });
-            }
-          }
-        } else {
-          // PARALLEL execution (safe - different repos)
-          console.log(`   ✅ All epics use DIFFERENT repositories - safe for parallel execution`);
-          console.log(`   Repositories: ${Array.from(uniqueRepos).join(', ')}`);
+          console.log(`\n${'='.repeat(60)}`);
+          console.log(`📦 [Epic ${epicIndex + 1}/${epics.length}] Starting: ${epic.title || epicId}`);
+          console.log(`   Repository: ${epic.targetRepository}`);
+          console.log(`   Epic ID: ${epicId}`);
+          console.log(`${'='.repeat(60)}`);
 
-          NotificationService.emitConsoleLog(taskId, 'info', `🔧 Phase ${order}: ${epics.length} epic(s) in PARALLEL`);
+          try {
+            const result = await this.executeTeam(epic, ++teamCounter, context);
 
-          const groupPromises = epics.map((epic: any) =>
-            this.executeTeam(epic, ++teamCounter, context)
-          );
-
-          const groupResults = await Promise.allSettled(groupPromises);
-
-          // 🔥🔥🔥 CHECKPOINT: Save all successful epics from parallel batch 🔥🔥🔥
-          for (let i = 0; i < groupResults.length; i++) {
-            const result = groupResults[i];
-            const epic = epics[i];
-            const epicId = getEpicId(epic); // 🔥 CENTRALIZED: Use IdNormalizer
-            if (result.status === 'fulfilled' && result.value.success) {
-              await this.saveEpicCheckpoint(task._id, epicId, taskId);
-            }
-            // 🔥 FIX: Wrap result with epic info
+            // 🔥 FIX: Wrap result with epic info to prevent index mismatch
             teamResults.push({
-              result: result,
+              result: { status: 'fulfilled', value: result },
               epicId: epicId,
               epicTitle: epic.title || epicId,
               targetRepository: epic.targetRepository,
             });
+
+            // 🔥🔥🔥 CHECKPOINT: Save epic completion IMMEDIATELY after success 🔥🔥🔥
+            if (result.success) {
+              await this.saveEpicCheckpoint(task._id, epicId, taskId);
+              console.log(`✅ [Epic ${epicIndex + 1}/${epics.length}] COMPLETED: ${epic.title || epicId}`);
+              console.log(`   📍 Checkpoint saved - safe to resume from here`);
+            } else {
+              console.warn(`⚠️ [Epic ${epicIndex + 1}/${epics.length}] FAILED: ${epic.title || epicId}`);
+              console.warn(`   Error: ${result.error || 'Unknown error'}`);
+            }
+          } catch (error: any) {
+            // 🔥 FIX: Wrap error with epic info
+            teamResults.push({
+              result: { status: 'rejected', reason: error },
+              epicId: epicId,
+              epicTitle: epic.title || epicId,
+              targetRepository: epic.targetRepository,
+            });
+
+            console.error(`❌ [Epic ${epicIndex + 1}/${epics.length}] EXCEPTION: ${epic.title || epicId}`);
+            console.error(`   Error: ${error.message || error}`);
           }
         }
 
@@ -568,13 +560,13 @@ export class TeamOrchestrationPhase extends BasePhase {
         (context.task.orchestration as any).teamOrchestration.pendingEpicIds = pendingEpicIds;
 
         task.status = 'paused';
-        // 🔥 ATOMIC: Avoid version conflicts
-        await Task.findByIdAndUpdate(task._id, {
+        // 🔥 FIRE-AND-FORGET: Persist pause status without blocking
+        updateTaskFireAndForget(task._id, {
           $set: {
             status: 'paused',
             'orchestration.teamOrchestration.pendingEpicIds': pendingEpicIds,
           },
-        });
+        }, 'billing pause');
 
         // Notify frontend about billing pause
         NotificationService.emitNotification(taskId, 'billing_error_pause', {
@@ -722,16 +714,16 @@ export class TeamOrchestrationPhase extends BasePhase {
         task.orchestration.team = [];
       }
 
-      // 🔥 CRITICAL: Accumulate ALL team costs using ATOMIC operation to prevent race conditions
+      // 🔥 FIRE-AND-FORGET: Accumulate ALL team costs using ATOMIC operation
       // When multiple teams run in parallel, using $inc ensures no lost updates
       const totalTeamsCost = teamCostsAccum.getTotalCost();
       if (totalTeamsCost > 0) {
-        const Task = require('../../models/Task').Task;
+        // Update local estimate (fire-and-forget to DB)
+        const estimatedTotal = (task.orchestration.totalCost || 0) + totalTeamsCost;
+        task.orchestration.totalCost = estimatedTotal;
 
-        // Use atomic $inc to prevent race condition when parallel teams update costs
-        const updatedTask = await Task.findByIdAndUpdate(
-          task._id,
-          {
+        // 🔥 FIRE-AND-FORGET: Non-blocking cost update
+        updateTaskFireAndForget(task._id, {
             $inc: { 'orchestration.totalCost': totalTeamsCost },
             $set: {
               'orchestration.teamOrchestration.status': (context.task.orchestration as any).teamOrchestration.status,
@@ -741,26 +733,19 @@ export class TeamOrchestrationPhase extends BasePhase {
               ...(techLeadCost > 0 ? { 'orchestration.techLead.cost_usd': techLeadCost } : {}),
               ...(judgeCost > 0 ? { 'orchestration.judge.cost_usd': judgeCost } : {}),
             }
-          },
-          { new: true }
-        );
+          }, 'teamOrch costs');
 
-        // Update local task reference with atomic result
-        if (updatedTask) {
-          task.orchestration.totalCost = updatedTask.orchestration.totalCost;
-        }
-
-        console.log(`💰 [TeamOrchestration] Total cost from all teams: ${CostAccumulator.formatCost(totalTeamsCost)} (atomic $inc)`);
-        console.log(`💰 [TeamOrchestration] Running orchestration total: $${task.orchestration.totalCost?.toFixed(4) || 'N/A'}`);
+        console.log(`💰 [TeamOrchestration] Total cost from all teams: ${CostAccumulator.formatCost(totalTeamsCost)} (fire-and-forget)`);
+        console.log(`💰 [TeamOrchestration] Running orchestration total: $${estimatedTotal.toFixed(4)} (estimated)`);
       } else {
-        // 🔥 ATOMIC: Even when no cost, save status atomically to avoid version conflicts
-        await Task.findByIdAndUpdate(task._id, {
+        // 🔥 FIRE-AND-FORGET: Save status without blocking
+        updateTaskFireAndForget(task._id, {
           $set: {
             'orchestration.teamOrchestration.status': (context.task.orchestration as any).teamOrchestration.status,
             'orchestration.teamOrchestration.completedAt': (context.task.orchestration as any).teamOrchestration.completedAt,
             'orchestration.teamOrchestration.teams': (context.task.orchestration as any).teamOrchestration.teams,
           },
-        });
+        }, 'teamOrch completed (no cost)');
       }
 
       // Notify completion
@@ -805,13 +790,13 @@ export class TeamOrchestrationPhase extends BasePhase {
       (context.task.orchestration as any).teamOrchestration.status = 'failed';
       (context.task.orchestration as any).teamOrchestration.error = error.message;
 
-      // 🔥 ATOMIC: Save error status without version conflicts
-      await Task.findByIdAndUpdate(task._id, {
+      // 🔥 FIRE-AND-FORGET: Save error status without blocking
+      updateTaskFireAndForget(task._id, {
         $set: {
           'orchestration.teamOrchestration.status': 'failed',
           'orchestration.teamOrchestration.error': error.message,
         },
-      });
+      }, 'teamOrch failed');
 
       NotificationService.emitAgentFailed(taskId, 'Team Orchestration', error.message);
 
@@ -1024,7 +1009,7 @@ export class TeamOrchestrationPhase extends BasePhase {
             safeGitExecSync(`git push -u origin ${branchName}`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 90000
+              timeout: GIT_TIMEOUTS.FETCH
             });
             console.log(`✅ [Team ${teamNumber}] Epic branch pushed to remote with initial commit`);
             pushSuccessful = true;
@@ -1034,7 +1019,7 @@ export class TeamOrchestrationPhase extends BasePhase {
               safeGitExecSync(`git pull origin ${branchName} --ff-only`, {
                 cwd: repoPath,
                 encoding: 'utf8',
-                timeout: 30000
+                timeout: GIT_TIMEOUTS.CHECKOUT
               });
               console.log(`✅ [Team ${teamNumber}] Local synced with remote`);
             } catch (pullError: any) {
@@ -1058,34 +1043,47 @@ export class TeamOrchestrationPhase extends BasePhase {
             safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
             console.log(`✅ [Team ${teamNumber}] Checked out existing branch: ${branchName}`);
 
-            // 🔥 CRITICAL: Also push existing branch to ensure it's on remote
+            // 🔥 CRITICAL: Sync with remote before pushing (handles resume scenarios)
             try {
-              console.log(`📤 [Team ${teamNumber}] Ensuring epic branch is on remote...`);
+              console.log(`📤 [Team ${teamNumber}] Ensuring epic branch is synced with remote...`);
 
-              // Fix remote auth before pushing
+              // Fix remote auth before any remote operations
               fixGitRemoteAuth(repoPath);
 
+              // 🔄 PULL FIRST: Get any commits from remote that we don't have locally
+              // This is critical for resume scenarios where remote has work from previous runs
+              try {
+                safeGitExecSync(`git pull origin ${branchName} --rebase`, {
+                  cwd: repoPath,
+                  encoding: 'utf8',
+                  timeout: GIT_TIMEOUTS.FETCH
+                });
+                console.log(`✅ [Team ${teamNumber}] Pulled latest from remote`);
+              } catch (pullError: any) {
+                // Branch might not exist on remote yet, that's fine
+                console.log(`   ℹ️ [Team ${teamNumber}] Pull skipped: ${pullError.message.split('\n')[0]}`);
+              }
+
+              // Now push (should succeed since we pulled first)
               safeGitExecSync(`git push -u origin ${branchName}`, {
                 cwd: repoPath,
                 encoding: 'utf8',
-                timeout: 90000
+                timeout: GIT_TIMEOUTS.FETCH
               });
               console.log(`✅ [Team ${teamNumber}] Epic branch confirmed on remote: ${branchName}`);
-
-              // FIX: Sync local with remote after push
+            } catch (pushError: any) {
+              // If push still fails, try force-with-lease as last resort
+              console.log(`⚠️  [Team ${teamNumber}] Normal push failed, trying force-with-lease...`);
               try {
-                safeGitExecSync(`git pull origin ${branchName} --ff-only`, {
+                safeGitExecSync(`git push -u origin ${branchName} --force-with-lease`, {
                   cwd: repoPath,
                   encoding: 'utf8',
-                  timeout: 30000
+                  timeout: GIT_TIMEOUTS.FETCH
                 });
-                console.log(`✅ [Team ${teamNumber}] Local synced with remote`);
-              } catch (pullError: any) {
-                console.log(`   ℹ️ [Team ${teamNumber}] Pull skipped (already up to date)`);
+                console.log(`✅ [Team ${teamNumber}] Epic branch force-pushed to remote`);
+              } catch (forceError: any) {
+                console.log(`ℹ️  [Team ${teamNumber}] Branch push result: ${forceError.message.split('\n')[0]}`);
               }
-            } catch (pushError: any) {
-              // Might already be on remote, that's fine
-              console.log(`ℹ️  [Team ${teamNumber}] Branch push result: ${pushError.message}`);
             }
           } catch (checkoutError: any) {
             console.error(`❌ [Team ${teamNumber}] Failed to create/checkout branch: ${checkoutError.message}`);
@@ -1274,11 +1272,11 @@ export class TeamOrchestrationPhase extends BasePhase {
             TECH_LEAD_APPROVAL_TIMEOUT_MS
           );
 
-          // 🔥 CRITICAL: Clear pendingApproval from DB after processing
-          await Task.findByIdAndUpdate(parentContext.task._id, {
+          // 🔥 FIRE-AND-FORGET: Clear pendingApproval from DB after processing
+          updateTaskFireAndForget(parentContext.task._id, {
             $unset: { 'orchestration.pendingApproval': 1 },
-          });
-          console.log(`📝 [Team ${teamNumber}] Cleared pendingApproval from DB`);
+          }, 'clear pendingApproval');
+          console.log(`📝 [Team ${teamNumber}] Cleared pendingApproval from DB (fire-and-forget)`);
 
           if (approvalResult.approved) {
             console.log(`✅ [Team ${teamNumber}] Tech Lead architecture approved`);
@@ -1653,7 +1651,7 @@ ${epic.description || 'No description provided'}
         // Check if epic branch exists locally
         let epicBranchExists = false;
         try {
-          execSync(`git rev-parse --verify ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+          execSync(`git rev-parse --verify ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUTS.CHECKOUT });
           epicBranchExists = true;
           console.log(`   ✅ Epic branch exists locally: ${epicBranch}`);
         } catch {
@@ -1664,8 +1662,8 @@ ${epic.description || 'No description provided'}
         let epicBranchExistsRemote = false;
         try {
           // Use cached fetch to avoid redundant network calls
-          smartGitFetch(repoPath, { timeout: 90000 });
-          execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+          smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH });
+          execSync(`git rev-parse --verify origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUTS.CHECKOUT });
           epicBranchExistsRemote = true;
           console.log(`   ✅ Epic branch exists on remote: origin/${epicBranch}`);
         } catch {
@@ -1675,18 +1673,18 @@ ${epic.description || 'No description provided'}
         if (!epicBranchExists && !epicBranchExistsRemote) {
           // Create epic branch from main
           console.log(`   🔨 Creating epic branch from main...`);
-          safeGitExecSync('git checkout main', { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
-          safeGitExecSync('git pull origin main', { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
-          safeGitExecSync(`git checkout -b ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync('git checkout main', { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
+          safeGitExecSync('git pull origin main', { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
+          safeGitExecSync(`git checkout -b ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
           console.log(`   ✅ Created epic branch: ${epicBranch}`);
         } else if (epicBranchExistsRemote && !epicBranchExists) {
           // Checkout existing remote epic branch
           console.log(`   🔨 Checking out remote epic branch...`);
-          safeGitExecSync(`git checkout -b ${epicBranch} origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git checkout -b ${epicBranch} origin/${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
           console.log(`   ✅ Checked out epic branch from remote`);
         } else {
           // Epic branch exists locally, just checkout
-          safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+          safeGitExecSync(`git checkout ${epicBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
           console.log(`   ✅ Checked out existing epic branch`);
         }
 
@@ -1700,7 +1698,7 @@ ${epic.description || 'No description provided'}
           } else {
             // Try to find branch from git remote that matches this story
             try {
-              const remoteBranches = safeGitExecSync(`git branch -r`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+              const remoteBranches = safeGitExecSync(`git branch -r`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
               // Look for pattern: story/{taskId}-{epicId}-story-{N} or story-{epicId}-story-{N}
               const storyNumber = s.id?.match(/story-(\d+)/)?.[1] || s.number || '1';
               const matchingBranch = remoteBranches.split('\n')
@@ -1724,12 +1722,12 @@ ${epic.description || 'No description provided'}
           if (!storyBranch) continue;
           try {
             // Check if story branch exists
-            execSync(`git rev-parse --verify origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+            execSync(`git rev-parse --verify origin/${storyBranch}`, { cwd: repoPath, encoding: 'utf8', stdio: 'pipe', timeout: GIT_TIMEOUTS.CHECKOUT });
             console.log(`   🔀 Merging ${storyBranch}...`);
             safeGitExecSync(`git merge origin/${storyBranch} --no-edit -m "Merge ${storyBranch} into epic"`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 60000
+              timeout: GIT_TIMEOUTS.PUSH
             });
             console.log(`      ✅ Merged ${storyBranch}`);
           } catch (mergeError: any) {
@@ -1763,7 +1761,7 @@ ${epic.description || 'No description provided'}
         safeGitExecSync(`git push -u origin ${epicBranch}`, {
           cwd: repoPath,
           encoding: 'utf8',
-          timeout: 60000 // 60 seconds
+          timeout: GIT_TIMEOUTS.PUSH // 60 seconds
         });
         console.log(`✅ [PR] Push succeeded`);
 
@@ -1772,7 +1770,7 @@ ${epic.description || 'No description provided'}
           safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, {
             cwd: repoPath,
             encoding: 'utf8',
-            timeout: 30000
+            timeout: GIT_TIMEOUTS.CHECKOUT
           });
           console.log(`✅ [PR] Local synced with remote`);
         } catch (pullError: any) {
@@ -1782,7 +1780,7 @@ ${epic.description || 'No description provided'}
         // Create PR
         const prOutput = execSync(
           `gh pr create --base main --head "${epicBranch}" --title "${prTitle.replace(/"/g, '\\"')}" --body "${prBody.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`,
-          { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
+          { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT }
         );
 
         // Extract PR URL
@@ -2044,10 +2042,8 @@ Or if you cannot fix it:
    */
   private async saveEpicCheckpoint(taskId: any, epicId: string, taskIdStr: string): Promise<void> {
     try {
-      const Task = require('../../models/Task').Task;
-
-      // 1️⃣ Save to MongoDB (atomic $addToSet to prevent duplicates)
-      await Task.findByIdAndUpdate(taskId, {
+      // 1️⃣ Save to MongoDB (fire-and-forget checkpoint)
+      updateTaskFireAndForget(taskId, {
         $addToSet: {
           'orchestration.teamOrchestration.completedEpicIds': epicId,
         },
@@ -2055,7 +2051,7 @@ Or if you cannot fix it:
           'orchestration.teamOrchestration.lastCheckpoint': new Date(),
           'orchestration.teamOrchestration.lastCompletedEpicId': epicId,
         },
-      });
+      }, `checkpoint epic ${epicId}`);
 
       // 2️⃣ Also update UnifiedMemory for recovery consistency
       // This ensures getResumptionPoint() returns accurate completedEpics

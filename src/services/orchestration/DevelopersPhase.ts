@@ -1,4 +1,4 @@
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { ITeamMember } from '../../models/Task';
 import { DependencyResolver } from '../dependencies/DependencyResolver';
 import { ConservativeDependencyPolicy } from '../dependencies/ConservativeDependencyPolicy';
@@ -21,198 +21,49 @@ import { logSection } from './utils/LogHelpers';
 import { isEmpty } from './utils/ArrayHelpers';
 import { CostAccumulator } from './utils/CostAccumulator';
 import { getEpicId, getStoryId } from './utils/IdNormalizer';
+// ⏱️ Centralized timeout constants (replaces magic numbers)
+import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from './constants/Timeouts';
+// 🔄 Unified state checking (replaces 4-way state checks)
+import { isStoryComplete, loadUnifiedMemoryCompletedStories, logStorySkip } from './utils/StateChecker';
+// 🔍 Failure classification (determines retry vs fatal)
+import {
+  classifyFailure,
+  logFailureAnalysis,
+  isTerminalFailure,
+  getTerminalFailureReason,
+  type FailureContext,
+} from './utils/FailureClassifier';
+// 🔧 Git work recovery helpers
+import {
+  detectWorkInWorkspace,
+  comprehensiveWorkRecovery,
+} from './utils/GitCommitHelper';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🔥 TYPED CONTRACTS: Developer ↔ Judge Communication
-// ═══════════════════════════════════════════════════════════════════════════════
-// These interfaces define the EXACT data that flows between Developer and Judge.
-// This ensures type safety and prevents silent data mismatches.
-// ═══════════════════════════════════════════════════════════════════════════════
+// 🔥 Types imported from developers module (extracted for modularity)
+import {
+  DeveloperOutput,
+  JudgeInput,
+  JudgeResult,
+  StoryPipelineContext,
+  DeveloperStageResult,
+  GitValidationStageResult,
+  JudgeStageResult,
+  MergeStageResult,
+  createJudgeInput,
+} from './developers/types';
 
-/**
- * Output from Developer after implementing a story.
- * This is the SINGLE SOURCE OF TRUTH for what Developer produced.
- */
-export interface DeveloperOutput {
-  /** Whether the developer completed successfully */
-  success: boolean;
-  /** The exact git commit SHA of the developer's work */
-  commitSHA: string;
-  /** The branch name where work was committed */
-  branchName: string;
-  /** List of files that were modified */
-  filesModified: string[];
-  /** List of files that were created */
-  filesCreated: string[];
-  /** Cost of the developer execution in USD */
-  cost: number;
-  /** Token usage for the developer */
-  tokens: { input: number; output: number };
-  /** When the developer completed */
-  completedAt: Date;
-  /** The story that was implemented */
-  storyId: string;
-  /** Raw agent response (for debugging) */
-  rawResponse?: string;
-}
-
-/**
- * Input that Judge receives to evaluate Developer's work.
- * This is derived from DeveloperOutput to ensure consistency.
- */
-export interface JudgeInput {
-  /** The exact commit SHA to review (from DeveloperOutput.commitSHA) */
-  commitSHA: string;
-  /** The branch to review (from DeveloperOutput.branchName) */
-  branchName: string;
-  /** Files to review (from DeveloperOutput.filesModified + filesCreated) */
-  filesToReview: string[];
-  /** The story being evaluated */
-  story: {
-    id: string;
-    title: string;
-    acceptanceCriteria?: string[];
-  };
-  /** The epic context */
-  epic: {
-    id: string;
-    name: string;
-    targetRepository: string;
-  };
-  /** Path to the isolated workspace where code exists */
-  workspacePath: string;
-  /** Type of judge evaluation */
-  judgeType: 'developer' | 'story' | 'epic' | 'integration';
-}
-
-/**
- * Result from Judge evaluation.
- */
-export interface JudgeResult {
-  /** Whether the code was approved */
-  approved: boolean;
-  /** Numeric score (0-100) */
-  score: number;
-  /** Detailed feedback from the judge */
-  feedback: string;
-  /** Whether human review is required (e.g., judge crashed) */
-  requiresHumanReview?: boolean;
-  /** Error message if evaluation failed */
-  evaluationError?: string;
-  /** Cost of the judge execution in USD */
-  cost?: number;
-  /** Token usage */
-  usage?: { input_tokens?: number; output_tokens?: number };
-  /** Current iteration (for retries) */
-  iteration?: number;
-  /** Max retries allowed */
-  maxRetries?: number;
-}
-
-/**
- * Helper to create JudgeInput from DeveloperOutput.
- * This ensures the handoff is consistent and type-safe.
- */
-export function createJudgeInput(
-  developerOutput: DeveloperOutput,
-  story: JudgeInput['story'],
-  epic: JudgeInput['epic'],
-  workspacePath: string,
-  judgeType: JudgeInput['judgeType'] = 'developer'
-): JudgeInput {
-  return {
-    commitSHA: developerOutput.commitSHA,
-    branchName: developerOutput.branchName,
-    filesToReview: [...developerOutput.filesModified, ...developerOutput.filesCreated],
-    story,
-    epic,
-    workspacePath,
-    judgeType,
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🔥 STAGE-BASED PIPELINE: Modular execution for mid-story recovery
-// ═══════════════════════════════════════════════════════════════════════════════
-// These interfaces define the inputs/outputs for each stage of the story pipeline.
-// This modularity allows jumping directly to any stage during recovery.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Parameters shared across all pipeline stages.
- * Extracted from executeIsolatedStoryPipeline to enable stage isolation.
- */
-export interface StoryPipelineContext {
-  task: any;
-  story: any;
-  developer: any;
-  epic: any;
-  repositories: any[];
-  effectiveWorkspacePath: string;
-  workspaceStructure: string;
-  attachments: any[];
-  state: any;
-  context: OrchestrationContext;
-  taskId: string;
-  normalizedEpicId: string;
-  normalizedStoryId: string;
-  epicBranchName: string;
-  devAuth?: any;
-  architectureBrief?: any;
-  environmentCommands?: any;
-  projectRadiographies?: Map<string, ProjectRadiography>;
-}
-
-/**
- * Result from the Developer stage.
- * Contains everything needed for subsequent stages.
- */
-export interface DeveloperStageResult {
-  success: boolean;
-  developerCost: number;
-  developerTokens: { input: number; output: number };
-  sdkSessionId?: string;
-  output?: string;
-  error?: string;
-}
-
-/**
- * Result from the Git Validation stage.
- * Confirms code is committed and pushed.
- */
-export interface GitValidationStageResult {
-  success: boolean;
-  commitSHA: string | null;
-  storyBranch: string | null;
-  gitValidationPassed: boolean;
-  error?: string;
-}
-
-/**
- * Result from the Judge stage.
- * Contains verdict and feedback.
- */
-export interface JudgeStageResult {
-  success: boolean;
-  approved: boolean;
-  judgeCost: number;
-  judgeTokens: { input: number; output: number };
-  feedback?: string;
-  iteration?: number;
-  maxRetries?: number;
-  error?: string;
-}
-
-/**
- * Result from the Merge stage.
- * Confirms story branch merged to epic branch.
- */
-export interface MergeStageResult {
-  success: boolean;
-  conflictResolutionCost: number;
-  conflictResolutionUsage: { input_tokens: number; output_tokens: number };
-  error?: string;
-}
+// Re-export for backward compatibility
+export {
+  DeveloperOutput,
+  JudgeInput,
+  JudgeResult,
+  StoryPipelineContext,
+  DeveloperStageResult,
+  GitValidationStageResult,
+  JudgeStageResult,
+  MergeStageResult,
+  createJudgeInput,
+};
 
 /**
  * Developers Phase
@@ -628,9 +479,8 @@ export class DevelopersPhase extends BasePhase {
         });
         console.error(`\n   🛑 STOPPING PHASE - HUMAN INTERVENTION REQUIRED`);
 
-        // Mark task as failed (atomic update to avoid version conflicts)
-        const Task = require('../../models/Task').Task;
-        await Task.findByIdAndUpdate(task._id, {
+        // Mark task as failed (fire-and-forget - error thrown after)
+        updateTaskFireAndForget(task._id, {
           $set: {
             status: 'failed',
             'orchestration.developers': {
@@ -640,7 +490,7 @@ export class DevelopersPhase extends BasePhase {
               invalidEpics: invalidEpics.map((e: any) => ({ id: e.id, name: e.name })),
             },
           },
-        });
+        }, 'developers failed - no targetRepository');
 
         throw new Error(
           `HUMAN_REQUIRED: ${invalidEpics.length} epic(s) have no targetRepository - Tech Lead phase incomplete`
@@ -774,12 +624,11 @@ export class DevelopersPhase extends BasePhase {
         console.warn(`⚠️  [DevelopersPhase] Story count mismatch: ${totalStoriesAssigned} assigned vs ${expectedStories} expected`);
       }
 
-      // Save team to task (atomic update to avoid version conflicts)
+      // Save team to task (fire-and-forget)
       if (!multiTeamMode) {
-        const Task = require('../../models/Task').Task;
-        await Task.findByIdAndUpdate(task._id, {
+        updateTaskFireAndForget(task._id, {
           $set: { 'orchestration.team': team },
-        });
+        }, 'save team');
       }
 
       await LogService.success(`Development team spawned: ${team.length} developers`, {
@@ -863,39 +712,10 @@ export class DevelopersPhase extends BasePhase {
         console.log(`   Stories will execute one at a time to avoid conflicts`);
         console.log(`   Each story will include changes from all previous stories`);
 
-        // 🧠 GRANULAR MEMORY: Get completed stories from memory as backup
-        // This ensures we don't re-execute stories even if EventStore state is stale
-        let memoryCompletedStories: string[] = [];
-        const projectId = task.projectId?.toString();
-        if (projectId) {
-          try {
-            memoryCompletedStories = await granularMemoryService.getCompletedStories({
-              projectId,
-              taskId,
-              epicId: normalizedEpicId,
-            });
-            if (memoryCompletedStories.length > 0) {
-              console.log(`🧠 [Memory] Found ${memoryCompletedStories.length} completed stories in granular memory`);
-              console.log(`   IDs: ${memoryCompletedStories.join(', ')}`);
-            }
-          } catch (memError: any) {
-            console.warn(`⚠️ [Memory] Failed to get completed stories: ${memError.message}`);
-          }
-        }
-
-        // 🔥 UNIFIED MEMORY: FOURTH source of truth for completed stories
-        // This is THE single source of truth - local file that survives server restarts
-        let unifiedMemoryCompletedStories: string[] = [];
-        try {
-          const resumption = await unifiedMemoryService.getResumptionPoint(taskId);
-          if (resumption.completedStories && resumption.completedStories.length > 0) {
-            unifiedMemoryCompletedStories = resumption.completedStories;
-            console.log(`💾 [UnifiedMemory] Found ${unifiedMemoryCompletedStories.length} completed stories`);
-            console.log(`   IDs: ${unifiedMemoryCompletedStories.join(', ')}`);
-          }
-        } catch (umError: any) {
-          console.warn(`⚠️ [UnifiedMemory] Failed to get completed stories: ${umError.message}`);
-        }
+        // 🔄 UNIFIED STATE CHECK: Load completed stories from UnifiedMemory
+        // Hierarchy: EventStore (primary) > UnifiedMemory (recovery) > merged flag (fast path)
+        // GranularMemory removed - redundant with UnifiedMemory
+        const unifiedMemoryCompletedStories = await loadUnifiedMemoryCompletedStories(taskId);
 
         let storyNumber = 0;
         const totalStories = epicDevelopers.reduce((sum, dev) => sum + (dev.assignedStories?.length || 0), 0);
@@ -911,25 +731,16 @@ export class DevelopersPhase extends BasePhase {
               continue;
             }
 
-            // 🔄 GRANULAR RECOVERY: Skip stories that are already completed
-            // Checks FOUR sources: EventStore status, mergedToEpic flag, granular memory, AND UnifiedMemory
-            // This ensures we don't re-execute even if one source is stale
-            const storyAny = story as any;
-            const isCompletedInEventStore = story.status === 'completed';
-            const isMergedToEpic = storyAny.mergedToEpic === true;
-            const isCompletedInMemory = memoryCompletedStories.includes(storyId);
-            const isCompletedInUnifiedMemory = unifiedMemoryCompletedStories.includes(storyId);
+            // 🔄 UNIFIED STATE CHECK: Skip stories that are already completed
+            // Uses hierarchical check: EventStore > UnifiedMemory > merged flag
+            const completionStatus = isStoryComplete(
+              { status: story.status, mergedToEpic: (story as any).mergedToEpic },
+              storyId,
+              unifiedMemoryCompletedStories
+            );
 
-            if (isCompletedInEventStore || isMergedToEpic || isCompletedInMemory || isCompletedInUnifiedMemory) {
-              console.log(`\n${'='.repeat(80)}`);
-              console.log(`⏭️ [STORY RECOVERY] Skipping already completed story: ${story.title}`);
-              console.log(`   Story ID: ${storyId}`);
-              console.log(`   Completed sources:`);
-              if (isCompletedInEventStore) console.log(`     ✅ EventStore status: completed`);
-              if (isMergedToEpic) console.log(`     ✅ Merged to epic branch`);
-              if (isCompletedInMemory) console.log(`     ✅ Granular memory: completed`);
-              if (isCompletedInUnifiedMemory) console.log(`     ✅ UnifiedMemory: completed`);
-              console.log(`${'='.repeat(80)}`);
+            if (completionStatus.isComplete) {
+              logStorySkip(story.title, storyId, completionStatus);
               continue;
             }
 
@@ -1041,32 +852,71 @@ export class DevelopersPhase extends BasePhase {
       context.setData('dependencyResolution', resolutionResult);
       context.setData('executeDeveloperFn', this.executeDeveloperFn); // Store for Judge retry mechanism
 
-      // 🔥 EVENT SOURCING: Emit completion event (SUCCESS CASE)
-      await eventStore.append({
-        taskId: task._id as any,
-        eventType: 'DevelopersCompleted',
-        agentName: 'developer',
-        payload: {
-          developersCount: team.length,
-          storiesImplemented: team.reduce((sum, m) => sum + m.assignedStories.length, 0),
-          epicsCount: orderedEpics.length,
-        },
-      });
+      // 🔥🔥🔥 BUG-004 FIX: Verify stories were ACTUALLY completed before emitting success 🔥🔥🔥
+      // Count ASSIGNED stories (what we planned to do)
+      const assignedStoriesCount = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
 
-      console.log(`📝 [Developers] Emitted DevelopersCompleted event (success)`);
+      // Count ACTUALLY COMPLETED stories (from EventStore - source of truth)
+      const allEvents = await eventStore.getEvents(task._id as any);
+      const storyCompletedEvents = allEvents.filter((e: any) => e.eventType === 'StoryCompleted');
+      const actuallyCompletedCount = storyCompletedEvents.length;
+
+      console.log(`\n📊 [BUG-004 CHECK] Story Execution Verification:`);
+      console.log(`   Assigned stories: ${assignedStoriesCount}`);
+      console.log(`   Actually completed (StoryCompleted events): ${actuallyCompletedCount}`);
+
+      // 🛡️ GUARD: If no stories were actually completed, this is a failure (BUG-004)
+      if (actuallyCompletedCount === 0 && assignedStoriesCount > 0) {
+        console.error(`\n❌❌❌ [BUG-004] CRITICAL: DevelopersPhase completed but 0 stories were actually executed! ❌❌❌`);
+        console.error(`   This indicates DevelopersPhase was skipped or failed silently.`);
+        console.error(`   Assigned: ${assignedStoriesCount} stories across ${orderedEpics.length} epics`);
+        console.error(`   Completed: 0 stories (NO StoryCompleted events found)`);
+        console.error(`   🚨 Emitting DevelopersCompleted with failed=true to prevent false success`);
+
+        await eventStore.append({
+          taskId: task._id as any,
+          eventType: 'DevelopersCompleted',
+          agentName: 'developer',
+          payload: {
+            developersCount: team.length,
+            storiesImplemented: 0,
+            storiesAssigned: assignedStoriesCount,
+            epicsCount: orderedEpics.length,
+            failed: true,
+            error: 'BUG-004: No stories were actually completed despite having assigned stories',
+          },
+        });
+
+        console.log(`📝 [Developers] Emitted DevelopersCompleted event (BUG-004 - no stories executed)`);
+      } else {
+        // 🔥 EVENT SOURCING: Emit completion event (TRUE SUCCESS CASE)
+        await eventStore.append({
+          taskId: task._id as any,
+          eventType: 'DevelopersCompleted',
+          agentName: 'developer',
+          payload: {
+            developersCount: team.length,
+            storiesImplemented: actuallyCompletedCount, // Use ACTUAL count, not assigned
+            storiesAssigned: assignedStoriesCount,
+            epicsCount: orderedEpics.length,
+          },
+        });
+
+        console.log(`📝 [Developers] Emitted DevelopersCompleted event (success: ${actuallyCompletedCount}/${assignedStoriesCount} stories)`);
+      }
 
       // 🧠 GRANULAR MEMORY: Store phase-level completion marker
       const projectId = task.projectId?.toString();
       if (projectId) {
         try {
-          const storiesImplemented = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
+          // Use actuallyCompletedCount (already calculated above for BUG-004 check)
           await granularMemoryService.storeProgress({
             projectId,
             taskId,
             phaseType: 'developer',
             agentType: 'developer',
-            status: 'completed',
-            details: `Development phase completed: ${storiesImplemented} stories implemented by ${team.length} developer(s) across ${orderedEpics.length} epic(s)`,
+            status: actuallyCompletedCount > 0 ? 'completed' : 'failed',
+            details: `Development phase: ${actuallyCompletedCount}/${assignedStoriesCount} stories completed by ${team.length} developer(s) across ${orderedEpics.length} epic(s)`,
           });
           console.log(`🧠 [Memory] Stored phase completion marker`);
         } catch (memError: any) {
@@ -1075,18 +925,18 @@ export class DevelopersPhase extends BasePhase {
       }
 
       // 🎯 ACTIVITY: Emit Developers completion for Activity tab
-      const storiesCount = team.reduce((sum, m) => sum + m.assignedStories.length, 0);
       AgentActivityService.emitToolUse(taskId, developerLabel, 'Development', {
         developers: team.length,
-        stories: storiesCount,
+        stories: actuallyCompletedCount,
+        storiesAssigned: assignedStoriesCount,
         epics: orderedEpics.length,
       });
       AgentActivityService.emitMessage(
         taskId,
         developerLabel,
-        `✅ Development complete: ${storiesCount} stories implemented by ${team.length} developer(s)`
+        `✅ Development complete: ${actuallyCompletedCount}/${assignedStoriesCount} stories implemented by ${team.length} developer(s)`
       );
-      NotificationService.emitAgentCompleted(taskId, developerLabel, `${storiesCount} stories implemented`);
+      NotificationService.emitAgentCompleted(taskId, developerLabel, `${actuallyCompletedCount}/${assignedStoriesCount} stories implemented`);
 
       // Log cost summary using CostAccumulator
       const devTokens = phaseCosts.getTokens('developer');
@@ -1110,7 +960,7 @@ export class DevelopersPhase extends BasePhase {
           .lean();
         const currentTotalCost = currentTask?.orchestration?.totalCost || 0;
 
-        await Task.findByIdAndUpdate(task._id, {
+        updateTaskFireAndForget(task._id, {
           $set: {
             'orchestration.team': team,
             'orchestration.judge': {
@@ -1125,8 +975,8 @@ export class DevelopersPhase extends BasePhase {
             },
             'orchestration.totalCost': currentTotalCost + phaseCosts.getTotalCost(),
           },
-        });
-        console.log(`✅ [Developers] Costs saved to task.orchestration`);
+        }, 'developers costs update');
+        console.log(`✅ [Developers] Costs saved (fire-and-forget)`);
       }
 
       return {
@@ -1358,9 +1208,8 @@ export class DevelopersPhase extends BasePhase {
       console.error(`   💀 CANNOT EXECUTE DEVELOPER - WOULD BE ARBITRARY`);
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
-      // Mark task as FAILED (atomic update to avoid version conflicts)
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(task._id, {
+      // Mark task as FAILED (fire-and-forget - error thrown after)
+      updateTaskFireAndForget(task._id, {
         $set: {
           status: 'failed',
           'orchestration.developers': {
@@ -1369,7 +1218,7 @@ export class DevelopersPhase extends BasePhase {
             humanRequired: true,
           },
         },
-      });
+      }, 'epic no targetRepository');
 
       throw new Error(`HUMAN_REQUIRED: Epic ${epic.id} has no targetRepository`);
     }
@@ -1384,9 +1233,8 @@ export class DevelopersPhase extends BasePhase {
       console.error(`   💀 This is a DATA INTEGRITY issue`);
       console.error(`\n   🛑 STOPPING PIPELINE - HUMAN INTERVENTION REQUIRED`);
 
-      // Mark task as FAILED (atomic update to avoid version conflicts)
-      const Task = require('../../models/Task').Task;
-      await Task.findByIdAndUpdate(task._id, {
+      // Mark task as FAILED (fire-and-forget - error thrown after)
+      updateTaskFireAndForget(task._id, {
         $set: {
           status: 'failed',
           'orchestration.developers': {
@@ -1395,7 +1243,7 @@ export class DevelopersPhase extends BasePhase {
             humanRequired: true,
           },
         },
-      });
+      }, 'story no targetRepository');
 
       throw new Error(`HUMAN_REQUIRED: Story ${story.id} has no targetRepository`);
     }
@@ -1405,12 +1253,18 @@ export class DevelopersPhase extends BasePhase {
     console.log(`   Epic: ${epic.name} → ${epic.targetRepository}`);
     console.log(`   Story: ${story.title} → ${story.targetRepository}`);
 
+    // 🔥 RECOVERY-READY: Declare key variables OUTSIDE try block so catch can access them
+    const epicBranchName = context.getData<string>('epicBranch');
+    const normalizedEpicId = getEpicId(epic);
+    const normalizedStoryId = getStoryId(story);
+    const devAuth = context.getData<any>('devAuth');
+    const architectureBrief = context.getData<any>('architectureBrief');
+    const environmentCommands = context.getData<any>('environmentCommands');
+    const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
+
     try {
       // STEP 1: Developer implements story
       console.log(`\n👨‍💻 [STEP 1/3] Developer ${developer.instanceId} implementing story...`);
-
-      // 🔥 CRITICAL: Get epic branch name from context (created by TeamOrchestrationPhase)
-      const epicBranchName = context.getData<string>('epicBranch');
 
       // 🛡️ VALIDATION: Epic branch is required for proper git workflow
       if (!epicBranchName) {
@@ -1426,26 +1280,16 @@ export class DevelopersPhase extends BasePhase {
       }
       console.log(`📂 [DevelopersPhase] Using epic branch: ${epicBranchName}`);
 
-      // 🔐 Get devAuth from context (for testing authenticated endpoints)
-      const devAuth = context.getData<any>('devAuth');
-
-      // 🏗️ Get architectureBrief from context (patterns, conventions, models from PlanningPhase)
-      const architectureBrief = context.getData<any>('architectureBrief');
+      // 🔐 devAuth, architectureBrief, environmentCommands, projectRadiographies declared outside try for recovery
       if (architectureBrief) {
         console.log(`🏗️ [DevelopersPhase] Architecture brief available - developer will follow project patterns`);
       }
-
-      // 🔬 Get projectRadiographies from context (language-agnostic analysis from PlanningPhase)
-      const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
       if (projectRadiographies) {
         const targetRadiography = projectRadiographies.get(epic.targetRepository);
         if (targetRadiography) {
           console.log(`🔬 [DevelopersPhase] Project radiography available for ${epic.targetRepository}: ${targetRadiography.language.primary}/${targetRadiography.framework.name}`);
         }
       }
-
-      // 🔧 Get environmentCommands from context (test, lint, typecheck, etc. from TechLead)
-      const environmentCommands = context.getData<any>('environmentCommands');
       if (environmentCommands) {
         console.log(`🔧 [DevelopersPhase] Environment commands available - developer will use project-specific verification`);
         console.log(`   Test: ${environmentCommands.test || '(not specified)'}`);
@@ -1484,8 +1328,7 @@ export class DevelopersPhase extends BasePhase {
       );
 
       // 🔥 MID-STORY RECOVERY: Check if we can skip to a later stage
-      const normalizedEpicId = getEpicId(epic);
-      const normalizedStoryId = getStoryId(story);
+      // normalizedEpicId and normalizedStoryId are declared outside try block for recovery access
       const existingProgress = await unifiedMemoryService.getStoryProgress(taskId, normalizedEpicId, normalizedStoryId);
 
       if (existingProgress && existingProgress.stage !== 'not_started') {
@@ -1762,24 +1605,16 @@ export class DevelopersPhase extends BasePhase {
 
       // 🔥🔥🔥 DEFINITIVE FIX: GIT IS THE SOURCE OF TRUTH, NOT MARKERS 🔥🔥🔥
       // Developer output can be truncated (50k char limit) which cuts off markers
-      // Instead: Check git FIRST - if commits exist, ACCEPT the work
+      // Instead: Check git FIRST - if commits exist, ACCEPT the work and FORCE to Judge
       const developerOutput = developerResult?.output || '';
 
-      // Check for explicit failure marker (this is the ONLY marker we strictly require)
+      // Check for explicit failure marker (but DON'T return early - verify git first!)
       const explicitlyFailed = hasMarker(developerOutput, COMMON_MARKERS.FAILED);
 
       if (explicitlyFailed) {
-        console.error(`❌ [PIPELINE] Developer explicitly reported FAILURE`);
-        console.error(`   Story: ${story.title}`);
-        console.error(`   Developer output (last 500 chars):\n${developerOutput.slice(-500)}`);
-        return {
-          developerCost,
-          judgeCost: 0,
-          conflictResolutionCost: 0,
-          developerTokens,
-          judgeTokens: { input: 0, output: 0 },
-          conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
-        };
+        console.warn(`⚠️ [PIPELINE] Developer reported FAILURE marker - but will verify git first!`);
+        console.warn(`   Story: ${story.title}`);
+        // 🔥 FIX: Don't return early! Check git for commits and proceed to Judge if found
       }
 
       // 🔥🔥🔥 GIT-FIRST VALIDATION: Git commits are the SOURCE OF TRUTH 🔥🔥🔥
@@ -1808,7 +1643,7 @@ export class DevelopersPhase extends BasePhase {
             safeGitExecSync(`git fetch origin --prune`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 90000
+              timeout: GIT_TIMEOUTS.FETCH
             });
             console.log(`   ✅ Fetch succeeded on attempt ${fetchAttempt}`);
             break;
@@ -1841,23 +1676,31 @@ export class DevelopersPhase extends BasePhase {
           commitSHA = gitVerification.commitSHA;
           gitValidationPassed = true;
 
+          // 🔥🔥🔥 FIX: FORCE TO JUDGE even if developer reported FAILED marker 🔥🔥🔥
+          // Commits exist = work was done, let Judge evaluate it
+          if (explicitlyFailed) {
+            console.log(`\n🚀🚀🚀 [FORCE-JUDGE] Developer reported FAILED but commits EXIST! 🚀🚀🚀`);
+            console.log(`   Overriding FAILED marker - git commits prove work was done`);
+            console.log(`   Proceeding to JUDGE for evaluation (not aborting pipeline)`);
+          }
+
           // 🔥🔥🔥 FORCE PUSH VERIFICATION: Ensure commit is on remote 🔥🔥🔥
           // Developer MUST push their work - this is mandatory, not optional
           console.log(`\n📤 [FORCE PUSH CHECK] Verifying commit ${commitSHA.substring(0, 8)} is on remote...`);
           try {
             const branchOnRemote = safeGitExecSync(
               `git ls-remote origin refs/heads/${storyBranch}`,
-              { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+              { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.STATUS }
             );
 
             if (!branchOnRemote || branchOnRemote.trim() === '') {
               // Branch not on remote - FORCE PUSH IT
               console.log(`   ⚠️ Branch ${storyBranch} NOT on remote - pushing now...`);
-              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
               console.log(`   ✅ Branch pushed to remote`);
               // FIX: Sync local with remote after push
               try {
-                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
                 console.log(`   ✅ Local synced with remote`);
               } catch (_pullErr) {
                 console.log(`   ℹ️ Pull skipped (already up to date)`);
@@ -1869,11 +1712,11 @@ export class DevelopersPhase extends BasePhase {
                 console.log(`   ✅ Commit ${commitSHA.substring(0, 8)} confirmed on remote`);
               } else {
                 console.log(`   ⚠️ Remote has different commit (${remoteCommit.substring(0, 8)}) - pushing latest...`);
-                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
                 console.log(`   ✅ Latest commit pushed to remote`);
                 // FIX: Sync local with remote after push
                 try {
-                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
                   console.log(`   ✅ Local synced with remote`);
                 } catch (_pullErr) {
                   console.log(`   ℹ️ Pull skipped (already up to date)`);
@@ -1884,11 +1727,11 @@ export class DevelopersPhase extends BasePhase {
             console.warn(`   ⚠️ Push verification failed: ${pushCheckErr.message}`);
             console.warn(`   Attempting force push...`);
             try {
-              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
               console.log(`   ✅ Force push succeeded`);
               // FIX: Sync local with remote after force push
               try {
-                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
                 console.log(`   ✅ Local synced with remote`);
               } catch (_pullErr) {
                 console.log(`   ℹ️ Pull skipped (already up to date)`);
@@ -1971,21 +1814,61 @@ export class DevelopersPhase extends BasePhase {
 
         // Only require the finish marker - let Judge decide code quality
         if (!requiredMarkers.finishedSuccessfully) {
-          console.error(`\n❌ [PIPELINE] Developer did NOT complete work!`);
-          console.error(`   Story: ${story.title}`);
-          console.error(`   NO commits found on git AND no FINISHED marker in output`);
-          console.error(`\n   Developer must either:`);
-          console.error(`   1. Make commits (git commit + git push) - detected automatically`);
-          console.error(`   2. Output ✅ DEVELOPER_FINISHED_SUCCESSFULLY marker`);
-          console.error(`\n   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
-          return {
-            developerCost,
-            judgeCost: 0,
-            conflictResolutionCost: 0,
-            developerTokens,
-            judgeTokens: { input: 0, output: 0 },
-            conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
-          };
+          // 🔥🔥🔥 LAST RESORT: Check if output shows work was done despite no marker 🔥🔥🔥
+          // Use heuristics to detect uncommitted work in developer output
+          const { detectUncommittedWork } = await import('./utils/GitCommitHelper');
+          const outputShowsWork = detectUncommittedWork(developerOutput);
+
+          if (outputShowsWork) {
+            console.warn(`\n⚠️ [HEURISTIC DETECTION] Developer output shows work was done!`);
+            console.warn(`   Story: ${story.title}`);
+            console.warn(`   No commits AND no FINISHED marker, BUT output contains:`);
+            console.warn(`   - Edit/Write tool calls (code changes)`);
+            console.warn(`   🚀 FORCING TO JUDGE - Let Judge evaluate the workspace files directly`);
+
+            // 🔥 Try one more aggressive auto-commit
+            console.log(`\n🔧 [AGGRESSIVE RECOVERY] Attempting to recover any workspace files...`);
+            const { autoCommitDeveloperWork } = await import('./utils/GitCommitHelper');
+            const aggressiveCommit = await autoCommitDeveloperWork(repoPath, story.title, storyBranch);
+
+            if (aggressiveCommit.success && aggressiveCommit.commitSHA) {
+              console.log(`✅ [AGGRESSIVE RECOVERY] Recovered work!`);
+              commitSHA = aggressiveCommit.commitSHA;
+              gitValidationPassed = true;
+            } else {
+              console.warn(`⚠️ [AGGRESSIVE RECOVERY] No files to commit - but proceeding to Judge anyway`);
+              // 🔥 Create a "checkpoint" commit so Judge has SOMETHING to review
+              // Even if empty, this ensures the pipeline continues
+              try {
+                const checkpointSHA = safeGitExecSync(`cd "${repoPath}" && git rev-parse HEAD`, { encoding: 'utf8' }).trim();
+                if (checkpointSHA) {
+                  console.log(`   Using current HEAD as checkpoint: ${checkpointSHA.substring(0, 8)}`);
+                  commitSHA = checkpointSHA;
+                  gitValidationPassed = true;
+                }
+              } catch (e) {
+                console.error(`   Could not get HEAD SHA: ${e}`);
+              }
+            }
+          } else {
+            // 🔥 Output doesn't show work either - truly failed
+            console.error(`\n❌ [PIPELINE] Developer did NOT complete work!`);
+            console.error(`   Story: ${story.title}`);
+            console.error(`   NO commits found on git AND no FINISHED marker in output`);
+            console.error(`   Heuristic check: output does NOT show Edit/Write tool usage`);
+            console.error(`\n   Developer must either:`);
+            console.error(`   1. Make commits (git commit + git push) - detected automatically`);
+            console.error(`   2. Output ✅ DEVELOPER_FINISHED_SUCCESSFULLY marker`);
+            console.error(`\n   Developer output (last 1500 chars):\n${developerOutput.slice(-1500)}`);
+            return {
+              developerCost,
+              judgeCost: 0,
+              conflictResolutionCost: 0,
+              developerTokens,
+              judgeTokens: { input: 0, output: 0 },
+              conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 }
+            };
+          }
         }
 
         // Marker validation passed - try to get commit SHA from output
@@ -2102,7 +1985,7 @@ export class DevelopersPhase extends BasePhase {
           // We must use `git ls-remote origin | grep <SHA>` to find commits in branch history
           const lsRemote = safeGitExecSync(
             `git ls-remote origin`,
-            { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+            { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.STATUS }
           );
 
           // Search for commit SHA in ls-remote output
@@ -2167,7 +2050,7 @@ export class DevelopersPhase extends BasePhase {
 
           // Fetch all branches from remote (uses cache to avoid redundant fetches)
           console.log(`   [1/3] Fetching from remote...`);
-          smartGitFetch(repoPath, { timeout: 90000 });
+          smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH });
           console.log(`   ✅ Fetched latest refs from remote`);
 
           // 🔥 NEW: Verify branch exists on remote BEFORE attempting checkout
@@ -2177,7 +2060,7 @@ export class DevelopersPhase extends BasePhase {
 
           const lsRemoteBranches = safeGitExecSync(
             `git ls-remote --heads origin ${updatedStory.branchName}`,
-            { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+            { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.STATUS }
           );
 
           if (!lsRemoteBranches || lsRemoteBranches.trim().length === 0) {
@@ -2271,7 +2154,7 @@ export class DevelopersPhase extends BasePhase {
                 console.log(`   ⏳ Waiting ${delay}ms before retry...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 // Re-fetch to get latest refs (force fetch on retry to ensure fresh data)
-                smartGitFetch(repoPath, { timeout: 90000, force: true });
+                smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH, force: true });
               }
             }
           }
@@ -2437,7 +2320,7 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
                 encoding: 'utf8',
-                timeout: 120000 // 15 seconds timeout
+                timeout: GIT_TIMEOUTS.CLONE // 2 minutes for remote delete (network operation)
               });
               console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch} (GitHub)`);
             } catch (remoteDeleteError: any) {
@@ -2659,6 +2542,368 @@ export class DevelopersPhase extends BasePhase {
 
     } catch (error: any) {
       console.error(`❌ [PIPELINE] Story pipeline failed for ${story.id}: ${error.message}`);
+
+      // 🔍🔍🔍 FAILURE CLASSIFICATION: Determine recovery strategy 🔍🔍🔍
+      const storyBranch = story.branchName;
+      const effectiveWorkspaceForRecovery = workspacePath ? `${workspacePath}/story-${story.id}` : null;
+      const repoPath = effectiveWorkspaceForRecovery && epic.targetRepository
+        ? `${effectiveWorkspaceForRecovery}/${epic.targetRepository}`
+        : null;
+
+      // Step 1: Detect work in workspace (files, not just git history)
+      const workspaceDetection = repoPath
+        ? detectWorkInWorkspace(repoPath, undefined)
+        : undefined;
+
+      // Step 2: Check for commits on branch
+      let hasCommitsOnBranch = false;
+      let gitVerification: { hasCommits: boolean; commitCount: number; commitSHA: string | null; commitMessage?: string } | null = null;
+
+      if (storyBranch && effectiveWorkspaceForRecovery && epic.targetRepository) {
+        try {
+          gitVerification = await this.verifyDeveloperWorkFromGit(
+            effectiveWorkspaceForRecovery,
+            epic.targetRepository,
+            storyBranch,
+            story.id
+          );
+          hasCommitsOnBranch = gitVerification?.hasCommits || false;
+        } catch {
+          // Ignore - will be handled by classifier
+        }
+      }
+
+      // Step 3: Classify the failure
+      const failureContext: FailureContext = {
+        error,
+        retriesAttempted: 0, // TODO: Track retries in pipeline
+        maxRetries: 3,
+        developerOutput: undefined, // TODO: Capture developer output
+        workspaceDetection,
+        hasCommitsOnBranch,
+        phase: 'developer',
+      };
+
+      const failureAnalysis = classifyFailure(failureContext);
+      logFailureAnalysis(story.title, story.id, failureAnalysis);
+
+      // Emit failure analysis to frontend dashboard
+      NotificationService.emitFailureAnalysis(taskId, {
+        storyId: story.id,
+        storyTitle: story.title,
+        category: failureAnalysis.category,
+        strategy: failureAnalysis.strategy,
+        isTerminal: failureAnalysis.isTerminal,
+        shouldRetry: failureAnalysis.shouldRetry,
+        shouldCallJudge: failureAnalysis.shouldCallJudge,
+        evidence: failureAnalysis.evidence,
+        recommendations: failureAnalysis.recommendations,
+        maxAdditionalRetries: failureAnalysis.maxAdditionalRetries,
+        retryDelay: failureAnalysis.retryDelay,
+        message: typeof error === 'string' ? error : error.message,
+      });
+
+      // Step 4: Execute recovery strategy based on classification
+      if (storyBranch && effectiveWorkspaceForRecovery && epic.targetRepository) {
+        try {
+          // STRATEGY: SALVAGE_AND_JUDGE - Try to recover work and send to Judge
+          if (failureAnalysis.shouldCallJudge) {
+            console.log(`\n🔧 [RECOVERY] Strategy: ${failureAnalysis.strategy}`);
+
+            // First, try comprehensive recovery (detects files + auto-commits)
+            const recoveryResult = await comprehensiveWorkRecovery(
+              repoPath!,
+              story.title,
+              storyBranch,
+              undefined
+            );
+
+            const commitSHA = recoveryResult.commitSHA || gitVerification?.commitSHA;
+
+            if (commitSHA) {
+              console.log(`\n🎉 [RECOVERY] Work found! Commit: ${commitSHA.substring(0, 8)}`);
+              console.log(`   Detection: ${recoveryResult.workspaceDetection.detectionMethod}`);
+              console.log(`   Files changed: ${recoveryResult.workspaceDetection.totalChanges}`);
+              console.log(`   🚀 Proceeding to JUDGE`);
+
+              // Use existing gitVerification if we have it, otherwise use recovery result
+              if (!gitVerification?.hasCommits && recoveryResult.commitSHA) {
+                gitVerification = {
+                  hasCommits: true,
+                  commitCount: 1,
+                  commitSHA: recoveryResult.commitSHA,
+                  commitMessage: `Auto-recovered: ${story.title}`,
+                };
+              }
+            } else {
+              console.log(`\n⚠️ [RECOVERY] No work to salvage despite shouldCallJudge=true`);
+            }
+          }
+
+          // STRATEGY: RETRY_* - Transient error, should retry
+          else if (failureAnalysis.shouldRetry) {
+            console.log(`\n⏳ [RECOVERY] Transient error detected - should retry`);
+            console.log(`   Category: ${failureAnalysis.category}`);
+            console.log(`   Strategy: ${failureAnalysis.strategy}`);
+            console.log(`   Recommended delay: ${failureAnalysis.retryDelay}ms`);
+            console.log(`   Retries remaining: ${failureAnalysis.maxAdditionalRetries}`);
+            console.log(`   ⚠️ Retry logic should be handled at higher level - this catch shouldn't be reached!`);
+          }
+
+          // No Judge needed and no retry - this shouldn't happen with aggressive recovery
+          else if (!failureAnalysis.shouldCallJudge) {
+            console.log(`\n⚠️ [RECOVERY] No recovery action available`);
+            console.log(`   Category: ${failureAnalysis.category}`);
+            console.log(`   Strategy: ${failureAnalysis.strategy}`);
+            console.log(`   This is unexpected with aggressive recovery settings!`);
+          }
+
+          // If we have a commit SHA (from original verification or recovery), proceed to Judge
+          if (gitVerification?.hasCommits && gitVerification.commitSHA) {
+            console.log(`\n🎉🎉🎉 [RECOVERY] FOUND DEVELOPER WORK! 🎉🎉🎉`);
+            console.log(`   Commits: ${gitVerification.commitCount}`);
+            console.log(`   Latest: ${gitVerification.commitSHA.substring(0, 8)}`);
+            console.log(`   Message: ${gitVerification.commitMessage || 'N/A'}`);
+            console.log(`   🚀 Proceeding directly to JUDGE (skipping failed developer retry)`);
+
+            // Create pipeline context for recovery
+            const recoveryPipelineCtx: StoryPipelineContext = {
+              task,
+              story,
+              developer,
+              epic,
+              repositories,
+              effectiveWorkspacePath: effectiveWorkspaceForRecovery,
+              workspaceStructure,
+              attachments,
+              state,
+              context,
+              taskId,
+              normalizedEpicId,
+              normalizedStoryId,
+              epicBranchName: epicBranchName || `epic/${normalizedEpicId}`,
+              devAuth,
+              architectureBrief,
+              environmentCommands,
+              projectRadiographies,
+            };
+
+            // Execute Judge stage directly
+            console.log(`\n⚖️ [RECOVERY-JUDGE] Evaluating recovered work...`);
+            const judgeResult = await this.executeJudgeStage(
+              recoveryPipelineCtx,
+              gitVerification.commitSHA,
+              storyBranch
+            );
+
+            if (judgeResult.success && judgeResult.approved) {
+              console.log(`\n✅ [RECOVERY-JUDGE] APPROVED! Proceeding to merge...`);
+
+              // Execute Merge stage
+              const mergeResult = await this.executeMergeStage(
+                recoveryPipelineCtx,
+                gitVerification.commitSHA
+              );
+
+              if (mergeResult.success) {
+                console.log(`\n🎊🎊🎊 [RECOVERY] SUCCESS! Story recovered from failure! 🎊🎊🎊`);
+
+                // Emit story recovered to frontend dashboard
+                NotificationService.emitStoryRecovered(taskId, {
+                  storyId: story.id,
+                  storyTitle: story.title,
+                  recoveryMethod: 'git_verification',
+                  commitSHA: gitVerification.commitSHA || undefined,
+                });
+
+                // Emit StoryCompleted event
+                const { eventStore } = await import('../EventStore');
+                await eventStore.append({
+                  taskId: task._id as any,
+                  eventType: 'StoryCompleted',
+                  agentName: 'developer',
+                  payload: {
+                    storyId: story.id,
+                    epicId: normalizedEpicId,
+                    title: story.title,
+                    recoveredFromFailure: true,
+                    originalError: error.message,
+                  },
+                });
+
+                // Mark story as completed
+                await unifiedMemoryService.markStoryCompleted(
+                  taskId,
+                  normalizedEpicId,
+                  normalizedStoryId,
+                  'approved',
+                  storyBranch,
+                  undefined
+                );
+
+                // Return costs from recovery
+                return {
+                  developerCost: 0, // Developer cost was lost due to failure
+                  judgeCost: judgeResult.judgeCost,
+                  conflictResolutionCost: mergeResult.conflictResolutionCost,
+                  developerTokens: { input: 0, output: 0 },
+                  judgeTokens: judgeResult.judgeTokens,
+                  conflictResolutionUsage: mergeResult.conflictResolutionUsage,
+                };
+              } else {
+                console.log(`\n⚠️ [RECOVERY-MERGE] Merge failed: ${mergeResult.error}`);
+              }
+            } else if (judgeResult.success && !judgeResult.approved) {
+              console.log(`\n❌ [RECOVERY-JUDGE] REJECTED: ${judgeResult.feedback}`);
+              // Judge rejected - mark as failed
+              const { eventStore } = await import('../EventStore');
+              await eventStore.append({
+                taskId: task._id as any,
+                eventType: 'StoryFailed',
+                agentName: 'developer',
+                payload: {
+                  storyId: story.id,
+                  epicId: normalizedEpicId,
+                  title: story.title,
+                  recoveredButRejected: true,
+                  feedback: judgeResult.feedback,
+                },
+              });
+            } else {
+              console.log(`\n⚠️ [RECOVERY-JUDGE] Judge stage failed: ${judgeResult.error}`);
+            }
+          } else {
+            // 🔥🔥🔥 AGGRESSIVE RECOVERY: No commits, but maybe files exist 🔥🔥🔥
+            console.log(`   📭 No commits found - attempting aggressive file recovery...`);
+
+            const repoPath = `${effectiveWorkspaceForRecovery}/${epic.targetRepository}`;
+
+            // Try auto-commit to capture any uncommitted work
+            const { autoCommitDeveloperWork } = await import('./utils/GitCommitHelper');
+            const autoCommitResult = await autoCommitDeveloperWork(repoPath, story.title, storyBranch);
+
+            if (autoCommitResult.success && autoCommitResult.commitSHA) {
+              console.log(`\n🎉 [AGGRESSIVE RECOVERY] Found and committed uncommitted work!`);
+              console.log(`   Commit: ${autoCommitResult.commitSHA.substring(0, 8)}`);
+              console.log(`   Action: ${autoCommitResult.action}`);
+              console.log(`   🚀 Proceeding to JUDGE with recovered work`);
+
+              // Create pipeline context for recovery
+              const recoveryPipelineCtx: StoryPipelineContext = {
+                task,
+                story,
+                developer,
+                epic,
+                repositories,
+                effectiveWorkspacePath: effectiveWorkspaceForRecovery,
+                workspaceStructure,
+                attachments,
+                state,
+                context,
+                taskId,
+                normalizedEpicId,
+                normalizedStoryId,
+                epicBranchName: epicBranchName || `epic/${normalizedEpicId}`,
+                devAuth,
+                architectureBrief,
+                environmentCommands,
+                projectRadiographies,
+              };
+
+              // Execute Judge stage
+              console.log(`\n⚖️ [AGGRESSIVE-JUDGE] Evaluating recovered uncommitted work...`);
+              const aggressiveJudgeResult = await this.executeJudgeStage(
+                recoveryPipelineCtx,
+                autoCommitResult.commitSHA,
+                storyBranch
+              );
+
+              if (aggressiveJudgeResult.success && aggressiveJudgeResult.approved) {
+                console.log(`\n✅ [AGGRESSIVE-JUDGE] APPROVED! Proceeding to merge...`);
+
+                const aggressiveMergeResult = await this.executeMergeStage(
+                  recoveryPipelineCtx,
+                  autoCommitResult.commitSHA
+                );
+
+                if (aggressiveMergeResult.success) {
+                  console.log(`\n🎊🎊🎊 [AGGRESSIVE RECOVERY] SUCCESS! Story recovered from uncommitted work! 🎊🎊🎊`);
+
+                  // Emit story recovered to frontend dashboard
+                  NotificationService.emitStoryRecovered(taskId, {
+                    storyId: story.id,
+                    storyTitle: story.title,
+                    recoveryMethod: 'auto_commit_uncommitted_work',
+                    commitSHA: autoCommitResult.commitSHA,
+                  });
+
+                  const { eventStore } = await import('../EventStore');
+                  await eventStore.append({
+                    taskId: task._id as any,
+                    eventType: 'StoryCompleted',
+                    agentName: 'developer',
+                    payload: {
+                      storyId: story.id,
+                      epicId: normalizedEpicId,
+                      title: story.title,
+                      recoveredFromUncommittedWork: true,
+                      originalError: error.message,
+                    },
+                  });
+
+                  await unifiedMemoryService.markStoryCompleted(
+                    taskId,
+                    normalizedEpicId,
+                    normalizedStoryId,
+                    'approved',
+                    storyBranch,
+                    undefined
+                  );
+
+                  return {
+                    developerCost: 0,
+                    judgeCost: aggressiveJudgeResult.judgeCost,
+                    conflictResolutionCost: aggressiveMergeResult.conflictResolutionCost,
+                    developerTokens: { input: 0, output: 0 },
+                    judgeTokens: aggressiveJudgeResult.judgeTokens,
+                    conflictResolutionUsage: aggressiveMergeResult.conflictResolutionUsage,
+                  };
+                }
+              } else if (aggressiveJudgeResult.success && !aggressiveJudgeResult.approved) {
+                console.log(`\n❌ [AGGRESSIVE-JUDGE] REJECTED - work incomplete: ${aggressiveJudgeResult.feedback}`);
+                // Judge rejected but at least we tried! Log for visibility
+              }
+            } else {
+              console.log(`   ℹ️ No uncommitted files to recover: ${autoCommitResult.message}`);
+            }
+          }
+        } catch (recoveryError: any) {
+          console.error(`   ❌ Recovery check failed: ${recoveryError.message}`);
+        }
+      } else {
+        console.log(`   ⚠️ Cannot verify git work - missing branch (${storyBranch}) or workspace`);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // FINAL CHECK: Is this failure TERMINAL or should we have recovered?
+      // ═══════════════════════════════════════════════════════════════════════════
+      if (isTerminalFailure(failureAnalysis)) {
+        // This is a LEGITIMATE failure (Judge rejected OR Claude API down)
+        const reason = getTerminalFailureReason(failureAnalysis);
+        console.log(`\n💀 [TERMINAL FAILURE] Story ${story.id} failed legitimately`);
+        console.log(`   Reason: ${reason}`);
+        console.log(`   Category: ${failureAnalysis.category}`);
+      } else {
+        // This should NOT have failed - recovery was possible but didn't work
+        console.log(`\n⚠️ [UNEXPECTED FAILURE] Story ${story.id} failed but recovery was possible`);
+        console.log(`   Category: ${failureAnalysis.category}`);
+        console.log(`   Strategy: ${failureAnalysis.strategy}`);
+        console.log(`   Should have retried: ${failureAnalysis.shouldRetry}`);
+        console.log(`   Max retries remaining: ${failureAnalysis.maxAdditionalRetries || 0}`);
+        console.log(`   🚨 This indicates a bug in the recovery logic - this failure should have been prevented!`);
+      }
+
+      // Return zero costs - story failed
       return {
         developerCost: 0,
         judgeCost: 0,
@@ -2901,7 +3146,7 @@ export class DevelopersPhase extends BasePhase {
             safeGitExecSync(`git fetch origin --prune`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 90000
+              timeout: GIT_TIMEOUTS.FETCH
             });
             console.log(`   ✅ Fetch succeeded`);
             break;
@@ -2935,25 +3180,25 @@ export class DevelopersPhase extends BasePhase {
           try {
             const branchOnRemote = safeGitExecSync(
               `git ls-remote origin refs/heads/${storyBranch}`,
-              { cwd: repoPath, encoding: 'utf8', timeout: 10000 }
+              { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.STATUS }
             );
 
             if (!branchOnRemote || branchOnRemote.trim() === '') {
               console.log(`   ⚠️ Branch not on remote - pushing...`);
-              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              safeGitExecSync(`git push -u origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
               console.log(`   ✅ Branch pushed`);
               // FIX: Sync local with remote after push
               try {
-                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
               } catch (_pullErr) { /* already up to date */ }
             } else {
               const remoteCommit = branchOnRemote.split('\t')[0];
               if (remoteCommit !== commitSHA) {
                 console.log(`   ⚠️ Remote has different commit - pushing latest...`);
-                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+                safeGitExecSync(`git push origin ${storyBranch}`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
                 // FIX: Sync local with remote after push
                 try {
-                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                  safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
                 } catch (_pullErr) { /* already up to date */ }
               }
               console.log(`   ✅ Commit confirmed on remote`);
@@ -2961,11 +3206,11 @@ export class DevelopersPhase extends BasePhase {
           } catch (pushErr: any) {
             console.warn(`   ⚠️ Push verification failed: ${pushErr.message}`);
             try {
-              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              safeGitExecSync(`git push -u origin ${storyBranch} --force-with-lease`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.PUSH });
               console.log(`   ✅ Force push succeeded`);
               // FIX: Sync local with remote after force push
               try {
-                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+                safeGitExecSync(`git pull origin ${storyBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
               } catch (_pullErr) { /* already up to date */ }
             } catch (forcePushErr: any) {
               console.error(`   ❌ Force push failed: ${forcePushErr.message}`);
@@ -3104,7 +3349,7 @@ export class DevelopersPhase extends BasePhase {
           console.log(`   🔄 Syncing workspace...`);
           try {
             // Use cached fetch to avoid redundant network calls
-            smartGitFetch(repoPath, { timeout: 90000 });
+            smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH });
 
             // Checkout story branch
             let branchExistsLocally = false;
@@ -3253,7 +3498,7 @@ export class DevelopersPhase extends BasePhase {
             try {
               safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
                 encoding: 'utf8',
-                timeout: 120000
+                timeout: GIT_TIMEOUTS.CLONE
               });
               console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch}`);
             } catch { /* Branch might not exist on remote */ }
@@ -3358,7 +3603,7 @@ export class DevelopersPhase extends BasePhase {
       try {
         const pullOutput = safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
           encoding: 'utf8',
-          timeout: 90000, // 90 seconds for pull (network operation)
+          timeout: GIT_TIMEOUTS.FETCH, // 90 seconds for pull (network operation)
         });
         console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
         console.log(`   Git output: ${pullOutput.substring(0, 100)}`);
@@ -3418,7 +3663,7 @@ export class DevelopersPhase extends BasePhase {
             {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 90000 // 90 seconds (network operation)
+              timeout: GIT_TIMEOUTS.FETCH // 90 seconds (network operation)
             }
           );
           console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
@@ -3426,7 +3671,7 @@ export class DevelopersPhase extends BasePhase {
           pushSucceeded = true;
           // FIX: Sync local with remote after push
           try {
-            safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+            safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
             console.log(`✅ [Merge] Local synced with remote`);
           } catch (_pullErr) {
             console.log(`   ℹ️ Pull skipped (already up to date)`);
@@ -3783,7 +4028,7 @@ If you cannot resolve a conflict, output:
         undefined,  // attachments
         {
           maxIterations: 10,  // Give it enough iterations to resolve conflicts
-          timeout: 180000,    // 3 minutes
+          timeout: AGENT_TIMEOUTS.DEFAULT,  // 5 minutes for conflict resolution
         }
       );
 

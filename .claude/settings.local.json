@@ -142,7 +142,17 @@
       "Bash(gh pr create:*)",
       "Bash(do echo \"=== PR #$pr ===\")",
       "Bash(git show:*)",
-      "Bash(gh pr merge:*)"
+      "Bash(gh pr merge:*)",
+      "mcp__github__push_files",
+      "Bash(do echo \"=== $service ===\")",
+      "Bash(do echo \"=== Model: $model ===\")",
+      "Bash(do echo \"=== Route: $route ===\")",
+      "Bash(do echo \"=== Util: $util ===\")",
+      "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/services/FailedExecutionRetryService.ts src/services/ExecutionCheckpointService.ts src/services/SmartCodeAnalyzer.ts src/services/DeveloperSelfCheckService.ts)",
+      "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/services/AgentPermissionService.ts)",
+      "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/services/orchestration/AgentDefinitions.ts)",
+      "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/agents-software-arq checkout -- src/tools/extraTools.ts)",
+      "Bash(top:*)"
     ],
     "deny": [],
     "ask": []

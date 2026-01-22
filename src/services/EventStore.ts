@@ -3,6 +3,8 @@ import { execSync } from 'child_process';
 import { Event, EventType, IEvent } from '../models/Event';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { atomicWriteFileSync, isOk } from '../utils/robustness';
 
 /**
  * EventCounter - Atomic counter for event versioning
@@ -89,10 +91,169 @@ export interface TaskState {
 
 /**
  * EventStore - Append-only event storage with state reconstruction
+ *
+ * 🔥 LOCAL-FIRST ARCHITECTURE:
+ * - All events are saved to LOCAL JSONL file FIRST (primary)
+ * - MongoDB is used as BACKUP (secondary)
+ * - This ensures events survive MongoDB crashes
+ * - Events are synced from local to MongoDB on recovery
  */
 export class EventStore {
   /**
-   * Append a new event (guaranteed to succeed if DB is up)
+   * Get local events file path for a task
+   * Location: {workspaceDir}/task-{taskId}/.agent-memory/events.jsonl
+   */
+  private getLocalEventsPath(taskId: string): string {
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const cleanTaskId = taskId.toString().replace(/^task-/, '');
+    return path.join(workspaceDir, `task-${cleanTaskId}`, '.agent-memory', 'events.jsonl');
+  }
+
+  /**
+   * Get local version counter path
+   */
+  private getLocalVersionPath(taskId: string): string {
+    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const cleanTaskId = taskId.toString().replace(/^task-/, '');
+    return path.join(workspaceDir, `task-${cleanTaskId}`, '.agent-memory', 'event-version.json');
+  }
+
+  /**
+   * Append event to local JSONL file
+   * Returns the version number used
+   *
+   * 🔒 ROBUSTNESS: Uses atomic writes for version counter to prevent race conditions
+   */
+  private appendToLocal(taskId: string, event: any): number {
+    const lockPath = this.getLocalVersionPath(taskId) + '.lock';
+
+    try {
+      const eventsPath = this.getLocalEventsPath(taskId);
+      const versionPath = this.getLocalVersionPath(taskId);
+      const dir = path.dirname(eventsPath);
+
+      // Ensure directory exists
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // 🔒 ATOMIC VERSION INCREMENT with simple file lock
+      // This prevents race conditions when multiple processes write events
+      let version = 1;
+      const maxRetries = 10;
+      let lockAcquired = false;
+
+      for (let retry = 0; retry < maxRetries; retry++) {
+        try {
+          // Try to acquire lock (atomic create)
+          fs.writeFileSync(lockPath, process.pid.toString(), { flag: 'wx' });
+          lockAcquired = true;
+          break;
+        } catch {
+          // Lock exists, wait a bit and retry
+          const waitMs = Math.floor(Math.random() * 50) + 10;
+          const start = Date.now();
+          while (Date.now() - start < waitMs) {
+            // Busy wait (short duration)
+          }
+        }
+      }
+
+      // Read current version
+      if (fs.existsSync(versionPath)) {
+        try {
+          const versionData = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
+          version = (versionData.sequence || 0) + 1;
+        } catch (e) {
+          // File corrupted, try to recover from events
+          const events = this.readFromLocal(taskId);
+          version = events.length > 0 ? Math.max(...events.map(e => e.version || 0)) + 1 : 1;
+          console.warn(`⚠️ [EventStore] Version file corrupted, recovered version: ${version}`);
+        }
+      }
+
+      // 🔒 ATOMIC WRITE: Save version counter atomically
+      const versionContent = JSON.stringify({ sequence: version, lastUpdated: Date.now(), pid: process.pid });
+      const writeResult = atomicWriteFileSync(versionPath, versionContent);
+      if (!isOk(writeResult)) {
+        // Fallback to direct write
+        fs.writeFileSync(versionPath, versionContent, 'utf8');
+      }
+
+      // Release lock
+      if (lockAcquired) {
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          // Ignore lock cleanup errors
+        }
+      }
+
+      // Append event to JSONL
+      const eventWithVersion = { ...event, version, savedAt: new Date().toISOString() };
+      fs.appendFileSync(eventsPath, JSON.stringify(eventWithVersion) + '\n', 'utf8');
+
+      return version;
+    } catch (error: any) {
+      console.error(`❌ [EventStore] Failed to save to local: ${error.message}`);
+      throw error; // Local is primary, so this is critical
+    }
+  }
+
+  /**
+   * Read events from local JSONL file
+   *
+   * 🔒 ROBUSTNESS: Reports corrupted lines and attempts to salvage valid events
+   */
+  private readFromLocal(taskId: string): any[] {
+    try {
+      const eventsPath = this.getLocalEventsPath(taskId);
+      if (!fs.existsSync(eventsPath)) {
+        return [];
+      }
+
+      const content = fs.readFileSync(eventsPath, 'utf8');
+      const lines = content.split('\n').filter(line => line.trim());
+      const events: any[] = [];
+      const corruptedLines: number[] = [];
+
+      lines.forEach((line, index) => {
+        try {
+          const event = JSON.parse(line);
+          events.push(event);
+        } catch (e) {
+          corruptedLines.push(index + 1);
+        }
+      });
+
+      // Report corrupted lines
+      if (corruptedLines.length > 0) {
+        console.warn(
+          `⚠️ [EventStore] Task ${taskId}: ${corruptedLines.length} corrupted event lines (lines: ${corruptedLines.slice(0, 5).join(', ')}${corruptedLines.length > 5 ? '...' : ''})`
+        );
+
+        // If more than 10% corrupted, this is serious
+        const corruptionRate = corruptedLines.length / lines.length;
+        if (corruptionRate > 0.1) {
+          console.error(
+            `❌ [EventStore] CRITICAL: ${(corruptionRate * 100).toFixed(1)}% of events corrupted for task ${taskId}`
+          );
+        }
+      }
+
+      // Sort by version
+      events.sort((a, b) => (a.version || 0) - (b.version || 0));
+
+      return events;
+    } catch (error: any) {
+      console.warn(`⚠️ [EventStore] Failed to read local events: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Append a new event
+   * 🔥 LOCAL-FIRST: Saves to local file FIRST, then MongoDB as backup
    */
   async append(data: {
     taskId: mongoose.Types.ObjectId | string;
@@ -106,28 +267,65 @@ export class EventStore {
       error?: string;
     };
   }): Promise<IEvent> {
+    const taskIdStr = data.taskId.toString();
     const taskId = typeof data.taskId === 'string'
       ? new mongoose.Types.ObjectId(data.taskId)
       : data.taskId;
 
-    // Get next version number
-    const version = await this.getNextVersion(taskId);
-
-    // Create event (atomic operation)
-    const event = await Event.create({
-      taskId,
+    // 1️⃣ SAVE TO LOCAL FIRST (primary)
+    const eventData = {
+      taskId: taskIdStr,
       eventType: data.eventType,
       payload: data.payload,
-      version,
-      userId: data.userId,
+      userId: data.userId?.toString(),
       agentName: data.agentName,
       metadata: data.metadata,
-      timestamp: new Date(),
-    });
+      timestamp: new Date().toISOString(),
+    };
 
-    console.log(`📝 [EventStore] Event ${version}: ${data.eventType}`);
+    const localVersion = this.appendToLocal(taskIdStr, eventData);
+    console.log(`💾 [EventStore] Saved to local: Event ${localVersion}: ${data.eventType}`);
 
-    return event;
+    // 2️⃣ BACKUP TO MONGODB (secondary, non-blocking)
+    let mongoEvent: IEvent | null = null;
+    try {
+      // Get next version number from MongoDB (may differ from local if out of sync)
+      const mongoVersion = await this.getNextVersion(taskId);
+
+      // Create event in MongoDB
+      mongoEvent = await Event.create({
+        taskId,
+        eventType: data.eventType,
+        payload: data.payload,
+        version: mongoVersion,
+        userId: data.userId,
+        agentName: data.agentName,
+        metadata: data.metadata,
+        timestamp: new Date(),
+      });
+
+      console.log(`☁️ [EventStore] Backed up to MongoDB: Event ${mongoVersion}: ${data.eventType}`);
+    } catch (mongoError: any) {
+      console.warn(`⚠️ [EventStore] MongoDB backup failed (non-critical): ${mongoError.message}`);
+      // Don't throw - local is primary, MongoDB is just backup
+    }
+
+    // Return a pseudo-event object if MongoDB failed
+    if (!mongoEvent) {
+      return {
+        _id: new mongoose.Types.ObjectId(),
+        taskId,
+        eventType: data.eventType,
+        payload: data.payload,
+        version: localVersion,
+        userId: data.userId,
+        agentName: data.agentName,
+        metadata: data.metadata,
+        timestamp: new Date(),
+      } as IEvent;
+    }
+
+    return mongoEvent;
   }
 
   /**
@@ -149,34 +347,158 @@ export class EventStore {
 
   /**
    * Get all events for a task (ordered by version)
+   * 🔥 LOCAL-FIRST: Reads from LOCAL first (primary), MongoDB as backup
+   * LOCAL -> MongoDB, NEVER MongoDB -> LOCAL
    */
   async getEvents(taskId: mongoose.Types.ObjectId | string): Promise<any[]> {
+    const taskIdStr = taskId.toString();
     const id = typeof taskId === 'string'
       ? new mongoose.Types.ObjectId(taskId)
       : taskId;
 
-    return await Event.find({ taskId: id })
-      .sort({ version: 1 })
-      .lean();
+    // 1️⃣ LOCAL FIRST (primary source of truth)
+    const localEvents = this.readFromLocal(taskIdStr);
+
+    // 2️⃣ If local has events, use them as primary
+    if (localEvents.length > 0) {
+      console.log(`📂 [EventStore] Using ${localEvents.length} events from LOCAL (primary)`);
+
+      // 3️⃣ Optionally check MongoDB for any events we might have missed during recovery
+      // (e.g., events from another server instance)
+      try {
+        const mongoEvents = await Event.find({ taskId: id })
+          .sort({ version: 1 })
+          .lean();
+
+        if (mongoEvents.length > localEvents.length) {
+          // MongoDB has more events - merge them (rare case: another instance wrote)
+          console.log(`🔄 [EventStore] MongoDB has ${mongoEvents.length - localEvents.length} extra events, merging...`);
+          const localVersions = new Set(localEvents.map(e => e.version));
+          const mongoOnlyEvents = mongoEvents.filter(e => !localVersions.has(e.version));
+          if (mongoOnlyEvents.length > 0) {
+            console.log(`   Adding ${mongoOnlyEvents.length} MongoDB-only events to result`);
+            return [...localEvents, ...mongoOnlyEvents].sort((a, b) => (a.version || 0) - (b.version || 0));
+          }
+        }
+      } catch (mongoError: any) {
+        // MongoDB failed - that's OK, we have local data
+        console.warn(`⚠️ [EventStore] MongoDB read failed (using local): ${mongoError.message}`);
+      }
+
+      return localEvents;
+    }
+
+    // 4️⃣ LOCAL is empty - try MongoDB as fallback (recovery scenario)
+    console.log(`📂 [EventStore] LOCAL is empty, checking MongoDB as fallback...`);
+    try {
+      const mongoEvents = await Event.find({ taskId: id })
+        .sort({ version: 1 })
+        .lean();
+
+      if (mongoEvents.length > 0) {
+        console.log(`☁️ [EventStore] Found ${mongoEvents.length} events in MongoDB (recovery mode)`);
+        return mongoEvents;
+      }
+    } catch (mongoError: any) {
+      console.warn(`⚠️ [EventStore] MongoDB fallback failed: ${mongoError.message}`);
+    }
+
+    // 5️⃣ Both empty - return empty array
+    return [];
   }
 
   /**
    * Get events since a specific version
+   * 🔥 LOCAL-FIRST: Same pattern as getEvents()
    */
   async getEventsSince(
     taskId: mongoose.Types.ObjectId | string,
     sinceVersion: number
   ): Promise<any[]> {
+    const taskIdStr = taskId.toString();
+
+    // 1️⃣ LOCAL FIRST
+    const localEvents = this.readFromLocal(taskIdStr);
+    const filteredLocal = localEvents.filter(e => (e.version || 0) > sinceVersion);
+
+    if (filteredLocal.length > 0) {
+      return filteredLocal;
+    }
+
+    // 2️⃣ Fallback to MongoDB only if local is empty
     const id = typeof taskId === 'string'
       ? new mongoose.Types.ObjectId(taskId)
       : taskId;
 
-    return await Event.find({
-      taskId: id,
-      version: { $gt: sinceVersion }
-    })
-      .sort({ version: 1 })
-      .lean();
+    try {
+      return await Event.find({
+        taskId: id,
+        version: { $gt: sinceVersion }
+      })
+        .sort({ version: 1 })
+        .lean();
+    } catch (mongoError: any) {
+      console.warn(`⚠️ [EventStore] MongoDB getEventsSince failed: ${mongoError.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * 🔥 Sync local events to MongoDB
+   * Call this when MongoDB comes back online after a crash
+   */
+  async syncLocalToMongoDB(taskId: mongoose.Types.ObjectId | string): Promise<{ synced: number; skipped: number }> {
+    const taskIdStr = taskId.toString();
+    const id = typeof taskId === 'string'
+      ? new mongoose.Types.ObjectId(taskId)
+      : taskId;
+
+    const localEvents = this.readFromLocal(taskIdStr);
+    if (localEvents.length === 0) {
+      return { synced: 0, skipped: 0 };
+    }
+
+    // Get existing MongoDB events
+    let mongoEvents: any[] = [];
+    try {
+      mongoEvents = await Event.find({ taskId: id }).lean();
+    } catch (e) {
+      console.error(`❌ [EventStore] Cannot sync - MongoDB unavailable`);
+      return { synced: 0, skipped: localEvents.length };
+    }
+
+    const mongoEventKeys = new Set(mongoEvents.map(e => `${e.eventType}-${e.payload?.storyId || ''}-${e.payload?.epicId || ''}`));
+
+    let synced = 0;
+    let skipped = 0;
+
+    for (const localEvent of localEvents) {
+      const key = `${localEvent.eventType}-${localEvent.payload?.storyId || ''}-${localEvent.payload?.epicId || ''}`;
+      if (mongoEventKeys.has(key)) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        await Event.create({
+          taskId: id,
+          eventType: localEvent.eventType,
+          payload: localEvent.payload,
+          version: localEvent.version,
+          userId: localEvent.userId ? new mongoose.Types.ObjectId(localEvent.userId) : undefined,
+          agentName: localEvent.agentName,
+          metadata: localEvent.metadata,
+          timestamp: new Date(localEvent.timestamp),
+        });
+        synced++;
+      } catch (e) {
+        // Duplicate or error, skip
+        skipped++;
+      }
+    }
+
+    console.log(`🔄 [EventStore] Synced ${synced} events from local to MongoDB (${skipped} skipped)`);
+    return { synced, skipped };
   }
 
   /**

@@ -599,3 +599,121 @@ export function fixGitRemoteAuth(repoPath: string): boolean {
     return false;
   }
 }
+
+/**
+ * 🔥 Safe checkout or create branch - handles resume scenarios
+ *
+ * This function handles the common pattern where we need to checkout a branch
+ * but it might already exist (from a previous run or resume scenario).
+ *
+ * Strategy:
+ * 1. Try to create branch with -b (new branch)
+ * 2. If fails because "already exists", checkout existing branch
+ * 3. If local checkout fails, try tracking from remote
+ *
+ * @param branchName - Name of the branch to checkout/create
+ * @param repoPath - Repository path
+ * @param options - Options for the operation
+ * @returns Object with success status and whether branch was created or checked out
+ */
+export function safeCheckoutBranch(
+  branchName: string,
+  repoPath: string,
+  options: {
+    createFrom?: string; // Base branch to create from (e.g., "main", "origin/main")
+    pullAfterCheckout?: boolean; // Pull latest after checkout
+    timeout?: number;
+  } = {}
+): { success: boolean; created: boolean; error?: string } {
+  const timeout = options.timeout || GIT_TIMEOUTS.DEFAULT;
+
+  try {
+    // STEP 1: Try to create new branch
+    try {
+      const createCmd = options.createFrom
+        ? `git checkout -b ${branchName} ${options.createFrom}`
+        : `git checkout -b ${branchName}`;
+
+      nodeExecSync(createCmd, {
+        cwd: repoPath,
+        encoding: 'utf8',
+        timeout,
+      });
+
+      console.log(`✅ [Git] Created new branch: ${branchName}`);
+      return { success: true, created: true };
+    } catch (createErr: any) {
+      // Check if branch already exists
+      if (createErr.message.includes('already exists')) {
+        console.log(`   ℹ️ [Git] Branch ${branchName} already exists, checking out...`);
+
+        // STEP 2: Try to checkout existing local branch
+        try {
+          nodeExecSync(`git checkout ${branchName}`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout,
+          });
+
+          // Optionally pull latest
+          if (options.pullAfterCheckout) {
+            try {
+              nodeExecSync(`git pull origin ${branchName} --rebase`, {
+                cwd: repoPath,
+                encoding: 'utf8',
+                timeout: GIT_TIMEOUTS.PULL,
+              });
+              console.log(`   ✅ [Git] Pulled latest from remote`);
+            } catch (pullErr: any) {
+              console.log(`   ℹ️ [Git] Pull skipped: ${pullErr.message.split('\n')[0]}`);
+            }
+          }
+
+          console.log(`✅ [Git] Checked out existing branch: ${branchName}`);
+          return { success: true, created: false };
+        } catch (checkoutErr: any) {
+          // STEP 3: Try tracking from remote
+          console.log(`   ℹ️ [Git] Local checkout failed, trying remote tracking...`);
+          try {
+            nodeExecSync(`git checkout -b ${branchName} origin/${branchName}`, {
+              cwd: repoPath,
+              encoding: 'utf8',
+              timeout,
+            });
+
+            console.log(`✅ [Git] Checked out branch from remote: ${branchName}`);
+            return { success: true, created: false };
+          } catch (trackErr: any) {
+            throw new Error(`Failed to checkout ${branchName}: ${trackErr.message}`);
+          }
+        }
+      } else {
+        // Different error, not "already exists"
+        throw createErr;
+      }
+    }
+  } catch (error: any) {
+    console.error(`❌ [Git] Branch operation failed for ${branchName}: ${error.message}`);
+    return { success: false, created: false, error: error.message };
+  }
+}
+
+/**
+ * Async version of safeCheckoutBranch
+ */
+export async function safeCheckoutBranchAsync(
+  branchName: string,
+  repoPath: string,
+  options: {
+    createFrom?: string;
+    pullAfterCheckout?: boolean;
+    timeout?: number;
+  } = {}
+): Promise<{ success: boolean; created: boolean; error?: string }> {
+  // Use the sync version wrapped in a promise for now
+  // This could be refactored to use async git operations if needed
+  return new Promise((resolve) => {
+    const result = safeCheckoutBranch(branchName, repoPath, options);
+    resolve(result);
+  });
+}

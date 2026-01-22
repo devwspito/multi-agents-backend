@@ -521,6 +521,12 @@ class AgentPlatformApp {
       });
       console.log('✅ Execution checkpoint recovery is ENABLED');
 
+      // 🏥 Start health monitoring service
+      console.log('🏥 Starting health monitoring service...');
+      const { healthCheckService } = await import('./services/orchestration/HealthCheckService');
+      healthCheckService.startPeriodicMonitoring(60000); // Check every 60 seconds
+      console.log('✅ Health monitoring is ENABLED (checks every 60s, auto-recovery for stuck tasks)');
+
       // Inicializar middleware
       this.initializeMiddleware();
 

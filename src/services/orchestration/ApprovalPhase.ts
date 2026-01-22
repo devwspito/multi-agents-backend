@@ -1,4 +1,4 @@
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { approvalEvents } from '../ApprovalEvents'; // Event-based approval system
 import { NotificationService } from '../NotificationService';
 
@@ -208,10 +208,10 @@ export class ApprovalPhase extends BasePhase {
       // Limpiar flag de aprobación pendiente
       context.setData('approvalPending', false);
 
-      // 📌 Clear persisted pending approval
-      await Task.findByIdAndUpdate(task._id, {
+      // 📌 Clear persisted pending approval (fire-and-forget)
+      updateTaskFireAndForget(task._id, {
         $unset: { 'orchestration.pendingApproval': 1 },
-      });
+      }, 'clear pendingApproval');
 
       if (approved) {
         console.log(`✅ [Approval] ${phaseName} approved by user (via event)`);

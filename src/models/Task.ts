@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'paused';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'interrupted';
 // Active agent types (legacy types removed: problem-analyst, product-manager, project-manager, qa-engineer, fixer, merge-coordinator, e2e-tester, contract-fixer, test-creator, contract-tester, error-detective)
 export type AgentType = 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'auto-merge' | 'team-orchestration' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
@@ -268,9 +268,9 @@ export interface IOrchestration {
   directiveHistory?: IDirective[];  // Archive of consumed directives for audit trail
 
   // Auto-aprobación opcional
-  // Phases: planning, tech-lead (architecture), team-orchestration, verification, auto-merge
+  // Phases: planning, tech-lead, team-orchestration, development, judge, recovery, integration, verification, auto-merge
   autoApprovalEnabled?: boolean; // Flag general para habilitar auto-aprobación
-  autoApprovalPhases?: ('planning' | 'tech-lead' | 'team-orchestration' | 'verification' | 'auto-merge' | 'development' | 'judge')[]; // Fases que se auto-aprueban
+  autoApprovalPhases?: ('planning' | 'tech-lead' | 'team-orchestration' | 'development' | 'judge' | 'recovery' | 'integration' | 'verification' | 'verification-fixer' | 'auto-merge')[]; // Fases que se auto-aprueban
   supervisorThreshold?: number; // 0-100: Auto-approve when Supervisor score >= threshold (default 80)
   // 📌 Pending approval data for re-emit on socket reconnect
   pendingApproval?: {
@@ -504,7 +504,7 @@ const taskSchema = new Schema<ITask>(
     }],
     status: {
       type: String,
-      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled', 'paused'],
+      enum: ['pending', 'in_progress', 'completed', 'failed', 'cancelled', 'paused', 'interrupted'],
       default: 'pending',
       index: true,
     },
@@ -664,10 +664,10 @@ const taskSchema = new Schema<ITask>(
         type: Boolean,
         default: false, // ❌ Auto-aprobación DESHABILITADA por defecto - requiere configuración explícita del usuario
       },
-      // Phases: planning, tech-lead (architecture), team-orchestration, development, verification, auto-merge
+      // Phases: planning, tech-lead, team-orchestration, development, judge, recovery, integration, verification, auto-merge
       autoApprovalPhases: {
         type: [String],
-        enum: ['planning', 'tech-lead', 'team-orchestration', 'development', 'verification', 'auto-merge'],
+        enum: ['planning', 'tech-lead', 'team-orchestration', 'development', 'judge', 'recovery', 'integration', 'verification', 'verification-fixer', 'auto-merge'],
         default: [], // ❌ Sin fases auto-aprobadas por defecto - usuario debe seleccionar manualmente
       },
       // 📌 Pending approval data for re-emit on socket reconnect

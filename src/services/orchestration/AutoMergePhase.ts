@@ -1,4 +1,4 @@
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, saveTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { PRManagementService } from '../github/PRManagementService';
@@ -156,7 +156,7 @@ export class AutoMergePhase extends BasePhase {
     const startTime = new Date();
     (context.task.orchestration as any).autoMerge.status = 'in_progress';
     (context.task.orchestration as any).autoMerge.startedAt = startTime;
-    await task.save();
+    saveTaskFireAndForget(task, 'autoMerge in_progress');
 
     NotificationService.emitAgentStarted(taskId, 'Auto-Merge');
 
@@ -192,7 +192,7 @@ export class AutoMergePhase extends BasePhase {
       (context.task.orchestration as any).autoMerge.results = mergeResults;
       (context.task.orchestration as any).autoMerge.status = 'completed';
       (context.task.orchestration as any).autoMerge.completedAt = new Date();
-      await task.save();
+      saveTaskFireAndForget(task, 'autoMerge completed');
 
       // Analyze results
       const successfulMerges = mergeResults.filter((r) => r.merged);
@@ -281,7 +281,7 @@ export class AutoMergePhase extends BasePhase {
             // Update pending integration status
             (task.orchestration as any).pendingIntegrationTask.status = 'created';
             (task.orchestration as any).pendingIntegrationTask.createdTaskId = integrationTask._id;
-            await task.save();
+            saveTaskFireAndForget(task, 'integration task created');
 
             console.log(`✅ Integration Task created: ${integrationTask._id}`);
             console.log(`   Title: ${integrationTask.title}`);
@@ -320,7 +320,7 @@ export class AutoMergePhase extends BasePhase {
 
           // Mark as notified but not created
           (task.orchestration as any).pendingIntegrationTask.userNotified = true;
-          await task.save();
+          saveTaskFireAndForget(task, 'integration task notified');
 
           const integrationTaskDefinition = `
 📋 INTEGRATION TASK (Create manually after resolving PRs):
@@ -364,7 +364,7 @@ ${pendingIntegration.filesToCreate.map((f: string) => `- ${f}`).join('\n')}
 
       (context.task.orchestration as any).autoMerge.status = 'failed';
       (context.task.orchestration as any).autoMerge.error = error.message;
-      await task.save();
+      saveTaskFireAndForget(task, 'autoMerge failed');
 
       NotificationService.emitAgentError(taskId, 'Auto-Merge', error.message);
 
