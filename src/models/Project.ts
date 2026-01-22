@@ -58,6 +58,7 @@ export interface IProject extends Document {
   settings?: {
     defaultBranch?: string;
     autoDeployment?: boolean;
+    autoRecoveryEnabled?: boolean; // Auto-recover interrupted tasks on server restart
     requiredReviews?: number;
     educationalContext?: string;
     complianceLevel?: string;
@@ -195,6 +196,7 @@ const projectSchema = new Schema<IProject>(
     settings: {
       defaultBranch: { type: String, default: 'main' },
       autoDeployment: { type: Boolean, default: false },
+      autoRecoveryEnabled: { type: Boolean, default: false }, // Manual recovery by default
       requiredReviews: { type: Number, default: 1 },
       educationalContext: { type: String, default: 'general' },
       complianceLevel: { type: String, default: 'basic' },

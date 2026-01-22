@@ -515,4 +515,71 @@ export class NotificationService {
       // No lanzar error - los logs no deben romper la orquestación
     }
   }
+
+  /**
+   * Emitir análisis de fallo al frontend
+   *
+   * Este método envía información detallada sobre fallos clasificados
+   * al FailureAnalysisDashboard del frontend.
+   *
+   * @param taskId - ID de la tarea
+   * @param failureData - Datos del análisis de fallo
+   */
+  static emitFailureAnalysis(
+    taskId: string,
+    failureData: {
+      storyId?: string;
+      storyTitle?: string;
+      category: string;
+      strategy: string;
+      isTerminal: boolean;
+      shouldRetry: boolean;
+      shouldCallJudge: boolean;
+      evidence: string[];
+      recommendations: string[];
+      maxAdditionalRetries?: number;
+      retryDelay?: number;
+      message?: string;
+    }
+  ): void {
+    this.emitNotification(taskId, 'failure_analysis', {
+      ...failureData,
+      timestamp: new Date().toISOString(),
+    });
+
+    const emoji = failureData.isTerminal ? '💀' : '🔄';
+    console.log(`${emoji} [WebSocket] Failure analysis emitted:`, {
+      taskId,
+      category: failureData.category,
+      isTerminal: failureData.isTerminal,
+      strategy: failureData.strategy,
+    });
+  }
+
+  /**
+   * Emitir evento de story recuperada exitosamente
+   *
+   * @param taskId - ID de la tarea
+   * @param recoveryData - Datos de la recuperación
+   */
+  static emitStoryRecovered(
+    taskId: string,
+    recoveryData: {
+      storyId: string;
+      storyTitle: string;
+      recoveryMethod: string;
+      commitSHA?: string;
+    }
+  ): void {
+    this.emitNotification(taskId, 'story_recovered', {
+      ...recoveryData,
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log(`🎉 [WebSocket] Story recovered emitted:`, {
+      taskId,
+      storyId: recoveryData.storyId,
+      recoveryMethod: recoveryData.recoveryMethod,
+    });
+  }
 }

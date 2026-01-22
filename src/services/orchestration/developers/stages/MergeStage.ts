@@ -1,0 +1,583 @@
+/**
+ * MergeStage - Handles merging story branches into epic branches
+ *
+ * Responsibilities:
+ * - Merge story branch to epic branch
+ * - Resolve conflicts (regex-based and AI-powered)
+ * - Push merged changes to remote
+ * - Cleanup story branches after merge
+ */
+
+import { safeGitExecSync, fixGitRemoteAuth } from '../../../../utils/safeGitExecution';
+import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from '../../constants/Timeouts';
+import { unifiedMemoryService } from '../../../UnifiedMemoryService';
+import { StoryPipelineContext, MergeStageResult } from '../types';
+
+export type ExecuteAgentFn = (
+  agentType: string,
+  prompt: string,
+  workspacePath: string,
+  taskId: string,
+  label: string,
+  sessionId?: string,
+  fork?: boolean,
+  attachments?: any[],
+  options?: { maxIterations?: number; timeout?: number }
+) => Promise<{ cost?: number; usage?: any; output?: string }>;
+
+export class MergeStageExecutor {
+  constructor(private executeAgentFn?: ExecuteAgentFn) {}
+
+  /**
+   * Execute the merge stage - merge story branch into epic branch
+   */
+  async execute(
+    pipelineCtx: StoryPipelineContext,
+    commitSHA: string
+  ): Promise<MergeStageResult> {
+    const {
+      task, story, epic, repositories,
+      effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId,
+    } = pipelineCtx;
+
+    console.log(`\n🔀 [MERGE STAGE] Merging story to epic branch: ${story.title}`);
+
+    try {
+      // Get updated story from event store
+      const { eventStore } = await import('../../../EventStore');
+      const updatedState = await eventStore.getCurrentState(task._id as any);
+      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+
+      // Merge to epic branch
+      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+
+      // Checkpoint: Mark as merged_to_epic
+      await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
+        commitHash: commitSHA,
+      });
+      console.log(`📍 [CHECKPOINT] Story progress: merged_to_epic`);
+
+      // Cleanup story branch
+      if (effectiveWorkspacePath && repositories.length > 0 && epic.targetRepository) {
+        await this.cleanupStoryBranch(effectiveWorkspacePath, repositories, epic, updatedStory);
+      }
+
+      // Get conflict resolution costs from story
+      const storyForCosts = updatedStory || story;
+      const conflictResolutionCost = (storyForCosts as any).conflictResolutionCost || 0;
+      const conflictResolutionUsage = (storyForCosts as any).conflictResolutionUsage || { input_tokens: 0, output_tokens: 0 };
+
+      console.log(`✅ [MERGE STAGE] Complete`);
+
+      return {
+        success: true,
+        conflictResolutionCost,
+        conflictResolutionUsage,
+      };
+
+    } catch (error: any) {
+      console.error(`❌ [MERGE STAGE] Failed: ${error.message}`);
+      return {
+        success: false,
+        conflictResolutionCost: 0,
+        conflictResolutionUsage: { input_tokens: 0, output_tokens: 0 },
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Cleanup local and remote story branches after merge
+   */
+  private async cleanupStoryBranch(
+    workspacePath: string,
+    repositories: any[],
+    epic: any,
+    story: any
+  ): Promise<void> {
+    try {
+      const targetRepo = repositories.find((r: any) =>
+        r.name === epic.targetRepository ||
+        r.full_name === epic.targetRepository ||
+        r.githubRepoName === epic.targetRepository
+      );
+
+      if (targetRepo && story?.branchName) {
+        const repoPath = `${workspacePath}/${targetRepo.name || targetRepo.full_name}`;
+        const storyBranch = story.branchName;
+
+        // Delete local branch
+        try {
+          safeGitExecSync(`cd "${repoPath}" && git branch -D ${storyBranch}`, { encoding: 'utf8' });
+          console.log(`🧹 Cleaned up LOCAL story branch: ${storyBranch}`);
+        } catch { /* Branch might not exist */ }
+
+        // Delete remote branch
+        try {
+          safeGitExecSync(`cd "${repoPath}" && git push origin --delete ${storyBranch}`, {
+            encoding: 'utf8',
+            timeout: GIT_TIMEOUTS.CLONE
+          });
+          console.log(`🧹 Cleaned up REMOTE story branch: ${storyBranch}`);
+        } catch { /* Branch might not exist on remote */ }
+      }
+    } catch (cleanupErr: any) {
+      console.warn(`⚠️ Branch cleanup failed: ${cleanupErr.message}`);
+    }
+  }
+
+  /**
+   * Merge approved story branch into epic branch
+   */
+  async mergeStoryToEpic(
+    story: any,
+    epic: any,
+    workspacePath: string | null,
+    repositories: any[],
+    taskId: string
+  ): Promise<void> {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🔀 [Merge] STARTING STORY TO EPIC MERGE`);
+    console.log(`${'='.repeat(80)}`);
+    console.log(`   Story: ${story.title || story.id}`);
+    console.log(`   Story Branch: ${story.branchName}`);
+    console.log(`   Epic: ${epic.title || epic.id}`);
+    console.log(`   Epic Branch: ${epic.branchName || `epic/${epic.id}`}`);
+    console.log(`${'='.repeat(80)}\n`);
+
+    if (!workspacePath) {
+      console.error(`❌ [Merge] No workspace path available`);
+      throw new Error('Workspace path required for merge');
+    }
+
+    if (!story.branchName) {
+      console.error(`❌ [Merge] Story has no branch name - cannot merge`);
+      throw new Error(`Story ${story.id} has no branch`);
+    }
+
+    try {
+      const { NotificationService } = await import('../../../NotificationService');
+
+      if (!epic.targetRepository) {
+        throw new Error(`Epic ${epic.id} has no targetRepository - cannot merge to main`);
+      }
+
+      const targetRepoObj = repositories.find(r =>
+        r.name === epic.targetRepository ||
+        r.full_name === epic.targetRepository ||
+        r.githubRepoName === epic.targetRepository
+      );
+
+      if (!targetRepoObj) {
+        throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+      }
+
+      const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
+      const epicBranch = epic.branchName;
+
+      if (!epicBranch) {
+        throw new Error(`Epic ${epic.id} has no branchName - cannot merge`);
+      }
+
+      console.log(`📂 [Merge] Repository: ${epic.targetRepository}`);
+      console.log(`📂 [Merge] Workspace Path: ${workspacePath}`);
+      console.log(`📂 [Merge] Repo Path: ${repoPath}`);
+      console.log(`📂 [Merge] Epic Branch: ${epicBranch}`);
+
+      // Step 1: Checkout epic branch
+      console.log(`\n[STEP 1/4] Checking out epic branch: ${epicBranch}...`);
+      const checkoutOutput = safeGitExecSync(`cd "${repoPath}" && git checkout ${epicBranch}`, { encoding: 'utf8' });
+      console.log(`✅ [Merge] Checked out ${epicBranch}`);
+      console.log(`   Git output: ${checkoutOutput.substring(0, 100)}`);
+
+      // Step 2: Pull latest changes
+      console.log(`\n[STEP 2/4] Pulling latest changes from remote...`);
+      try {
+        const pullOutput = safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
+          encoding: 'utf8',
+          timeout: GIT_TIMEOUTS.FETCH,
+        });
+        console.log(`✅ [Merge] Pulled latest changes from ${epicBranch}`);
+        console.log(`   Git output: ${pullOutput.substring(0, 100)}`);
+      } catch (pullError: any) {
+        console.warn(`⚠️  [Merge] Pull failed: ${pullError.message}`);
+      }
+
+      // Step 3: Merge story branch
+      console.log(`\n[STEP 3/4] Merging story branch into epic...`);
+      console.log(`   Executing: git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`);
+      const mergeOutput = safeGitExecSync(
+        `cd "${repoPath}" && git merge --no-ff ${story.branchName} -m "Merge story: ${story.title}"`,
+        { encoding: 'utf8' }
+      );
+      console.log(`✅ [Merge] MERGE SUCCESSFUL: ${story.branchName} → ${epicBranch}`);
+      console.log(`   Git merge output:\n${mergeOutput}`);
+
+      // Step 4: Push epic branch
+      console.log(`\n[STEP 4/4] Pushing epic branch to remote...`);
+      console.log(`   Executing: git push origin ${epicBranch}`);
+
+      // Fix git remote authentication
+      console.log(`🔧 [Merge] Fixing git remote authentication...`);
+      const authFixed = fixGitRemoteAuth(repoPath);
+      if (authFixed) {
+        console.log(`✅ [Merge] Git remote URL fixed to use credential helper`);
+      }
+
+      // Push with retries
+      await this.pushWithRetry(repoPath, epicBranch);
+
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔀 Merged story ${story.title} → ${epicBranch}`
+      );
+
+      // Update story status
+      story.mergedToEpic = true;
+      story.mergedAt = new Date();
+
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`✅ [Merge] STORY MERGE COMPLETED SUCCESSFULLY`);
+      console.log(`${'='.repeat(80)}\n`);
+
+    } catch (error: any) {
+      console.error(`❌ [Merge] Failed to merge story ${story.id}: ${error.message}`);
+
+      // Check if it's a merge conflict
+      if (error.message.includes('CONFLICT') || error.message.includes('Recorded preimage')) {
+        await this.handleMergeConflict(error, story, epic, workspacePath, repositories, taskId);
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Push to remote with retry logic
+   */
+  private async pushWithRetry(repoPath: string, epicBranch: string, maxRetries = 3): Promise<void> {
+    let pushSucceeded = false;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxRetries && !pushSucceeded; attempt++) {
+      try {
+        console.log(`📤 [Merge] Push attempt ${attempt}/${maxRetries}...`);
+        const pushOutput = safeGitExecSync(
+          `git push origin ${epicBranch}`,
+          {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: GIT_TIMEOUTS.FETCH
+          }
+        );
+        console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
+        console.log(`   Git push output:\n${pushOutput}`);
+        pushSucceeded = true;
+
+        // Sync local with remote after push
+        try {
+          safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
+          console.log(`✅ [Merge] Local synced with remote`);
+        } catch (_pullErr) {
+          console.log(`   ℹ️ Pull skipped (already up to date)`);
+        }
+      } catch (pushError: any) {
+        lastError = pushError;
+        console.error(`❌ [Merge] Push attempt ${attempt} failed: ${pushError.message}`);
+
+        if (attempt < maxRetries) {
+          const delay = 2000 * attempt;
+          console.log(`⏳ [Merge] Waiting ${delay/1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    if (!pushSucceeded) {
+      console.error(`❌ [Merge] CRITICAL: All ${maxRetries} push attempts failed!`);
+      throw new Error(`Failed to push epic branch ${epicBranch} to remote after ${maxRetries} attempts: ${lastError?.message}`);
+    }
+  }
+
+  /**
+   * Handle merge conflict - try regex resolution, then AI resolution
+   */
+  private async handleMergeConflict(
+    error: any,
+    story: any,
+    epic: any,
+    workspacePath: string | null,
+    repositories: any[],
+    taskId: string
+  ): Promise<void> {
+    console.error(`🔥 [Merge] MERGE CONFLICT detected!`);
+
+    if (!epic.targetRepository) {
+      throw new Error(`Epic ${epic.id} has no targetRepository - cannot resolve conflict`);
+    }
+
+    const targetRepoObj = repositories.find(r =>
+      r.name === epic.targetRepository ||
+      r.full_name === epic.targetRepository ||
+      r.githubRepoName === epic.targetRepository
+    );
+
+    if (!targetRepoObj) {
+      throw new Error(`Repository ${epic.targetRepository} not found`);
+    }
+
+    const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
+
+    // Get conflicted files
+    let conflictedFiles: string[] = [];
+    try {
+      const diffOutput = safeGitExecSync(`cd "${repoPath}" && git diff --name-only --diff-filter=U`, {
+        encoding: 'utf8',
+      });
+      conflictedFiles = diffOutput.trim().split('\n').filter(f => f);
+      console.log(`   📄 Conflicted files: ${conflictedFiles.join(', ')}`);
+    } catch (diffError) {
+      console.error(`   ⚠️ Could not get conflicted files: ${diffError}`);
+    }
+
+    if (conflictedFiles.length > 0) {
+      // Try regex resolution first
+      const regexResolved = await this.resolveConflictsWithRegex(repoPath, conflictedFiles, story);
+
+      if (regexResolved) {
+        return;
+      }
+
+      // Try AI resolution
+      if (this.executeAgentFn) {
+        const aiResolved = await this.resolveConflictsWithAI(taskId, story, epic, repoPath, conflictedFiles);
+
+        if (aiResolved.success) {
+          console.log(`   ✅ AI resolved all conflicts!`);
+
+          // Stage and commit
+          safeGitExecSync(`cd "${repoPath}" && git add .`, { encoding: 'utf8' });
+          safeGitExecSync(
+            `cd "${repoPath}" && git commit -m "Merge story: ${story.title} (AI-resolved conflicts)"`,
+            { encoding: 'utf8' }
+          );
+
+          story.status = 'completed';
+          story.mergedToEpic = true;
+          story.mergeConflict = false;
+          story.mergeConflictAutoResolved = true;
+          story.mergeConflictResolvedByAI = true;
+          story.conflictResolutionCost = aiResolved.cost || 0;
+          story.conflictResolutionUsage = aiResolved.usage || {};
+
+          return;
+        }
+      }
+    }
+
+    // Abort merge and mark for manual resolution
+    console.log(`   📋 All automatic resolution methods failed - marking for manual resolution...`);
+    try {
+      safeGitExecSync(`cd "${repoPath}" && git merge --abort`, { encoding: 'utf8' });
+    } catch (abortError) {
+      console.error(`   ⚠️ Could not abort merge: ${abortError}`);
+    }
+
+    story.mergeConflict = true;
+    story.mergeConflictDetails = error.message;
+    story.mergeConflictFiles = conflictedFiles;
+  }
+
+  /**
+   * Try to resolve conflicts using regex-based approach
+   */
+  private async resolveConflictsWithRegex(
+    repoPath: string,
+    conflictedFiles: string[],
+    story: any
+  ): Promise<boolean> {
+    console.log(`   🤖 Attempting simple conflict resolution...`);
+    const fs = require('fs');
+
+    let allResolved = true;
+    for (const file of conflictedFiles) {
+      try {
+        const filePath = `${repoPath}/${file}`;
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+
+        if (fileContent.includes('<<<<<<<') && fileContent.includes('>>>>>>>')) {
+          let resolved = fileContent;
+
+          const conflictPattern = /<<<<<<< HEAD\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> [^\n]+/g;
+
+          resolved = resolved.replace(conflictPattern, (_match: string, head: string, incoming: string) => {
+            const headLines = head.split('\n').filter((l: string) => l.trim());
+            const incomingLines = incoming.split('\n').filter((l: string) => l.trim());
+
+            const combined = [...headLines];
+            for (const line of incomingLines) {
+              if (!combined.includes(line)) {
+                combined.push(line);
+              }
+            }
+            return combined.join('\n');
+          });
+
+          if (!resolved.includes('<<<<<<<') && !resolved.includes('>>>>>>>')) {
+            fs.writeFileSync(filePath, resolved, 'utf8');
+            console.log(`   ✅ Resolved: ${file}`);
+          } else {
+            console.log(`   ❌ Could not fully resolve: ${file}`);
+            allResolved = false;
+          }
+        }
+      } catch (fileError: any) {
+        console.error(`   ❌ Error resolving ${file}: ${fileError.message}`);
+        allResolved = false;
+      }
+    }
+
+    if (allResolved) {
+      console.log(`   ✅ All conflicts resolved automatically!`);
+
+      safeGitExecSync(`cd "${repoPath}" && git add .`, { encoding: 'utf8' });
+      safeGitExecSync(
+        `cd "${repoPath}" && git commit -m "Merge story: ${story.title} (auto-resolved conflicts)"`,
+        { encoding: 'utf8' }
+      );
+
+      story.status = 'completed';
+      story.mergedToEpic = true;
+      story.mergeConflict = false;
+      story.mergeConflictAutoResolved = true;
+
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Resolve merge conflicts using AI agent
+   */
+  async resolveConflictsWithAI(
+    taskId: string,
+    story: any,
+    epic: any,
+    repoPath: string,
+    conflictedFiles: string[]
+  ): Promise<{ success: boolean; cost?: number; usage?: any; error?: string }> {
+    console.log(`\n🤖 [ConflictResolver] Starting AI-powered conflict resolution`);
+
+    if (!this.executeAgentFn) {
+      return { success: false, error: 'executeAgentFn not available' };
+    }
+
+    const fs = require('fs');
+    const conflictDetails: string[] = [];
+
+    for (const file of conflictedFiles) {
+      try {
+        const filePath = `${repoPath}/${file}`;
+        const content = fs.readFileSync(filePath, 'utf8');
+        conflictDetails.push(`\n### File: ${file}\n\`\`\`\n${content}\n\`\`\``);
+      } catch (readError: any) {
+        conflictDetails.push(`\n### File: ${file}\nError reading: ${readError.message}`);
+      }
+    }
+
+    const prompt = `# Git Merge Conflict Resolution Required
+
+## Context
+- **Story**: ${story.title}
+- **Story Branch**: ${story.branchName}
+- **Epic**: ${epic.title || epic.id}
+- **Epic Branch**: ${epic.branchName}
+- **Repository Path**: ${repoPath}
+
+## Conflicted Files (${conflictedFiles.length})
+${conflictedFiles.map(f => `- ${f}`).join('\n')}
+
+## Current File Contents (with conflict markers)
+${conflictDetails.join('\n')}
+
+## Your Task
+1. Read each conflicted file carefully
+2. Understand what each side (HEAD vs incoming) is trying to do
+3. Merge the changes intelligently - keep BOTH sides' functionality when possible
+4. Use Edit tool to remove ALL conflict markers (<<<<<<<, =======, >>>>>>>)
+5. Ensure the merged code compiles and makes sense
+
+## Important Rules
+- KEEP functionality from BOTH sides when possible
+- For imports: combine all imports
+- For functions: keep both if they have different names, merge if same name
+- For types/interfaces: combine fields from both versions
+- NEVER leave conflict markers in the file
+
+## Output
+After resolving ALL conflicts, output:
+✅ CONFLICT_RESOLVED
+
+If you cannot resolve a conflict, output:
+❌ CONFLICT_UNRESOLVABLE: <reason>`;
+
+    try {
+      console.log(`   📝 Calling conflict-resolver agent...`);
+
+      const result = await this.executeAgentFn(
+        'conflict-resolver',
+        prompt,
+        repoPath,
+        taskId,
+        'ConflictResolver',
+        undefined,
+        undefined,
+        undefined,
+        {
+          maxIterations: 10,
+          timeout: AGENT_TIMEOUTS.DEFAULT,
+        }
+      );
+
+      console.log(`   ✅ Agent completed`);
+      console.log(`   💰 Cost: $${result.cost?.toFixed(4) || 0}`);
+
+      const output = result.output || '';
+      const allResolved = this.verifyNoConflictMarkers(repoPath, conflictedFiles, fs);
+
+      if (output.includes('CONFLICT_RESOLVED') || output.includes('✅') || allResolved) {
+        if (allResolved) {
+          return { success: true, cost: result.cost, usage: result.usage };
+        }
+        return { success: false, cost: result.cost, usage: result.usage, error: 'Conflict markers remain' };
+      }
+
+      const reason = output.match(/CONFLICT_UNRESOLVABLE:\s*(.+)/)?.[1] || 'Unknown reason';
+      return { success: false, cost: result.cost, usage: result.usage, error: reason };
+
+    } catch (agentError: any) {
+      console.error(`   ❌ Agent error: ${agentError.message}`);
+      return { success: false, error: agentError.message };
+    }
+  }
+
+  /**
+   * Verify no conflict markers remain in files
+   */
+  private verifyNoConflictMarkers(repoPath: string, files: string[], fs: any): boolean {
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(`${repoPath}/${file}`, 'utf8');
+        if (content.includes('<<<<<<<') || content.includes('>>>>>>>')) {
+          return false;
+        }
+      } catch {
+        // File might have been deleted/moved
+      }
+    }
+    return true;
+  }
+}

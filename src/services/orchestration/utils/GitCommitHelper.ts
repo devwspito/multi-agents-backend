@@ -251,6 +251,164 @@ export function detectUncommittedWork(developerOutput: string): boolean {
 }
 
 // ============================================================================
+// WORKSPACE DETECTION - Check actual files, not just output
+// ============================================================================
+
+export interface WorkspaceDetectionResult {
+  hasUncommittedFiles: boolean;
+  hasUntrackedFiles: boolean;
+  hasStagedFiles: boolean;
+  modifiedFiles: string[];
+  untrackedFiles: string[];
+  totalChanges: number;
+  detectionMethod: 'git_status' | 'output_heuristic' | 'both' | 'none';
+}
+
+/**
+ * 🔥 IMPROVED DETECTION: Check workspace for actual changes
+ *
+ * This solves the problem where:
+ * 1. Developer works but forgets to commit
+ * 2. Developer doesn't output markers
+ * 3. Git has no commits
+ * 4. BUT workspace has modified files!
+ *
+ * @param repoPath - Path to the repository
+ * @param developerOutput - Optional developer output for additional heuristics
+ * @returns Detection result with details about found changes
+ */
+export function detectWorkInWorkspace(
+  repoPath: string,
+  developerOutput?: string
+): WorkspaceDetectionResult {
+  const result: WorkspaceDetectionResult = {
+    hasUncommittedFiles: false,
+    hasUntrackedFiles: false,
+    hasStagedFiles: false,
+    modifiedFiles: [],
+    untrackedFiles: [],
+    totalChanges: 0,
+    detectionMethod: 'none',
+  };
+
+  // 1. Check git status for actual workspace state
+  try {
+    const statusOutput = safeGitExecSync(`cd "${repoPath}" && git status --porcelain`, {
+      encoding: 'utf8',
+    });
+
+    if (statusOutput && statusOutput.trim().length > 0) {
+      const lines = statusOutput.trim().split('\n');
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        const status = line.substring(0, 2);
+        const file = line.substring(3).trim();
+
+        // M = modified, A = added, D = deleted, R = renamed, C = copied
+        if (status.includes('M') || status.includes('A') || status.includes('D') || status.includes('R') || status.includes('C')) {
+          result.modifiedFiles.push(file);
+          result.hasUncommittedFiles = true;
+        }
+
+        // ?? = untracked
+        if (status === '??') {
+          result.untrackedFiles.push(file);
+          result.hasUntrackedFiles = true;
+        }
+
+        // First character is index status (staged)
+        if (status[0] !== ' ' && status[0] !== '?') {
+          result.hasStagedFiles = true;
+        }
+      }
+
+      result.totalChanges = result.modifiedFiles.length + result.untrackedFiles.length;
+      result.detectionMethod = 'git_status';
+
+      console.log(`🔍 [WorkspaceDetection] Found changes in workspace:`);
+      console.log(`   Modified files: ${result.modifiedFiles.length}`);
+      console.log(`   Untracked files: ${result.untrackedFiles.length}`);
+      console.log(`   Total changes: ${result.totalChanges}`);
+    }
+  } catch (error: any) {
+    console.warn(`⚠️ [WorkspaceDetection] git status failed: ${error.message}`);
+  }
+
+  // 2. Also check developer output as fallback/additional signal
+  if (developerOutput) {
+    const outputShowsWork = detectUncommittedWork(developerOutput);
+    if (outputShowsWork) {
+      if (result.detectionMethod === 'git_status') {
+        result.detectionMethod = 'both';
+      } else {
+        result.detectionMethod = 'output_heuristic';
+        // Even if git status showed nothing, output suggests work was done
+        // This handles cases where files were modified but then reverted
+        result.hasUncommittedFiles = true;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 🔥 COMPREHENSIVE RECOVERY: Detect and recover any work in workspace
+ *
+ * Combines all detection methods and attempts recovery:
+ * 1. Check git status for uncommitted files
+ * 2. Check developer output for Edit/Write calls
+ * 3. Auto-commit and push if any work found
+ * 4. Return result indicating if recovery to Judge is possible
+ *
+ * @param repoPath - Path to the repository
+ * @param storyTitle - Story title for commit message
+ * @param branchName - Branch name for push
+ * @param developerOutput - Developer output for heuristic detection
+ * @returns Recovery result with commit SHA if successful
+ */
+export async function comprehensiveWorkRecovery(
+  repoPath: string,
+  storyTitle: string,
+  branchName: string,
+  developerOutput?: string
+): Promise<CommitRecoveryResult & { workspaceDetection: WorkspaceDetectionResult }> {
+  console.log(`\n🔍 [COMPREHENSIVE RECOVERY] Starting work detection...`);
+  console.log(`   Repository: ${repoPath}`);
+  console.log(`   Branch: ${branchName}`);
+
+  // Step 1: Detect work in workspace
+  const detection = detectWorkInWorkspace(repoPath, developerOutput);
+
+  // Step 2: If any work detected, attempt recovery
+  if (detection.hasUncommittedFiles || detection.hasUntrackedFiles || detection.detectionMethod === 'output_heuristic') {
+    console.log(`\n✅ [COMPREHENSIVE RECOVERY] Work detected! Attempting auto-commit...`);
+    console.log(`   Detection method: ${detection.detectionMethod}`);
+    console.log(`   Files found: ${detection.totalChanges}`);
+
+    const commitResult = await autoCommitDeveloperWork(repoPath, storyTitle, branchName);
+
+    return {
+      ...commitResult,
+      workspaceDetection: detection,
+    };
+  }
+
+  // Step 3: No work detected
+  console.log(`\n⚠️ [COMPREHENSIVE RECOVERY] No work detected in workspace`);
+  console.log(`   Detection method: ${detection.detectionMethod}`);
+
+  return {
+    success: false,
+    action: 'no_changes',
+    message: 'No uncommitted work detected in workspace',
+    workspaceDetection: detection,
+  };
+}
+
+// ============================================================================
 // GIT FETCH WITH RETRY - Exponential backoff for network operations
 // ============================================================================
 

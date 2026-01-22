@@ -23,6 +23,13 @@ import * as path from 'path';
 import * as os from 'os';
 import mongoose from 'mongoose';
 import { granularMemoryService } from './GranularMemoryService';
+import {
+  atomicWriteFileSync,
+  atomicWriteJsonSync,
+  saveCheckpoint,
+  loadCheckpoint,
+  isOk,
+} from '../utils/robustness';
 
 // ==================== TYPES ====================
 
@@ -425,6 +432,8 @@ export class UnifiedMemoryService {
    * 🔥 Load execution map from LOCAL file
    * Used as fallback when MongoDB is empty or unavailable
    * Location: {workspacePath}/.agent-memory/ (NOT inside client repos)
+   *
+   * 🔒 ROBUSTNESS: Tries main file first, then checkpoint backup
    */
   private async loadFromLocal(taskId: string): Promise<ExecutionMap | null> {
     try {
@@ -439,17 +448,47 @@ export class UnifiedMemoryService {
       const memoryDir = path.join(taskDir, '.agent-memory');
       const mapPath = path.join(memoryDir, 'execution-map.json');
 
+      // 🔒 TRY 1: Main execution-map.json
       if (fs.existsSync(mapPath)) {
-        const content = fs.readFileSync(mapPath, 'utf8');
-        const map = JSON.parse(content) as ExecutionMap;
+        try {
+          const content = fs.readFileSync(mapPath, 'utf8');
+          const map = JSON.parse(content) as ExecutionMap;
 
-        // Validate taskId matches (extra safety)
+          // Validate taskId matches (extra safety)
+          if (map.taskId !== taskId) {
+            console.log(`⚠️ [UnifiedMemory] Local file has DIFFERENT taskId: ${map.taskId} (expected: ${taskId}) - IGNORING`);
+          } else {
+            console.log(`📂 [UnifiedMemory] Loaded from local: ${mapPath}`);
+            return map;
+          }
+        } catch (parseError: any) {
+          console.warn(`⚠️ [UnifiedMemory] Main file corrupted: ${parseError.message}, trying checkpoint...`);
+        }
+      }
+
+      // 🔒 TRY 2: Checkpoint backup (if main file corrupted or missing)
+      const checkpointResult = loadCheckpoint<ExecutionMap>(memoryDir, 'execution-map');
+      if (isOk(checkpointResult)) {
+        const map = checkpointResult.data;
+
+        // Validate taskId
         if (map.taskId !== taskId) {
-          console.log(`⚠️ [UnifiedMemory] Local file has DIFFERENT taskId: ${map.taskId} (expected: ${taskId}) - IGNORING`);
+          console.warn(`⚠️ [UnifiedMemory] Checkpoint has wrong taskId: ${map.taskId}`);
           return null;
         }
 
-        console.log(`📂 [UnifiedMemory] Loaded from local: ${mapPath}`);
+        console.log(`🔄 [UnifiedMemory] Recovered from checkpoint: ${memoryDir}`);
+
+        // Restore main file from checkpoint
+        try {
+          const restoreResult = atomicWriteJsonSync(mapPath, map);
+          if (isOk(restoreResult)) {
+            console.log(`✅ [UnifiedMemory] Restored main file from checkpoint`);
+          }
+        } catch {
+          // Non-critical - we have the data
+        }
+
         return map;
       }
 
@@ -1411,6 +1450,8 @@ export class UnifiedMemoryService {
    * Sync execution map to local file
    * 🔥 IMPORTANT: Saves OUTSIDE the client's repo to avoid polluting their codebase
    * Location: {workspacePath}/.agent-memory/ (not inside the cloned repos)
+   *
+   * 🔒 ROBUSTNESS: Uses atomic writes + checkpoints for crash recovery
    */
   private async syncToLocal(
     workspacePath: string,
@@ -1425,17 +1466,36 @@ export class UnifiedMemoryService {
         fs.mkdirSync(memoryDir, { recursive: true });
       }
 
+      // 🔒 ATOMIC WRITE: Use temp file + rename pattern for crash safety
       const filePath = path.join(memoryDir, 'execution-map.json');
-      fs.writeFileSync(filePath, JSON.stringify(map, null, 2), 'utf8');
+      const writeResult = atomicWriteJsonSync(filePath, map);
 
-      // Also write a human-readable summary
+      if (!isOk(writeResult)) {
+        // Fallback: try direct write if atomic fails
+        console.warn(`⚠️ [UnifiedMemory] Atomic write failed, using fallback: ${writeResult.message}`);
+        fs.writeFileSync(filePath, JSON.stringify(map, null, 2), 'utf8');
+      }
+
+      // 🔒 CHECKPOINT: Save checkpoint for recovery
+      const checkpointResult = saveCheckpoint(memoryDir, 'execution-map', map);
+      if (!isOk(checkpointResult)) {
+        console.warn(`⚠️ [UnifiedMemory] Checkpoint save failed: ${checkpointResult.message}`);
+      }
+
+      // Also write a human-readable summary (non-critical, ok if fails)
       const summaryPath = path.join(memoryDir, 'execution-summary.md');
       const summary = this.generateSummary(map);
-      fs.writeFileSync(summaryPath, summary, 'utf8');
+      const summaryResult = atomicWriteFileSync(summaryPath, summary);
+      if (!isOk(summaryResult)) {
+        // Silent fail for summary - it's just for debugging
+        fs.writeFileSync(summaryPath, summary, 'utf8');
+      }
 
-      console.log(`💾 [UnifiedMemory] Saved to local: ${memoryDir}`);
+      console.log(`💾 [UnifiedMemory] Saved to local (atomic): ${memoryDir}`);
     } catch (error: any) {
-      console.warn(`⚠️ [UnifiedMemory] Failed to sync to local: ${error.message}`);
+      console.error(`❌ [UnifiedMemory] CRITICAL: Failed to sync to local: ${error.message}`);
+      // Re-throw on critical failures - caller needs to know
+      throw error;
     }
   }
 

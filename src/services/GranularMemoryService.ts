@@ -276,7 +276,7 @@ export class GranularMemoryService {
 
     } catch (error) {
       console.warn(`⚠️ [GranularMemory] Failed to save locally: ${error}`);
-      // Don't throw - MongoDB is the primary source, local is backup
+      // Don't throw - Local is primary, but we continue even if local fails
     }
   }
 
@@ -911,40 +911,38 @@ export class GranularMemoryService {
       filter.storyId = { $exists: false };
     }
 
-    // 1️⃣ Try MongoDB first
-    let checkpoint = await GranularMemoryModel.findOne(filter).sort({ updatedAt: -1 }).lean();
+    // 1️⃣ LOCAL FIRST (primary source of truth)
+    const localCheckpoint = await this.loadCheckpointFromLocal(
+      params.taskId,
+      params.phaseType,
+      params.epicId,
+      params.storyId
+    );
 
-    // 2️⃣ Fallback to local files if not in MongoDB
-    if (!checkpoint) {
-      console.log(`📂 [Checkpoint] Not in MongoDB, checking local files...`);
-      const localCheckpoint = await this.loadCheckpointFromLocal(
-        params.taskId,
-        params.phaseType,
-        params.epicId,
-        params.storyId
-      );
+    if (localCheckpoint) {
+      console.log(`📂 [Checkpoint] Found in LOCAL (primary): ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
+      return localCheckpoint;
+    }
 
-      if (localCheckpoint) {
-        console.log(`📂 [Checkpoint] Found in local files, syncing to MongoDB...`);
-        // Sync to MongoDB for future lookups
-        try {
-          await GranularMemoryModel.create(localCheckpoint);
-        } catch {
-          // Might already exist
-        }
-        return localCheckpoint;
-      }
+    // 2️⃣ FALLBACK to MongoDB only if local is empty
+    console.log(`📂 [Checkpoint] LOCAL empty, checking MongoDB fallback...`);
+    let checkpoint: GranularMemory | null = null;
+    try {
+      checkpoint = await GranularMemoryModel.findOne(filter).sort({ updatedAt: -1 }).lean() as GranularMemory | null;
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [Checkpoint] MongoDB fallback failed: ${mongoErr.message}`);
     }
 
     if (checkpoint) {
-      console.log(`📍 [Checkpoint] Found in MongoDB: ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
+      console.log(`☁️ [Checkpoint] Found in MongoDB (fallback): ${params.phaseType}${params.epicId ? `/${params.epicId}` : ''}${params.storyId ? `/${params.storyId}` : ''}`);
     }
 
-    return checkpoint as GranularMemory | null;
+    return checkpoint;
   }
 
   /**
    * Get all memories for a phase (for context injection)
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getPhaseMemories(params: {
     projectId: string;
@@ -953,10 +951,42 @@ export class GranularMemoryService {
     epicId?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const limit = params.limit || 50;
+
+    // 1️⃣ LOCAL FIRST (primary source)
+    const localMemories = await this.loadFromLocal(params.taskId);
+    if (localMemories.length > 0) {
+      // Filter locally
+      const filtered = localMemories.filter(m => {
+        // Include project-wide, task-specific, phase-specific memories
+        if (m.scope === 'project') return true;
+        if (m.taskId?.toString() === params.taskId) return true;
+        if (params.phaseType && m.phaseType === params.phaseType) return true;
+        if (params.epicId && m.epicId === params.epicId) return true;
+        return false;
+      });
+
+      // Sort by importance and recency
+      const importanceOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+      filtered.sort((a, b) => {
+        const impDiff = (importanceOrder[b.importance] || 0) - (importanceOrder[a.importance] || 0);
+        if (impDiff !== 0) return impDiff;
+        const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
+
+      const result = filtered.slice(0, limit);
+      console.log(`📂 [GranularMemory] Loaded ${result.length} phase memories from LOCAL (primary)`);
+      return result;
+    }
+
+    // 2️⃣ FALLBACK to MongoDB only if local is empty
+    console.log(`📂 [GranularMemory] LOCAL empty, checking MongoDB fallback...`);
+
     const projectOid = this.safeObjectId(params.projectId);
     const taskOid = this.safeObjectId(params.taskId);
     if (!projectOid || !taskOid) {
-      // Don't log warning - just return empty array for graceful degradation
       return [];
     }
 
@@ -964,12 +994,11 @@ export class GranularMemoryService {
       projectId: projectOid,
       archived: false,
       $or: [
-        { scope: 'project' }, // Always include project-wide memories
-        { taskId: taskOid }, // Include task memories
+        { scope: 'project' },
+        { taskId: taskOid },
       ],
     };
 
-    // Include phase-specific and higher importance
     if (params.phaseType) {
       filter.$or.push({ phaseType: params.phaseType });
     }
@@ -978,59 +1007,110 @@ export class GranularMemoryService {
       filter.$or.push({ epicId: params.epicId });
     }
 
-    const memories = await GranularMemoryModel.find(filter)
-      .sort({ importance: -1, updatedAt: -1 })
-      .limit(params.limit || 50)
-      .lean();
+    try {
+      const memories = await GranularMemoryModel.find(filter)
+        .sort({ importance: -1, updatedAt: -1 })
+        .limit(limit)
+        .lean();
 
-    // Update usage count
-    if (memories.length > 0) {
-      await GranularMemoryModel.updateMany(
-        { _id: { $in: memories.map(m => m._id) } },
-        { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
-      );
+      if (memories.length > 0) {
+        console.log(`☁️ [GranularMemory] Loaded ${memories.length} phase memories from MongoDB (fallback)`);
+        // Update usage count (non-blocking)
+        GranularMemoryModel.updateMany(
+          { _id: { $in: memories.map(m => m._id) } },
+          { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
+        ).catch(() => {});
+      }
+
+      return memories as unknown as GranularMemory[];
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
     }
-
-    return memories as unknown as GranularMemory[];
   }
 
   /**
    * Get completed stories for an epic (to avoid re-doing work)
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getCompletedStories(params: {
     projectId: string;
     taskId: string;
     epicId: string;
   }): Promise<string[]> {
+    // 1️⃣ LOCAL FIRST (primary source)
+    const localMemories = await this.loadFromLocal(params.taskId, 'progress');
+    if (localMemories.length > 0) {
+      const completed = localMemories
+        .filter(m =>
+          m.epicId === params.epicId &&
+          m.title?.startsWith('COMPLETED:') &&
+          !m.archived
+        )
+        .map(m => m.storyId)
+        .filter(Boolean) as string[];
+
+      if (completed.length > 0) {
+        console.log(`📂 [GranularMemory] Found ${completed.length} completed stories from LOCAL (primary)`);
+        return completed;
+      }
+    }
+
+    // 2️⃣ FALLBACK to MongoDB only if local is empty
     const projectOid = this.safeObjectId(params.projectId);
     const taskOid = this.safeObjectId(params.taskId);
     if (!projectOid || !taskOid) {
-      return []; // Graceful degradation
+      return [];
     }
 
-    const completedProgress = await GranularMemoryModel.find({
-      projectId: projectOid,
-      taskId: taskOid,
-      epicId: params.epicId,
-      type: 'progress',
-      title: { $regex: /^COMPLETED:/ },
-      archived: false,
-    }).lean();
+    try {
+      const completedProgress = await GranularMemoryModel.find({
+        projectId: projectOid,
+        taskId: taskOid,
+        epicId: params.epicId,
+        type: 'progress',
+        title: { $regex: /^COMPLETED:/ },
+        archived: false,
+      }).lean();
 
-    return completedProgress.map((m: any) => m.storyId).filter(Boolean);
+      const result = completedProgress.map((m: any) => m.storyId).filter(Boolean);
+      if (result.length > 0) {
+        console.log(`☁️ [GranularMemory] Found ${result.length} completed stories from MongoDB (fallback)`);
+      }
+      return result;
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
+    }
   }
 
   /**
    * Get errors to avoid
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getErrorsToAvoid(params: {
     projectId: string;
     taskId?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const limit = params.limit || 10;
+
+    // 1️⃣ LOCAL FIRST (if taskId provided)
+    if (params.taskId) {
+      const localMemories = await this.loadFromLocal(params.taskId, 'error');
+      if (localMemories.length > 0) {
+        const filtered = localMemories.filter(m => !m.archived);
+        const importanceOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+        filtered.sort((a, b) => (importanceOrder[b.importance] || 0) - (importanceOrder[a.importance] || 0));
+        console.log(`📂 [GranularMemory] Found ${Math.min(filtered.length, limit)} errors from LOCAL (primary)`);
+        return filtered.slice(0, limit);
+      }
+    }
+
+    // 2️⃣ FALLBACK to MongoDB
     const projectOid = this.safeObjectId(params.projectId);
     if (!projectOid) {
-      return []; // Graceful degradation
+      return [];
     }
 
     const filter: any = {
@@ -1047,38 +1127,80 @@ export class GranularMemoryService {
       ];
     }
 
-    const results = await GranularMemoryModel.find(filter)
-      .sort({ importance: -1, createdAt: -1 })
-      .limit(params.limit || 10)
-      .lean();
-    return results as unknown as GranularMemory[];
+    try {
+      const results = await GranularMemoryModel.find(filter)
+        .sort({ importance: -1, createdAt: -1 })
+        .limit(limit)
+        .lean();
+      if (results.length > 0) {
+        console.log(`☁️ [GranularMemory] Found ${results.length} errors from MongoDB (fallback)`);
+      }
+      return results as unknown as GranularMemory[];
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
+    }
   }
 
   /**
    * Get patterns and conventions
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getPatternsAndConventions(params: {
     projectId: string;
+    taskId?: string; // Added for local-first
     limit?: number;
   }): Promise<GranularMemory[]> {
-    const projectOid = this.safeObjectId(params.projectId);
-    if (!projectOid) {
-      return []; // Graceful degradation
+    const limit = params.limit || 20;
+
+    // 1️⃣ LOCAL FIRST (if taskId provided)
+    if (params.taskId) {
+      const localMemories = await this.loadFromLocal(params.taskId);
+      if (localMemories.length > 0) {
+        const filtered = localMemories.filter(m =>
+          (m.type === 'pattern' || m.type === 'convention') && !m.archived
+        );
+        const importanceOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+        filtered.sort((a, b) => {
+          const impDiff = (importanceOrder[b.importance] || 0) - (importanceOrder[a.importance] || 0);
+          if (impDiff !== 0) return impDiff;
+          return (b.confidence || 0) - (a.confidence || 0);
+        });
+        if (filtered.length > 0) {
+          console.log(`📂 [GranularMemory] Found ${Math.min(filtered.length, limit)} patterns/conventions from LOCAL (primary)`);
+          return filtered.slice(0, limit);
+        }
+      }
     }
 
-    const results = await GranularMemoryModel.find({
-      projectId: projectOid,
-      type: { $in: ['pattern', 'convention'] },
-      archived: false,
-    })
-      .sort({ importance: -1, confidence: -1 })
-      .limit(params.limit || 20)
-      .lean();
-    return results as unknown as GranularMemory[];
+    // 2️⃣ FALLBACK to MongoDB
+    const projectOid = this.safeObjectId(params.projectId);
+    if (!projectOid) {
+      return [];
+    }
+
+    try {
+      const results = await GranularMemoryModel.find({
+        projectId: projectOid,
+        type: { $in: ['pattern', 'convention'] },
+        archived: false,
+      })
+        .sort({ importance: -1, confidence: -1 })
+        .limit(limit)
+        .lean();
+      if (results.length > 0) {
+        console.log(`☁️ [GranularMemory] Found ${results.length} patterns/conventions from MongoDB (fallback)`);
+      }
+      return results as unknown as GranularMemory[];
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
+    }
   }
 
   /**
    * Get file changes for a story (to know what was already modified)
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getFileChanges(params: {
     projectId: string;
@@ -1086,10 +1208,31 @@ export class GranularMemoryService {
     epicId?: string;
     storyId?: string;
   }): Promise<GranularMemory[]> {
+    // 1️⃣ LOCAL FIRST
+    const localMemories = await this.loadFromLocal(params.taskId, 'file_change');
+    if (localMemories.length > 0) {
+      let filtered = localMemories.filter(m => !m.archived);
+      if (params.storyId) {
+        filtered = filtered.filter(m => m.storyId === params.storyId);
+      } else if (params.epicId) {
+        filtered = filtered.filter(m => m.epicId === params.epicId);
+      }
+      filtered.sort((a, b) => {
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
+      if (filtered.length > 0) {
+        console.log(`📂 [GranularMemory] Found ${filtered.length} file changes from LOCAL (primary)`);
+        return filtered;
+      }
+    }
+
+    // 2️⃣ FALLBACK to MongoDB
     const projectOid = this.safeObjectId(params.projectId);
     const taskOid = this.safeObjectId(params.taskId);
     if (!projectOid || !taskOid) {
-      return []; // Graceful degradation
+      return [];
     }
 
     const filter: any = {
@@ -1105,14 +1248,23 @@ export class GranularMemoryService {
       filter.epicId = params.epicId;
     }
 
-    const results = await GranularMemoryModel.find(filter)
-      .sort({ createdAt: -1 })
-      .lean();
-    return results as unknown as GranularMemory[];
+    try {
+      const results = await GranularMemoryModel.find(filter)
+        .sort({ createdAt: -1 })
+        .lean();
+      if (results.length > 0) {
+        console.log(`☁️ [GranularMemory] Found ${results.length} file changes from MongoDB (fallback)`);
+      }
+      return results as unknown as GranularMemory[];
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
+    }
   }
 
   /**
    * 🔥 STRICT TASK CACHE: Get cache entries ONLY for this specific task
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    *
    * Unlike getPhaseMemories which includes project-wide memories,
    * this method is STRICT - it only returns memories that match the EXACT taskId.
@@ -1128,34 +1280,58 @@ export class GranularMemoryService {
     phaseType: string;
     cacheTitle: string;
   }): Promise<GranularMemory | null> {
+    // 1️⃣ LOCAL FIRST
+    const localMemories = await this.loadFromLocal(params.taskId, 'context');
+    if (localMemories.length > 0) {
+      const found = localMemories.find(m =>
+        m.phaseType === params.phaseType &&
+        m.title === params.cacheTitle &&
+        !m.archived
+      );
+      if (found) {
+        console.log(`📂 [GranularMemory] Found task cache "${params.cacheTitle}" from LOCAL (primary)`);
+        return found;
+      }
+    }
+
+    // 2️⃣ FALLBACK to MongoDB
     const projectOid = this.safeObjectId(params.projectId);
     const taskOid = this.safeObjectId(params.taskId);
     if (!projectOid || !taskOid) {
-      return null; // Graceful degradation
+      return null;
     }
 
-    const result = await GranularMemoryModel.findOne({
-      projectId: projectOid,
-      taskId: taskOid, // 🔥 STRICT: Must match EXACT taskId
-      phaseType: params.phaseType,
-      type: 'context',
-      title: params.cacheTitle,
-      archived: false,
-    }).lean() as any;
+    try {
+      const result = await GranularMemoryModel.findOne({
+        projectId: projectOid,
+        taskId: taskOid,
+        phaseType: params.phaseType,
+        type: 'context',
+        title: params.cacheTitle,
+        archived: false,
+      }).lean() as any;
 
-    if (result && result._id) {
-      // Update usage stats
-      await GranularMemoryModel.updateOne(
-        { _id: result._id },
-        { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
-      );
+      if (result) {
+        console.log(`☁️ [GranularMemory] Found task cache "${params.cacheTitle}" from MongoDB (fallback)`);
+        // Update usage stats (non-blocking)
+        if (result._id) {
+          GranularMemoryModel.updateOne(
+            { _id: result._id },
+            { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
+          ).catch(() => {});
+        }
+      }
+
+      return result as GranularMemory | null;
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return null;
     }
-
-    return result as GranularMemory | null;
   }
 
   /**
    * 🔥 STRICT TASK CACHE: Get multiple cache entries for this specific task
+   * 🔥 LOCAL-FIRST: Reads local files first, MongoDB as fallback
    */
   async getTaskCaches(params: {
     projectId: string;
@@ -1164,15 +1340,38 @@ export class GranularMemoryService {
     cacheTitlePrefix?: string;
     limit?: number;
   }): Promise<GranularMemory[]> {
+    const limit = params.limit || 10;
+
+    // 1️⃣ LOCAL FIRST
+    const localMemories = await this.loadFromLocal(params.taskId, 'context');
+    if (localMemories.length > 0) {
+      let filtered = localMemories.filter(m =>
+        m.phaseType === params.phaseType && !m.archived
+      );
+      if (params.cacheTitlePrefix) {
+        filtered = filtered.filter(m => m.title?.startsWith(params.cacheTitlePrefix!));
+      }
+      filtered.sort((a, b) => {
+        const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
+      if (filtered.length > 0) {
+        console.log(`📂 [GranularMemory] Found ${Math.min(filtered.length, limit)} task caches from LOCAL (primary)`);
+        return filtered.slice(0, limit);
+      }
+    }
+
+    // 2️⃣ FALLBACK to MongoDB
     const projectOid = this.safeObjectId(params.projectId);
     const taskOid = this.safeObjectId(params.taskId);
     if (!projectOid || !taskOid) {
-      return []; // Graceful degradation
+      return [];
     }
 
     const filter: any = {
       projectId: projectOid,
-      taskId: taskOid, // 🔥 STRICT: Must match EXACT taskId
+      taskId: taskOid,
       phaseType: params.phaseType,
       type: 'context',
       archived: false,
@@ -1182,19 +1381,26 @@ export class GranularMemoryService {
       filter.title = { $regex: new RegExp(`^${params.cacheTitlePrefix}`) };
     }
 
-    const results = await GranularMemoryModel.find(filter)
-      .sort({ updatedAt: -1 })
-      .limit(params.limit || 10)
-      .lean();
+    try {
+      const results = await GranularMemoryModel.find(filter)
+        .sort({ updatedAt: -1 })
+        .limit(limit)
+        .lean();
 
-    if (results.length > 0) {
-      await GranularMemoryModel.updateMany(
-        { _id: { $in: results.map(r => r._id) } },
-        { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
-      );
+      if (results.length > 0) {
+        console.log(`☁️ [GranularMemory] Found ${results.length} task caches from MongoDB (fallback)`);
+        // Update usage stats (non-blocking fire-and-forget)
+        GranularMemoryModel.updateMany(
+          { _id: { $in: results.map(r => r._id) } },
+          { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
+        ).catch(() => {});
+      }
+
+      return results as unknown as GranularMemory[];
+    } catch (mongoErr: any) {
+      console.warn(`⚠️ [GranularMemory] MongoDB fallback failed: ${mongoErr.message}`);
+      return [];
     }
-
-    return results as unknown as GranularMemory[];
   }
 
   // ==================== FORMAT FOR PROMPTS ====================

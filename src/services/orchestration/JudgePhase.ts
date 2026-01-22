@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { BasePhase, OrchestrationContext, PhaseResult } from './Phase';
+import { BasePhase, OrchestrationContext, PhaseResult, saveTaskFireAndForget } from './Phase';
 import { IStory } from '../../models/Task';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
@@ -34,6 +34,8 @@ import {
   buildTechLeadJudgePrompt,
   buildDeveloperJudgePrompt,
 } from './prompts/JudgePrompts';
+// ⏱️ Centralized timeout constants
+import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from './constants/Timeouts';
 
 /**
  * Judge Types - Unified evaluation across all phases
@@ -807,7 +809,7 @@ export class JudgePhase extends BasePhase {
         story.judgeStatus = 'approved';
         story.status = 'completed';
         if (!multiTeamMode) {
-          await task.save();
+          saveTaskFireAndForget(task, 'judge approved story');
         }
 
         // 📦 GITHUB BACKUP: Save Developer Judge evaluation
@@ -851,7 +853,7 @@ export class JudgePhase extends BasePhase {
         story.judgeStatus = 'changes_requested';
         story.judgeComments = evaluation.feedback;
         if (!multiTeamMode) {
-          await task.save();
+          saveTaskFireAndForget(task, 'judge requested changes');
         }
 
         NotificationService.emitAgentMessage(
@@ -954,7 +956,7 @@ export class JudgePhase extends BasePhase {
           task.orchestration.pausedAt = new Date();
 
           if (!multiTeamMode) {
-            await task.save();
+            saveTaskFireAndForget(task, 'judge paused for manual review');
           }
 
           // 📦 GITHUB BACKUP: Save Developer Judge evaluation (rejected after max retries)
@@ -1281,7 +1283,7 @@ export class JudgePhase extends BasePhase {
       try {
         testResult = await AutomatedTestRunner.runTests(testRepoPath, {
           command: customTestCommand,
-          timeout: 90000, // 90 seconds for tests
+          timeout: GIT_TIMEOUTS.FETCH, // 90 seconds for tests
         });
 
         testResultsSection = AutomatedTestRunner.formatForJudge(testResult);
@@ -1411,7 +1413,7 @@ export class JudgePhase extends BasePhase {
         attachments.length > 0 ? attachments : undefined, // attachments parameter
         {
           maxIterations: 5,
-          timeout: 300000, // 5 minutes
+          timeout: AGENT_TIMEOUTS.JUDGE, // 5 minutes
         },
         undefined, // contextOverride
         undefined, // skipOptimization
@@ -1821,7 +1823,7 @@ npm test             # Must pass
           safeGitExecSync(`git fetch origin --prune`, {
             cwd: repoPath,
             encoding: 'utf8',
-            timeout: 90000
+            timeout: GIT_TIMEOUTS.FETCH
           });
           console.log(`✅ [Judge PRE-RETRY] Fetched all remote branches`);
 
@@ -1829,7 +1831,7 @@ npm test             # Must pass
           const branchCheck = safeGitExecSync(`git ls-remote --heads origin ${storyFromEventStore.branchName}`, {
             cwd: repoPath,
             encoding: 'utf8',
-            timeout: 10000
+            timeout: GIT_TIMEOUTS.STATUS
           });
 
           if (branchCheck.trim()) {
@@ -1982,7 +1984,7 @@ npm test             # Must pass
 
           // Fetch and pull latest commits (using cached fetch to avoid redundant network calls)
           const { safeGitExecSync, smartGitFetch } = await import('../../utils/safeGitExecution');
-          smartGitFetch(repoPath, { timeout: 90000 });
+          smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH });
 
           // 🔥 FIX: Stash any unstaged changes before checkout
           // Developer might have left uncommitted changes
@@ -2049,7 +2051,7 @@ npm test             # Must pass
             safeGitExecSync(`git pull origin ${story.branchName}`, {
               cwd: repoPath,
               encoding: 'utf8',
-              timeout: 30000
+              timeout: GIT_TIMEOUTS.CHECKOUT
             });
             console.log(`✅ [POST-RETRY SYNC] Main repo updated (checkout + pull)`);
           }

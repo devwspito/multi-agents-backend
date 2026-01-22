@@ -1,4 +1,5 @@
-import { ITask } from '../../models/Task';
+import mongoose from 'mongoose';
+import { Task, ITask } from '../../models/Task';
 
 /**
  * Branch Registry Entry
@@ -631,4 +632,70 @@ export abstract class BasePhase implements IPhase {
    * Optional: Cleanup resources
    */
   async cleanup?(context: OrchestrationContext): Promise<void>;
+}
+
+// ==================== FIRE-AND-FORGET UTILITIES ====================
+
+/**
+ * 🔥 Fire-and-forget Task save
+ *
+ * LOCAL-FIRST pattern: MongoDB writes should not block execution.
+ * This utility saves the task to MongoDB in the background without blocking.
+ *
+ * Use this for non-critical updates like:
+ * - Model config changes
+ * - Progress updates
+ * - Cost/token updates
+ *
+ * For critical status changes (completed, failed), consider using saveTaskCritical()
+ */
+export function saveTaskFireAndForget(task: ITask, context?: string): void {
+  const taskId = task._id?.toString() || 'unknown';
+  task.save()
+    .then(() => {
+      console.log(`☁️ [Task] Background save OK${context ? ` (${context})` : ''}`);
+    })
+    .catch((err: Error) => {
+      console.warn(`⚠️ [Task ${taskId}] Background save failed${context ? ` (${context})` : ''}: ${err.message}`);
+    });
+}
+
+/**
+ * 🔥 Fire-and-forget Task.findByIdAndUpdate
+ *
+ * Same as saveTaskFireAndForget but for atomic updates.
+ * Use this when you don't need the updated document back.
+ */
+export function updateTaskFireAndForget(
+  taskId: string | mongoose.Types.ObjectId,
+  update: any,
+  context?: string
+): void {
+  Task.findByIdAndUpdate(taskId, update)
+    .then(() => {
+      console.log(`☁️ [Task] Background update OK${context ? ` (${context})` : ''}`);
+    })
+    .catch((err: Error) => {
+      console.warn(`⚠️ [Task ${taskId}] Background update failed${context ? ` (${context})` : ''}: ${err.message}`);
+    });
+}
+
+/**
+ * 🔥 Critical Task save with error handling
+ *
+ * Use this for critical status changes where you need to know if it failed,
+ * but still don't want to crash the system.
+ *
+ * Returns true if save succeeded, false if failed.
+ */
+export async function saveTaskCritical(task: ITask, context?: string): Promise<boolean> {
+  const taskId = task._id?.toString() || 'unknown';
+  try {
+    await task.save();
+    console.log(`✅ [Task] Critical save OK${context ? ` (${context})` : ''}`);
+    return true;
+  } catch (err: any) {
+    console.error(`❌ [Task ${taskId}] Critical save FAILED${context ? ` (${context})` : ''}: ${err.message}`);
+    return false;
+  }
 }
