@@ -78,21 +78,32 @@ ${taskDescription}
 ${repoContext}
 ${additionalContext ? `\nADDITIONAL CONTEXT:\n${additionalContext}` : ''}
 
-RESPOND WITH RAW JSON ONLY. NO MARKDOWN CODE BLOCKS. NO BACKTICKS. NO EXPLANATION. JUST THE JSON OBJECT:
+RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
 {
-  "language": "the primary programming language (e.g., dart, typescript, python, go, rust, java, kotlin, swift)",
-  "framework": "the framework if mentioned (e.g., flutter, react, nextjs, django, fastapi, gin)",
-  "dockerImage": "the appropriate Docker image for this stack",
-  "ecosystem": "the ecosystem/runtime (e.g., flutter, node, python, jvm, go)",
+  "language": "dart|typescript|python|go|rust|java|kotlin|swift",
+  "framework": "flutter|react|nextjs|django|fastapi|gin|express|none",
+  "dockerImage": "exact docker image (e.g., ghcr.io/cirruslabs/flutter:stable)",
+  "ecosystem": "flutter|node|python|jvm|go|rust",
   "confidence": "high|medium|low",
-  "reasoning": "brief explanation of detection",
-  "checkFile": "file that indicates project exists (e.g., pubspec.yaml, package.json, go.mod, Cargo.toml, requirements.txt)",
-  "projectName": "valid project name for this language (e.g., Dart uses snake_case like 'app_pasos', npm uses kebab-case like 'app-pasos')",
-  "createCmd": "COMPLETE command to create project WITH --project-name flag if needed (e.g., 'flutter create . --project-name app_pasos --overwrite')",
+  "reasoning": "one sentence explanation",
+  "checkFile": "pubspec.yaml|package.json|go.mod|Cargo.toml|requirements.txt",
+  "projectName": "valid_project_name_for_language",
+  "createCmd": "complete command to create project",
   "installCmd": "command to install dependencies",
-  "devCmd": "command to run the dev server (must bind to 0.0.0.0 for Docker)",
-  "devPort": "default port number for the dev server (integer)"
+  "devCmd": "REQUIRED: command to start dev server binding to 0.0.0.0",
+  "devPort": 8080
 }
+
+MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
+- Flutter: "flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0"
+- React/Vite: "npm run dev -- --host 0.0.0.0 --port 3000"
+- Next.js: "npm run dev"
+- Express: "npm run dev || npm start"
+- Python Flask: "flask run --host=0.0.0.0 --port=5000"
+- Python Django: "python manage.py runserver 0.0.0.0:8000"
+- FastAPI: "uvicorn main:app --host 0.0.0.0 --port 8000"
+- Go: "go run ."
+- Rust: "cargo run"
 
 CRITICAL NAMING RULES:
 - Dart/Flutter: Use snake_case (lowercase with underscores). "app-pasos-frontend" → "app_pasos_frontend"
