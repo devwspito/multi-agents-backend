@@ -21,7 +21,8 @@ export interface DetectedLanguage {
   reasoning: string;
   // Project setup commands (LLM-determined, 100% agnostic)
   checkFile?: string;         // File that indicates project exists (e.g., "pubspec.yaml", "package.json")
-  createCmd?: string;         // Command to create new project (e.g., "flutter create . --force")
+  projectName?: string;       // 🔥 LLM-determined valid project name (e.g., "app_pasos_frontend" for Dart)
+  createCmd?: string;         // Command to create new project WITH correct project name
   installCmd?: string;        // Command to install dependencies (e.g., "flutter pub get")
   devCmd?: string;            // Command to run dev server (e.g., "flutter run -d web-server")
   devPort?: number;           // Default port for dev server (e.g., 8080)
@@ -49,18 +50,33 @@ class LanguageDetectionService {
 
   /**
    * Detect language/framework from task description using LLM
-   * Uses Haiku for speed and cost efficiency
+   *
+   * 🔥 FULLY AGNOSTIC: LLM determines EVERYTHING including:
+   * - Docker image
+   * - Valid project name (e.g., underscores for Dart, kebab-case for npm)
+   * - Create command with correct flags
+   * - Install/dev commands
+   *
+   * @param taskDescription - Task description from user
+   * @param additionalContext - Optional additional context
+   * @param repoNames - Optional array of repo names to generate valid project names for
    */
   async detectFromDescription(
     taskDescription: string,
-    additionalContext?: string
+    additionalContext?: string,
+    repoNames?: string[]
   ): Promise<DetectionResult> {
+    // 🔥 Include repo names in prompt so LLM can generate valid project names
+    const repoContext = repoNames?.length
+      ? `\nREPOSITORY NAMES (may need name conversion for the language):\n${repoNames.map(r => `- ${r}`).join('\n')}`
+      : '';
+
     const prompt = `Analyze this task description and determine the programming language, framework, and appropriate Docker image.
 
 TASK DESCRIPTION:
 ${taskDescription}
-
-${additionalContext ? `ADDITIONAL CONTEXT:\n${additionalContext}` : ''}
+${repoContext}
+${additionalContext ? `\nADDITIONAL CONTEXT:\n${additionalContext}` : ''}
 
 RESPOND WITH RAW JSON ONLY. NO MARKDOWN CODE BLOCKS. NO BACKTICKS. NO EXPLANATION. JUST THE JSON OBJECT:
 {
@@ -71,17 +87,31 @@ RESPOND WITH RAW JSON ONLY. NO MARKDOWN CODE BLOCKS. NO BACKTICKS. NO EXPLANATIO
   "confidence": "high|medium|low",
   "reasoning": "brief explanation of detection",
   "checkFile": "file that indicates project exists (e.g., pubspec.yaml, package.json, go.mod, Cargo.toml, requirements.txt)",
-  "createCmd": "command to create a NEW empty project (use --overwrite for flutter/dart, --force for rust/cargo, appropriate flags for other languages)",
+  "projectName": "valid project name for this language (e.g., Dart uses snake_case like 'app_pasos', npm uses kebab-case like 'app-pasos')",
+  "createCmd": "COMPLETE command to create project WITH --project-name flag if needed (e.g., 'flutter create . --project-name app_pasos --overwrite')",
   "installCmd": "command to install dependencies",
   "devCmd": "command to run the dev server (must bind to 0.0.0.0 for Docker)",
   "devPort": "default port number for the dev server (integer)"
 }
 
-GUIDELINES:
-- Docker images: Flutter→ghcr.io/cirruslabs/flutter:stable, Node→node:20-bookworm, Python→python:3.12-bookworm, Go→golang:1.21-bookworm, Rust→rust:1.75-bookworm, Java→eclipse-temurin:21-jdk
-- createCmd MUST handle non-empty directories: use --overwrite for flutter/dart, --force for rust/cargo, -y for npm
-- devCmd MUST bind to 0.0.0.0 (not localhost) for Docker container access
-- If unknown language → use ubuntu:22.04 and null for commands
+CRITICAL NAMING RULES:
+- Dart/Flutter: Use snake_case (lowercase with underscores). "app-pasos-frontend" → "app_pasos_frontend"
+- npm/Node.js: Use kebab-case (lowercase with hyphens). "AppPasos" → "app-pasos"
+- Python: Use snake_case. "my-project" → "my_project"
+- Rust/Cargo: Use snake_case. "my-app" → "my_app"
+- Go: Use lowercase, no special chars. "MyApp" → "myapp"
+
+CRITICAL: createCmd MUST include the --project-name flag with the VALID project name for that language!
+Example for Flutter: "flutter create . --project-name app_pasos_frontend --org com.example --overwrite"
+
+DOCKER IMAGES:
+- Flutter/Dart → ghcr.io/cirruslabs/flutter:stable
+- Node/TypeScript → node:20-bookworm
+- Python → python:3.12-bookworm
+- Go → golang:1.22-bookworm
+- Rust → rust:1.75-bookworm
+- Java → eclipse-temurin:21-jdk
+- Unknown → ubuntu:22.04
 
 JSON RESPONSE:`;
 
@@ -107,8 +137,11 @@ JSON RESPONSE:`;
 
       console.log(`🔍 [LanguageDetection] Detected: ${parsed.language}/${parsed.framework} → ${parsed.dockerImage}`);
       console.log(`   Confidence: ${parsed.confidence} | Reasoning: ${parsed.reasoning}`);
+      if (parsed.projectName) {
+        console.log(`   Project name: ${parsed.projectName}`);
+      }
       if (parsed.createCmd) {
-        console.log(`   Setup: checkFile=${parsed.checkFile}, createCmd=${parsed.createCmd}`);
+        console.log(`   Create command: ${parsed.createCmd}`);
       }
 
       return {
@@ -121,6 +154,7 @@ JSON RESPONSE:`;
           reasoning: parsed.reasoning || '',
           // Project setup commands (100% LLM-determined)
           checkFile: parsed.checkFile || undefined,
+          projectName: parsed.projectName || undefined, // 🔥 LLM-determined valid name
           createCmd: parsed.createCmd || undefined,
           installCmd: parsed.installCmd || undefined,
           devCmd: parsed.devCmd || undefined,
