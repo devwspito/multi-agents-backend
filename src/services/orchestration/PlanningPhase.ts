@@ -116,15 +116,24 @@ export class PlanningPhase extends BasePhase {
       console.log(`🔍 [Planning] Detecting language from task description using LLM...`);
       console.log(`   Input: "${descriptionToAnalyze.substring(0, 100)}${descriptionToAnalyze.length > 100 ? '...' : ''}"`);
       try {
+        // 🔥 AGNOSTIC: Pass repo names so LLM can generate valid project names for the language
+        const repoNames = repositories.map((r: any) => r.name);
         const detection = await languageDetectionService.detectFromDescription(
           descriptionToAnalyze,
-          task.title // Additional context
+          task.title, // Additional context
+          repoNames   // 🔥 LLM will convert to valid names (snake_case for Dart, kebab-case for npm, etc.)
         );
         detectedLanguage = detection.primary;
         context.setData('detectedLanguage', detectedLanguage);
         console.log(`✅ [Planning] Language detected: ${detectedLanguage.language}/${detectedLanguage.framework}`);
         console.log(`   Docker image: ${detectedLanguage.dockerImage}`);
         console.log(`   Confidence: ${detectedLanguage.confidence}`);
+        if (detectedLanguage.projectName) {
+          console.log(`   Project name: ${detectedLanguage.projectName}`);
+        }
+        if (detectedLanguage.createCmd) {
+          console.log(`   Create command: ${detectedLanguage.createCmd}`);
+        }
       } catch (error: any) {
         console.warn(`⚠️ [Planning] Language detection failed: ${error.message}`);
       }
