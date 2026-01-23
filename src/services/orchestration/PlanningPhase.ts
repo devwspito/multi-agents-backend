@@ -138,7 +138,30 @@ export class PlanningPhase extends BasePhase {
 
         // 🔥 AGNOSTIC: Emit EnvironmentConfigDefined event with LLM-determined devCmd
         // This allows DevServerService to use the correct command for preview
-        if (detectedLanguage.devCmd) {
+        // Get devCmd from LLM or use sensible default based on framework
+        let devCmd = detectedLanguage.devCmd;
+        let devPort = detectedLanguage.devPort;
+
+        // 🔥 FALLBACK: If LLM didn't return devCmd, use defaults based on detected language
+        if (!devCmd) {
+          const devDefaults: Record<string, { cmd: string; port: number }> = {
+            flutter: { cmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0', port: 8080 },
+            dart: { cmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0', port: 8080 },
+            typescript: { cmd: 'npm run dev || npm start', port: 3000 },
+            node: { cmd: 'npm run dev || npm start', port: 3000 },
+            python: { cmd: 'python -m flask run --host=0.0.0.0 --port=5000', port: 5000 },
+            go: { cmd: 'go run .', port: 8080 },
+            rust: { cmd: 'cargo run', port: 8080 },
+          };
+          const defaults = devDefaults[detectedLanguage.language] || devDefaults[detectedLanguage.framework];
+          if (defaults) {
+            devCmd = defaults.cmd;
+            devPort = devPort || defaults.port;
+            console.log(`   🔄 Using fallback devCmd for ${detectedLanguage.language}: ${devCmd}`);
+          }
+        }
+
+        if (devCmd) {
           const envConfig: Record<string, any> = {};
           // Use generic key for single-repo or first repo for multi-repo
           const repoKey = repositories.length > 0 ? repositories[0].name : 'default';
@@ -146,8 +169,8 @@ export class PlanningPhase extends BasePhase {
             language: detectedLanguage.language,
             framework: detectedLanguage.framework,
             installCommand: detectedLanguage.installCmd,
-            runCommand: detectedLanguage.devCmd,  // 🔥 LLM-determined dev server command
-            devPort: detectedLanguage.devPort,
+            runCommand: devCmd,  // 🔥 LLM-determined or fallback dev server command
+            devPort: devPort,
             dockerImage: detectedLanguage.dockerImage,
           };
 
@@ -156,7 +179,7 @@ export class PlanningPhase extends BasePhase {
             eventType: 'EnvironmentConfigDefined',
             payload: envConfig,
           });
-          console.log(`✅ [Planning] Emitted EnvironmentConfigDefined with devCmd: ${detectedLanguage.devCmd}`);
+          console.log(`✅ [Planning] Emitted EnvironmentConfigDefined with devCmd: ${devCmd}`);
         }
       } catch (error: any) {
         console.warn(`⚠️ [Planning] Language detection failed: ${error.message}`);
