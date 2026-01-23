@@ -12,6 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import { NotificationService } from './NotificationService';
 import { sandboxService } from './SandboxService';
+import { eventStore } from './EventStore';
 
 /**
  * Get extended PATH including common SDK locations
@@ -480,47 +481,70 @@ class DevServerService extends EventEmitter {
     const projectDir = await this.findProjectDirInDocker(containerName, framework);
     console.log(`🐳 [DevServerService] Using project directory: ${projectDir}`);
 
-    // Build the command based on framework
-    let command: string;
+    // 🔥 AGNOSTIC: Try to get LLM-determined command from EventStore first
+    let command: string = '';  // Will be set by EventStore or fallback
     let installFirst = '';
+    let usedEventStore = false;
 
-    switch (framework) {
-      case 'flutter':
-        installFirst = 'flutter pub get 2>/dev/null || true && ';
-        command = `flutter run -d web-server --web-port=${port} --web-hostname=0.0.0.0`;
-        break;
-      case 'vite':
-        installFirst = 'npm install 2>/dev/null || true && ';
-        command = `npm run dev -- --port ${port} --host 0.0.0.0`;
-        break;
-      case 'nextjs':
-        installFirst = 'npm install 2>/dev/null || true && ';
-        command = `PORT=${port} npm run dev`;
-        break;
-      case 'cra':
-        installFirst = 'npm install 2>/dev/null || true && ';
-        command = `PORT=${port} npm start`;
-        break;
-      case 'node':
-        installFirst = 'npm install 2>/dev/null || true && ';
-        command = `PORT=${port} npm run dev 2>/dev/null || PORT=${port} npm start`;
-        break;
-      case 'django':
-        installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
-        command = `python manage.py runserver 0.0.0.0:${port}`;
-        break;
-      case 'flask':
-        installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
-        command = `flask run --host=0.0.0.0 --port=${port}`;
-        break;
-      case 'fastapi':
-        installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
-        command = `uvicorn main:app --host 0.0.0.0 --port ${port} --reload`;
-        break;
-      default:
-        // Generic: try npm run dev first, then npm start
-        installFirst = 'npm install 2>/dev/null || true && ';
-        command = `PORT=${port} npm run dev 2>/dev/null || PORT=${port} npm start`;
+    try {
+      const state = await eventStore.getCurrentState(taskId);
+      if (state?.environmentConfig) {
+        // Find matching config (by repo name or first available)
+        const repoKeys = Object.keys(state.environmentConfig);
+        const envConfig = repoKeys.length > 0 ? state.environmentConfig[repoKeys[0]] : null;
+
+        if (envConfig?.runCommand) {
+          command = envConfig.runCommand;
+          installFirst = envConfig.installCommand ? `${envConfig.installCommand} 2>/dev/null || true && ` : '';
+          usedEventStore = true;
+          console.log(`🤖 [DevServerService] Using LLM-determined command from EventStore: ${command}`);
+        }
+      }
+    } catch (err: any) {
+      console.log(`⚠️ [DevServerService] Could not read from EventStore: ${err.message}`);
+    }
+
+    // Fallback to hardcoded commands if EventStore didn't have a command
+    if (!usedEventStore) {
+      console.log(`📦 [DevServerService] Using hardcoded command for framework: ${framework}`);
+      switch (framework) {
+        case 'flutter':
+          installFirst = 'flutter pub get 2>/dev/null || true && ';
+          command = `flutter run -d web-server --web-port=${port} --web-hostname=0.0.0.0`;
+          break;
+        case 'vite':
+          installFirst = 'npm install 2>/dev/null || true && ';
+          command = `npm run dev -- --port ${port} --host 0.0.0.0`;
+          break;
+        case 'nextjs':
+          installFirst = 'npm install 2>/dev/null || true && ';
+          command = `PORT=${port} npm run dev`;
+          break;
+        case 'cra':
+          installFirst = 'npm install 2>/dev/null || true && ';
+          command = `PORT=${port} npm start`;
+          break;
+        case 'node':
+          installFirst = 'npm install 2>/dev/null || true && ';
+          command = `PORT=${port} npm run dev 2>/dev/null || PORT=${port} npm start`;
+          break;
+        case 'django':
+          installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
+          command = `python manage.py runserver 0.0.0.0:${port}`;
+          break;
+        case 'flask':
+          installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
+          command = `flask run --host=0.0.0.0 --port=${port}`;
+          break;
+        case 'fastapi':
+          installFirst = 'pip install -r requirements.txt 2>/dev/null || true && ';
+          command = `uvicorn main:app --host 0.0.0.0 --port ${port} --reload`;
+          break;
+        default:
+          // Generic: try npm run dev first, then npm start
+          installFirst = 'npm install 2>/dev/null || true && ';
+          command = `PORT=${port} npm run dev 2>/dev/null || PORT=${port} npm start`;
+      }
     }
 
     const fullCommand = `${installFirst}${command}`;

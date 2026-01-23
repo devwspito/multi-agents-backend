@@ -21,6 +21,7 @@ import { TaskRepository } from '../../database/repositories/TaskRepository';
 import { sandboxService } from '../SandboxService';
 import { sandboxPoolService } from '../SandboxPoolService';
 import { languageDetectionService, DetectedLanguage } from '../LanguageDetectionService';
+import { eventStore } from '../EventStore';
 import fs from 'fs';
 import path from 'path';
 
@@ -133,6 +134,29 @@ export class PlanningPhase extends BasePhase {
         }
         if (detectedLanguage.createCmd) {
           console.log(`   Create command: ${detectedLanguage.createCmd}`);
+        }
+
+        // 🔥 AGNOSTIC: Emit EnvironmentConfigDefined event with LLM-determined devCmd
+        // This allows DevServerService to use the correct command for preview
+        if (detectedLanguage.devCmd) {
+          const envConfig: Record<string, any> = {};
+          // Use generic key for single-repo or first repo for multi-repo
+          const repoKey = repositories.length > 0 ? repositories[0].name : 'default';
+          envConfig[repoKey] = {
+            language: detectedLanguage.language,
+            framework: detectedLanguage.framework,
+            installCommand: detectedLanguage.installCmd,
+            runCommand: detectedLanguage.devCmd,  // 🔥 LLM-determined dev server command
+            devPort: detectedLanguage.devPort,
+            dockerImage: detectedLanguage.dockerImage,
+          };
+
+          await eventStore.append({
+            taskId,
+            eventType: 'EnvironmentConfigDefined',
+            payload: envConfig,
+          });
+          console.log(`✅ [Planning] Emitted EnvironmentConfigDefined with devCmd: ${detectedLanguage.devCmd}`);
         }
       } catch (error: any) {
         console.warn(`⚠️ [Planning] Language detection failed: ${error.message}`);
