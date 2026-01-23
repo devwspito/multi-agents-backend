@@ -1679,6 +1679,18 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
         `🐳 Creating unified sandbox for all repos (multi-runtime: Flutter + Node.js + Python)`
       );
 
+      // 🔥 AGNOSTIC: Use LLM-determined Docker image (not hardcoded)
+      // For empty repos, the LLM decides everything - language, image, commands
+      const dockerImage = llmDetectedLanguage?.dockerImage || 'ghcr.io/cirruslabs/flutter:stable';
+      const language = llmDetectedLanguage?.language || 'multi-runtime';
+
+      console.log(`   🤖 [Planning] LLM-determined config:`);
+      console.log(`      Language: ${language}`);
+      console.log(`      Docker Image: ${dockerImage}`);
+      if (llmDetectedLanguage?.createCmd) {
+        console.log(`      Create Command: ${llmDetectedLanguage.createCmd}`);
+      }
+
       // Use sandboxPoolService to create the unified sandbox
       const result = await sandboxPoolService.findOrCreateSandbox(
         taskId,
@@ -1686,11 +1698,12 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
         'unified', // Special repo name indicating unified sandbox
         [], // plannedFiles - not used
         workspacePath, // Base workspace path
-        'multi-runtime', // This will use the multi-runtime image
+        language, // 🔥 LLM-determined language (not hardcoded)
         {
+          image: dockerImage, // 🔥 LLM-determined Docker image
           networkMode: 'bridge',
-          memoryLimit: '8g', // More memory for multi-runtime
-          cpuLimit: '4', // More CPU for multi-runtime
+          memoryLimit: '8g',
+          cpuLimit: '4',
           ports: allPorts,
           workspaceMounts, // Mount all repos
         },

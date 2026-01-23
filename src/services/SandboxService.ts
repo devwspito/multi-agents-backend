@@ -105,6 +105,10 @@ const LANGUAGE_IMAGES: Record<string, string> = {
   go: 'golang:1.22-bookworm',
   rust: 'rust:1.75-bookworm',
   java: 'eclipse-temurin:21-jdk',
+  // 🔥 Multi-runtime: Use Flutter image (Node.js installed at runtime)
+  // Flutter SDK is complex to install, Node.js is easy (~30s)
+  'multi-runtime': 'ghcr.io/cirruslabs/flutter:stable',
+  fullstack: 'ghcr.io/cirruslabs/flutter:stable',
   // Default: Ubuntu with basic tools
   default: 'ubuntu:22.04',
 };
