@@ -12,6 +12,21 @@ import { safeGitExecSync, fixGitRemoteAuth } from '../../../../utils/safeGitExec
 import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from '../../constants/Timeouts';
 import { unifiedMemoryService } from '../../../UnifiedMemoryService';
 import { StoryPipelineContext, MergeStageResult } from '../types';
+import { sandboxService } from '../../../SandboxService';
+
+// Dependency files that require reinstall when changed
+const DEPENDENCY_FILES: Record<string, { pattern: RegExp; installCmd: string; language: string }> = {
+  'pubspec.yaml': { pattern: /pubspec\.yaml$/i, installCmd: 'flutter pub get', language: 'flutter' },
+  'pubspec.lock': { pattern: /pubspec\.lock$/i, installCmd: 'flutter pub get', language: 'flutter' },
+  'package.json': { pattern: /package\.json$/i, installCmd: 'npm install', language: 'nodejs' },
+  'package-lock.json': { pattern: /package-lock\.json$/i, installCmd: 'npm install', language: 'nodejs' },
+  'yarn.lock': { pattern: /yarn\.lock$/i, installCmd: 'yarn install', language: 'nodejs' },
+  'pnpm-lock.yaml': { pattern: /pnpm-lock\.yaml$/i, installCmd: 'pnpm install', language: 'nodejs' },
+  'requirements.txt': { pattern: /requirements\.txt$/i, installCmd: 'pip install -r requirements.txt', language: 'python' },
+  'Pipfile.lock': { pattern: /Pipfile\.lock$/i, installCmd: 'pipenv sync', language: 'python' },
+  'Cargo.toml': { pattern: /Cargo\.toml$/i, installCmd: 'cargo build', language: 'rust' },
+  'go.mod': { pattern: /go\.mod$/i, installCmd: 'go mod download', language: 'go' },
+};
 
 export type ExecuteAgentFn = (
   agentType: string,
@@ -22,7 +37,7 @@ export type ExecuteAgentFn = (
   sessionId?: string,
   fork?: boolean,
   attachments?: any[],
-  options?: { maxIterations?: number; timeout?: number }
+  options?: { maxIterations?: number; timeout?: number; sandboxId?: string } // 🐳 Added sandboxId
 ) => Promise<{ cost?: number; usage?: any; output?: string }>;
 
 export class MergeStageExecutor {
@@ -38,6 +53,7 @@ export class MergeStageExecutor {
     const {
       task, story, epic, repositories,
       effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId,
+      sandboxId, // 🐳 Explicit sandbox ID for Docker execution
     } = pipelineCtx;
 
     console.log(`\n🔀 [MERGE STAGE] Merging story to epic branch: ${story.title}`);
@@ -49,7 +65,7 @@ export class MergeStageExecutor {
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       // Merge to epic branch
-      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId, sandboxId);
 
       // Checkpoint: Mark as merged_to_epic
       await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
@@ -134,7 +150,8 @@ export class MergeStageExecutor {
     epic: any,
     workspacePath: string | null,
     repositories: any[],
-    taskId: string
+    taskId: string,
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<void> {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🔀 [Merge] STARTING STORY TO EPIC MERGE`);
@@ -246,7 +263,7 @@ export class MergeStageExecutor {
 
       // Check if it's a merge conflict
       if (error.message.includes('CONFLICT') || error.message.includes('Recorded preimage')) {
-        await this.handleMergeConflict(error, story, epic, workspacePath, repositories, taskId);
+        await this.handleMergeConflict(error, story, epic, workspacePath, repositories, taskId, sandboxId);
         return;
       }
 
@@ -310,7 +327,8 @@ export class MergeStageExecutor {
     epic: any,
     workspacePath: string | null,
     repositories: any[],
-    taskId: string
+    taskId: string,
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<void> {
     console.error(`🔥 [Merge] MERGE CONFLICT detected!`);
 
@@ -347,12 +365,14 @@ export class MergeStageExecutor {
       const regexResolved = await this.resolveConflictsWithRegex(repoPath, conflictedFiles, story);
 
       if (regexResolved) {
+        // 🔄 Reinstall dependencies if pubspec.yaml/package.json was in conflicts
+        await this.reinstallDependenciesIfNeeded(conflictedFiles, sandboxId, repoPath);
         return;
       }
 
       // Try AI resolution
       if (this.executeAgentFn) {
-        const aiResolved = await this.resolveConflictsWithAI(taskId, story, epic, repoPath, conflictedFiles);
+        const aiResolved = await this.resolveConflictsWithAI(taskId, story, epic, repoPath, conflictedFiles, sandboxId);
 
         if (aiResolved.success) {
           console.log(`   ✅ AI resolved all conflicts!`);
@@ -363,6 +383,9 @@ export class MergeStageExecutor {
             `cd "${repoPath}" && git commit -m "Merge story: ${story.title} (AI-resolved conflicts)"`,
             { encoding: 'utf8' }
           );
+
+          // 🔄 Reinstall dependencies if pubspec.yaml/package.json was in conflicts
+          await this.reinstallDependenciesIfNeeded(conflictedFiles, sandboxId, repoPath);
 
           story.status = 'completed';
           story.mergedToEpic = true;
@@ -467,7 +490,8 @@ export class MergeStageExecutor {
     story: any,
     epic: any,
     repoPath: string,
-    conflictedFiles: string[]
+    conflictedFiles: string[],
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<{ success: boolean; cost?: number; usage?: any; error?: string }> {
     console.log(`\n🤖 [ConflictResolver] Starting AI-powered conflict resolution`);
 
@@ -539,6 +563,7 @@ If you cannot resolve a conflict, output:
         {
           maxIterations: 10,
           timeout: AGENT_TIMEOUTS.DEFAULT,
+          sandboxId, // 🐳 Explicit sandbox ID for Docker execution
         }
       );
 
@@ -579,5 +604,75 @@ If you cannot resolve a conflict, output:
       }
     }
     return true;
+  }
+
+  /**
+   * 🔄 Reinstall dependencies in sandbox if dependency files were modified
+   *
+   * This handles the gap where conflict resolution changes pubspec.yaml/package.json
+   * but the sandbox still has old dependencies installed.
+   *
+   * The HOST and SANDBOX share the same filesystem via volume mount,
+   * so code changes are visible immediately. But dependency changes
+   * (pubspec.yaml, package.json) require running install commands.
+   */
+  private async reinstallDependenciesIfNeeded(
+    conflictedFiles: string[],
+    sandboxId: string | undefined,
+    _repoPath: string // Kept for future logging, sandbox uses /workspace
+  ): Promise<void> {
+    if (!sandboxId) {
+      console.log(`   ⚠️ [Merge] No sandboxId - skipping dependency reinstall`);
+      return;
+    }
+
+    // Find which dependency files were modified
+    const modifiedDeps: Set<string> = new Set();
+    for (const file of conflictedFiles) {
+      for (const [depName, config] of Object.entries(DEPENDENCY_FILES)) {
+        if (config.pattern.test(file)) {
+          modifiedDeps.add(depName);
+        }
+      }
+    }
+
+    if (modifiedDeps.size === 0) {
+      console.log(`   ℹ️ [Merge] No dependency files in conflicts - skip reinstall`);
+      return;
+    }
+
+    console.log(`\n🔄 [Merge] Dependency files modified: ${Array.from(modifiedDeps).join(', ')}`);
+
+    // Determine which install commands to run (dedupe by language)
+    const commandsByLanguage: Map<string, string> = new Map();
+    Array.from(modifiedDeps).forEach((depName) => {
+      const config = DEPENDENCY_FILES[depName];
+      if (config && !commandsByLanguage.has(config.language)) {
+        commandsByLanguage.set(config.language, config.installCmd);
+      }
+    });
+
+    // Execute install commands in sandbox
+    for (const [language, installCmd] of Array.from(commandsByLanguage.entries())) {
+      console.log(`   📦 [Merge] Reinstalling ${language} dependencies: ${installCmd}`);
+
+      try {
+        const result = await sandboxService.exec(sandboxId, installCmd, {
+          cwd: '/workspace',
+          timeout: 120000, // 2 minutes for install
+        });
+
+        if (result.exitCode === 0) {
+          console.log(`   ✅ [Merge] ${language} dependencies reinstalled successfully`);
+        } else {
+          console.warn(`   ⚠️ [Merge] ${language} install returned exit code ${result.exitCode}`);
+          console.warn(`      stdout: ${result.stdout?.substring(0, 200)}`);
+          console.warn(`      stderr: ${result.stderr?.substring(0, 200)}`);
+        }
+      } catch (installError: any) {
+        console.error(`   ❌ [Merge] Failed to reinstall ${language} deps: ${installError.message}`);
+        // Don't throw - dependency reinstall failure shouldn't block merge
+      }
+    }
   }
 }

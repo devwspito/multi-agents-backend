@@ -507,6 +507,80 @@ export class NotificationService {
   }
 
   /**
+   * Emitir evento de workspace listo para LivePreview
+   *
+   * Este evento notifica al frontend que hay un workspace disponible
+   * para iniciar el dev server y mostrar preview.
+   *
+   * @param taskId - ID de la tarea
+   * @param workspacePath - Path completo al workspace del story
+   * @param repoName - Nombre del repositorio
+   * @param epicName - Nombre del epic
+   * @param storyTitle - Título del story
+   */
+  static emitStoryWorkspaceReady(
+    taskId: string,
+    workspacePath: string,
+    repoName: string,
+    epicName: string,
+    storyTitle: string
+  ): void {
+    this.emitNotification(taskId, 'story_workspace_ready', {
+      workspacePath,
+      repoName,
+      epicName,
+      storyTitle,
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log(`📂 [WebSocket] Story workspace ready emitted:`, {
+      taskId,
+      workspacePath,
+      repoName,
+      storyTitle,
+    });
+  }
+
+  /**
+   * Emitir evento de dev server listo para LivePreview
+   *
+   * Este evento notifica al frontend que un dev server está corriendo
+   * y listo para mostrar en el LivePreview component.
+   *
+   * @param taskId - ID de la tarea
+   * @param url - URL del dev server (e.g., http://localhost:5173)
+   * @param framework - Framework detectado (vite, nextjs, cra, etc.)
+   */
+  static emitDevServerReady(taskId: string, url: string, framework: string): void {
+    this.emitNotification(taskId, 'dev_server_ready', {
+      url,
+      framework,
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log(`🖥️ [WebSocket] Dev server ready emitted:`, {
+      taskId,
+      url,
+      framework,
+    });
+  }
+
+  /**
+   * Emitir evento de dev server detenido
+   *
+   * @param taskId - ID de la tarea
+   */
+  static emitDevServerStopped(taskId: string): void {
+    this.emitNotification(taskId, 'dev_server_stopped', {
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log(`🛑 [WebSocket] Dev server stopped emitted:`, {
+      taskId,
+    });
+  }
+
+  /**
    * Emitir análisis de fallo al frontend
    *
    * Este método envía información detallada sobre fallos clasificados

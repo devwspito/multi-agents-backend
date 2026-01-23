@@ -44,8 +44,9 @@ export interface ModelPricing {
   outputPerMillion: number;
 }
 
-// Pricing per million tokens (as of Nov 2025)
+// Pricing per million tokens (as of Jan 2026)
 // Source: https://docs.anthropic.com/en/docs/about-claude/models
+// 🔥 OPUS 4.5 PRICING: $15 input, $75 output per MTok
 export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
   'sonnet': {
     inputPerMillion: 3,
@@ -56,8 +57,8 @@ export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
     outputPerMillion: 5,
   },
   'opus': {
-    inputPerMillion: 5,
-    outputPerMillion: 25,
+    inputPerMillion: 15,   // 🔥 Opus 4.5 pricing
+    outputPerMillion: 75,  // 🔥 Opus 4.5 pricing
   },
 };
 

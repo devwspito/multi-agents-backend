@@ -425,6 +425,54 @@ export function initializeDatabase(): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_api_keys_api_key ON webhook_api_keys(api_key)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_api_keys_project_id ON webhook_api_keys(project_id)`);
 
+  // ============================================
+  // SANDBOX POOL STATE TABLE
+  // Persists sandbox pool state across server restarts
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sandbox_pool_state (
+      id TEXT PRIMARY KEY,
+      pool_key TEXT UNIQUE NOT NULL,
+      project_id TEXT NOT NULL,
+      repo_name TEXT NOT NULL,
+      container_id TEXT,
+      container_name TEXT,
+      image TEXT NOT NULL,
+      workspace_path TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'initializing',
+      mapped_ports TEXT,
+      active_tasks TEXT DEFAULT '[]',
+      completed_tasks TEXT DEFAULT '[]',
+      init_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sandbox_pool_state_pool_key ON sandbox_pool_state(pool_key)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sandbox_pool_state_project_id ON sandbox_pool_state(project_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sandbox_pool_state_status ON sandbox_pool_state(status)`);
+
+  // ============================================
+  // PROJECT NETWORKS TABLE
+  // Manages Docker networks for multi-service projects (frontend + backend)
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_networks (
+      id TEXT PRIMARY KEY,
+      project_id TEXT UNIQUE NOT NULL,
+      network_id TEXT NOT NULL,
+      network_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      connected_containers TEXT DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_project_networks_project_id ON project_networks(project_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_project_networks_status ON project_networks(status)`);
+
   console.log('[SQLite] Database initialized at:', DB_PATH);
 }
 

@@ -9,15 +9,24 @@ import { CryptoService } from '../CryptoService';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
 import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
-import { granularMemoryService } from '../GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
 import { AgentArtifactService } from '../AgentArtifactService';
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 🏊 SANDBOX POOL - Intelligent sandbox reuse with conflict detection
+import { sandboxPoolService } from '../SandboxPoolService';
 // 📦 Utility helpers
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { logSection } from './utils/LogHelpers';
 import { isEmpty } from './utils/ArrayHelpers';
 import { getEpicId, getStoryId, validateStoryIds } from './utils/IdNormalizer';
+// 📦 Reusable Prompt Sections
+import {
+  SCOPE_BOUNDARY_SECTION,
+  NO_PLACEHOLDERS_SECTION,
+  ONE_DEV_ONE_STORY_SECTION,
+  DECOMPOSITION_METHODOLOGY_SECTION,
+} from '../../prompts/sections';
 
 /**
  * Tech Lead Phase
@@ -208,6 +217,15 @@ export class TechLeadPhase extends BasePhase {
         console.log(`   Target Repo: ${repoTypeEmoji} ${targetRepo} (${repoObj.type.toUpperCase()})`);
         console.log(`   Complexity: ${teamEpic.estimatedComplexity}`);
         console.log(`   🔥 CRITICAL: Tech Lead will ONLY create stories for ${repoObj.type.toUpperCase()} tasks`);
+
+        // 🐳 SANDBOX: Get sandbox ID for Docker execution
+        const sandboxMap = context.getData<Map<string, string>>('sandboxMap');
+        const sandboxId = sandboxMap?.get(targetRepo);
+        if (sandboxId) {
+          console.log(`   🐳 Sandbox: ${sandboxId}`);
+        }
+        // Store sandboxId in closure for later use in executeAgentFn
+        context.setData('techLeadSandboxId', sandboxId);
       }
 
       // Build repositories information with TYPE and ENVIRONMENT VARIABLES for multi-repo orchestration
@@ -410,6 +428,9 @@ ${judgeFeedback}
         );
       }
 
+      // 🐳 SANDBOX: Get sandbox ID for Docker execution (stored earlier in multi-team mode)
+      const techLeadSandboxId = context.getData<string | undefined>('techLeadSandboxId');
+
       // Execute agent
       const result = await this.executeAgentFn(
         'tech-lead',
@@ -420,7 +441,7 @@ ${judgeFeedback}
         undefined, // sessionId
         undefined, // fork
         attachments.length > 0 ? attachments : undefined, // attachments
-        undefined, // options
+        techLeadSandboxId ? { sandboxId: techLeadSandboxId } : undefined, // 🐳 options with sandboxId
         undefined, // contextOverride
         undefined, // skipOptimization
         undefined, // permissionMode
@@ -770,7 +791,7 @@ ${judgeFeedback}
           throw new Error(`Epic ${epic.id} has no targetRepository - this should have been caught earlier!`);
         }
 
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'EpicCreated',
           agentName: 'tech-lead',
@@ -805,7 +826,7 @@ ${judgeFeedback}
           // Save to UnifiedMemoryService BEFORE emitting event
           unifiedMemoryService.saveStoryBranch(taskId, normalizedStoryId, storyBranchName);
 
-          await eventStore.append({
+          await eventStore.safeAppend({
             taskId: task.id as any,
             eventType: 'StoryCreated',
             agentName: 'tech-lead',
@@ -828,7 +849,7 @@ ${judgeFeedback}
           });
 
           // 🔥 Also emit StoryBranchCreated for explicit branch tracking
-          await eventStore.append({
+          await eventStore.safeAppend({
             taskId: task.id as any,
             eventType: 'StoryBranchCreated',
             agentName: 'tech-lead',
@@ -841,12 +862,18 @@ ${judgeFeedback}
         }
       }
 
-      // Emit team composition event
-      await eventStore.append({
+      // Emit team composition event - INCLUDE storyAssignments for multi-team mode
+      // 🔥 FIX Bug #10: Include epicId for proper filtering in recovery
+      // Note: teamEpic is already declared at line ~108 in this function
+      await eventStore.safeAppend({
         taskId: task.id as any,
         eventType: 'TeamCompositionDefined',
         agentName: 'tech-lead',
-        payload: parsed.teamComposition,
+        payload: {
+          ...parsed.teamComposition,
+          epicId: teamEpic?.id || null,  // 🔥 FIX Bug #10: Tag event with epicId
+          storyAssignments: parsed.storyAssignments || [],  // 🔥 FIX Bug #10: Include assignments
+        },
       });
 
       // 🔧 ENVIRONMENT CONFIG: Parse and emit if TechLead provided it
@@ -859,7 +886,7 @@ ${judgeFeedback}
         console.log(`   Typecheck: ${parsed.environmentConfig.typecheckCommand || 'not specified'}`);
 
         // Emit EnvironmentConfigDefined event for TeamOrchestrationPhase
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'EnvironmentConfigDefined',
           agentName: 'tech-lead',
@@ -883,13 +910,16 @@ ${judgeFeedback}
       // This is different from Supervisor - we only check if THIS epic is well broken down
       // 🔥 FIX: Pass workspacePath and repositories directly (context.workspacePath, context.repositories)
       //    Previously used task.orchestration?.workspacePath which was null, causing fallback to process.cwd()
+      // 🐳 SANDBOX: Get sandbox ID for Docker execution
+      const judgeSandboxId = context.getData<string | undefined>('techLeadSandboxId');
       const techLeadJudgeResult = await this.judgeTechLeadOutput(
         parsed,
         multiTeamMode ? teamEpic : null,
         taskId,
         task,
         workspacePath || process.cwd(),  // Use context.workspacePath from line 217
-        context.repositories             // Use context.repositories directly
+        context.repositories,            // Use context.repositories directly
+        judgeSandboxId                   // 🐳 Explicit sandbox ID for Docker execution
       );
 
       if (!techLeadJudgeResult.approved) {
@@ -1108,26 +1138,6 @@ ${judgeFeedback}
         console.warn(`⚠️ [TechLead] GitHub backup failed (non-blocking): ${artifactError.message}`);
       }
 
-      // 🔥 EVENT SOURCING: Emit completion event
-      // 🔥 CRITICAL FIX: Include epicId in multi-team mode so shouldSkip can filter correctly
-      await eventStore.append({
-        taskId: task.id as any,
-        eventType: 'TechLeadCompleted',
-        agentName: 'tech-lead',
-        payload: {
-          output: result.output,
-          epicsCount: parsed.epics.length,
-          storiesCount: Object.keys(storiesMap).length,
-          // 🔥 CRITICAL: Include epicId for multi-team mode filtering
-          epicId: multiTeamMode ? teamEpic?.id : undefined,
-          multiTeamMode,
-        },
-        metadata: {
-          cost: result.cost,
-          duration: Date.now() - startTime.getTime(),
-        },
-      });
-
       console.log(`📝 [TechLead] Emitted ${parsed.epics.length} EpicCreated + ${Object.keys(storiesMap).length} StoryCreated events`);
 
       // 🔥 CRITICAL FIX: Register stories and mark epic TechLead as completed in Unified Memory
@@ -1151,6 +1161,27 @@ ${judgeFeedback}
 
         await unifiedMemoryService.markEpicTechLeadCompleted(taskId, epicId);
         console.log(`✅ [TechLead] Marked TechLead completed for epic ${epicId}`);
+
+        // 🔥 CRITICAL FIX: Emit TechLeadCompleted event for EACH epic (not just one)
+        // Without this, resume will only mark ONE epic as techLeadCompleted
+        await eventStore.safeAppend({
+          taskId: task.id as any,
+          eventType: 'TechLeadCompleted',
+          agentName: 'tech-lead',
+          payload: {
+            output: result.output,
+            epicsCount: parsed.epics.length,
+            storiesCount: epicStories.length,
+            // 🔥 CRITICAL: Include epicId for this specific epic
+            epicId,
+            multiTeamMode,
+          },
+          metadata: {
+            cost: result.cost ? result.cost / parsed.epics.length : 0, // Distribute cost across epics
+            duration: Date.now() - startTime.getTime(),
+          },
+        });
+        console.log(`💾 [TechLead] Emitted TechLeadCompleted event for epic ${epicId}`);
       }
 
       // 🔥 CRITICAL FOR RECOVERY: Save team composition and story assignments to Unified Memory
@@ -1158,6 +1189,32 @@ ${judgeFeedback}
       await unifiedMemoryService.saveTeamComposition(taskId, parsed.teamComposition);
       await unifiedMemoryService.saveStoryAssignments(taskId, parsed.storyAssignments);
       console.log(`💾 [TechLead] Saved team composition and story assignments to Unified Memory`);
+
+      // 🏊 SANDBOX POOL: Update planned files for conflict detection
+      // This enables sandbox reuse between tasks working on different files of the same project+repo
+      try {
+        const allPlannedFiles: string[] = [];
+        for (const epic of parsed.epics) {
+          for (const story of (epic.stories || [])) {
+            if (story.filesToModify) allPlannedFiles.push(...story.filesToModify);
+            if (story.filesToCreate) allPlannedFiles.push(...story.filesToCreate);
+          }
+        }
+
+        if (allPlannedFiles.length > 0) {
+          // Get projectId and repoName for pool lookup
+          const projectId = task.projectId?.toString() || taskId;
+          const primaryRepoName = context.repositories.length > 0
+            ? context.repositories[0].name || context.repositories[0].githubRepoName
+            : 'default';
+
+          sandboxPoolService.updateTaskFiles(taskId, projectId, primaryRepoName, allPlannedFiles);
+          console.log(`🏊 [TechLead] Updated sandbox pool: ${allPlannedFiles.length} planned files for conflict detection`);
+        }
+      } catch (poolError) {
+        // Non-critical: sandbox pool update failure shouldn't break TechLead
+        console.warn(`⚠️ [TechLead] Failed to update sandbox pool (non-critical):`, poolError);
+      }
 
       // 🔥 EMIT FULL OUTPUT TO CONSOLE VIEWER (no truncation)
       NotificationService.emitConsoleLog(
@@ -1210,58 +1267,7 @@ ${judgeFeedback}
       // 🔄 Mark checkpoint as completed (no resume needed)
       await sessionCheckpointService.markCompleted(taskId, 'tech-lead');
 
-      // 🧠 GRANULAR MEMORY: Store TechLead decisions
-      const projectId = task.projectId?.toString();
-      if (projectId) {
-        try {
-          // Store progress marker
-          await granularMemoryService.storeProgress({
-            projectId,
-            taskId,
-            phaseType: 'tech-lead',
-            agentType: 'tech-lead',
-            epicId: multiTeamMode ? teamEpic?.id : undefined,
-            status: 'completed',
-            details: `Created ${Object.keys(storiesMap).length} stories, assigned to ${parsed.teamComposition.developers} developer(s)`,
-          });
-
-          // Store each story as a decision
-          for (const [storyId, story] of Object.entries(storiesMap)) {
-            const storyData = story as any;
-            await granularMemoryService.storeDecision({
-              projectId,
-              taskId,
-              phaseType: 'tech-lead',
-              agentType: 'tech-lead',
-              epicId: multiTeamMode ? teamEpic?.id : undefined,
-              storyId,
-              title: `Story: ${storyData.title || storyId}`,
-              content: `Assigned to: ${storyData.assignedTo || 'unassigned'}\nComplexity: ${storyData.complexity || 'N/A'}\nFiles: ${storyData.filesToModify?.join(', ') || 'none'}`,
-              importance: 'high',
-            });
-          }
-
-          // Store architecture decision
-          if (parsed.architectureDesign) {
-            await granularMemoryService.storeDecision({
-              projectId,
-              taskId,
-              phaseType: 'tech-lead',
-              agentType: 'tech-lead',
-              epicId: multiTeamMode ? teamEpic?.id : undefined,
-              title: 'Architecture Design',
-              content: typeof parsed.architectureDesign === 'string'
-                ? parsed.architectureDesign.substring(0, 1000)
-                : JSON.stringify(parsed.architectureDesign).substring(0, 1000),
-              importance: 'critical',
-            });
-          }
-
-          console.log(`🧠 [TechLead] Stored ${Object.keys(storiesMap).length + 2} memories (progress, stories, architecture)`);
-        } catch (memError: any) {
-          console.warn(`⚠️ [TechLead] Failed to store memories: ${memError.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService calls - SQLite (task.orchestration) tracks all TechLead state
 
       return {
         success: true,
@@ -1326,7 +1332,7 @@ ${judgeFeedback}
 
       // 🔥 EVENT SOURCING: Emit failure event to prevent infinite loop
       const { eventStore } = await import('../EventStore');
-      await eventStore.append({
+      await eventStore.safeAppend({
         taskId: task.id as any,
         eventType: 'TechLeadCompleted', // Mark as completed even on error
         agentName: 'tech-lead',
@@ -1585,14 +1591,13 @@ ${epic.technicalNotes}
 - 🔧 **PATTERNS TO USE**: Which existing functions to use (e.g., "Use createProject() NOT new Project()")
 - ⚠️ **ANTI-PATTERNS TO AVOID**: What NOT to do (code that compiles but won't work)
 
-## 🚨🚨🚨 MANDATORY RULE: 1 DEV = 1 STORY 🚨🚨🚨
+${DECOMPOSITION_METHODOLOGY_SECTION}
 
-**THIS IS NON-NEGOTIABLE. THE SYSTEM WILL REJECT YOUR OUTPUT IF YOU VIOLATE THIS.**
+${ONE_DEV_ONE_STORY_SECTION}
 
-- 3 stories → 3 developers (dev-1, dev-2, dev-3)
-- 5 stories → 5 developers (dev-1, dev-2, dev-3, dev-4, dev-5)
-- NEVER assign 2+ stories to the same developer
-- teamComposition.developers MUST EQUAL the number of stories
+${SCOPE_BOUNDARY_SECTION}
+
+${NO_PLACEHOLDERS_SECTION}
 
 ## JSON OUTPUT ONLY:
 \`\`\`json
@@ -1693,7 +1698,8 @@ Explore first, then output JSON.`;
     taskId: string,
     task: any,
     workspacePath: string,    // 🔥 FIX: Must be passed from caller (context.workspacePath)
-    repositories: any[]       // 🔥 FIX: Must be passed from caller (context.repositories)
+    repositories: any[],      // 🔥 FIX: Must be passed from caller (context.repositories)
+    sandboxId?: string        // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<{
     approved: boolean;
     reason?: string;
@@ -1776,6 +1782,7 @@ Explore first, then output JSON.`;
       architectureOutput: parsed,
       totalEpicsInTask,
       currentEpicIndex,
+      sandboxId, // 🐳 Explicit sandbox ID for Docker execution
     });
 
     // Emit detailed evaluation results
@@ -1887,7 +1894,22 @@ Explore first, then output JSON.`;
 
       const epicEvents = events.filter((e: any) => e.eventType === 'EpicCreated');
       let storyEvents = events.filter((e: any) => e.eventType === 'StoryCreated');
-      const teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
+
+      // 🔥 FIX Bug #10: In multi-team mode, find TeamCompositionDefined for THIS epic
+      // Each epic has its own TechLead that emits its own TeamCompositionDefined event
+      let teamEvent: any;
+      if (multiTeamMode && teamEpic?.id) {
+        teamEvent = events.find((e: any) =>
+          e.eventType === 'TeamCompositionDefined' && e.payload?.epicId === teamEpic.id
+        );
+        if (teamEvent) {
+          console.log(`   🎯 [Multi-Team] Found TeamCompositionDefined for epic ${teamEpic.id}`);
+        }
+      }
+      // Fallback to first event for single-team mode or if not found
+      if (!teamEvent) {
+        teamEvent = events.find((e: any) => e.eventType === 'TeamCompositionDefined');
+      }
 
       // 🔥 CRITICAL FIX: In multi-team mode, ONLY restore stories for THIS EPIC
       // Without this filter, epic 2's developers would get stories from epic 1
@@ -1925,6 +1947,13 @@ Explore first, then output JSON.`;
       if (teamEvent && !context.getData<any>('teamComposition')) {
         context.setData('teamComposition', teamEvent.payload);
         console.log(`   🔄 Restored teamComposition from EventStore: ${teamEvent.payload.developers} devs`);
+
+        // 🔥 FIX Bug #10: Also extract storyAssignments from TeamCompositionDefined event
+        // Now that TechLeadPhase includes storyAssignments in the event payload
+        if (teamEvent.payload.storyAssignments && !context.getData<any[]>('storyAssignments')) {
+          context.setData('storyAssignments', teamEvent.payload.storyAssignments);
+          console.log(`   🔄 Restored ${teamEvent.payload.storyAssignments.length} story assignments from TeamCompositionDefined event`);
+        }
       }
     } catch (error: any) {
       console.log(`   ⚠️ EventStore recovery failed: ${error.message}`);

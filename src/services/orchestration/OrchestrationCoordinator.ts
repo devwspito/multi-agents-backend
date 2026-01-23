@@ -26,6 +26,7 @@ import { safeGitExecSync } from '../../utils/safeGitExecution';
 import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
 import { eventStore } from '../EventStore';
+import { contextCheckpointService } from './ContextCheckpointService';
 
 import path from 'path';
 import os from 'os';
@@ -38,14 +39,18 @@ import fs from 'fs';
 import { BackgroundTaskService } from '../BackgroundTaskService';
 import { SlashCommandService } from '../SlashCommandService';
 
-// 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
-import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 🎯 SQLITE IS THE SINGLE SOURCE OF TRUTH
+// UnifiedMemoryService REMOVED - was causing bugs on server restart (memory lost)
+// All phase/epic/story status is now tracked ONLY in task.orchestration (SQLite)
 
 // 🔥 REFACTORED: Agent execution extracted to separate service
 import { agentExecutorService, AgentExecutionResult, ResumeOptions } from './AgentExecutorService';
 
 // 🔥 REFACTORED: Developer prompt building extracted to separate builder
 import { DeveloperPromptBuilder } from './DeveloperPromptBuilder';
+
+// 🏊 SANDBOX POOL: For task completion tracking
+import { sandboxPoolService } from '../SandboxPoolService';
 
 /**
  * OrchestrationCoordinator
@@ -124,11 +129,23 @@ export class OrchestrationCoordinator {
     try {
       // === GATHER CONTEXT ===
       const task = TaskRepository.findById(taskId);
-      const resumptionPoint = await unifiedMemoryService.getResumptionPoint(taskId);
 
       if (!task) {
         throw new Error(`Task ${taskId} not found`);
       }
+
+      // 🔍 Log task state from SQLite (THE SINGLE SOURCE OF TRUTH)
+      const planningStatus = (task.orchestration as any)?.planning?.status;
+      const techLeadStatus = (task.orchestration as any)?.techLead?.status;
+      const teamStatus = (task.orchestration as any)?.teamOrchestration?.status;
+
+      console.log(`\n📊 [SQLite] Task state loaded:`);
+      console.log(`   Task ID: ${task.id}`);
+      console.log(`   Status: ${task.status}`);
+      console.log(`   currentPhase: ${task.orchestration?.currentPhase}`);
+      console.log(`   planning.status: ${planningStatus || 'UNDEFINED'}`);
+      console.log(`   techLead.status: ${techLeadStatus || 'UNDEFINED'}`);
+      console.log(`   teamOrchestration.status: ${teamStatus || 'UNDEFINED'}`);
 
       // 🛑 CANCELLED CHECK: Do not orchestrate cancelled tasks
       if (task.status === 'cancelled') {
@@ -137,25 +154,21 @@ export class OrchestrationCoordinator {
         return;
       }
 
-      // 🔄 RECOVERY DETECTION: Check UNIFIED MEMORY for resumption point
-      // This is THE SINGLE SOURCE OF TRUTH - not task.status or task.orchestration
-      const isRecovery = resumptionPoint?.shouldResume ?? false;
+      // 🔄 RECOVERY DETECTION: Use SQLite data (not memory!)
+      // A task is resuming if any phase has status 'completed'
+      const completedPhases = this.getCompletedPhasesFromTask(task);
+      const isRecovery = completedPhases.length > 0;
 
-      if (isRecovery && resumptionPoint) {
+      if (isRecovery) {
         console.log(`\n${'🔄'.repeat(30)}`);
-        console.log(`🔄 [RECOVERY MODE] Resuming task from UNIFIED MEMORY`);
-        console.log(`🔄   Resume from phase: ${resumptionPoint.resumeFromPhase || 'start'}`);
-        console.log(`🔄   Resume from epic: ${resumptionPoint.resumeFromEpic || 'none'}`);
-        console.log(`🔄   Resume from story: ${resumptionPoint.resumeFromStory || 'none'}`);
-        console.log(`🔄   Completed phases: ${(resumptionPoint.completedPhases ?? []).join(', ') || 'none'}`);
-        console.log(`🔄   Completed epics: ${(resumptionPoint.completedEpics ?? []).join(', ') || 'none'}`);
-        console.log(`🔄   Completed stories: ${(resumptionPoint.completedStories ?? []).length} stories`);
+        console.log(`🔄 [RECOVERY MODE] Resuming task from SQLite state`);
+        console.log(`🔄   Completed phases: ${completedPhases.join(', ')}`);
+        console.log(`🔄   Current phase: ${task.orchestration?.currentPhase || 'unknown'}`);
         console.log(`${'🔄'.repeat(30)}\n`);
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `🔄 RECOVERY MODE: Resuming from ${resumptionPoint.resumeFromPhase || 'start'}. ` +
-          `${(resumptionPoint.completedPhases ?? []).length} phases already completed.`
+          `🔄 RECOVERY MODE: ${completedPhases.length} phases already completed. Will skip them.`
         );
 
         // Check for pending approval to re-emit
@@ -164,7 +177,7 @@ export class OrchestrationCoordinator {
           console.log(`🔄   Will re-emit approval_required when ApprovalPhase executes`);
         }
       } else {
-        console.log(`✨ [NEW TASK] No previous execution found - starting fresh`);
+        console.log(`✨ [NEW TASK] Starting fresh - no completed phases in SQLite`);
       }
 
       // 📋 EMIT TASK REQUEST TO ACTIVITY - First thing user sees
@@ -229,7 +242,9 @@ export class OrchestrationCoordinator {
       NotificationService.emitConsoleLog(taskId, 'info', `✅ Found ${repositories.length} repositories: ${repoNames}`);
 
       // Setup workspace (pass user token for cloning - NOT encrypted)
-      const workspacePath = await this.setupWorkspace(taskId, repositories, user.accessToken);
+      // 🏊 Use project-based workspace for sandbox reuse across tasks
+      const projectId = task.projectId?.toString() || taskId;
+      const workspacePath = await this.setupWorkspace(taskId, projectId, repositories, user.accessToken);
       const workspaceStructure = await this.getWorkspaceStructure(workspacePath);
 
       // 🔥🔥🔥 CRITICAL VALIDATION: workspacePath MUST be valid after setup 🔥🔥🔥
@@ -266,6 +281,14 @@ export class OrchestrationCoordinator {
 
       console.log(`   ✅ Workspace path valid and exists: ${workspacePath}`);
 
+      // 🐳 SANDBOX CREATION MOVED TO PlanningPhase
+      // PlanningPhase is the SINGLE source of truth for sandbox creation because:
+      // 1. It creates sandboxes PER REPOSITORY (not just primary)
+      // 2. It has correct language detection per repo
+      // 3. It handles preview server setup
+      // 4. No duplication - 100% control over where sandboxes are created
+      console.log(`   ℹ️ Docker sandboxes will be created by PlanningPhase (per-repository)`);
+
       // 🔥 FIX: Enrich repositories with localPath after cloning
       repositories.forEach((repo: any) => {
         repo.localPath = path.join(workspacePath, repo.name);
@@ -275,8 +298,25 @@ export class OrchestrationCoordinator {
       const context = new OrchestrationContext(task, repositories, workspacePath);
       console.log(`   ✅ OrchestrationContext created with workspacePath: ${context.workspacePath}`);
 
-      // 🎯 Store resumption point in context for phases to use (from unified memory)
-      context.setData('resumptionPoint', resumptionPoint);
+      // 🐳 Sandbox info will be set by PlanningPhase when it creates sandboxes
+      // Initially set to false - PlanningPhase will update to true
+      context.setData('useSandbox', false);
+
+      // 🎯 Store completed phases for recovery context
+      context.setData('completedPhases', completedPhases);
+      context.setData('isRecovery', isRecovery);
+
+      // 🔄 CHECKPOINT RESTORATION: Restore context from EventStore/checkpoint for crash recovery
+      // Priority: 1. EventStore (most reliable), 2. Checkpoint snapshot, 3. Legacy branchRegistry
+      const restoreResult = await contextCheckpointService.restoreContext(taskId, context);
+      if (restoreResult.restored) {
+        console.log(`🔄 [Checkpoint] Context restored from ${restoreResult.source}: ${restoreResult.details}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 Context restored: ${restoreResult.details} (source: ${restoreResult.source})`
+        );
+      }
 
       // 🔑 Get project-specific API key with fallback chain:
       // 1. Project API key (if set)
@@ -351,53 +391,31 @@ export class OrchestrationCoordinator {
         ...orch,
         currentPhase: 'planning',
         startedAt: new Date(),
+        workspacePath, // 💾 Save workspace path for debug and recovery
       }));
       task.status = 'in_progress';
       task.orchestration.currentPhase = 'planning';
+      task.orchestration.workspacePath = workspacePath;
 
-      // 🎯 UNIFIED MEMORY: Initialize or update execution map
-      // This is THE source of truth for recovery - not task.orchestration
-      const targetRepo = repositories[0]?.name || 'unknown';
-      const projectId = task.projectId?.toString();
-      if (!projectId) {
-        throw new Error(`Task ${taskId} has no projectId - cannot initialize execution map`);
-      }
-      const executionMap = await unifiedMemoryService.initializeExecution({
-        taskId,
-        projectId,
-        targetRepository: targetRepo,
-        workspacePath,
-        taskTitle: task.title,
-        taskDescription: task.description,
-      });
-      context.setData('executionMap', executionMap);
-      console.log(`🎯 [UnifiedMemory] Execution map initialized - status: ${executionMap.status}`);
-
+      // 🔥 SQLite IS THE SOURCE OF TRUTH - no separate memory needed
       NotificationService.emitTaskStarted(taskId, {
         repositoriesCount: repositories.length,
         workspacePath,
       });
 
       // === EXECUTE PHASES SEQUENTIALLY WITH APPROVAL GATES ===
-      // ⚡ OPTIMIZATION: Cache phase statuses to avoid redundant MongoDB writes during skips
+      // ⚡ OPTIMIZATION: Cache phase statuses from SQLite once at start
       const cachedPhaseStatuses = this.getPhaseStatusesFromTask(task);
-      console.log(`⚡ [Optimization] Cached ${cachedPhaseStatuses.size} phase statuses for fast skip checks`);
+      console.log(`⚡ [SQLite] Cached ${cachedPhaseStatuses.size} phase statuses: ${JSON.stringify([...cachedPhaseStatuses.entries()])}`);
 
       for (const phaseName of this.PHASE_ORDER) {
-        // ⚡⚡⚡ MEGA OPTIMIZATION: Check skip conditions FIRST ⚡⚡⚡
-        // Priority: 1) Cache (instant) → 2) Unified Memory (if cache miss)
-        const skipFromCache = cachedPhaseStatuses.get(phaseName) === 'completed';
-        const skipFromMemory = skipFromCache ? false : await unifiedMemoryService.shouldSkipPhase(taskId, phaseName);
+        // ⚡ SIMPLE SKIP: Check ONLY SQLite status (no memory!)
+        const shouldSkip = cachedPhaseStatuses.get(phaseName) === 'completed';
 
-        // Fast skip: No DB queries, no budget check, no directives - just skip!
-        if (skipFromCache || skipFromMemory) {
-          console.log(`⚡ [${phaseName}] FAST SKIP`);
-          NotificationService.emitConsoleLog(taskId, 'info', `⚡ Fast skip: ${phaseName}`);
-          // Only sync to DB if not already in cache
-          if (!skipFromCache) {
-            await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
-          }
-          continue; // ← Skip everything: pause check, budget, directives, etc.
+        if (shouldSkip) {
+          console.log(`⚡ [${phaseName}] SKIP - already completed in SQLite`);
+          NotificationService.emitConsoleLog(taskId, 'info', `⚡ Skip: ${phaseName} (already completed)`);
+          continue;
         }
 
         // === ONLY REACH HERE IF PHASE WILL EXECUTE ===
@@ -478,10 +496,7 @@ export class OrchestrationCoordinator {
           }
         }
 
-        // 🎯 UNIFIED MEMORY: Mark phase as STARTED
-        await unifiedMemoryService.markPhaseStarted(taskId, phaseName);
-
-        // 🔥 CRITICAL: Update currentPhase in DB BEFORE executing
+        // 🔥 CRITICAL: Update currentPhase in SQLite BEFORE executing
         // This ensures recovery knows where to resume from if server crashes
         const phaseEnum = this.mapPhaseToEnum(phaseName);
         TaskRepository.modifyOrchestration(task.id, (orch) => ({
@@ -624,10 +639,7 @@ export class OrchestrationCoordinator {
             );
           }
 
-          // 🎯 UNIFIED MEMORY: Mark phase as FAILED
-          await unifiedMemoryService.markPhaseFailed(taskId, phaseName, result.error || 'Unknown error');
-
-          // Phase failed - mark task as failed
+          // Phase failed - mark task as failed (SQLite updated in handlePhaseFailed)
           NotificationService.emitConsoleLog(taskId, 'error', `❌ Phase ${phaseName} failed: ${result.error}`);
           await this.handlePhaseFailed(task, phaseName, result);
           return; // 🔥 EXPLICIT STOP: No further phases will execute
@@ -635,9 +647,7 @@ export class OrchestrationCoordinator {
 
         // Check if phase needs approval (paused, not failed)
         if (result.needsApproval) {
-          // 🎯 UNIFIED MEMORY: Mark phase as WAITING APPROVAL
-          await unifiedMemoryService.markPhaseWaitingApproval(taskId, phaseName);
-
+          // SQLite already has pendingApproval set by the phase
           console.log(`⏸️  [${phaseName}] Paused - waiting for human approval`);
           NotificationService.emitConsoleLog(taskId, 'info', `⏸️  Phase ${phaseName} paused - waiting for human approval`);
           return; // Exit orchestration, will resume when approval granted
@@ -658,15 +668,17 @@ export class OrchestrationCoordinator {
           console.log(`⏭️  [${phaseName}] Skipped`);
           NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Phase ${phaseName} skipped`);
         } else {
-          // 🎯 UNIFIED MEMORY: Mark phase as COMPLETED
-          await unifiedMemoryService.markPhaseCompleted(taskId, phaseName, result.data);
-
+          // Phase completed - status already saved to SQLite by the phase itself
           console.log(`✅ [${phaseName}] Completed successfully`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Phase ${phaseName} completed successfully`);
 
           // 📦 TIMELINE BACKUP: Save orchestration timeline to Local + GitHub
           // This ensures we have a complete history even if server crashes
           await this.saveOrchestrationTimeline(task, phaseName, context, workspacePath);
+
+          // 💾 CHECKPOINT SAVE: Persist context state after each successful phase
+          // Enables crash recovery by restoring branchRegistry, sharedData, phaseResults
+          contextCheckpointService.saveCheckpoint(taskId, context);
 
           // 🔥 RATE LIMIT PROTECTION: Wait 2 seconds between phases to avoid Anthropic rate limits
           // Each agent makes many API calls, waiting prevents hitting limits
@@ -785,31 +797,42 @@ export class OrchestrationCoordinator {
   /**
    * Setup workspace for multi-repo development
    * Clones ONLY the repositories selected by the user for this specific task
-   * ⚡ OPTIMIZATION: Fast path for recovery - skip cloning if repos already exist
+   * ⚡ OPTIMIZATION: Project-based workspace for sandbox reuse
+   *
+   * Structure:
+   * {workspaceDir}/
+   * ├── project-{projectId}/      ← Shared by all tasks of same project
+   * │   ├── backend/              ← Each repo cloned once
+   * │   ├── frontend/
+   * │   └── mobile/
+   * └── task-{taskId}/            ← Legacy (for tasks without projectId)
    */
-  private async setupWorkspace(taskId: string, repositories: any[], githubToken: string): Promise<string> {
-    const taskWorkspace = path.join(this.workspaceDir, `task-${taskId}`);
+  private async setupWorkspace(taskId: string, projectId: string, repositories: any[], githubToken: string): Promise<string> {
+    // 🏊 Use project-based workspace for sandbox reuse
+    // Falls back to task-based for backwards compatibility
+    const workspaceKey = projectId !== taskId ? `project-${projectId}` : `task-${taskId}`;
+    const projectWorkspace = path.join(this.workspaceDir, workspaceKey);
 
     // ⚡ FAST PATH: Check if workspace already exists with all required repos
-    if (fs.existsSync(taskWorkspace)) {
-      const existingDirs = fs.readdirSync(taskWorkspace).filter(
+    if (fs.existsSync(projectWorkspace)) {
+      const existingDirs = fs.readdirSync(projectWorkspace).filter(
         name => !name.startsWith('.') && !name.startsWith('team-')
       );
       const requiredRepos = repositories.map(r => r.name);
       const allReposExist = requiredRepos.every(repoName =>
         existingDirs.includes(repoName) &&
-        fs.existsSync(path.join(taskWorkspace, repoName, '.git'))
+        fs.existsSync(path.join(projectWorkspace, repoName, '.git'))
       );
 
       if (allReposExist) {
         console.log(`⚡ [Workspace] Fast path - already exists with all ${repositories.length} repos`);
-        console.log(`   📁 Using existing: ${taskWorkspace}`);
+        console.log(`   📁 Using existing: ${projectWorkspace}`);
         NotificationService.emitConsoleLog(
           taskId,
           'info',
           `⚡ Workspace already ready (fast recovery): ${repositories.map(r => r.name).join(', ')}`
         );
-        return taskWorkspace;
+        return projectWorkspace;
       }
     }
 
@@ -823,8 +846,8 @@ export class OrchestrationCoordinator {
     });
 
     // Create workspace directory
-    if (!fs.existsSync(taskWorkspace)) {
-      fs.mkdirSync(taskWorkspace, { recursive: true });
+    if (!fs.existsSync(projectWorkspace)) {
+      fs.mkdirSync(projectWorkspace, { recursive: true });
     }
 
     // Clone ONLY the selected repositories using user's GitHub token
@@ -844,13 +867,13 @@ export class OrchestrationCoordinator {
         repo.githubRepoUrl,
         repo.githubBranch || 'main',
         githubToken,  // Use user's token for all repos
-        taskWorkspace,
+        projectWorkspace,
         envVariables  // Inject .env file during cloning
       );
     }
 
     // Verify workspace contains only selected repos
-    const clonedRepos = fs.readdirSync(taskWorkspace).filter(name => !name.startsWith('.'));
+    const clonedRepos = fs.readdirSync(projectWorkspace).filter(name => !name.startsWith('.'));
     console.log(`   📁 Workspace contents: ${clonedRepos.join(', ')}`);
 
     if (clonedRepos.length !== repositories.length) {
@@ -860,14 +883,14 @@ export class OrchestrationCoordinator {
       console.warn(`   This might indicate an issue with repository cloning`);
     }
 
-    console.log(`✅ Workspace setup complete: ${taskWorkspace}`);
+    console.log(`✅ Workspace setup complete: ${projectWorkspace}`);
     NotificationService.emitConsoleLog(
       taskId,
       'info',
       `✅ Workspace ready with ${repositories.length} selected repositories: ${repositories.map(r => r.name).join(', ')}`
     );
 
-    return taskWorkspace;
+    return projectWorkspace;
   }
 
   /**
@@ -973,6 +996,13 @@ export class OrchestrationCoordinator {
     const statuses = new Map<string, string>();
     const orchestration = task.orchestration || {};
 
+    // 🔍 DIAGNOSTIC: Log the raw orchestration data
+    console.log(`🔍 [getPhaseStatusesFromTask] Raw orchestration for task ${task.id}:`);
+    console.log(`   planning.status = ${orchestration.planning?.status || 'UNDEFINED'}`);
+    console.log(`   techLead.status = ${orchestration.techLead?.status || 'UNDEFINED'}`);
+    console.log(`   teamOrchestration.status = ${orchestration.teamOrchestration?.status || 'UNDEFINED'}`);
+    console.log(`   judge.status = ${orchestration.judge?.status || 'UNDEFINED'}`);
+
     const phases = [
       { name: 'Planning', field: orchestration.planning },
       { name: 'Approval', field: orchestration.approval },
@@ -994,7 +1024,24 @@ export class OrchestrationCoordinator {
       }
     }
 
+    // 🔍 DIAGNOSTIC: Log what statuses were found
+    console.log(`🔍 [getPhaseStatusesFromTask] Statuses found: ${JSON.stringify([...statuses.entries()])}`);
+
     return statuses;
+  }
+
+  /**
+   * Get list of completed phases from SQLite task data
+   */
+  private getCompletedPhasesFromTask(task: ITask): string[] {
+    const statuses = this.getPhaseStatusesFromTask(task);
+    const completed: string[] = [];
+    for (const [phase, status] of statuses.entries()) {
+      if (status === 'completed') {
+        completed.push(phase);
+      }
+    }
+    return completed;
   }
 
   /**
@@ -1335,6 +1382,7 @@ ${formattedDirectives}
     _options?: {
       maxIterations?: number;
       timeout?: number;
+      sandboxId?: string;  // 🐳 Explicit sandbox ID for Docker execution
     },
     contextOverride?: OrchestrationContext,
     skipOptimization?: boolean,
@@ -1387,8 +1435,10 @@ ${formattedDirectives}
       resumeSessionId?: string;    // SDK session ID to resume from
       resumeAtMessage?: string;    // Specific message UUID to resume from
       isResume?: boolean;          // Flag indicating this is a resume
-    }
-  ): Promise<{ output?: string; cost?: number; sdkSessionId?: string; lastMessageUuid?: string } | void> {
+    },
+    // 🐳 SANDBOX: Explicit sandbox ID for Docker execution
+    sandboxId?: string
+  ): Promise<{ output?: string; cost?: number; usage?: any; sdkSessionId?: string; lastMessageUuid?: string; filesModified?: string[]; filesCreated?: string[]; toolsUsed?: string[]; turnsCompleted?: number } | void> {
     const taskId = (task.id as any).toString();
 
     // 🚀 RETRY OPTIMIZATION: Use topModel when Judge rejected code
@@ -1464,7 +1514,7 @@ ${formattedDirectives}
 
     console.log(`👨‍💻 [Developer ${member.instanceId}] Starting work on ${storiesToProcess.length} stories`);
 
-    let lastResult: { output?: string; cost?: number; sdkSessionId?: string; lastMessageUuid?: string } | undefined;
+    let lastResult: { output?: string; cost?: number; usage?: any; sdkSessionId?: string; lastMessageUuid?: string; filesModified?: string[]; filesCreated?: string[]; toolsUsed?: string[]; turnsCompleted?: number } | undefined;
 
     for (const story of storiesToProcess) {
       if (!story || !story.id) {
@@ -1618,7 +1668,7 @@ ${formattedDirectives}
           undefined, // sessionId
           undefined, // fork
           attachments, // Pass images for visual context
-          undefined, // options
+          sandboxId ? { sandboxId } : undefined, // 🐳 Pass sandbox ID for Docker execution
           undefined, // contextOverride
           forceTopModel, // skipOptimization - when true, keeps topModel for retry
           undefined, // permissionMode
@@ -1635,11 +1685,17 @@ ${formattedDirectives}
 
         // Store result for return (isolated pipeline uses single-story execution)
         // 🔄 Include session data for mid-execution recovery
+        // 🔥 Include granular tracking for recovery
         lastResult = {
           output: result.output,
           cost: result.cost,
+          usage: result.usage,
           sdkSessionId: result.sdkSessionId,
           lastMessageUuid: result.lastMessageUuid,
+          filesModified: result.filesModified,
+          filesCreated: result.filesCreated,
+          toolsUsed: result.toolsUsed,
+          turnsCompleted: result.turnsCompleted,
         };
 
         // 2️⃣ 🔥 CRITICAL: Verify developer finished successfully and pushed to remote
@@ -1661,18 +1717,47 @@ ${formattedDirectives}
           throw new Error(`Developer ${member.instanceId} reported failure for story ${story.title}`);
         }
 
-        if (!developerFinishedSuccessfully) {
-          console.error(`❌ [Developer ${member.instanceId}] Developer did NOT report success marker`);
-          console.error(`   Expected: "✅ DEVELOPER_FINISHED_SUCCESSFULLY"`);
+        // 🔥 FIX: Check if StoryPushVerified event exists BEFORE requiring marker
+        // If git push was already verified, we don't need the text marker
+        let commitSHA: string | undefined;
+        let gitVerifiedSuccess = false;
+
+        try {
+          const events = await eventStore.getEvents(taskId);
+          const pushVerifiedEvent = events.find(
+            (e: any) => e.eventType === 'StoryPushVerified' &&
+            e.payload?.storyId === story.id &&
+            e.payload?.commitSha
+          );
+
+          if (pushVerifiedEvent?.payload?.commitSha) {
+            commitSHA = pushVerifiedEvent.payload.commitSha as string;
+            gitVerifiedSuccess = true;
+            console.log(`✅ [Developer ${member.instanceId}] Git push already verified via StoryPushVerified event`);
+            console.log(`   Commit SHA: ${commitSHA}`);
+            console.log(`   Branch: ${pushVerifiedEvent.payload.branchName}`);
+          }
+        } catch (eventErr: any) {
+          console.warn(`⚠️ [Developer ${member.instanceId}] Could not check StoryPushVerified: ${eventErr.message}`);
+        }
+
+        // Only require marker if git wasn't verified via events
+        if (!gitVerifiedSuccess && !developerFinishedSuccessfully) {
+          console.error(`❌ [Developer ${member.instanceId}] Developer did NOT report success`);
+          console.error(`   No StoryPushVerified event found AND no success marker in output`);
+          console.error(`   Expected: "✅ DEVELOPER_FINISHED_SUCCESSFULLY" or verified git push`);
           throw new Error(`Developer ${member.instanceId} did not report success for story ${story.title}`);
         }
 
-        // Extract commit SHA
-        const commitMatch = developerOutput.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
-        const commitSHA = commitMatch?.[1];
+        // Extract commit SHA from output if not already found
+        if (!commitSHA) {
+          const commitMatch = developerOutput.match(/📍\s*Commit SHA:\s*([a-f0-9]{40})/i);
+          commitSHA = commitMatch?.[1];
+        }
 
         if (!commitSHA) {
-          console.error(`❌ [Developer ${member.instanceId}] Developer did NOT report commit SHA`);
+          console.error(`❌ [Developer ${member.instanceId}] Could not determine commit SHA`);
+          console.error(`   No StoryPushVerified event AND no commit SHA in output`);
           throw new Error(`Developer ${member.instanceId} did not report commit SHA for story ${story.title}`);
         }
 
@@ -1845,8 +1930,8 @@ ${formattedDirectives}
 
         // 🔥 EVENT SOURCING: Confirm story branch (TechLead created it, Developer confirms it was used)
         // This is idempotent - if TechLead already emitted this event, it just updates with same value
-        const { eventStore } = await import('../EventStore');
-        await eventStore.append({
+        // Note: eventStore is already imported at the top of the file
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'StoryBranchCreated',
           agentName: 'developer',
@@ -1988,9 +2073,31 @@ ${formattedDirectives}
    * Handle orchestration completion
    */
   private async handleOrchestrationComplete(task: ITask, _context: OrchestrationContext): Promise<void> {
+    const taskId = (task.id as any).toString();
+
+    // 🐳 Cleanup sandbox (but don't delete for LivePreview access)
+    const useSandbox = _context.getData<boolean>('useSandbox');
+    if (useSandbox) {
+      console.log(`   🐳 Sandbox remains active for LivePreview: task-${taskId.substring(0, 12)}`);
+      // NOTE: We keep the sandbox running so users can preview the result
+      // It will be cleaned up by workspace cleanup scheduler or manual stop
+    }
+
     task.status = 'completed';
     task.orchestration.currentPhase = 'completed';
     await saveTaskCritical(task, 'orchestration completed');
+
+    // 🏊 SANDBOX POOL: Mark task as completed to free up files for other tasks
+    try {
+      const projectId = task.projectId?.toString() || taskId;
+      const primaryRepoName = _context.repositories.length > 0
+        ? _context.repositories[0].name || _context.repositories[0].githubRepoName
+        : 'default';
+      sandboxPoolService.completeTask(taskId, projectId, primaryRepoName, true);
+      console.log(`🏊 [Orchestration] Task completed in sandbox pool - files released for reuse`);
+    } catch (poolError) {
+      console.warn(`⚠️ [Orchestration] Failed to mark task completed in pool (non-critical):`, poolError);
+    }
 
     // Calculate detailed cost breakdown by phase
     const breakdown: { phase: string; cost: number; inputTokens: number; outputTokens: number }[] = [];
@@ -2088,7 +2195,7 @@ ${formattedDirectives}
 
     // Collect PRs from epics
     const pullRequests: { epicName: string; prNumber: number; prUrl: string; repository: string }[] = [];
-    const { eventStore } = await import('../EventStore');
+    // Note: eventStore is already imported at the top of the file
     const currentState = await eventStore.getCurrentState(task.id as any);
 
     if (currentState.epics && Array.isArray(currentState.epics)) {
@@ -2133,7 +2240,7 @@ ${formattedDirectives}
     console.log(`${'='.repeat(80)}\n`);
 
     // 🔥 IMPORTANT: Clean up task-specific resources to prevent memory leaks
-    const taskId = (task.id as any).toString();
+    // Note: taskId already declared at top of function
 
     // Clean up cost budget config
     CostBudgetService.cleanupTaskConfig(taskId);
@@ -2159,6 +2266,14 @@ ${formattedDirectives}
     // 🔥 IMPORTANT: Clean up task-specific resources even on failure
     CostBudgetService.cleanupTaskConfig(taskId);
     console.log(`🧹 Cleaned up task-specific cost budget config for failed task ${taskId}`);
+
+    // 🏊 SANDBOX POOL: Mark task as failed to release files for other tasks
+    try {
+      sandboxPoolService.completeTaskById(taskId, false);
+      console.log(`🏊 Cleaned up sandbox pool for failed task ${taskId}`);
+    } catch (poolError) {
+      console.warn(`⚠️ Failed to cleanup sandbox pool for task ${taskId} (non-critical):`, poolError);
+    }
 
     // Clean up approval event listeners
     import('../ApprovalEvents').then(({ approvalEvents }) => {

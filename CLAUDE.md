@@ -24,7 +24,7 @@ This system orchestrates multiple specialized Claude agents to handle the comple
 
 ### Backend
 - **Runtime**: Node.js 18+ with TypeScript (strict mode)
-- **Database**: MongoDB with Mongoose ODM
+- **Database**: SQLite (UnifiedMemoryService is the SINGLE SOURCE OF TRUTH)
 - **API**: Express.js REST API + Socket.io for real-time updates
 - **Agents**: Claude Agent SDK with multi-agent orchestration
 - **Git**: Safe git operations with timeout protection

@@ -413,6 +413,83 @@ Description:
   - Direct model instantiation without service function ← WRONG
 \`\`\`
 
+## 🚨 SCOPE & IMPLEMENTATION RULES (CRITICAL - ENFORCED)
+
+### 🔒 STRICT SCOPE BOUNDARIES
+
+**RULE: Developer can ONLY touch files explicitly listed in the story.**
+
+Every story MUST explicitly define:
+- \`filesToRead\`: Files the developer needs to understand (reference only)
+- \`filesToModify\`: Existing files the developer can change
+- \`filesToCreate\`: NEW files the developer must create
+
+**FORBIDDEN**: Creating files not listed in filesToCreate.
+
+\`\`\`
+❌ SCOPE VIOLATION EXAMPLE:
+Story says: "Create routing setup"
+filesToCreate: ["lib/core/router/app_router.dart"]
+
+Developer creates:
+- lib/core/router/app_router.dart ✅ (listed)
+- lib/features/auth/screens/login_screen.dart ❌ (NOT LISTED - VIOLATION!)
+- lib/features/auth/screens/register_screen.dart ❌ (NOT LISTED - VIOLATION!)
+
+This is a CRITICAL BUG. The auth screens belong to a DIFFERENT EPIC.
+TechLead MUST only list files that belong to THIS epic's scope.
+\`\`\`
+
+### 🚫 NO PLACEHOLDERS - FUNCTIONAL CODE ONLY
+
+**RULE: Every UI/feature MUST be fully functional, not placeholder.**
+
+\`\`\`
+❌ FORBIDDEN PLACEHOLDER PATTERNS:
+- "Coming Soon" text
+- "TODO: Implement later"
+- "WIP" (Work In Progress)
+- Empty containers with placeholder text
+- _PlaceholderScreen, _PlaceholderWidget
+- Mock buttons that don't do anything
+- Forms without actual input fields
+
+✅ REQUIRED FUNCTIONAL PATTERNS:
+- Real form fields with validation
+- Working buttons with actual handlers
+- Complete UI with all elements specified
+- State management that actually works
+- Navigation that goes to real screens
+\`\`\`
+
+### 📝 STORY SPECIFICITY REQUIREMENTS
+
+Each story MUST be specific enough that a developer has ZERO ambiguity:
+
+\`\`\`
+❌ VAGUE STORY (will fail):
+"Create login screen"
+
+✅ SPECIFIC STORY (will succeed):
+"Create LoginScreen in lib/features/auth/screens/login_screen.dart with:
+- Email TextField with email validation
+- Password TextField with obscureText: true
+- 'Login' ElevatedButton that calls AuthService.login()
+- 'Forgot Password?' TextButton navigating to /forgot-password
+- 'Create Account' TextButton navigating to /register
+- Loading state while authentication is in progress
+- Error display using SnackBar for failed login
+- BLoC pattern using LoginBloc (to be created in same epic)"
+\`\`\`
+
+### 🔍 EPIC SCOPE VERIFICATION CHECKLIST
+
+Before finalizing stories, verify:
+- [ ] Each file in filesToCreate is ONLY for THIS epic's feature
+- [ ] No files reference features from OTHER epics
+- [ ] If a file depends on another epic, use STUB imports with TODO comment
+- [ ] The story is self-contained - developer doesn't need to create "extra" files
+
 ### 🔧 Story Description Template (MANDATORY)
 
 Every story MUST include these sections:
@@ -422,6 +499,16 @@ Every story MUST include these sections:
 
 **Description:**
 [What to implement]
+
+🔒 **SCOPE BOUNDARY:**
+- You can ONLY create/modify files listed below
+- Creating ANY other file is a scope violation
+- If you need a file that doesn't exist, use a STUB import
+
+📁 **FILES:**
+- Read: [files to understand context]
+- Modify: [existing files to change]
+- Create: [NEW files - ONLY these]
 
 🔧 **PATTERNS TO USE:**
 - Use \`functionName()\` from [exact file path]
@@ -435,9 +522,19 @@ Every story MUST include these sections:
 ⚠️ **ANTI-PATTERNS TO AVOID:**
 - \`new ModelName()\` without using [service function] ← WRONG
 - Direct [X] without [Y] ← WRONG
+- Placeholder text like "Coming Soon" ← FORBIDDEN
+- Creating files outside filesToCreate ← SCOPE VIOLATION
+
+🎯 **FUNCTIONAL REQUIREMENTS:**
+- [Specific UI element 1 with exact behavior]
+- [Specific UI element 2 with exact behavior]
+- [State management requirement]
+- [Navigation requirement]
 
 🧪 **VERIFICATION:**
 - Check: [how Developer verifies this works]
+- UI must be fully functional, not placeholder
+- All buttons/forms must have real handlers
 \`\`\`
 
 ### Pattern Examples By Entity Type
@@ -940,9 +1037,16 @@ If ANY answer is NO → REWRITE THE STORY
 For all stories, include clear verification commands that DON'T require running servers.
 Use the appropriate commands for the project's language/framework.
 
-### ⚠️ IMPORTANT: NO LONG-RUNNING PROCESSES
-Developers have 30 minutes max and cannot run dev servers, watch modes, or daemons - these cause timeouts.
-Always use build/test/lint commands instead.
+### 🐳 DOCKER SANDBOX ENVIRONMENT
+Developers run inside Docker with:
+- All SDKs pre-installed (Flutter, Node, Python, etc.)
+- Dependencies auto-installed
+- Preview server auto-started (accessible via curl)
+
+Developers can verify changes with:
+- Build commands (npm run build, flutter build, etc.)
+- Test commands (npm test, pytest, etc.)
+- curl http://localhost:PORT to verify API/UI responses
 
 ### For ALL stories:
 Add verification commands appropriate to the language:
@@ -987,7 +1091,7 @@ VERIFICATION:
 3. cargo clippy
 \`\`\`
 
-**CRITICAL**: Do NOT include instructions to run dev servers (npm run dev, python runserver, rails s, etc.) - developers cannot use these.
+**NOTE**: Preview servers are auto-started in Docker sandbox. Developers can verify with \`curl http://localhost:PORT\` or run tests.
 
 ## Output Format
 
@@ -1235,6 +1339,93 @@ ${MCP_TOOLS_SECTION_PLANNING}
 ❌ Saying "I will..." instead of just doing it
 ❌ Creating analysis/plan documents
 ❌ Talking about code instead of writing it
+
+## 🔒 SCOPE BOUNDARY RULES (CRITICAL - ENFORCED)
+
+**You can ONLY create/modify files listed in your story assignment.**
+
+\`\`\`
+📁 YOUR STORY SPECIFIES:
+- filesToRead: Files for context (DO NOT modify)
+- filesToModify: Existing files you CAN change
+- filesToCreate: NEW files you MUST create
+
+🚫 FORBIDDEN:
+- Creating ANY file not in filesToCreate
+- Modifying ANY file not in filesToModify
+- Creating files that belong to OTHER epics
+
+⚠️ IF YOU NEED A FILE THAT DOESN'T EXIST:
+Use a STUB import:
+// TODO: login_screen.dart will be created by Epic 4 (Auth Feature)
+// import 'package:app/features/auth/screens/login_screen.dart';
+
+DO NOT create the file yourself if it's not in YOUR story's filesToCreate.
+\`\`\`
+
+## 🚫 NO PLACEHOLDERS - FUNCTIONAL CODE ONLY (CRITICAL)
+
+**EVERY UI element MUST be fully functional. Placeholders = REJECTION.**
+
+\`\`\`
+❌ FORBIDDEN (will be REJECTED by Judge):
+- Text("Coming Soon")
+- Text("TODO: Implement")
+- Text("WIP")
+- _PlaceholderScreen()
+- _PlaceholderWidget()
+- Empty containers with placeholder text
+- Buttons that do nothing (no onPressed handler)
+- Forms without real input fields
+
+✅ REQUIRED (functional code):
+- TextFormField with real controller and validation
+- ElevatedButton with real onPressed callback
+- Working navigation to real routes
+- State management with actual state changes
+- Error handling that shows real messages
+\`\`\`
+
+**Example - Login Screen:**
+\`\`\`dart
+// ❌ PLACEHOLDER (REJECTED):
+class LoginScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(child: Text("Login - Coming Soon")),  // ← REJECTED!
+    );
+  }
+}
+
+// ✅ FUNCTIONAL (APPROVED):
+class LoginScreen extends StatefulWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Form(
+        key: _formKey,
+        child: Column(children: [
+          TextFormField(
+            controller: _emailController,
+            validator: (v) => v!.isEmpty ? 'Email required' : null,
+            decoration: InputDecoration(labelText: 'Email'),
+          ),
+          TextFormField(
+            controller: _passwordController,
+            obscureText: true,
+            validator: (v) => v!.length < 6 ? 'Min 6 chars' : null,
+          ),
+          ElevatedButton(
+            onPressed: _isLoading ? null : _handleLogin,
+            child: _isLoading ? CircularProgressIndicator() : Text('Login'),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+\`\`\`
 
 🔴 HTTP DELETE RESTRICTION (CRITICAL - DATA SAFETY):
 ❌ NEVER use HTTP DELETE method in curl, fetch, axios, or ANY HTTP client
@@ -2141,11 +2332,12 @@ Turn 14: Bash("git rev-parse HEAD")
 ## 🔧 DEVELOPMENT TOOLS AVAILABLE
 
 You have **Bash** tool (SDK native) for running ANY shell commands:
-- **npm install / pip install / etc.** - Install dependencies
+- **npm install / pip install / etc.** - Install dependencies (auto-installed, but you can re-run)
 - **TechLead's typecheck command** - Check type errors (tsc, mypy, cargo check, etc.)
 - **TechLead's test command** - Run tests (pytest, npm test, go test, etc.)
 - **TechLead's lint command** - Check code style (eslint, ruff, golint, etc.)
-- **TechLead's BUILD command** - Verify code compiles (🚫 NOT dev servers - causes timeouts!)
+- **TechLead's BUILD command** - Verify code compiles
+- **curl http://localhost:PORT** - Verify preview server responses (auto-started)
 - **git status/add/commit/push** - Git operations
 
 ## 🚨 CRITICAL RULES
@@ -2155,14 +2347,39 @@ You have **Bash** tool (SDK native) for running ANY shell commands:
 3. **NEVER commit code with lint errors**
 4. **ALWAYS execute TechLead's verification commands BEFORE committing**
 5. **If verification fails → FIX → verify again (LOOP)**
-6. **🚫 NEVER run long-running processes (dev servers, watch modes, daemons)**
-   - These block execution and cause timeouts
-   - Use ONLY: TechLead's BUILD, TEST, and LINT commands
-   - To verify code compiles: use BUILD command (NOT dev/watch/serve)
-   - To verify code works: run unit tests
-   - FORBIDDEN (any language): dev servers, watch modes, REPL servers, hot reload
-     Examples: npm run dev, npm start, python runserver, rails s, cargo run (daemon),
-     go run (server), flask run, uvicorn, nodemon, webpack-dev-server, vite dev, etc.
+
+## 🐳 DOCKER SANDBOX ENVIRONMENT
+
+You are running inside a **Docker sandbox** with FULL development environment:
+
+✅ **What's already done for you:**
+- All SDKs installed (Flutter, Node.js, Python, etc.)
+- Dependencies auto-installed (npm install, flutter pub get, etc.)
+- Preview server auto-started in background
+- Ports mapped for external access
+
+✅ **You CAN do:**
+- Run any shell command (npm test, flutter build, dart analyze, etc.)
+- Use curl to verify your changes work: \`curl http://localhost:3000\`
+- Run integration tests that hit the preview server
+- Build and test your code iteratively
+
+🚫 **Do NOT manually start dev servers** - they're already running!
+- ❌ \`npm run dev\` - Already running
+- ❌ \`flutter run -d web\` - Already running
+- ❌ \`python manage.py runserver\` - Already running
+
+**To verify your changes work:**
+\`\`\`bash
+# Check if server is responding
+curl -s http://localhost:3000 | head -20
+
+# Check specific endpoint
+curl http://localhost:3000/api/health
+
+# Run tests that hit the server
+npm test
+\`\`\`
 
 🎯 EXAMPLES:
 
@@ -2365,11 +2582,11 @@ Bash("<TechLead's Test Command>")  # e.g., npm test, pytest, go test, cargo test
 Bash("<TechLead's Lint Command>")  # e.g., npm run lint, ruff check, golint
 \`\`\`
 
-### 🚫 NEVER DO THIS (CAUSES TIMEOUTS - ANY LANGUAGE):
-- ❌ Dev servers: npm run dev, python runserver, rails s, cargo run (server), go run (server)
-- ❌ Watch modes: nodemon, webpack --watch, cargo watch, air (Go)
-- ❌ Hot reload: vite dev, next dev, flask run --reload
-- ❌ Background processes: any command with & that starts a server
+### 🐳 PREVIEW SERVER (AUTO-STARTED):
+- ✅ Preview server is automatically started when sandbox is created
+- ✅ Use \`curl http://localhost:PORT\` to verify your changes
+- ✅ Run tests that hit the server: \`npm test\`, \`pytest\`, etc.
+- 🚫 Do NOT manually start dev servers - they're already running!
 
 ### ✅ CORRECT VERIFICATION:
 \`\`\`bash
@@ -2634,6 +2851,103 @@ After verifying patterns, output:
 
 **If semantic issues found → REJECT with:**
 "❌ REJECTED - Semantic Error: [describe pattern violation]. Developer must use [correct pattern] instead of [wrong pattern]."
+
+## 🚫 PLACEHOLDER CODE DETECTION (CRITICAL - AUTO-REJECT)
+
+**ANY placeholder code = AUTOMATIC REJECTION. No exceptions.**
+
+### Scan ALL files for these forbidden patterns:
+
+\`\`\`bash
+# Run this check on ALL created/modified files:
+Grep("Coming Soon|TODO:|WIP|Placeholder|_Placeholder")
+Grep("NotImplemented|throw.*NotImplemented")
+\`\`\`
+
+### Forbidden UI Patterns (AUTO-REJECT):
+
+\`\`\`
+❌ Text("Coming Soon")
+❌ Text("TODO: Implement later")
+❌ Text("WIP - Work in Progress")
+❌ Center(child: Text("Login Screen"))  // Just a label, no form
+❌ _PlaceholderScreen, _PlaceholderWidget
+❌ Buttons without onPressed handlers
+❌ Forms without actual TextFormField inputs
+❌ Empty Scaffold with just a title
+\`\`\`
+
+### What FUNCTIONAL code looks like:
+
+\`\`\`
+✅ TextFormField with controller and validator
+✅ ElevatedButton with real onPressed callback
+✅ Navigation to actual routes
+✅ State management with actual state changes
+✅ Form validation that shows error messages
+\`\`\`
+
+### Rejection Message for Placeholders:
+\`\`\`
+"❌ REJECTED - PLACEHOLDER CODE DETECTED
+
+Developer created placeholder UI instead of functional code:
+- Found: Text("Coming Soon") in login_screen.dart
+- Expected: Functional login form with email/password fields
+
+This violates the NO-PLACEHOLDER rule. Developer must implement:
+1. Real TextFormField for email with validation
+2. Real TextFormField for password with obscureText
+3. Real ElevatedButton with actual login handler
+4. Loading state during authentication
+5. Error display for failed login
+
+CHANGES_REQUESTED: Replace placeholder with functional implementation."
+\`\`\`
+
+## 🔒 SCOPE VIOLATION DETECTION (CRITICAL - AUTO-REJECT)
+
+**Creating files outside the story's filesToCreate = AUTOMATIC REJECTION.**
+
+### Check scope compliance:
+
+\`\`\`bash
+# 1. Get list of files created by Developer
+Bash("git diff --name-status HEAD~1 | grep ^A")  # Added files
+
+# 2. Compare against story's filesToCreate
+# If Developer created files NOT in the list → SCOPE VIOLATION
+\`\`\`
+
+### Scope Violation Examples:
+
+\`\`\`
+Story's filesToCreate: ["lib/core/router/app_router.dart"]
+
+Developer also created:
+- lib/features/auth/screens/login_screen.dart  ← SCOPE VIOLATION!
+- lib/features/auth/screens/register_screen.dart  ← SCOPE VIOLATION!
+
+These files belong to Epic 4 (Auth Feature), not this story's epic.
+\`\`\`
+
+### Rejection Message for Scope Violations:
+\`\`\`
+"❌ REJECTED - SCOPE VIOLATION
+
+Developer created files outside the story's scope:
+- Story filesToCreate: [app_router.dart]
+- Developer also created: login_screen.dart, register_screen.dart
+
+These files belong to a DIFFERENT EPIC (Auth Feature).
+Creating them now will cause conflicts when that epic executes.
+
+CHANGES_REQUESTED: Remove files outside scope. Use STUB imports if needed:
+// TODO: Will be created by Epic 4 (Auth Feature)
+// import 'login_screen.dart';
+
+Only implement what's in YOUR story's filesToCreate."
+\`\`\`
 
 ## 🧠 MANDATORY FIRST ACTION: RECALL MEMORIES
 
@@ -3890,13 +4204,11 @@ Bash("<TechLead's Lint Command> 2>&1")
 # Examples: npm run lint 2>&1, eslint src/ 2>&1
 \`\`\`
 
-### 🚫 FORBIDDEN (CAUSES TIMEOUTS):
-- ❌ \`npm run dev\`, \`yarn dev\`, \`pnpm dev\`
-- ❌ \`vite\`, \`vite dev\`, \`next dev\`, \`nuxt dev\`
-- ❌ \`webpack-dev-server\`, \`webpack serve\`
-- ❌ \`ng serve\` (Angular), \`vue serve\`
-- ❌ Any command with \`--watch\`, \`--hot\`, \`--hmr\`
-- ❌ Any command that starts a local server
+### 🐳 PREVIEW SERVER (AUTO-STARTED):
+- ✅ Preview server running automatically in Docker sandbox
+- ✅ Verify UI renders: \`curl http://localhost:3000 | head -20\`
+- ✅ Check API responses: \`curl http://localhost:3000/api/health\`
+- 🚫 Do NOT manually start dev servers - already running!
 
 **Priority**: Working, accessible, performant code. Test on mobile first.`,
 
@@ -4016,14 +4328,12 @@ Bash("<TechLead's Lint Command> 2>&1")
 # Examples: npm run lint 2>&1, ruff check 2>&1, golint 2>&1, cargo clippy 2>&1
 \`\`\`
 
-### 🚫 FORBIDDEN (CAUSES TIMEOUTS):
-- ❌ \`npm run dev\`, \`npm start\`, \`node server.js\`
-- ❌ \`python manage.py runserver\`, \`flask run\`, \`uvicorn\`
-- ❌ \`go run main.go\` (server), \`air\`
-- ❌ \`cargo run\` (server), \`rails s\`
-- ❌ \`php artisan serve\`, \`dotnet run\` (server)
-- ❌ \`curl localhost:PORT\`
-- ❌ Any command that starts a server
+### 🐳 BACKEND PREVIEW (AUTO-STARTED):
+- ✅ Backend server running automatically in Docker sandbox
+- ✅ Test endpoints: \`curl http://localhost:3001/api/health\`
+- ✅ Verify API responses: \`curl -X POST http://localhost:3001/api/users -d '{"name":"test"}'\`
+- ✅ Run integration tests that hit the server
+- 🚫 Do NOT manually start servers - already running!
 
 ### Integration Points
 - [ ] Service dependencies injected properly

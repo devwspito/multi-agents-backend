@@ -843,20 +843,22 @@ export class TeamOrchestrationPhase extends BasePhase {
     epicId?: string;
   }> {
     const taskId = (parentContext.task.id as any).toString();
+    // Use epic name for clearer logging instead of "Team 1", "Team 2"
+    const epicName = epic.title || epic.name || epic.id;
 
     // 🔥 CRITICAL: Check MongoDB connection before starting team
     const { isMongoConnected, waitForMongoConnection } = require('../../config/database');
     if (!isMongoConnected()) {
-      console.warn(`⚠️  [Team ${teamNumber}] MongoDB disconnected - waiting for reconnection...`);
+      console.warn(`⚠️  [Team: ${epicName}] MongoDB disconnected - waiting for reconnection...`);
       const reconnected = await waitForMongoConnection(30000); // Wait up to 30 seconds
       if (!reconnected) {
-        throw new Error(`MongoDB connection lost - cannot proceed with team ${teamNumber} execution`);
+        throw new Error(`MongoDB connection lost - cannot proceed with team "${epicName}" execution`);
       }
-      console.log(`✅ [Team ${teamNumber}] MongoDB reconnected - proceeding with execution`);
+      console.log(`✅ [Team: ${epicName}] MongoDB reconnected - proceeding with execution`);
     }
 
     console.log(`\n${'='.repeat(80)}`);
-    console.log(`🏃 [Team ${teamNumber}] Starting execution for EPIC: ${epic.id}`);
+    console.log(`🏃 [Team: ${epicName}] Starting execution`);
     console.log(`   Epic: ${epic.title}`);
     console.log(`   Complexity: ${epic.estimatedComplexity}`);
     console.log(`   Repositories: ${epic.affectedRepositories?.join(', ') || 'Not specified'}`);
@@ -865,7 +867,7 @@ export class TeamOrchestrationPhase extends BasePhase {
     NotificationService.emitConsoleLog(
       taskId,
       'info',
-      `\n🏃 Team ${teamNumber} starting epic: ${epic.title}\n`
+      `\n🏃 Team: ${epicName} starting\n`
     );
 
     try {
@@ -882,17 +884,17 @@ export class TeamOrchestrationPhase extends BasePhase {
           const unifiedBranch = await unifiedMemoryService.getEpicBranch(taskId, epicId);
           if (unifiedBranch) {
             epic.branchName = unifiedBranch; // getEpicBranch returns the branch name string directly
-            console.log(`   🔄 [Team ${teamNumber}] Restored epic branch from UnifiedMemory: ${epic.branchName}`);
+            console.log(`   🔄 [Team: ${epicName}] Restored epic branch from UnifiedMemory: ${epic.branchName}`);
           }
         } catch (error: any) {
-          console.log(`   ⚠️ [Team ${teamNumber}] UnifiedMemory branch recovery failed: ${error.message}`);
+          console.log(`   ⚠️ [Team: ${epicName}] UnifiedMemory branch recovery failed: ${error.message}`);
         }
       }
 
       if (epic.branchName) {
         // Use existing branch name from EventStore/context/UnifiedMemory
         branchName = epic.branchName;
-        console.log(`   📌 [Team ${teamNumber}] Using EXISTING epic branch: ${branchName}`);
+        console.log(`   📌 [Team: ${epicName}] Using EXISTING epic branch: ${branchName}`);
       } else {
         // Generate DETERMINISTIC branch name (same inputs = same branch name)
         const taskShortId = (parentContext.task.id as any).toString().slice(-8);
@@ -900,17 +902,17 @@ export class TeamOrchestrationPhase extends BasePhase {
         // Use simple hash of epicId for uniqueness without randomness
         const epicHash = epic.id.split('').reduce((a: number, c: string) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0).toString(36).slice(-6);
         branchName = `epic/${taskShortId}-${epicSlug}-${epicHash}`;
-        console.log(`   📌 [Team ${teamNumber}] Creating DETERMINISTIC epic branch: ${branchName}`);
+        console.log(`   📌 [Team: ${epicName}] Creating DETERMINISTIC epic branch: ${branchName}`);
       }
       const workspacePath = parentContext.workspacePath;
 
       // 🔥 CRITICAL VALIDATION: workspacePath MUST be valid for team operations
-      assertValidWorkspacePath(workspacePath, `Team ${teamNumber}`);
-      console.log(`   ✅ [Team ${teamNumber}] Workspace path valid: ${workspacePath}`);
+      assertValidWorkspacePath(workspacePath, `Team: ${epicName}`);
+      console.log(`   ✅ [Team: ${epicName}] Workspace path valid: ${workspacePath}`);
 
       // 🔥 CRITICAL: Epic MUST have targetRepository - NO FALLBACKS
       if (!epic.targetRepository) {
-        console.error(`\n❌❌❌ [Team ${teamNumber}] CRITICAL ERROR: Epic has NO targetRepository!`);
+        console.error(`\n❌❌❌ [Team: ${epicName}] CRITICAL ERROR: Epic has NO targetRepository!`);
         console.error(`   Epic: ${epic.title}`);
         console.error(`   Epic ID: ${epic.id}`);
         console.error(`\n   💀 CANNOT CREATE BRANCH WITHOUT KNOWING WHICH REPOSITORY`);
@@ -926,25 +928,28 @@ export class TeamOrchestrationPhase extends BasePhase {
       // This prevents git conflicts when multiple teams work in parallel on the same repo
       const fs = require('fs');
 
-      const teamWorkspacePath = `${workspacePath}/team-${teamNumber}`;
+      // 🔥 FIX: Use epic name for workspace path, not team number
+      // Sanitize epic name to be filesystem-safe (replace spaces/special chars with dashes)
+      const epicSlug = epicName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase().substring(0, 50);
+      const teamWorkspacePath = `${workspacePath}/team-${teamNumber}-${epicSlug}`;
       const isolatedRepoPath = `${teamWorkspacePath}/${targetRepository}`;
       const sourceRepoPath = `${workspacePath}/${targetRepository}`;
 
-      console.log(`\n🔒 [Team ${teamNumber}] Creating ISOLATED workspace...`);
+      console.log(`\n🔒 [Team: ${epicName}] Creating ISOLATED workspace...`);
       console.log(`   Source repo: ${sourceRepoPath}`);
       console.log(`   Isolated workspace: ${teamWorkspacePath}`);
 
       // Create team directory
       if (!fs.existsSync(teamWorkspacePath)) {
         fs.mkdirSync(teamWorkspacePath, { recursive: true });
-        console.log(`✅ [Team ${teamNumber}] Created team directory: ${teamWorkspacePath}`);
+        console.log(`✅ [Team: ${epicName}] Created team directory: ${teamWorkspacePath}`);
       }
 
       // 🔥 FIX: Remove stale isolated workspace before copying
       // This prevents the "nested folder" bug where cp -r copies INTO existing directory
       // instead of replacing it, creating: repo/repo/src instead of repo/src
       if (fs.existsSync(isolatedRepoPath)) {
-        console.log(`⚠️  [Team ${teamNumber}] Removing stale isolated workspace: ${isolatedRepoPath}`);
+        console.log(`⚠️  [Team: ${epicName}] Removing stale isolated workspace: ${isolatedRepoPath}`);
         fs.rmSync(isolatedRepoPath, { recursive: true, force: true });
       }
 
@@ -953,14 +958,28 @@ export class TeamOrchestrationPhase extends BasePhase {
         throw new Error(`Source repository not found: ${sourceRepoPath}`);
       }
 
-      console.log(`📋 [Team ${teamNumber}] Copying repository to isolated workspace...`);
-      // Use cp -r to copy the entire repository including .git
+      console.log(`📋 [Team: ${epicName}] Copying repository to isolated workspace...`);
+      // 🔥 Use rsync instead of cp to handle broken symlinks (Flutter .plugin_symlinks)
+      // -a = archive mode (preserves permissions, timestamps, etc.)
+      // --ignore-errors = continue even if errors (broken symlinks)
+      // -L = transform symlinks to referent file/dir (skip if broken)
       const { execSync } = require('child_process');
-      execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
-      console.log(`✅ [Team ${teamNumber}] Repository copied to: ${isolatedRepoPath}`);
+      try {
+        // Try rsync first (handles symlinks better)
+        execSync(`rsync -a --ignore-errors "${sourceRepoPath}/" "${isolatedRepoPath}/"`, { encoding: 'utf8', stdio: 'pipe' });
+      } catch (rsyncErr: any) {
+        // Fallback: Delete broken symlinks first, then use cp
+        console.log(`⚠️ [Team: ${epicName}] rsync failed, trying cp with symlink cleanup...`);
+        try {
+          // Find and delete broken symlinks before copying
+          execSync(`find "${sourceRepoPath}" -type l ! -exec test -e {} \\; -delete 2>/dev/null || true`, { encoding: 'utf8', stdio: 'pipe' });
+        } catch { /* ignore */ }
+        execSync(`cp -R "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+      }
+      console.log(`✅ [Team: ${epicName}] Repository copied to: ${isolatedRepoPath}`);
 
       if (workspacePath && targetRepository) {
-        console.log(`\n🌿 [Team ${teamNumber}] Creating branch: ${branchName}`);
+        console.log(`\n🌿 [Team: ${epicName}] Creating branch: ${branchName}`);
         console.log(`   Repository: ${targetRepository}`);
         console.log(`   Isolated path: ${isolatedRepoPath}`);
 
@@ -970,32 +989,32 @@ export class TeamOrchestrationPhase extends BasePhase {
         // 🔥 CRITICAL: Verify repository directory exists
         const fs = require('fs');
         if (!fs.existsSync(repoPath)) {
-          console.error(`❌ [Team ${teamNumber}] Repository directory does not exist: ${repoPath}`);
+          console.error(`❌ [Team: ${epicName}] Repository directory does not exist: ${repoPath}`);
           console.error(`   Workspace: ${workspacePath}`);
           console.error(`   Target repo: ${targetRepository}`);
           console.error(`   Available repos: ${parentContext.repositories.map((r: any) => r.name || r.full_name).join(', ')}`);
           throw new Error(`Repository directory not found: ${repoPath}`);
         }
 
-        console.log(`✅ [Team ${teamNumber}] Repository directory verified: ${repoPath}`);
+        console.log(`✅ [Team: ${epicName}] Repository directory verified: ${repoPath}`);
 
         try {
           // Create epic branch LOCALLY (will be pushed later with commits)
           // Epic branch should be created from current HEAD (main or whatever is checked out)
           // but NOT pushed until it has actual commits from work
-          console.log(`🌿 [Team ${teamNumber}] Creating epic branch locally: ${branchName}`);
+          console.log(`🌿 [Team: ${epicName}] Creating epic branch locally: ${branchName}`);
 
           // Ensure we start from a clean state
           try {
             safeGitExecSync(`git checkout main`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`✅ [Team ${teamNumber}] Checked out main branch as base`);
+            console.log(`✅ [Team: ${epicName}] Checked out main branch as base`);
           } catch (mainError: any) {
-            console.warn(`⚠️  [Team ${teamNumber}] Could not checkout main: ${mainError.message}`);
+            console.warn(`⚠️  [Team: ${epicName}] Could not checkout main: ${mainError.message}`);
             // Continue - use current branch as base
           }
 
           safeGitExecSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
-          console.log(`✅ [Team ${teamNumber}] Epic branch created locally: ${branchName}`);
+          console.log(`✅ [Team: ${epicName}] Epic branch created locally: ${branchName}`);
 
           // 🔥 CRITICAL: Create initial commit in epic branch
           // This ensures epic branch has a base for story branches to branch from
@@ -1005,7 +1024,7 @@ export class TeamOrchestrationPhase extends BasePhase {
             cwd: repoPath,
             encoding: 'utf8'
           });
-          console.log(`✅ [Team ${teamNumber}] Created initial empty commit in epic branch`);
+          console.log(`✅ [Team: ${epicName}] Created initial empty commit in epic branch`);
 
           // Push epic branch with initial commit
           try {
@@ -1015,7 +1034,7 @@ export class TeamOrchestrationPhase extends BasePhase {
               encoding: 'utf8',
               timeout: GIT_TIMEOUTS.FETCH
             });
-            console.log(`✅ [Team ${teamNumber}] Epic branch pushed to remote with initial commit`);
+            console.log(`✅ [Team: ${epicName}] Epic branch pushed to remote with initial commit`);
             pushSuccessful = true;
 
             // FIX: Sync local with remote after push
@@ -1025,12 +1044,12 @@ export class TeamOrchestrationPhase extends BasePhase {
                 encoding: 'utf8',
                 timeout: GIT_TIMEOUTS.CHECKOUT
               });
-              console.log(`✅ [Team ${teamNumber}] Local synced with remote`);
+              console.log(`✅ [Team: ${epicName}] Local synced with remote`);
             } catch (pullError: any) {
-              console.log(`   ℹ️ [Team ${teamNumber}] Pull skipped (already up to date)`);
+              console.log(`   ℹ️ [Team: ${epicName}] Pull skipped (already up to date)`);
             }
           } catch (pushError: any) {
-            console.error(`❌ [Team ${teamNumber}] Failed to push epic branch: ${pushError.message}`);
+            console.error(`❌ [Team: ${epicName}] Failed to push epic branch: ${pushError.message}`);
             pushSuccessful = false;
             throw new Error(`Cannot proceed without epic branch on remote: ${pushError.message}`);
           }
@@ -1038,18 +1057,18 @@ export class TeamOrchestrationPhase extends BasePhase {
           NotificationService.emitConsoleLog(
             taskId,
             'info',
-            `✅ Team ${teamNumber}: Created and pushed branch ${branchName} in ${targetRepository}`
+            `✅ Team: ${epicName} - Created and pushed branch ${branchName} in ${targetRepository}`
           );
         } catch (gitError: any) {
           // Branch might already exist
-          console.log(`⚠️  [Team ${teamNumber}] Branch might already exist: ${gitError.message}`);
+          console.log(`⚠️  [Team: ${epicName}] Branch might already exist: ${gitError.message}`);
           try {
             safeGitExecSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8' });
-            console.log(`✅ [Team ${teamNumber}] Checked out existing branch: ${branchName}`);
+            console.log(`✅ [Team: ${epicName}] Checked out existing branch: ${branchName}`);
 
             // 🔥 CRITICAL: Sync with remote before pushing (handles resume scenarios)
             try {
-              console.log(`📤 [Team ${teamNumber}] Ensuring epic branch is synced with remote...`);
+              console.log(`📤 [Team: ${epicName}] Ensuring epic branch is synced with remote...`);
 
               // Fix remote auth before any remote operations
               fixGitRemoteAuth(repoPath);
@@ -1062,10 +1081,10 @@ export class TeamOrchestrationPhase extends BasePhase {
                   encoding: 'utf8',
                   timeout: GIT_TIMEOUTS.FETCH
                 });
-                console.log(`✅ [Team ${teamNumber}] Pulled latest from remote`);
+                console.log(`✅ [Team: ${epicName}] Pulled latest from remote`);
               } catch (pullError: any) {
                 // Branch might not exist on remote yet, that's fine
-                console.log(`   ℹ️ [Team ${teamNumber}] Pull skipped: ${pullError.message.split('\n')[0]}`);
+                console.log(`   ℹ️ [Team: ${epicName}] Pull skipped: ${pullError.message.split('\n')[0]}`);
               }
 
               // Now push (should succeed since we pulled first)
@@ -1074,23 +1093,23 @@ export class TeamOrchestrationPhase extends BasePhase {
                 encoding: 'utf8',
                 timeout: GIT_TIMEOUTS.FETCH
               });
-              console.log(`✅ [Team ${teamNumber}] Epic branch confirmed on remote: ${branchName}`);
+              console.log(`✅ [Team: ${epicName}] Epic branch confirmed on remote: ${branchName}`);
             } catch (pushError: any) {
               // If push still fails, try force-with-lease as last resort
-              console.log(`⚠️  [Team ${teamNumber}] Normal push failed, trying force-with-lease...`);
+              console.log(`⚠️  [Team: ${epicName}] Normal push failed, trying force-with-lease...`);
               try {
                 safeGitExecSync(`git push -u origin ${branchName} --force-with-lease`, {
                   cwd: repoPath,
                   encoding: 'utf8',
                   timeout: GIT_TIMEOUTS.FETCH
                 });
-                console.log(`✅ [Team ${teamNumber}] Epic branch force-pushed to remote`);
+                console.log(`✅ [Team: ${epicName}] Epic branch force-pushed to remote`);
               } catch (forceError: any) {
-                console.log(`ℹ️  [Team ${teamNumber}] Branch push result: ${forceError.message.split('\n')[0]}`);
+                console.log(`ℹ️  [Team: ${epicName}] Branch push result: ${forceError.message.split('\n')[0]}`);
               }
             }
           } catch (checkoutError: any) {
-            console.error(`❌ [Team ${teamNumber}] Failed to create/checkout branch: ${checkoutError.message}`);
+            console.error(`❌ [Team: ${epicName}] Failed to create/checkout branch: ${checkoutError.message}`);
           }
         }
       }
@@ -1111,7 +1130,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       const devAuth = parentContext.getData<any>('devAuth');
       if (devAuth) {
         teamContext.setData('devAuth', devAuth);
-        console.log(`🔐 [Team ${teamNumber}] DevAuth passed to team context: method=${devAuth.method}`);
+        console.log(`🔐 [Team: ${epicName}] DevAuth passed to team context: method=${devAuth.method}`);
       }
 
       // Store epic for this team to work on (Tech Lead will divide into stories)
@@ -1132,12 +1151,12 @@ export class TeamOrchestrationPhase extends BasePhase {
         pushed: pushSuccessful,
         merged: false,
       });
-      console.log(`🌿 [Team ${teamNumber}] Registered epic branch: ${branchName} → ${targetRepository} (pushed: ${pushSuccessful})`);
+      console.log(`🌿 [Team: ${epicName}] Registered epic branch: ${branchName} → ${targetRepository} (pushed: ${pushSuccessful})`);
 
       // 🔥 CRITICAL: Update EventStore with the actual branch name
       // This allows all downstream phases (Developers, Judge, QA) to access the correct branch
       const { eventStore } = await import('../EventStore');
-      await eventStore.append({
+      await eventStore.safeAppend({
         taskId: parentContext.task.id as any,
         eventType: 'EpicBranchCreated' as any,
         agentName: 'team-orchestration',
@@ -1147,7 +1166,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           targetRepository: targetRepository,
         },
       });
-      console.log(`📝 [Team ${teamNumber}] Stored epic branch in EventStore: ${branchName}`);
+      console.log(`📝 [Team: ${epicName}] Stored epic branch in EventStore: ${branchName}`);
 
       // 🔥 CRITICAL FOR RECOVERY: Save epic branch to Unified Memory
       // This ensures Developers phase knows which branch to work on after restart
@@ -1157,7 +1176,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         branchName,
         targetRepository
       );
-      console.log(`💾 [Team ${teamNumber}] Saved epic branch to Unified Memory: ${branchName}`);
+      console.log(`💾 [Team: ${epicName}] Saved epic branch to Unified Memory: ${branchName}`);
 
       // Execute team pipeline
       // SIMPLIFIED: TechLead → Developers (includes Judge per-story) → PR
@@ -1192,13 +1211,13 @@ export class TeamOrchestrationPhase extends BasePhase {
       // Previous bug: when auto-approval enabled, while(!true) never executed
       do {
         // Tech Lead: Design architecture for this epic
-        console.log(`\n[Team ${teamNumber}] Phase 1: Tech Lead (Architecture)${techLeadRetryCount > 0 ? ` - Attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES}` : ''}`);
+        console.log(`\n[Team: ${epicName}] Phase 1: Tech Lead (Architecture)${techLeadRetryCount > 0 ? ` - Attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES}` : ''}`);
 
         if (techLeadRetryCount > 0) {
           NotificationService.emitConsoleLog(
             taskId,
             'info',
-            `🔄 [Team ${teamNumber}] Re-executing Tech Lead with user feedback (attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES})`
+            `🔄 [Team: ${epicName}] Re-executing Tech Lead with user feedback (attempt ${techLeadRetryCount + 1}/${MAX_TECH_LEAD_RETRIES})`
           );
         }
 
@@ -1216,13 +1235,13 @@ export class TeamOrchestrationPhase extends BasePhase {
         if (techLeadCost > 0) {
           (teamCosts as any).techLead = ((teamCosts as any).techLead || 0) + techLeadCost;
           (teamCosts as any).techLeadUsage = techLeadUsage;
-          console.log(`💰 [Team ${teamNumber}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
+          console.log(`💰 [Team: ${epicName}] Tech Lead cost: $${techLeadCost.toFixed(4)} (${techLeadUsage.input + techLeadUsage.output} tokens)`);
         }
 
         // 🔥 FIX: If TechLead was SKIPPED (already completed), don't require approval
         // Phase was skipped = already approved in a previous run
         if (techLeadResult.warnings?.includes('Phase was skipped')) {
-          console.log(`✅ [Team ${teamNumber}] Tech Lead was skipped (already completed) - no approval needed`);
+          console.log(`✅ [Team: ${epicName}] Tech Lead was skipped (already completed) - no approval needed`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead skipped (already completed) for epic: ${epic.title}`);
           techLeadApproved = true;
           break; // Exit loop - no need to wait for approval
@@ -1230,13 +1249,13 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         // 🛑 TECH LEAD APPROVAL GATE - Check auto-approval AFTER execution
         if (techLeadAutoApproved) {
-          console.log(`✅ [Team ${teamNumber}] Tech Lead auto-approved (configured)`);
+          console.log(`✅ [Team: ${epicName}] Tech Lead auto-approved (configured)`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead auto-approved for epic: ${epic.title}`);
           techLeadApproved = true;
           break; // Exit loop - no need to wait for manual approval
         }
 
-        console.log(`\n⏸️  [Team ${teamNumber}] Waiting for Tech Lead approval...`);
+        console.log(`\n⏸️  [Team: ${epicName}] Waiting for Tech Lead approval...`);
 
         // 🔥 CRITICAL: Persist pendingApproval to DB so bypass endpoint can find it
         const currentTask = TaskRepository.findById(parentContext.task.id);
@@ -1251,7 +1270,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           };
           TaskRepository.update(parentContext.task.id, { orchestration });
         }
-        console.log(`📝 [Team ${teamNumber}] Persisted pendingApproval to DB for bypass support`);
+        console.log(`📝 [Team: ${epicName}] Persisted pendingApproval to DB for bypass support`);
 
         // Emit approval required notification
         NotificationService.emitApprovalRequired(taskId, {
@@ -1266,7 +1285,7 @@ export class TeamOrchestrationPhase extends BasePhase {
         NotificationService.emitConsoleLog(
           taskId,
           'info',
-          `⏸️ [Team ${teamNumber}] Waiting for Tech Lead architecture approval for epic: ${epic.title}`
+          `⏸️ [Team: ${epicName}] Waiting for Tech Lead architecture approval`
         );
 
         try {
@@ -1280,10 +1299,10 @@ export class TeamOrchestrationPhase extends BasePhase {
           updateTaskFireAndForget(parentContext.task.id, {
             $unset: { 'orchestration.pendingApproval': 1 },
           }, 'clear pendingApproval');
-          console.log(`📝 [Team ${teamNumber}] Cleared pendingApproval from DB (fire-and-forget)`);
+          console.log(`📝 [Team: ${epicName}] Cleared pendingApproval from DB (fire-and-forget)`);
 
           if (approvalResult.approved) {
-            console.log(`✅ [Team ${teamNumber}] Tech Lead architecture approved`);
+            console.log(`✅ [Team: ${epicName}] Tech Lead architecture approved`);
             NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead architecture approved - continuing to development`);
 
             // Emit approval granted for frontend
@@ -1298,7 +1317,7 @@ export class TeamOrchestrationPhase extends BasePhase {
             techLeadRetryCount++;
 
             if (approvalResult.feedback && techLeadRetryCount < MAX_TECH_LEAD_RETRIES) {
-              console.log(`🔄 [Team ${teamNumber}] Tech Lead rejected with feedback - will re-execute`);
+              console.log(`🔄 [Team: ${epicName}] Tech Lead rejected with feedback - will re-execute`);
               console.log(`   Feedback: ${approvalResult.feedback}`);
               NotificationService.emitConsoleLog(
                 taskId,
@@ -1329,7 +1348,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
               // Continue loop to re-execute TechLead
             } else if (!approvalResult.feedback) {
-              console.log(`❌ [Team ${teamNumber}] Tech Lead rejected without feedback - cannot re-execute`);
+              console.log(`❌ [Team: ${epicName}] Tech Lead rejected without feedback - cannot re-execute`);
               NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead rejected without feedback - task failed`);
 
               NotificationService.emitApprovalGranted(taskId, {
@@ -1339,7 +1358,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
               throw new Error('Tech Lead architecture rejected by user without feedback');
             } else {
-              console.log(`❌ [Team ${teamNumber}] Tech Lead rejected - max retries (${MAX_TECH_LEAD_RETRIES}) reached`);
+              console.log(`❌ [Team: ${epicName}] Tech Lead rejected - max retries (${MAX_TECH_LEAD_RETRIES}) reached`);
               NotificationService.emitConsoleLog(taskId, 'error', `❌ Tech Lead max retries reached - task failed`);
 
               NotificationService.emitApprovalGranted(taskId, {
@@ -1353,7 +1372,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           }
         } catch (error: any) {
           if (error.message.includes('timeout')) {
-            console.log(`⏱️  [Team ${teamNumber}] Tech Lead approval timeout - auto-continuing`);
+            console.log(`⏱️  [Team: ${epicName}] Tech Lead approval timeout - auto-continuing`);
             NotificationService.emitConsoleLog(taskId, 'warn', `⏱️ Tech Lead approval timeout - auto-continuing`);
             techLeadApproved = true; // Continue on timeout
           } else {
@@ -1382,17 +1401,17 @@ export class TeamOrchestrationPhase extends BasePhase {
 
         if (envConfigEvents.length > 0) {
           envConfig = envConfigEvents[envConfigEvents.length - 1].payload;
-          console.log(`\n🐳 [Team ${teamNumber}] Found environment config from event store`);
+          console.log(`\n🐳 [Team: ${epicName}] Found environment config from event store`);
         }
 
         // Fallback: Read from task.orchestration.environmentConfig (DB persistence)
         if (!envConfig && parentContext.task.orchestration?.environmentConfig) {
           envConfig = parentContext.task.orchestration.environmentConfig;
-          console.log(`\n🐳 [Team ${teamNumber}] Found environment config from task DB`);
+          console.log(`\n🐳 [Team: ${epicName}] Found environment config from task DB`);
         }
 
         if (envConfig) {
-          console.log(`   🔧 [Team ${teamNumber}] Applying TechLead environment configuration...`);
+          console.log(`   🔧 [Team: ${epicName}] Applying TechLead environment configuration...`);
 
           // Handle two config formats:
           // 1. Per-repo: { "repoName": { installCommand, testCommand, ... } }
@@ -1411,9 +1430,9 @@ export class TeamOrchestrationPhase extends BasePhase {
 
             // Log environment configuration
             if (repoPath && path.isAbsolute(repoPath)) {
-              console.log(`   📦 [Team ${teamNumber}] Configuring ${teamRepoName}: ${teamRepoConfig.language || 'unknown'}/${teamRepoConfig.framework || 'unknown'}`);
+              console.log(`   📦 [Team: ${epicName}] Configuring ${teamRepoName}: ${teamRepoConfig.language || 'unknown'}/${teamRepoConfig.framework || 'unknown'}`);
             } else {
-              console.warn(`   ⚠️  [Team ${teamNumber}] Invalid repo path: ${repoPath}`);
+              console.warn(`   ⚠️  [Team: ${epicName}] Invalid repo path: ${repoPath}`);
             }
 
             // Store ALL commands in context for developers (including lint and typecheck)
@@ -1437,17 +1456,17 @@ export class TeamOrchestrationPhase extends BasePhase {
             console.log(`      Typecheck: ${teamRepoConfig.typecheckCommand || '(not specified)'}`);
             console.log(`      Build: ${teamRepoConfig.buildCommand || '(not specified)'}`);
           } else {
-            console.warn(`   ⚠️  [Team ${teamNumber}] No commands found in environment config for ${teamRepoName}`);
+            console.warn(`   ⚠️  [Team: ${epicName}] No commands found in environment config for ${teamRepoName}`);
           }
         } else {
-          console.log(`\n⚠️  [Team ${teamNumber}] No environment config available - using defaults`);
+          console.log(`\n⚠️  [Team: ${epicName}] No environment config available - using defaults`);
         }
       } catch (envError: any) {
-        console.warn(`⚠️  [Team ${teamNumber}] Could not apply environment config: ${envError.message}`);
+        console.warn(`⚠️  [Team: ${epicName}] Could not apply environment config: ${envError.message}`);
       }
 
       // Developers: Implement the epic
-      console.log(`\n[Team ${teamNumber}] Phase 2: Developers (Implementation)`);
+      console.log(`\n[Team: ${epicName}] Phase 2: Developers (Implementation)`);
       const developersResult = await developersPhase.execute(teamContext);
       if (!developersResult.success) {
         throw new Error(`Developers failed: ${developersResult.error}`);
@@ -1459,7 +1478,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           input: Number(developersResult.metadata?.input_tokens || 0),
           output: Number(developersResult.metadata?.output_tokens || 0),
         };
-        console.log(`💰 [Team ${teamNumber}] Developers cost: $${developersResult.metadata.cost.toFixed(4)}`);
+        console.log(`💰 [Team: ${epicName}] Developers cost: $${developersResult.metadata.cost.toFixed(4)}`);
       }
       // Track Judge costs and tokens (from within DevelopersPhase)
       if (developersResult.metadata?.judgeCost) {
@@ -1468,7 +1487,7 @@ export class TeamOrchestrationPhase extends BasePhase {
           input: Number(developersResult.metadata?.judge_input_tokens || 0),
           output: Number(developersResult.metadata?.judge_output_tokens || 0),
         };
-        console.log(`💰 [Team ${teamNumber}] Judge cost: $${developersResult.metadata.judgeCost.toFixed(4)}`);
+        console.log(`💰 [Team: ${epicName}] Judge cost: $${developersResult.metadata.judgeCost.toFixed(4)}`);
       }
 
       // ✅ Judge review already done per-story in DevelopersPhase
@@ -1478,7 +1497,7 @@ export class TeamOrchestrationPhase extends BasePhase {
 
       // Calculate total team cost
       teamCosts.total = teamCosts.techLead + teamCosts.developers + teamCosts.judge;
-      console.log(`💰 [Team ${teamNumber}] Total team cost: $${teamCosts.total.toFixed(4)}`);
+      console.log(`💰 [Team: ${epicName}] Total team cost: $${teamCosts.total.toFixed(4)}`);
 
       // 🔥🔥🔥 CRITICAL VERIFICATION: ALL STORIES MUST BE COMPLETED 🔥🔥🔥
       // Check that every story in the epic was actually completed
@@ -1498,7 +1517,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       });
       const completedCount = completedInMemory.length;
 
-      console.log(`\n📊 [Team ${teamNumber}] Story completion check:`);
+      console.log(`\n📊 [Team: ${epicName}] Story completion check:`);
       console.log(`   Total stories: ${totalStories}`);
       console.log(`   Completed: ${completedCount}`);
 
@@ -1507,12 +1526,12 @@ export class TeamOrchestrationPhase extends BasePhase {
           .filter((s: any) => !completedInMemory.includes(s.id))
           .map((s: any) => s.id);
 
-        console.error(`\n❌❌❌ [Team ${teamNumber}] NOT ALL STORIES COMPLETED! ❌❌❌`);
+        console.error(`\n❌❌❌ [Team: ${epicName}] NOT ALL STORIES COMPLETED! ❌❌❌`);
         console.error(`   Missing stories: ${missingStories.join(', ')}`);
         console.error(`   Completed: ${completedCount}/${totalStories}`);
 
         throw new Error(
-          `Team ${teamNumber} incomplete: ${completedCount}/${totalStories} stories finished. ` +
+          `Team: ${epicName} incomplete - ${completedCount}/${totalStories} stories finished. ` +
           `Missing: ${missingStories.join(', ')}`
         );
       }
@@ -1527,16 +1546,19 @@ export class TeamOrchestrationPhase extends BasePhase {
         teamCosts.total
       );
 
-      console.log(`\n✅ [Team ${teamNumber}] Completed successfully for epic: ${epic.title}!\n`);
+      console.log(`\n✅ [Team: ${epicName}] Completed successfully for epic: ${epic.title}!\n`);
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `✅ Team ${teamNumber} completed epic: ${epic.title}`
+        `✅ Team: ${epicName} completed`
       );
 
       // 🚀 AUTO-CREATE PULL REQUEST
       // Now that epic is complete, create a PR for user to review and merge
-      await this.createPullRequest(epic, branchName, workspacePath, parentContext.repositories, taskId);
+      // 🐳 SANDBOX: Get sandbox ID for Docker execution during PR creation
+      const sandboxMap = parentContext.getData<Map<string, string>>('sandboxMap');
+      const prSandboxId = sandboxMap?.get(epic.targetRepository);
+      await this.createPullRequest(epic, branchName, workspacePath, parentContext.repositories, taskId, prSandboxId);
 
       return {
         success: true,
@@ -1544,11 +1566,11 @@ export class TeamOrchestrationPhase extends BasePhase {
         epicId: getEpicId(epic) // 🔥 CENTRALIZED: Use IdNormalizer
       };
     } catch (error: any) {
-      console.error(`\n❌ [Team ${teamNumber}] Failed for epic ${epic.title}: ${error.message}\n`);
+      console.error(`\n❌ [Team: ${epicName}] Failed for epic ${epic.title}: ${error.message}\n`);
       NotificationService.emitConsoleLog(
         taskId,
         'error',
-        `❌ Team ${teamNumber} failed (epic: ${epic.title}): ${error.message}`
+        `❌ Team: ${epicName} failed: ${error.message}`
       );
 
       return {
@@ -1569,7 +1591,8 @@ export class TeamOrchestrationPhase extends BasePhase {
     epicBranch: string,
     workspacePath: string | null,
     repositories: any[],
-    taskId: string
+    taskId: string,
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<void> {
     if (!workspacePath || repositories.length === 0) {
       console.log(`⚠️  [PR] No workspace/repository - skipping PR creation`);
@@ -1890,7 +1913,7 @@ Or if you cannot fix it:
             undefined,       // sessionId
             undefined,       // fork
             undefined,       // attachments
-            { maxIterations: 20 } // options
+            { maxIterations: 20, sandboxId } // 🐳 options with sandbox ID
           );
 
           // Parse agent output for PR URL
@@ -1942,7 +1965,7 @@ Or if you cannot fix it:
       // Store PR in EventStore so AutoMerge can find it
       // MUST use 'PRCreated' event type - EventStore.getCurrentState() looks for this
       const { eventStore } = await import('../EventStore');
-      await eventStore.append({
+      await eventStore.safeAppend({
         taskId: taskId as any,
         eventType: 'PRCreated' as any,  // <-- EventStore expects this, NOT 'TeamCompleted'
         agentName: 'team-orchestration',

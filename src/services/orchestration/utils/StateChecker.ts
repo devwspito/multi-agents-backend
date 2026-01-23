@@ -194,7 +194,7 @@ export async function markStoryComplete(
   // 1. EventStore - emit StoryCompleted event
   try {
     const { eventStore } = await import('../../EventStore');
-    await eventStore.append({
+    await eventStore.safeAppend({
       taskId: taskId as any,
       eventType: 'StoryCompleted',
       agentName: 'system',
@@ -236,7 +236,7 @@ export async function markEpicComplete(
   // 1. EventStore - emit DevelopersCompleted event (used for epic completion)
   try {
     const { eventStore } = await import('../../EventStore');
-    await eventStore.append({
+    await eventStore.safeAppend({
       taskId: taskId as any,
       eventType: 'DevelopersCompleted',
       agentName: 'system',

@@ -31,7 +31,8 @@ export type ExecuteDeveloperFn = (
   architectureBrief?: any,
   environmentCommands?: any,
   projectRadiographies?: Map<string, any>,
-  resumeOptions?: { isResume?: boolean; sessionId?: string; resumeSessionId?: string; resumeAtMessage?: string }
+  resumeOptions?: { isResume?: boolean; sessionId?: string; resumeSessionId?: string; resumeAtMessage?: string },
+  sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
 ) => Promise<{
   cost?: number;
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -52,6 +53,7 @@ export class DeveloperStageExecutor {
       effectiveWorkspacePath, workspaceStructure, attachments, state,
       taskId, normalizedEpicId, normalizedStoryId, epicBranchName,
       devAuth, architectureBrief, environmentCommands, projectRadiographies,
+      sandboxId, // 🐳 Explicit sandbox ID for Docker execution
     } = pipelineCtx;
 
     console.log(`\n👨‍💻 [DEVELOPER STAGE] Starting for story: ${story.title}`);
@@ -116,7 +118,8 @@ export class DeveloperStageExecutor {
         architectureBrief,
         environmentCommands,
         projectRadiographies,
-        resumeOptions
+        resumeOptions,
+        sandboxId // 🐳 Explicit sandbox ID for Docker execution
       );
 
       // Save session checkpoint for potential resume
@@ -154,6 +157,15 @@ export class DeveloperStageExecutor {
       // Checkpoint: Mark story as "code_written"
       await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_written', {
         sdkSessionId: developerResult?.sdkSessionId,
+      });
+
+      // 🔥 Emit code_written notification for LivePreview HMR indicator
+      NotificationService.emitNotification(taskId, 'code_written', {
+        storyId: normalizedStoryId,
+        storyTitle: story.title,
+        developerId: developer.instanceId,
+        epicId: normalizedEpicId,
+        epicName: epic.name,
       });
 
       return {

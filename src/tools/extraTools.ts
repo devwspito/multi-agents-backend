@@ -64,7 +64,14 @@ export {
   generateDesignInspirationTool,
   generateJsdocTool,
   extractApiDocsTool,
+  // Sandbox tools (Docker container execution)
+  sandboxBashTool,
+  sandboxStatusTool,
+  sandboxFileSyncTool,
 } from './categories';
+
+// Re-export sandbox context functions for use in AgentExecutorService
+export { setSandboxContext, clearSandboxContext, getSandboxContext } from './categories';
 
 // Import for use in createExtraToolsServer
 import {
@@ -113,6 +120,10 @@ import {
   generateDesignInspirationTool,
   generateJsdocTool,
   extractApiDocsTool,
+  // Sandbox tools
+  sandboxBashTool,
+  sandboxStatusTool,
+  sandboxFileSyncTool,
 } from './categories';
 
 /**
@@ -178,6 +189,10 @@ export function createExtraToolsServer() {
       scaffoldComponentTool,
       scaffoldServiceTool,
       scaffoldModelTool,
+      // 🐳 Sandbox tools (Docker container execution)
+      sandboxBashTool,
+      sandboxStatusTool,
+      sandboxFileSyncTool,
     ],
   });
 }

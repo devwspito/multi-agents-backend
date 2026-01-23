@@ -5,9 +5,11 @@ import { RepositoryRepository } from '../database/repositories/RepositoryReposit
 import { WebhookApiKeyRepository } from '../database/repositories/WebhookApiKeyRepository.js';
 import { UserRepository } from '../database/repositories/UserRepository.js';
 import { GitHubService } from '../services/GitHubService';
+import { sandboxPoolService } from '../services/SandboxPoolService.js';
 import { z } from 'zod';
 import path from 'path';
 import os from 'os';
+import fs from 'fs';
 
 const router = Router();
 const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
@@ -1050,5 +1052,153 @@ router.post('/:id/webhook-keys/:keyId/regenerate', authenticate, async (req: Aut
     });
   }
 });
+
+/**
+ * ===================================================================
+ * ENVIRONMENT CLEANUP ENDPOINTS
+ * ===================================================================
+ */
+
+/**
+ * POST /api/projects/:id/clean-environment
+ * Clean sandbox containers and workspace files for a project
+ */
+router.post('/:id/clean-environment', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const projectId = req.params.id;
+    const userId = req.user!.id;
+
+    // Verify project ownership
+    const project = ProjectRepository.findById(projectId);
+
+    if (!project || project.userId !== userId) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    console.log(`🧹 [CleanEnvironment] Starting cleanup for project: ${project.name} (${projectId})`);
+
+    const results = {
+      sandboxes: { destroyed: 0, errors: [] as string[] },
+      workspaces: { cleaned: 0, errors: [] as string[], freedBytes: 0 },
+    };
+
+    // 1. Destroy all sandbox pools for this project
+    try {
+      const destroyedCount = await sandboxPoolService.destroyProjectPools(projectId);
+      results.sandboxes.destroyed = destroyedCount;
+      console.log(`   🐳 Destroyed ${destroyedCount} sandbox pools`);
+    } catch (sandboxError: any) {
+      console.error(`   ❌ Sandbox cleanup error:`, sandboxError.message);
+      results.sandboxes.errors.push(sandboxError.message);
+    }
+
+    // 2. Clean workspace directories
+    const agentWorkspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.homedir(), 'agent-workspace-prod');
+    const projectWorkspacePattern = `project-${projectId}`;
+
+    try {
+      if (fs.existsSync(agentWorkspaceDir)) {
+        const entries = fs.readdirSync(agentWorkspaceDir);
+
+        for (const entry of entries) {
+          const fullPath = path.join(agentWorkspaceDir, entry);
+
+          // Clean project-specific workspace
+          if (entry === projectWorkspacePattern || entry.includes(projectId)) {
+            try {
+              const stats = await getDirectorySize(fullPath);
+              fs.rmSync(fullPath, { recursive: true, force: true });
+              results.workspaces.cleaned++;
+              results.workspaces.freedBytes += stats;
+              console.log(`   📁 Cleaned workspace: ${entry} (${formatBytes(stats)})`);
+            } catch (err: any) {
+              results.workspaces.errors.push(`${entry}: ${err.message}`);
+            }
+          }
+        }
+      }
+    } catch (workspaceError: any) {
+      console.error(`   ❌ Workspace cleanup error:`, workspaceError.message);
+      results.workspaces.errors.push(workspaceError.message);
+    }
+
+    // 3. Sandbox state cleanup (no-op in simplified architecture)
+    // Sandboxes are ephemeral per task - cleaned up when tasks complete
+    // No persistent state to clean
+
+    const totalErrors = results.sandboxes.errors.length + results.workspaces.errors.length;
+    const success = totalErrors === 0;
+
+    console.log(`✅ [CleanEnvironment] Completed for project ${project.name}:`);
+    console.log(`   Sandboxes destroyed: ${results.sandboxes.destroyed}`);
+    console.log(`   Workspaces cleaned: ${results.workspaces.cleaned}`);
+    console.log(`   Space freed: ${formatBytes(results.workspaces.freedBytes)}`);
+
+    res.json({
+      success,
+      message: success
+        ? 'Environment cleaned successfully'
+        : 'Environment cleanup completed with some errors',
+      data: {
+        sandboxesDestroyed: results.sandboxes.destroyed,
+        workspacesCleaned: results.workspaces.cleaned,
+        spaceFreed: formatBytes(results.workspaces.freedBytes),
+        spaceFreedBytes: results.workspaces.freedBytes,
+        errors: totalErrors > 0 ? [...results.sandboxes.errors, ...results.workspaces.errors] : undefined,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error cleaning environment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to clean environment',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Helper: Get directory size recursively
+ */
+async function getDirectorySize(dirPath: string): Promise<number> {
+  let totalSize = 0;
+
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+
+      if (entry.isDirectory()) {
+        totalSize += await getDirectorySize(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          const stats = fs.statSync(fullPath);
+          totalSize += stats.size;
+        } catch {
+          // Skip files we can't stat
+        }
+      }
+    }
+  } catch {
+    // Skip directories we can't read
+  }
+
+  return totalSize;
+}
+
+/**
+ * Helper: Format bytes to human readable
+ */
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
 
 export default router;

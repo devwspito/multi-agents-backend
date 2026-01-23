@@ -21,7 +21,7 @@ import { CodebaseKnowledge } from '../CodebaseDiscoveryService';
 import { AutomatedTestRunner, TestResult } from '../AutomatedTestRunner';
 import { ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
-import { granularMemoryService } from '../GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
 import { AgentArtifactService } from '../AgentArtifactService';
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
@@ -70,7 +70,27 @@ export interface JudgeEvaluationContext {
   targetRepository?: string;
   architectureBrief?: any;
   projectRadiographies?: Map<string, ProjectRadiography>;
+
+  // 🐳 SANDBOX: Explicit sandbox ID for Docker execution
+  sandboxId?: string;
 }
+
+/**
+ * Rejection reason type - Used to route to appropriate specialist
+ * - 'conflicts': Git merge conflicts → ConflictResolver specialist
+ * - 'code_issues': Code quality/bugs → Fixer specialist or Developer retry
+ * - 'scope_violation': Files created outside allowed scope → Developer retry with strict rules
+ * - 'placeholder_code': Incomplete/placeholder code detected → Developer retry
+ * - 'missing_files': Required files not created → Developer retry
+ * - 'other': Generic rejection → Developer retry
+ */
+export type RejectReasonType =
+  | 'conflicts'
+  | 'code_issues'
+  | 'scope_violation'
+  | 'placeholder_code'
+  | 'missing_files'
+  | 'other';
 
 /**
  * Judge Result - Standardized output from all judges
@@ -88,6 +108,16 @@ export interface JudgeResult {
   requiresHumanReview?: boolean;
   /** Error message if evaluation failed */
   evaluationError?: string;
+  /**
+   * Reason for rejection - Used to route to appropriate specialist:
+   * - 'conflicts' → ConflictResolver specialist
+   * - 'code_issues' → Fixer specialist / Developer retry
+   * - 'scope_violation' → Developer retry with strict rules
+   * - 'placeholder_code' → Developer retry
+   * - 'missing_files' → Developer retry
+   * - 'other' → Developer retry
+   */
+  rejectReason?: RejectReasonType;
 }
 
 /**
@@ -155,7 +185,7 @@ export class JudgePhase extends BasePhase {
    * @returns JudgeResult with approved/rejected status and feedback
    */
   async evaluateWithType(evalContext: JudgeEvaluationContext): Promise<JudgeResult> {
-    const { type, workspacePath, taskId } = evalContext;
+    const { type, workspacePath, taskId, sandboxId } = evalContext;
 
     console.log(`\n⚖️ [Judge] Starting ${type.toUpperCase()} evaluation...`);
     AgentActivityService.emitMessage(taskId, `Judge-${type}`, `⚖️ Starting ${type} evaluation...`);
@@ -175,7 +205,7 @@ export class JudgePhase extends BasePhase {
         undefined, // sessionId
         undefined, // fork
         undefined, // attachments
-        undefined, // options
+        sandboxId ? { sandboxId } : undefined, // 🐳 options with sandboxId
         undefined, // contextOverride
         undefined, // skipOptimization
         'bypassPermissions' // Same permissions as the phase being judged
@@ -601,33 +631,7 @@ export class JudgePhase extends BasePhase {
         },
       });
 
-      // 🧠 GRANULAR MEMORY: Store Judge completion and learnings
-      const projectId = task.projectId?.toString();
-      if (projectId) {
-        try {
-          await granularMemoryService.storeProgress({
-            projectId,
-            taskId,
-            phaseType: 'judge',
-            agentType: 'judge',
-            status: 'completed',
-            details: `Judge approved all ${totalApproved} stories`,
-          });
-
-          // Store learning about what made the code pass
-          await granularMemoryService.storeLearning({
-            projectId,
-            taskId,
-            title: 'Quality Standards Met',
-            content: `All ${totalApproved} stories passed code review. Patterns that work: follow existing codebase conventions, proper error handling, complete implementations without TODOs.`,
-            importance: 'medium',
-          });
-
-          console.log(`🧠 [Judge] Stored completion memory`);
-        } catch (memError: any) {
-          console.warn(`⚠️ [Judge] Failed to store memory: ${memError.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService calls - SQLite (task.orchestration) tracks all Judge state
 
       return {
         success: true,
@@ -725,12 +729,16 @@ export class JudgePhase extends BasePhase {
     totalJudgeUsage: { input: number; output: number };
     totalDeveloperRetryCost: number;
     totalDeveloperRetryUsage: { input: number; output: number };
+    // 🔥 SPECIALIST ROUTING: Reason for rejection (for routing to specialist)
+    rejectReason?: RejectReasonType;
   }> {
     // 🔥 COST TRACKING: Initialize accumulators
     let totalJudgeCost = 0;
     let totalJudgeUsage = { input: 0, output: 0 };
     let totalDeveloperRetryCost = 0;
     let totalDeveloperRetryUsage = { input: 0, output: 0 };
+    // 🔥 SPECIALIST ROUTING: Track last rejection reason for routing decision
+    let lastRejectReason: RejectReasonType | undefined;
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       console.log(`🔍 [Judge] Story "${story.title}" - Evaluation attempt ${attempt}/${this.MAX_RETRIES}`);
@@ -769,6 +777,12 @@ export class JudgePhase extends BasePhase {
       totalJudgeUsage.output += evaluation.usage?.output_tokens || 0;
       console.log(`💰 [Judge] Evaluation cost: $${(evaluation.cost || 0).toFixed(4)} (accumulated: $${totalJudgeCost.toFixed(4)})`);
 
+      // 🔥 SPECIALIST ROUTING: Track rejection reason for routing decisions
+      if (evaluation.rejectReason) {
+        lastRejectReason = evaluation.rejectReason;
+        console.log(`📋 [Judge] Rejection reason: ${lastRejectReason}`);
+      }
+
       // 🔥 ATOMIC FIX: Store evaluation atomically to prevent race conditions
       // Use addOrUpdateJudgeEvaluation instead of direct array manipulation
       if (!multiTeamMode) {
@@ -785,6 +799,18 @@ export class JudgePhase extends BasePhase {
         console.log(`✅ [Judge] Evaluation saved atomically for story ${story.id}`);
       } else {
         // Multi-team mode: still need local update for in-memory consistency
+        // 🔥 FIX: Ensure judge.evaluations array exists before accessing
+        if (!task.orchestration.judge) {
+          task.orchestration.judge = {
+            agent: 'judge',
+            status: 'in_progress',
+            evaluations: [],
+            startedAt: new Date(),
+          } as any;
+        }
+        if (!task.orchestration.judge.evaluations) {
+          task.orchestration.judge.evaluations = [];
+        }
         const existingEvalIndex = task.orchestration.judge.evaluations.findIndex(
           (e: any) => e.storyId === story.id && e.developerId === developer.instanceId
         );
@@ -849,6 +875,7 @@ export class JudgePhase extends BasePhase {
           totalJudgeUsage,
           totalDeveloperRetryCost,
           totalDeveloperRetryUsage,
+          // No rejectReason for approved status
         };
       } else {
         // ❌ CODE NEEDS CHANGES
@@ -926,6 +953,7 @@ export class JudgePhase extends BasePhase {
               totalJudgeUsage,
               totalDeveloperRetryCost,
               totalDeveloperRetryUsage,
+              rejectReason: lastRejectReason,
             };
           }
         } else {
@@ -1013,6 +1041,7 @@ export class JudgePhase extends BasePhase {
             totalJudgeUsage,
             totalDeveloperRetryCost,
             totalDeveloperRetryUsage,
+            rejectReason: lastRejectReason,
           };
         }
       }
@@ -1026,6 +1055,7 @@ export class JudgePhase extends BasePhase {
       totalJudgeUsage,
       totalDeveloperRetryCost,
       totalDeveloperRetryUsage,
+      rejectReason: lastRejectReason,
     };
   }
 
@@ -1040,7 +1070,7 @@ export class JudgePhase extends BasePhase {
     developer: any,
     workspacePath: string | null,
     context: OrchestrationContext
-  ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string; cost: number; usage: any }> {
+  ): Promise<{ status: 'approved' | 'changes_requested'; feedback: string; cost: number; usage: any; rejectReason?: RejectReasonType }> {
 
     // 🔍 DETAILED LOGGING: Show exactly what Judge is about to review
     console.log(`\n${'='.repeat(80)}`);
@@ -1143,6 +1173,13 @@ export class JudgePhase extends BasePhase {
     console.log(`   📂 Repository: ${targetRepository}`);
     console.log(`   📁 Workspace: ${workspacePath || 'NOT SET'}`);
 
+    // 🐳 SANDBOX: Get sandbox ID for Docker execution
+    const sandboxMap = context.getData<Map<string, string>>('sandboxMap');
+    const sandboxId = sandboxMap?.get(targetRepository);
+    if (sandboxId) {
+      console.log(`   🐳 Sandbox: ${sandboxId}`);
+    }
+
     // Show files that should have been modified/created
     console.log(`\n📝 [Judge] Expected File Changes:`);
     const filesToModify: string[] = (story as any).filesToModify || [];
@@ -1167,6 +1204,54 @@ export class JudgePhase extends BasePhase {
 
     if (totalExpectedFiles === 0) {
       console.warn(`   ⚠️  WARNING: No expected file changes listed - Judge may have limited context`);
+    }
+
+    // 🔥🔥🔥 CRITICAL FIX: Sync workspace from GitHub BEFORE verifying files 🔥🔥🔥
+    // GitHub ALWAYS has the correct code (push is forced), but local workspace may be stale.
+    // This ensures Judge sees the EXACT code the Developer pushed.
+    if (workspacePath && targetRepository && storyBranchName) {
+      const repoPath = path.join(workspacePath, targetRepository);
+      console.log(`\n🔄 [Judge] Syncing workspace from GitHub...`);
+      console.log(`   📂 Repo: ${repoPath}`);
+      console.log(`   🔀 Branch: ${storyBranchName}`);
+
+      try {
+        const { safeGitExecSync } = await import('../../utils/safeGitExecution');
+
+        // Fetch latest from remote
+        console.log(`   ⬇️  Fetching from origin...`);
+        safeGitExecSync(`git fetch origin --prune`, { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+
+        // Check if branch exists on remote
+        const remoteBranchCheck = safeGitExecSync(
+          `git ls-remote --heads origin ${storyBranchName}`,
+          { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
+        );
+
+        if (remoteBranchCheck.trim()) {
+          console.log(`   ✅ Branch exists on remote`);
+
+          // Checkout the story branch (create from remote if needed)
+          try {
+            safeGitExecSync(`git checkout ${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+          } catch {
+            // Branch doesn't exist locally, create from remote
+            console.log(`   📥 Creating local branch from remote...`);
+            safeGitExecSync(`git checkout -b ${storyBranchName} origin/${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+          }
+
+          // Reset to EXACT state on remote (this is what GitHub has)
+          console.log(`   🔄 Resetting to origin/${storyBranchName}...`);
+          safeGitExecSync(`git reset --hard origin/${storyBranchName}`, { cwd: repoPath, encoding: 'utf8' });
+          console.log(`   ✅ Workspace synced with GitHub`);
+        } else {
+          console.warn(`   ⚠️  Branch ${storyBranchName} NOT found on remote!`);
+          console.warn(`   This means Developer may not have pushed successfully.`);
+        }
+      } catch (syncError: any) {
+        console.error(`   ❌ Sync from GitHub failed: ${syncError.message}`);
+        console.error(`   Judge will evaluate with possibly stale local files.`);
+      }
     }
 
     // 🔥🔥🔥 CRITICAL VALIDATION: Verify files actually exist before Judge evaluation 🔥🔥🔥
@@ -1202,11 +1287,13 @@ export class JudgePhase extends BasePhase {
         missingFiles.forEach(f => console.log(`   - ${f}`));
 
         // Return immediate rejection - don't even call the Judge AI
+        // 🔥 SPECIALIST ROUTING: Classified as MISSING_FILES → Developer retry
         return {
           status: 'changes_requested',
           feedback: `🚨 AUTOMATIC REJECTION: Developer did not create required files.\n\nMissing files:\n${missingFiles.map(f => `- ${f}`).join('\n')}\n\nThe developer must create these files before the code can be reviewed.`,
           cost: 0,
           usage: { input_tokens: 0, output_tokens: 0 },
+          rejectReason: 'missing_files' as RejectReasonType,
         };
       }
 
@@ -1416,6 +1503,7 @@ export class JudgePhase extends BasePhase {
         {
           maxIterations: 5,
           timeout: AGENT_TIMEOUTS.JUDGE, // 5 minutes
+          sandboxId, // 🐳 Explicit sandbox ID for Docker execution
         },
         undefined, // contextOverride
         undefined, // skipOptimization
@@ -1491,6 +1579,8 @@ export class JudgePhase extends BasePhase {
         // 🔥 COST TRACKING: Return cost and usage from Judge execution
         cost: result.cost || 0,
         usage: result.usage || {},
+        // 🔥 SPECIALIST ROUTING: Include rejectReason for routing decisions
+        rejectReason: parsed.rejectReason,
       };
 
     } catch (error: any) {
@@ -1499,11 +1589,13 @@ export class JudgePhase extends BasePhase {
       // 🔄 Mark session checkpoint as failed
       await sessionCheckpointService.markFailed(taskId, 'judge', story.id, error.message);
 
+      // 🔥 SPECIALIST ROUTING: Classify error as 'other' for retry
       return {
         status: 'changes_requested',
         feedback: `Evaluation failed: ${error.message}. Please review the code manually.`,
         cost: 0,
         usage: {},
+        rejectReason: 'other' as RejectReasonType,
       };
     }
   }
@@ -1520,6 +1612,119 @@ export class JudgePhase extends BasePhase {
   // ============================================================================
 
   /**
+   * Classify the rejection reason from Judge feedback
+   * Used to route to the appropriate specialist:
+   * - 'conflicts' → ConflictResolver
+   * - 'code_issues' → Fixer / Developer retry
+   * - 'scope_violation' → Developer retry (stricter)
+   * - 'placeholder_code' → Developer retry
+   * - 'missing_files' → Developer retry
+   * - 'other' → Developer retry
+   */
+  private classifyRejectReason(feedback: string): RejectReasonType {
+    // 🔥 CONFLICTS: Git merge conflicts
+    const conflictPatterns = [
+      /merge\s+conflict/i,
+      /conflict\s+(in|with|detected)/i,
+      /<<<<<<</,        // Git conflict marker
+      /=======/,        // Git conflict marker
+      />>>>>>>/,        // Git conflict marker
+      /unable\s+to\s+merge/i,
+      /failed\s+to\s+merge/i,
+      /cannot\s+(auto)?merge/i,
+      /rebase\s+(failed|conflict)/i,
+      /conflict\s+markers?\s+found/i,
+      /unresolved\s+conflict/i,
+    ];
+    if (conflictPatterns.some(p => p.test(feedback))) {
+      console.log(`   🔍 [RejectReason] Classified as: CONFLICTS (merge conflict detected)`);
+      return 'conflicts';
+    }
+
+    // 🚫 SCOPE VIOLATION: Files outside allowed scope
+    const scopePatterns = [
+      /scope\s+violation/i,
+      /file.+not\s+in\s+(allowed|scope)/i,
+      /created.+outside\s+(of\s+)?scope/i,
+      /modified.+outside\s+(of\s+)?scope/i,
+      /unauthorized\s+file/i,
+      /filesToCreate\s+violation/i,
+      /filesToModify\s+violation/i,
+      /forbidden.+(file|directory)/i,
+      /only\s+allowed\s+to\s+(modify|create)/i,
+    ];
+    if (scopePatterns.some(p => p.test(feedback))) {
+      console.log(`   🔍 [RejectReason] Classified as: SCOPE_VIOLATION`);
+      return 'scope_violation';
+    }
+
+    // 📝 PLACEHOLDER CODE: Incomplete/stub code
+    const placeholderPatterns = [
+      /placeholder/i,
+      /coming\s+soon/i,
+      /todo\s*:/i,
+      /not\s+implemented/i,
+      /stub\s+(code|function|method)/i,
+      /wip\s/i,
+      /work\s+in\s+progress/i,
+      /empty\s+(function|method|class)/i,
+      /throw\s+new\s+(Error|NotImplemented)/i,
+      /_Placeholder/i,
+      /dummy\s+(data|code|implementation)/i,
+    ];
+    if (placeholderPatterns.some(p => p.test(feedback))) {
+      console.log(`   🔍 [RejectReason] Classified as: PLACEHOLDER_CODE`);
+      return 'placeholder_code';
+    }
+
+    // 📁 MISSING FILES: Required files not created
+    const missingFilePatterns = [
+      /missing\s+file/i,
+      /file.+not\s+(found|created|exist)/i,
+      /required\s+file.+missing/i,
+      /expected\s+file.+not\s+found/i,
+      /did\s+not\s+create/i,
+      /must\s+create/i,
+      /0\s+bytes/i,
+      /empty\s+file/i,
+    ];
+    if (missingFilePatterns.some(p => p.test(feedback))) {
+      console.log(`   🔍 [RejectReason] Classified as: MISSING_FILES`);
+      return 'missing_files';
+    }
+
+    // 🐛 CODE ISSUES: General code quality problems (bugs, errors, bad patterns)
+    const codeIssuePatterns = [
+      /bug\s+(found|detected)/i,
+      /error\s+(in|found|detected)/i,
+      /syntax\s+error/i,
+      /type\s+error/i,
+      /compilation\s+(failed|error)/i,
+      /build\s+(failed|error)/i,
+      /test.+(fail|error)/i,
+      /runtime\s+error/i,
+      /null\s+pointer/i,
+      /undefined\s+(variable|reference)/i,
+      /security\s+(issue|vulnerability)/i,
+      /broken\s+(code|logic|function)/i,
+      /logic\s+error/i,
+      /infinite\s+loop/i,
+      /memory\s+leak/i,
+      /performance\s+issue/i,
+      /quality\s+standard.+not\s+met/i,
+      /does\s+not\s+meet\s+requirements/i,
+    ];
+    if (codeIssuePatterns.some(p => p.test(feedback))) {
+      console.log(`   🔍 [RejectReason] Classified as: CODE_ISSUES`);
+      return 'code_issues';
+    }
+
+    // 🤷 OTHER: Default catch-all
+    console.log(`   🔍 [RejectReason] Classified as: OTHER (no specific pattern matched)`);
+    return 'other';
+  }
+
+  /**
    * Parse Judge agent output - Uses plain text markers with SMART FALLBACK
    *
    * 🔥🔥🔥 SMART FALLBACK LOGIC 🔥🔥🔥
@@ -1530,7 +1735,7 @@ export class JudgePhase extends BasePhase {
    * 4. If no markers but negative language → rejected
    * 5. If completely unclear → approved (benefit of the doubt)
    */
-  private parseJudgeOutput(output: string): { status: string; feedback: string } {
+  private parseJudgeOutput(output: string): { status: string; feedback: string; rejectReason?: RejectReasonType } {
     console.log(`🔍 [Judge] Parsing output (length: ${output.length} chars)...`);
 
     // Check for approval/rejection markers
@@ -1563,9 +1768,13 @@ export class JudgePhase extends BasePhase {
       if (requiredChanges) feedback += `Required Changes: ${requiredChanges}\n`;
       if (!feedback) feedback = output;
 
+      // 🔥 SPECIALIST ROUTING: Classify rejection reason
+      const rejectReason = this.classifyRejectReason(feedback);
+
       return {
         status: 'changes_requested',
         feedback: feedback,
+        rejectReason,
       };
     }
 
@@ -1628,9 +1837,13 @@ export class JudgePhase extends BasePhase {
         feedback = lines.slice(-5).join('\n');
       }
 
+      // 🔥 SPECIALIST ROUTING: Classify rejection reason from output
+      const rejectReason = this.classifyRejectReason(output);
+
       return {
         status: 'changes_requested',
         feedback: feedback || 'Review feedback required',
+        rejectReason,
       };
     }
 
@@ -1804,6 +2017,15 @@ npm test             # Must pass
     const epicBranchName = context.getData<string>('epicBranch');
     console.log(`📂 [Judge] Passing epic branch to developer for retry: ${epicBranchName || 'not specified'}`);
 
+    // 🐳 SANDBOX: Get sandbox ID for Docker execution
+    const sandboxMap = context.getData<Map<string, string>>('sandboxMap');
+    const epic = state.epics?.find((e: any) => e.stories?.includes(story.id));
+    const targetRepository = epic?.targetRepository || repositories[0]?.name;
+    const sandboxId = sandboxMap?.get(targetRepository);
+    if (sandboxId) {
+      console.log(`🐳 [Judge] Using sandbox ${sandboxId} for developer retry`);
+    }
+
     // 🔥🔥🔥 CRITICAL FIX: Fetch all remote branches BEFORE retry
     // The isolated workspace might not have the story branch available locally.
     // Developer pushed it to remote, so we need to fetch it before retry.
@@ -1876,7 +2098,13 @@ npm test             # Must pass
         state.epics,
         formattedFeedback, // Pass FORMATTED Judge feedback for retry (structured and clear)
         epicBranchName, // Epic branch name from TeamOrchestrationPhase
-        true // 🚀 forceTopModel: Use best model for retry (Judge rejected the code)
+        true, // 🚀 forceTopModel: Use best model for retry (Judge rejected the code)
+        context.getData<any>('devAuth'), // 🔐 Developer authentication
+        context.getData<any>('architectureBrief'), // 🏗️ Architecture patterns
+        context.getData<any>('environmentCommands'), // 🔧 Environment commands
+        context.getData<Map<string, any>>('projectRadiographies'), // 🔬 Project analysis
+        undefined, // resumeOptions (no resume for retry)
+        sandboxId // 🐳 Explicit sandbox ID for Docker execution
       );
 
       // 🔥 COST TRACKING: Store developer retry cost for accumulation

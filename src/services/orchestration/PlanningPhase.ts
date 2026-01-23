@@ -8,16 +8,19 @@ import { CodebaseDiscoveryService, CodebaseKnowledge } from '../CodebaseDiscover
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
 import { JudgePhase } from './JudgePhase';
 import { sessionCheckpointService } from '../SessionCheckpointService';
-import { granularMemoryService } from '../GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
 import { AgentArtifactService } from '../AgentArtifactService';
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
 // 📦 Utility helpers
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { isEmpty } from './utils/ArrayHelpers';
-import { getEpicId } from './utils/IdNormalizer';
+// 🔥 REMOVED: getEpicId - was only used by granularMemoryService
 // 📦 SQLite Repository
 import { TaskRepository } from '../../database/repositories/TaskRepository';
+import { sandboxService } from '../SandboxService';
+import { sandboxPoolService } from '../SandboxPoolService';
+import { languageDetectionService, DetectedLanguage } from '../LanguageDetectionService';
 import fs from 'fs';
 import path from 'path';
 
@@ -103,6 +106,31 @@ export class PlanningPhase extends BasePhase {
     console.log(`Repositories: ${repositories.map((r: any) => `${r.name} (${r.type})`).join(', ')}`);
     console.log(`Permission Mode: plan (read-only exploration)`);
     console.log(`${'='.repeat(80)}\n`);
+
+    // 🔍 LANGUAGE DETECTION: Use LLM to detect language/framework from task description
+    // This is 100% language-agnostic - no hardcoded patterns needed
+    let detectedLanguage: DetectedLanguage | null = null;
+    const descriptionToAnalyze = task.description || task.title || '';
+    console.log(`🔍 [Planning] Language detection - description length: ${descriptionToAnalyze.length}`);
+    if (descriptionToAnalyze.length > 0) {
+      console.log(`🔍 [Planning] Detecting language from task description using LLM...`);
+      console.log(`   Input: "${descriptionToAnalyze.substring(0, 100)}${descriptionToAnalyze.length > 100 ? '...' : ''}"`);
+      try {
+        const detection = await languageDetectionService.detectFromDescription(
+          descriptionToAnalyze,
+          task.title // Additional context
+        );
+        detectedLanguage = detection.primary;
+        context.setData('detectedLanguage', detectedLanguage);
+        console.log(`✅ [Planning] Language detected: ${detectedLanguage.language}/${detectedLanguage.framework}`);
+        console.log(`   Docker image: ${detectedLanguage.dockerImage}`);
+        console.log(`   Confidence: ${detectedLanguage.confidence}`);
+      } catch (error: any) {
+        console.warn(`⚠️ [Planning] Language detection failed: ${error.message}`);
+      }
+    } else {
+      console.warn(`⚠️ [Planning] No task description or title available for language detection`);
+    }
 
     // Initialize phase state
     const startTime = new Date();
@@ -245,7 +273,7 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
       let retryCount = 0;
       let lastError: any = null;
       const effectiveWorkspacePath = workspacePath || process.cwd();
-      const projectId = task.projectId?.toString();
+      // 🔥 REMOVED: projectId declaration - was only used by granularMemoryService
 
       // 🔥 PROGRAMMATIC CODEBASE DISCOVERY WITH CACHING
       // Checks: 1) Context (retry) → 2) Granular Memory (restart) → 3) Fresh scan
@@ -255,60 +283,15 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
       // 1️⃣ Check context first (from previous retry in same execution)
       codebaseKnowledge = context.getData('codebaseKnowledge') as CodebaseKnowledge | undefined;
 
-      // 2️⃣ Check granular memory (from previous execution before restart)
-      // 🔥 CRITICAL: Use getTaskCache (STRICT) - only loads cache for THIS EXACT TASK
-      // This prevents loading stale cache from previous tasks where code may have changed
-      if (!codebaseKnowledge && projectId) {
-        try {
-          const discoveryCache = await granularMemoryService.getTaskCache({
-            projectId,
-            taskId,
-            phaseType: 'planning',
-            cacheTitle: 'CodebaseDiscovery Cache',
-          });
-          if (discoveryCache?.content) {
-            try {
-              codebaseKnowledge = JSON.parse(discoveryCache.content) as CodebaseKnowledge;
-              console.log(`✅ [Cache] Loaded codebaseKnowledge from granular memory (taskId: ${taskId})`);
-              console.log(`   → ${codebaseKnowledge.helperFunctions?.length || 0} helpers, ${codebaseKnowledge.entityCreationRules?.length || 0} rules`);
-              context.setData('codebaseKnowledge', codebaseKnowledge);
-            } catch (parseErr) {
-              console.warn(`⚠️ [Cache] Failed to parse cached discovery, will re-scan`);
-            }
-          }
-        } catch (memErr: any) {
-          console.warn(`⚠️ [Cache] Memory check failed: ${memErr.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService cache check - SQLite is single source of truth
 
-      // 3️⃣ Fresh scan if no cache
+      // 2️⃣ Fresh scan if no cache
       if (!codebaseKnowledge) {
         console.log(`🔍 [PlanningPhase] Running fresh codebase discovery...`);
         try {
           codebaseKnowledge = await CodebaseDiscoveryService.discoverCodebase(effectiveWorkspacePath);
           context.setData('codebaseKnowledge', codebaseKnowledge);
           console.log(`✅ [PlanningPhase] Discovered ${codebaseKnowledge.helperFunctions.length} helper functions, ${codebaseKnowledge.entityCreationRules.length} entity rules`);
-
-          // Cache to granular memory for future restarts
-          if (projectId) {
-            try {
-              await granularMemoryService.store({
-                projectId,
-                taskId,
-                scope: 'task',
-                phaseType: 'planning',
-                agentType: 'planning-agent',
-                type: 'context',
-                title: 'CodebaseDiscovery Cache',
-                content: JSON.stringify(codebaseKnowledge),
-                importance: 'medium',
-                confidence: 1.0,
-              });
-              console.log(`[Cache] Stored codebaseKnowledge in granular memory`);
-            } catch (storeErr: any) {
-              console.warn(`[Cache] Failed to store discovery: ${storeErr.message}`);
-            }
-          }
         } catch (error: any) {
           console.warn(`⚠️ [PlanningPhase] Codebase discovery failed (will continue): ${error.message}`);
         }
@@ -327,41 +310,9 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
         console.log(`✅ [Cache] Loaded ${projectRadiographies.size} radiographies from context`);
       }
 
-      // 2️⃣ Check granular memory
-      // 🔥 CRITICAL: Use getTaskCaches (STRICT) - only loads cache for THIS EXACT TASK
-      // This prevents loading stale cache from previous tasks where code may have changed
-      if (projectRadiographies.size === 0 && projectId) {
-        try {
-          const radiographyCaches = await granularMemoryService.getTaskCaches({
-            projectId,
-            taskId,
-            phaseType: 'planning',
-            cacheTitlePrefix: 'ProjectRadiography:',
-            limit: 10,
-          });
-          if (radiographyCaches.length > 0) {
-            for (const cache of radiographyCaches) {
-              const repoName = cache.title?.replace('ProjectRadiography: ', '') || '';
-              if (repoName && cache.content) {
-                try {
-                  const radiography = JSON.parse(cache.content) as ProjectRadiography;
-                  projectRadiographies.set(repoName, radiography);
-                } catch (parseErr) {
-                  // Skip invalid cache
-                }
-              }
-            }
-            if (projectRadiographies.size > 0) {
-              console.log(`✅ [Cache] Loaded ${projectRadiographies.size} radiographies from granular memory (taskId: ${taskId})`);
-              context.setData('projectRadiographies', projectRadiographies);
-            }
-          }
-        } catch (memErr: any) {
-          console.warn(`⚠️ [Cache] Memory check failed: ${memErr.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService cache check - SQLite is single source of truth
 
-      // 3️⃣ Fresh scan for missing repositories
+      // 2️⃣ Fresh scan for missing repositories
       const missingRepos = repositories.filter((r: any) => !projectRadiographies.has(r.name));
       if (missingRepos.length > 0) {
         console.log(`🔬 [PlanningPhase] Scanning ${missingRepos.length} repository(s)...`);
@@ -373,26 +324,7 @@ ${previousOutput.substring(0, 2000)}${previousOutput.length > 2000 ? '...(trunca
               const radiography = await ProjectRadiographyService.scan(repoPath);
               projectRadiographies.set(repo.name, radiography);
               console.log(`  ✅ ${repo.name}: ${radiography.language.primary}/${radiography.framework.name} - ${radiography.routes.length} routes, ${radiography.models.length} models, ${radiography.services.length} services`);
-
-              // Cache to granular memory
-              if (projectId) {
-                try {
-                  await granularMemoryService.store({
-                    projectId,
-                    taskId,
-                    scope: 'task',
-                    phaseType: 'planning',
-                    agentType: 'planning-agent',
-                    type: 'context',
-                    title: `ProjectRadiography: ${repo.name}`,
-                    content: JSON.stringify(radiography),
-                    importance: 'medium',
-                    confidence: 1.0,
-                  });
-                } catch (storeErr: any) {
-                  // Non-critical
-                }
-              }
+              // 🔥 REMOVED: granularMemoryService.store - SQLite is single source of truth
             } catch (error: any) {
               console.warn(`  ⚠️ ${repo.name}: Radiography failed (will continue): ${error.message}`);
             }
@@ -615,6 +547,25 @@ ${judgeFeedback}
 
       console.log(`✅ [Planning] Judge approved - ${planningJudgeResult.epicsCount} epic(s)`);
 
+      // 📦 POST-PLANNING SETUP: Create project structure and install dependencies if needed
+      // This runs AFTER Planning because Planning determines the tech stack
+      const sandboxMap = await this.setupProjectIfNeeded(
+        taskId,
+        effectiveWorkspacePath,
+        repositories,
+        projectRadiographies,
+        parsed.architectureBrief,
+        detectedLanguage  // 🔍 LLM-detected language from task.description
+      );
+
+      // 🔗 CRITICAL: Store sandbox map in context for ALL phases (TechLead, Developers, Judge, QA, Fixer)
+      // Each phase needs to know which Docker sandbox to use for each repository
+      if (sandboxMap.size > 0) {
+        context.setData('sandboxMap', sandboxMap);
+        context.setData('useSandbox', true); // Mark that sandboxes are available
+        console.log(`🐳 [Planning] Stored sandbox map in context: ${sandboxMap.size} repo(s)`);
+      }
+
       // 🔥 CRITICAL: Re-fetch task from DB to avoid stale data
       // During the agent execution (~2-3 min), WebSocket notifications may have updated the task
       const freshTask = TaskRepository.findById(task.id);
@@ -742,7 +693,7 @@ ${judgeFeedback}
 
       // Event sourcing
       const { eventStore } = await import('../EventStore');
-      await eventStore.append({
+      await eventStore.safeAppend({
         taskId: task.id as any,
         eventType: 'PlanningCompleted',
         agentName: 'planning-agent',
@@ -759,61 +710,7 @@ ${judgeFeedback}
       // 🔄 Mark checkpoint as completed (no resume needed)
       await sessionCheckpointService.markCompleted(taskId, 'planning');
 
-      // 🧠 GRANULAR MEMORY: Store planning decisions and discoveries
-      const projectId = task.projectId?.toString();
-      if (projectId) {
-        try {
-          // Store progress marker
-          await granularMemoryService.storeProgress({
-            projectId,
-            taskId,
-            phaseType: 'planning',
-            agentType: 'planning-agent',
-            status: 'completed',
-            details: `Created ${enrichedEpics.length} epic(s): ${enrichedEpics.map((e: any) => e.title).join(', ')}`,
-          });
-
-          // Store each epic as a decision
-          for (const epic of enrichedEpics) {
-            await granularMemoryService.storeDecision({
-              projectId,
-              taskId,
-              phaseType: 'planning',
-              agentType: 'planning-agent',
-              epicId: getEpicId(epic), // 🔥 CENTRALIZED: Use IdNormalizer
-              title: `Epic: ${epic.title}`,
-              content: `Repository: ${epic.targetRepository}\nDescription: ${epic.description || 'N/A'}\nFiles to modify: ${epic.filesToModify?.join(', ') || 'none'}\nFiles to create: ${epic.filesToCreate?.join(', ') || 'none'}`,
-              importance: 'high',
-            });
-          }
-
-          // Store patterns from architectureBrief
-          if (parsed.architectureBrief?.codePatterns) {
-            const patterns = parsed.architectureBrief.codePatterns;
-            await granularMemoryService.storePattern({
-              projectId,
-              title: 'Code Patterns Discovered',
-              content: `Naming: ${patterns.namingConvention || 'N/A'}\nFile Structure: ${patterns.fileStructure || 'N/A'}\nError Handling: ${patterns.errorHandling || 'N/A'}\nTesting: ${patterns.testing || 'N/A'}`,
-              importance: 'high',
-            });
-          }
-
-          // Store conventions from codebaseKnowledge
-          if (codebaseKnowledge?.helperFunctions?.length) {
-            for (const helper of codebaseKnowledge.helperFunctions.slice(0, 5)) {
-              await granularMemoryService.storeConvention({
-                projectId,
-                title: `Use ${helper.name}()`,
-                content: `File: ${helper.file}\nUsage: ${helper.usage}\n${helper.antiPattern ? `Anti-pattern: ${helper.antiPattern}` : ''}`,
-              });
-            }
-          }
-
-          console.log(`🧠 [Planning] Stored ${enrichedEpics.length + 2} memories (progress, epics, patterns)`);
-        } catch (memError: any) {
-          console.warn(`⚠️ [Planning] Failed to store memories: ${memError.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService calls - SQLite (task.orchestration) tracks all planning state
 
       return {
         success: true,
@@ -1648,5 +1545,1324 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
         score: judgeResult.score || 0,
       },
     };
+  }
+
+  // --------------------------------------------------------------------------
+  // 📦 PROJECT SETUP: Create projects and install dependencies after Planning
+  // --------------------------------------------------------------------------
+
+  /**
+   * Setup project structure and dependencies after Planning determines the tech stack.
+   *
+   * 🔥 ARCHITECTURE (2026-01-23): ONE SANDBOX PER TASK
+   * - Creates a SINGLE multi-runtime sandbox per task
+   * - Mounts ALL repos into /workspace/{repo-name}/
+   * - Frontend can use localhost:3001 to reach backend (same container!)
+   * - Simpler networking, simpler debugging
+   *
+   * This method:
+   * 1. For NEW projects (empty repos): Creates project structure (flutter create, npm init, etc.)
+   * 2. For ALL projects: Installs dependencies if dependency files exist
+   *
+   * Called AFTER Planning completes because Planning determines what technologies to use.
+   */
+  private async setupProjectIfNeeded(
+    taskId: string,
+    workspacePath: string,
+    repositories: any[],
+    projectRadiographies: Map<string, any>,
+    architectureBrief: any,
+    llmDetectedLanguage: DetectedLanguage | null  // 🔍 LLM-detected language from task.description
+  ): Promise<Map<string, string>> {  // 🔗 Returns: repoName -> sandboxId map
+    console.log(`\n📦 [Planning] Post-planning setup: checking project dependencies...`);
+
+    // Initialize sandbox service (auto-detects/installs Docker if needed)
+    await sandboxService.initialize();
+
+    // Check if sandbox is available
+    if (!sandboxService.isDockerAvailable()) {
+      console.log(`   ⚠️ Docker not available, skipping Docker setup (commands will run on host)`);
+      // Continue anyway - we'll try to run commands on host as fallback
+    }
+
+    // Configuration for project setup by language
+    // Note: dockerImage is ignored now - we use multi-runtime image for everything
+    const setupConfig: Record<string, {
+      checkFile: string;
+      createCmd?: string;
+      installCmd: string;
+      postCmds?: string[];
+      dockerImage: string; // Kept for backward compatibility, but ignored
+    }> = {
+      flutter: {
+        checkFile: 'pubspec.yaml',
+        createCmd: 'flutter create . --org com.example --project-name app --overwrite',
+        installCmd: 'flutter pub get',
+        postCmds: ['flutter doctor -v'],
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      dart: {
+        checkFile: 'pubspec.yaml',
+        createCmd: 'dart create . --overwrite',
+        installCmd: 'dart pub get',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      node: {
+        checkFile: 'package.json',
+        createCmd: 'npm init -y',
+        installCmd: 'npm install',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      typescript: {
+        checkFile: 'package.json',
+        createCmd: 'npm init -y && npm install typescript @types/node -D && npx tsc --init',
+        installCmd: 'npm install',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      python: {
+        checkFile: 'requirements.txt',
+        installCmd: 'pip install -r requirements.txt',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      go: {
+        checkFile: 'go.mod',
+        createCmd: 'go mod init app',
+        installCmd: 'go mod download',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+      rust: {
+        checkFile: 'Cargo.toml',
+        createCmd: 'cargo init --force',
+        installCmd: 'cargo fetch',
+        dockerImage: 'multi-runtime', // Ignored - using multi-runtime
+      },
+    };
+
+    // Get projectId from task
+    const task = TaskRepository.findById(taskId);
+    const projectId = task?.projectId?.toString() || taskId;
+
+    // ==========================================================================
+    // 🔥 STEP 1: Create ONE sandbox per TASK with ALL repos mounted
+    // ==========================================================================
+    const unifiedSandboxId = taskId; // ONE sandbox ID for the whole task
+    let sandbox: any = null;
+    let sandboxCreated = false;
+
+    if (sandboxService.isDockerAvailable() && repositories.length > 0) {
+      console.log(`\n   🐳 [Planning] Creating UNIFIED sandbox for task (multi-runtime image)`);
+      console.log(`      Task: ${taskId}`);
+      console.log(`      Repos: ${repositories.map(r => r.name).join(', ')}`);
+
+      // Build workspace mounts: each repo gets mounted at /workspace/{repo-name}
+      const workspaceMounts: Record<string, string> = {};
+      for (const repo of repositories) {
+        const hostPath = path.join(workspacePath, repo.name);
+        const containerPath = `/workspace/${repo.name}`;
+        workspaceMounts[hostPath] = containerPath;
+        console.log(`      Mount: ${hostPath} → ${containerPath}`);
+      }
+
+      // Collect ALL ports from ALL repos for the unified sandbox
+      const allPorts: string[] = [];
+      // Common preview ports
+      allPorts.push('0:3000');  // React/Vue/Angular
+      allPorts.push('0:3001');  // Node.js backend
+      allPorts.push('0:5000');  // Python Flask
+      allPorts.push('0:8080');  // General purpose
+      allPorts.push('0:5173');  // Vite
+      allPorts.push('0:8000');  // Python Django/FastAPI
+
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🐳 Creating unified sandbox for all repos (multi-runtime: Flutter + Node.js + Python)`
+      );
+
+      // Use sandboxPoolService to create the unified sandbox
+      const result = await sandboxPoolService.findOrCreateSandbox(
+        taskId,
+        projectId,
+        'unified', // Special repo name indicating unified sandbox
+        [], // plannedFiles - not used
+        workspacePath, // Base workspace path
+        'multi-runtime', // This will use the multi-runtime image
+        {
+          networkMode: 'bridge',
+          memoryLimit: '8g', // More memory for multi-runtime
+          cpuLimit: '4', // More CPU for multi-runtime
+          ports: allPorts,
+          workspaceMounts, // Mount all repos
+        },
+        'fullstack' // Unified sandbox handles all types
+      );
+
+      sandbox = result.sandbox;
+      sandboxCreated = !!sandbox;
+
+      if (sandbox) {
+        console.log(`   ✅ [Planning] Unified sandbox created: ${sandbox.containerName}`);
+        if (sandbox.mappedPorts && Object.keys(sandbox.mappedPorts).length > 0) {
+          console.log(`      🔌 Mapped ports:`);
+          for (const [containerPort, hostPort] of Object.entries(sandbox.mappedPorts)) {
+            console.log(`         ${containerPort} → ${hostPort} (http://localhost:${hostPort})`);
+          }
+        }
+      } else {
+        console.warn(`   ⚠️ [Planning] Failed to create unified sandbox, will use host execution`);
+      }
+    }
+
+    // ==========================================================================
+    // 🔥 STEP 2: Setup each repo WITHIN the unified sandbox
+    // ==========================================================================
+
+    // 🔗 Track sandbox info for each repo (all point to same sandbox)
+    interface SandboxInfo {
+      repoName: string;
+      repoType: 'backend' | 'frontend' | 'fullstack' | 'unknown';
+      repoPath: string;
+      language: string;
+      sandboxId: string;
+      mappedPorts: Record<string, string>;
+    }
+    const sandboxInfos: SandboxInfo[] = [];
+
+    for (const repo of repositories) {
+      const repoPath = path.join(workspacePath, repo.name);
+      const containerRepoPath = `/workspace/${repo.name}`; // Path INSIDE container
+      const radiography = projectRadiographies.get(repo.name);
+
+      // 🔍 PRIORITY 1: Radiography detection (existing code is source of truth)
+      let language = radiography?.language?.primary?.toLowerCase() || 'unknown';
+      if (language !== 'unknown') {
+        console.log(`   📊 [${repo.name}] Using radiography-detected language: ${language}`);
+      }
+
+      // PRIORITY 2: LLM detection from task.description (for empty/new repos only)
+      if (language === 'unknown' && llmDetectedLanguage && llmDetectedLanguage.confidence !== 'low') {
+        language = llmDetectedLanguage.language;
+        console.log(`   🤖 [${repo.name}] Using LLM-detected language: ${language} (empty repo, ${llmDetectedLanguage.confidence} confidence)`);
+      }
+
+      // PRIORITY 3: Architecture brief (from planning output)
+      if (language === 'unknown' && architectureBrief?.techStack) {
+        const techStack = architectureBrief.techStack.toLowerCase();
+        if (techStack.includes('flutter')) language = 'flutter';
+        else if (techStack.includes('dart')) language = 'dart';
+        else if (techStack.includes('typescript')) language = 'typescript';
+        else if (techStack.includes('node') || techStack.includes('javascript')) language = 'node';
+        else if (techStack.includes('python')) language = 'python';
+        else if (techStack.includes('go') || techStack.includes('golang')) language = 'go';
+        else if (techStack.includes('rust')) language = 'rust';
+      }
+
+      // PRIORITY 4: Direct file detection (fallback)
+      if (language === 'unknown') {
+        if (fs.existsSync(path.join(repoPath, 'pubspec.yaml'))) {
+          const pubspec = fs.readFileSync(path.join(repoPath, 'pubspec.yaml'), 'utf-8');
+          language = pubspec.includes('flutter:') ? 'flutter' : 'dart';
+          console.log(`   🔍 [${repo.name}] Detected ${language} from pubspec.yaml`);
+        } else if (fs.existsSync(path.join(repoPath, 'package.json'))) {
+          const pkgJson = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf-8'));
+          language = pkgJson.devDependencies?.typescript || pkgJson.dependencies?.typescript ? 'typescript' : 'node';
+          console.log(`   🔍 [${repo.name}] Detected ${language} from package.json`);
+        } else if (fs.existsSync(path.join(repoPath, 'requirements.txt')) || fs.existsSync(path.join(repoPath, 'pyproject.toml'))) {
+          language = 'python';
+          console.log(`   🔍 [${repo.name}] Detected python from requirements.txt/pyproject.toml`);
+        } else if (fs.existsSync(path.join(repoPath, 'go.mod'))) {
+          language = 'go';
+          console.log(`   🔍 [${repo.name}] Detected go from go.mod`);
+        } else if (fs.existsSync(path.join(repoPath, 'Cargo.toml'))) {
+          language = 'rust';
+          console.log(`   🔍 [${repo.name}] Detected rust from Cargo.toml`);
+        }
+      }
+
+      // 🔍 PRIORITY: Use LLM-determined commands when available (100% agnostic)
+      // BUT ONLY if the LLM-detected language MATCHES the repo's detected language
+      const llmLanguageMatch = llmDetectedLanguage && (
+        llmDetectedLanguage.language === language ||
+        llmDetectedLanguage.framework === language ||
+        llmDetectedLanguage.ecosystem === language
+      );
+
+      const llmConfig = llmLanguageMatch ? {
+        checkFile: llmDetectedLanguage!.checkFile,
+        createCmd: llmDetectedLanguage!.createCmd,
+        installCmd: llmDetectedLanguage!.installCmd,
+      } : null;
+      const hardcodedConfig = setupConfig[language];
+
+      // Merge: LLM takes priority, hardcoded as fallback
+      const config = {
+        checkFile: llmConfig?.checkFile || hardcodedConfig?.checkFile,
+        createCmd: llmConfig?.createCmd || hardcodedConfig?.createCmd,
+        installCmd: llmConfig?.installCmd || hardcodedConfig?.installCmd,
+        postCmds: hardcodedConfig?.postCmds,
+      };
+
+      if (!config.checkFile) {
+        console.log(`   ℹ️ [${repo.name}] No setup config for language: ${language}`);
+        await this.createEnvIfNeeded(taskId, repoPath, repo.name, language, repo.type || 'unknown');
+        continue;
+      }
+
+      // Log which config source we're using
+      if (llmConfig?.createCmd) {
+        console.log(`   🤖 [${repo.name}] Using LLM-determined setup commands (language match: ${language})`);
+      } else if (llmDetectedLanguage && !llmLanguageMatch) {
+        console.log(`   ⚠️ [${repo.name}] LLM language mismatch: repo=${language}, LLM=${llmDetectedLanguage.language}/${llmDetectedLanguage.framework} - using hardcoded config`);
+      }
+      if (!llmConfig?.createCmd && hardcodedConfig) {
+        console.log(`   📦 [${repo.name}] Using hardcoded setup config for ${language}`);
+      }
+
+      const depFilePath = path.join(repoPath, config.checkFile);
+      const depFileExists = fs.existsSync(depFilePath);
+
+      // Determine if we need to create a new project
+      const needsProjectCreation = !depFileExists && config.createCmd;
+
+      // Track this repo's sandbox info (points to unified sandbox)
+      if (sandboxCreated) {
+        sandboxInfos.push({
+          repoName: repo.name,
+          repoType: repo.type || 'unknown',
+          repoPath,
+          language,
+          sandboxId: unifiedSandboxId,
+          mappedPorts: sandbox?.mappedPorts || {},
+        });
+      }
+
+      // Use unified sandbox ID for exec
+      const execId = sandboxCreated ? unifiedSandboxId : taskId;
+      // Working directory inside container
+      const cwdInContainer = sandboxCreated ? containerRepoPath : repoPath;
+
+      if (needsProjectCreation) {
+        // NEW PROJECT: Create project structure
+        console.log(`   🆕 [${repo.name}] No ${config.checkFile} found - creating ${language} project...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🆕 Creating ${language} project in ${repo.name}...`
+        );
+
+        const createResult = await sandboxService.exec(execId, config.createCmd!, {
+          cwd: cwdInContainer,
+          timeout: 300000, // 5 minutes for project creation
+        });
+
+        if (createResult.exitCode === 0) {
+          console.log(`   ✅ [${repo.name}] Project created successfully (executed in: ${createResult.executedIn})`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ ${language} project created in ${repo.name}`);
+        } else {
+          console.warn(`   ⚠️ [${repo.name}] Project creation failed: ${createResult.stderr}`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️ Project creation failed in ${repo.name} - developers will need to initialize manually`
+          );
+          await this.createEnvIfNeeded(taskId, repoPath, repo.name, language, repo.type || 'unknown');
+          continue;
+        }
+      }
+
+      // Check again after potential creation
+      const depFileExistsNow = fs.existsSync(path.join(repoPath, config.checkFile));
+
+      if (depFileExistsNow) {
+        // Check if dependencies were already installed
+        const alreadyInstalled = this.checkDependenciesInstalled(repoPath, language);
+
+        if (alreadyInstalled && depFileExists) {
+          console.log(`   ⏭️ [${repo.name}] Dependencies already installed (skipping)`);
+          await this.createEnvIfNeeded(taskId, repoPath, repo.name, language, repo.type || 'unknown');
+          continue;
+        }
+
+        // INSTALL DEPENDENCIES
+        console.log(`   📦 [${repo.name}] Installing dependencies: ${config.installCmd}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `📦 Installing dependencies in ${repo.name}: ${config.installCmd}`
+        );
+
+        const installResult = await sandboxService.exec(execId, config.installCmd, {
+          cwd: cwdInContainer,
+          timeout: 600000, // 10 minutes for install
+        });
+
+        if (installResult.exitCode === 0) {
+          console.log(`   ✅ [${repo.name}] Dependencies installed successfully (executed in: ${installResult.executedIn})`);
+          NotificationService.emitConsoleLog(taskId, 'info', `✅ Dependencies installed in ${repo.name}`);
+
+          // Run post-install commands if any
+          if (config.postCmds) {
+            for (const cmd of config.postCmds) {
+              console.log(`   🔧 [${repo.name}] Running: ${cmd}`);
+              const postResult = await sandboxService.exec(execId, cmd, {
+                cwd: cwdInContainer,
+                timeout: 60000,
+              });
+              console.log(`      → Exit code: ${postResult.exitCode}, executed in: ${postResult.executedIn}`);
+            }
+          }
+
+          // 🚀 AUTO-START PREVIEW SERVER: Start dev server in background
+          if (sandboxCreated) {
+            const previewPort = await this.startPreviewServer(
+              taskId,
+              unifiedSandboxId, // Use unified sandbox ID
+              language,
+              repo.type || 'unknown',
+              repoPath,
+              repo.name
+            );
+
+            if (previewPort) {
+              NotificationService.emitConsoleLog(
+                taskId,
+                'info',
+                `🌐 Preview available at http://localhost:${previewPort} - agents can verify changes with curl`
+              );
+            }
+          }
+        } else {
+          console.warn(`   ⚠️ [${repo.name}] Install failed (executed in: ${installResult.executedIn}): ${installResult.stderr}`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️ Dependency installation failed in ${repo.name} - developers may need to install manually`
+          );
+        }
+      } else {
+        console.log(`   ℹ️ [${repo.name}] No ${config.checkFile} - skipping dependency install`);
+      }
+
+      // 🔐 Create .env template if missing
+      await this.createEnvIfNeeded(taskId, repoPath, repo.name, language, repo.type || 'unknown');
+    }
+
+    // ==========================================================================
+    // 🔥 STEP 3: Cross-project configuration (same container, simpler networking!)
+    // ==========================================================================
+
+    // 🔗 CROSS-PROJECT PORT INJECTION
+    // In unified sandbox, all services run in SAME container, so frontend
+    // can use localhost:3001 to reach backend directly!
+    if (sandboxInfos.length > 0) {
+      console.log(`\n   🔗 [Planning] Configuring cross-service communication (same container)`);
+      console.log(`      Frontend can use localhost:3001 to reach backend - no port mapping needed!`);
+      // Still run injection for external access from host
+      await this.injectBackendPortsIntoFrontends(taskId, sandboxInfos);
+    }
+
+    // Log unified sandbox status
+    if (sandboxCreated) {
+      console.log(`\n   🐳 [Planning] UNIFIED SANDBOX STATUS:`);
+      console.log(`      ID: ${unifiedSandboxId}`);
+      console.log(`      Container: ${sandbox?.containerName}`);
+      console.log(`      Repos mounted: ${repositories.length}`);
+      console.log(`      Image: multi-runtime (Flutter + Node.js + Python)`);
+      console.log(`      Sandbox will remain available for all subsequent phases`);
+    }
+
+    console.log(`\n📦 [Planning] Post-planning setup complete\n`);
+
+    // 🔗 Return sandbox map: repoName -> sandboxId
+    // ALL repos point to the SAME unified sandbox
+    const sandboxMap = new Map<string, string>();
+    for (const repo of repositories) {
+      sandboxMap.set(repo.name, unifiedSandboxId);
+      console.log(`   📍 Sandbox map: ${repo.name} → ${unifiedSandboxId} (unified)`);
+    }
+
+    return sandboxMap;
+  }
+
+  /**
+   * 🔗 Inject backend's actual port into frontend .env files
+   *
+   * SMART APPROACH:
+   * 1. Read backend's .env (or .env.example) to find configured PORT
+   * 2. Read frontend's .env (or .env.example) to find API URL variables
+   * 3. Replace the backend port in frontend's URLs with the actual mapped port
+   *
+   * This is intelligent because:
+   * - We don't assume variable names
+   * - We use the actual project configuration
+   * - We handle .env.example as fallback
+   */
+  private async injectBackendPortsIntoFrontends(
+    taskId: string,
+    sandboxInfos: Array<{
+      repoName: string;
+      repoType: 'backend' | 'frontend' | 'fullstack' | 'unknown';
+      repoPath: string;
+      language: string;
+      sandboxId: string;
+      mappedPorts: Record<string, string>;
+    }>
+  ): Promise<void> {
+    const backendInfos = sandboxInfos.filter(s => s.repoType === 'backend');
+    const frontendInfos = sandboxInfos.filter(s => s.repoType === 'frontend');
+
+    if (backendInfos.length === 0 || frontendInfos.length === 0) {
+      console.log(`   ℹ️ [Planning] No backend/frontend pair found for port injection`);
+      return;
+    }
+
+    const backendInfo = backendInfos[0];
+
+    // 📖 STEP 1: Read backend's .env to find its configured PORT
+    const backendConfiguredPort = this.readBackendPort(backendInfo.repoPath, backendInfo.repoName);
+    console.log(`   📖 [${backendInfo.repoName}] Configured PORT: ${backendConfiguredPort || 'not found'}`);
+
+    // 🔌 STEP 2: Find the actual host port from Docker mapping
+    const backendPorts = backendInfo.mappedPorts;
+    let backendHostPort: string | null = null;
+
+    // First try to find the configured port in mappings
+    if (backendConfiguredPort && backendPorts[backendConfiguredPort]) {
+      backendHostPort = backendPorts[backendConfiguredPort];
+      console.log(`   🔌 [Planning] Backend mapped: container:${backendConfiguredPort} → host:${backendHostPort}`);
+    } else {
+      // Fallback: try common backend ports
+      const commonPorts = ['3001', '8000', '8080', '5000', '5001'];
+      for (const port of commonPorts) {
+        if (backendPorts[port]) {
+          backendHostPort = backendPorts[port];
+          console.log(`   🔌 [Planning] Backend mapped (fallback): container:${port} → host:${backendHostPort}`);
+          break;
+        }
+      }
+    }
+
+    if (!backendHostPort) {
+      // Last resort: use first available mapped port
+      const firstPort = Object.entries(backendPorts)[0];
+      if (firstPort) {
+        backendHostPort = firstPort[1];
+        console.log(`   🔌 [Planning] Backend mapped (first available): container:${firstPort[0]} → host:${backendHostPort}`);
+      }
+    }
+
+    if (!backendHostPort) {
+      console.warn(`   ⚠️ [Planning] Could not determine backend host port`);
+      return;
+    }
+
+    // 📝 STEP 3: Update frontend .env files
+    for (const frontendInfo of frontendInfos) {
+      await this.updateFrontendEnvWithBackendPort(
+        taskId,
+        frontendInfo,
+        backendInfo.repoName,
+        backendConfiguredPort || '3001', // Port to search for in frontend .env
+        backendHostPort                   // Actual host port to replace with
+      );
+    }
+  }
+
+  /**
+   * Read the PORT configuration from a backend's .env or .env.example
+   */
+  private readBackendPort(repoPath: string, repoName: string): string | null {
+    // Try .env first, then .env.example
+    const envFiles = ['.env', '.env.example', '.env.local'];
+
+    for (const envFile of envFiles) {
+      const envPath = path.join(repoPath, envFile);
+      if (fs.existsSync(envPath)) {
+        try {
+          const content = fs.readFileSync(envPath, 'utf-8');
+
+          // Look for PORT=XXXX pattern
+          const portMatch = content.match(/^PORT=(\d+)/m);
+          if (portMatch) {
+            console.log(`   📖 [${repoName}] Found PORT=${portMatch[1]} in ${envFile}`);
+            return portMatch[1];
+          }
+
+          // Also check for common variations
+          const serverPortMatch = content.match(/^(?:SERVER_PORT|APP_PORT|HTTP_PORT)=(\d+)/m);
+          if (serverPortMatch) {
+            console.log(`   📖 [${repoName}] Found port ${serverPortMatch[1]} in ${envFile}`);
+            return serverPortMatch[1];
+          }
+        } catch (error: any) {
+          console.warn(`   ⚠️ [${repoName}] Could not read ${envFile}: ${error.message}`);
+        }
+      }
+    }
+
+    // If no .env found, try to detect from code (package.json scripts, etc.)
+    const packageJsonPath = path.join(repoPath, 'package.json');
+    if (fs.existsSync(packageJsonPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        // Check for port in scripts
+        const scripts = pkg.scripts || {};
+        for (const script of Object.values(scripts) as string[]) {
+          const portMatch = script.match(/(?:--port|PORT=|:)(\d{4,5})/);
+          if (portMatch) {
+            console.log(`   📖 [${repoName}] Detected port ${portMatch[1]} from package.json scripts`);
+            return portMatch[1];
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Update a frontend's .env file with the backend's actual port
+   */
+  private async updateFrontendEnvWithBackendPort(
+    taskId: string,
+    frontendInfo: { repoName: string; repoPath: string; language: string },
+    backendRepoName: string,
+    backendConfiguredPort: string,
+    backendHostPort: string
+  ): Promise<void> {
+    // Find the frontend's .env (or create from .env.example)
+    const envPath = path.join(frontendInfo.repoPath, '.env');
+    const envExamplePath = path.join(frontendInfo.repoPath, '.env.example');
+
+    let envContent: string | null = null;
+    let sourceFile = '';
+
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf-8');
+      sourceFile = '.env';
+    } else if (fs.existsSync(envExamplePath)) {
+      // Copy .env.example to .env
+      envContent = fs.readFileSync(envExamplePath, 'utf-8');
+      sourceFile = '.env.example (copied to .env)';
+      console.log(`   📋 [${frontendInfo.repoName}] Creating .env from .env.example`);
+    }
+
+    if (!envContent) {
+      console.log(`   ℹ️ [${frontendInfo.repoName}] No .env or .env.example found`);
+      return;
+    }
+
+    // 🔍 Find and replace URLs pointing to the backend port
+    // Pattern: ANY_VAR=http(s)://localhost:BACKEND_PORT(optional path)
+    const httpPattern = new RegExp(
+      `^([A-Z_][A-Z0-9_]*=https?:\\/\\/localhost:)${backendConfiguredPort}(.*)$`,
+      'gm'
+    );
+    const wsPattern = new RegExp(
+      `^([A-Z_][A-Z0-9_]*=wss?:\\/\\/localhost:)${backendConfiguredPort}(.*)$`,
+      'gm'
+    );
+
+    let updated = false;
+    const originalContent = envContent;
+
+    if (httpPattern.test(envContent)) {
+      httpPattern.lastIndex = 0;
+      envContent = envContent.replace(httpPattern, `$1${backendHostPort}$2`);
+      updated = true;
+    }
+
+    if (wsPattern.test(envContent)) {
+      wsPattern.lastIndex = 0;
+      envContent = envContent.replace(wsPattern, `$1${backendHostPort}$2`);
+      updated = true;
+    }
+
+    // Also try common backend ports if the configured port didn't match anything
+    if (!updated && backendConfiguredPort !== '3001') {
+      const fallbackPorts = ['3001', '8000', '8080', '5000'];
+      for (const port of fallbackPorts) {
+        const fallbackHttp = new RegExp(
+          `^([A-Z_][A-Z0-9_]*=https?:\\/\\/localhost:)${port}(.*)$`,
+          'gm'
+        );
+        const fallbackWs = new RegExp(
+          `^([A-Z_][A-Z0-9_]*=wss?:\\/\\/localhost:)${port}(.*)$`,
+          'gm'
+        );
+
+        if (fallbackHttp.test(envContent)) {
+          fallbackHttp.lastIndex = 0;
+          envContent = envContent.replace(fallbackHttp, `$1${backendHostPort}$2`);
+          updated = true;
+        }
+        if (fallbackWs.test(envContent)) {
+          fallbackWs.lastIndex = 0;
+          envContent = envContent.replace(fallbackWs, `$1${backendHostPort}$2`);
+          updated = true;
+        }
+      }
+    }
+
+    if (updated || sourceFile.includes('copied')) {
+      fs.writeFileSync(envPath, envContent, 'utf-8');
+
+      // Log what changed
+      const changedLines: string[] = [];
+      const origLines = originalContent.split('\n');
+      const newLines = envContent.split('\n');
+      for (let i = 0; i < newLines.length; i++) {
+        if (origLines[i] !== newLines[i] && newLines[i].includes('localhost')) {
+          changedLines.push(newLines[i].split('=')[0]);
+        }
+      }
+
+      console.log(`   🔗 [${frontendInfo.repoName}] Updated from ${sourceFile}`);
+      if (changedLines.length > 0) {
+        console.log(`      Variables updated: ${changedLines.join(', ')}`);
+      }
+      console.log(`      Backend port: ${backendConfiguredPort} → ${backendHostPort}`);
+
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔗 Connected ${frontendInfo.repoName} to ${backendRepoName} (port ${backendHostPort})`
+      );
+    } else {
+      console.log(`   ℹ️ [${frontendInfo.repoName}] No backend URLs found to update in ${sourceFile}`);
+    }
+  }
+
+  /**
+   * Check if dependencies are already installed by looking for lock files or deps folders
+   */
+  private checkDependenciesInstalled(repoPath: string, language: string): boolean {
+    const indicators: Record<string, string[]> = {
+      flutter: ['pubspec.lock', '.dart_tool'],
+      dart: ['pubspec.lock', '.dart_tool'],
+      node: ['node_modules', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
+      typescript: ['node_modules', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
+      python: ['.venv', 'venv', '__pycache__'],
+      go: ['go.sum'],
+      rust: ['Cargo.lock', 'target'],
+    };
+
+    const indicatorFiles = indicators[language] || [];
+
+    for (const indicator of indicatorFiles) {
+      if (fs.existsSync(path.join(repoPath, indicator))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Get the preview/dev server command based on language and project type
+   * Returns null if no preview command is applicable
+   */
+  private getPreviewCommand(language: string, repoType: string, repoPath: string): { command: string; port: number } | null {
+    // Check for specific config files to determine the right command
+    const hasVite = fs.existsSync(path.join(repoPath, 'vite.config.ts')) ||
+                    fs.existsSync(path.join(repoPath, 'vite.config.js'));
+    const hasNext = fs.existsSync(path.join(repoPath, 'next.config.js')) ||
+                    fs.existsSync(path.join(repoPath, 'next.config.mjs'));
+    const hasPackageJson = fs.existsSync(path.join(repoPath, 'package.json'));
+
+    // Read package.json to check for dev script
+    let packageJson: any = null;
+    if (hasPackageJson) {
+      try {
+        packageJson = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf-8'));
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
+    const hasDevScript = packageJson?.scripts?.dev;
+    const hasStartScript = packageJson?.scripts?.start;
+
+    // Determine command based on language and framework
+    switch (language) {
+      case 'flutter':
+        // 🔥 For Flutter, startPreviewServer handles build+serve separately
+        // This command is only used if the server needs restart
+        return {
+          command: 'python3 -m http.server 8080 --bind 0.0.0.0',
+          port: 8080
+        };
+
+      case 'node':
+      case 'typescript':
+        if (hasVite) {
+          return { command: 'npm run dev -- --host 0.0.0.0', port: 5173 };
+        }
+        if (hasNext) {
+          return { command: 'npm run dev -- -H 0.0.0.0', port: 3000 };
+        }
+        if (hasDevScript) {
+          return { command: 'npm run dev', port: 3000 };
+        }
+        if (hasStartScript && repoType === 'backend') {
+          return { command: 'npm start', port: 3001 };
+        }
+        return null; // No suitable dev command found
+
+      case 'python':
+        if (fs.existsSync(path.join(repoPath, 'manage.py'))) {
+          return { command: 'python manage.py runserver 0.0.0.0:8000', port: 8000 };
+        }
+        if (fs.existsSync(path.join(repoPath, 'app.py')) || fs.existsSync(path.join(repoPath, 'main.py'))) {
+          return { command: 'python -m flask run --host=0.0.0.0 --port=5000', port: 5000 };
+        }
+        return null;
+
+      case 'go':
+        if (fs.existsSync(path.join(repoPath, 'main.go'))) {
+          return { command: 'go run . &', port: 8080 };
+        }
+        return null;
+
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Start preview server in Docker container (runs in background)
+   * Returns the port number if successful, null otherwise
+   */
+  private async startPreviewServer(
+    taskId: string,
+    sandboxId: string,
+    language: string,
+    repoType: string,
+    repoPath: string,
+    repoName: string
+  ): Promise<number | null> {
+    const previewConfig = this.getPreviewCommand(language, repoType, repoPath);
+
+    if (!previewConfig) {
+      console.log(`   ℹ️ [${repoName}] No preview server configured for ${language}`);
+      return null;
+    }
+
+    const { command, port } = previewConfig;
+
+    console.log(`   🚀 [${repoName}] Starting preview server on port ${port}...`);
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `🚀 Starting preview server for ${repoName} on port ${port}`
+    );
+
+    try {
+      // 🔥 For Flutter: separate build from serve (build is slow, serve is fast)
+      const isFlutter = language === 'flutter';
+
+      if (isFlutter) {
+        // Step 1: Build Flutter web (synchronous, can take 60-120 seconds)
+        console.log(`   ⏳ [${repoName}] Building Flutter web (this may take 1-2 minutes)...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `⏳ Building Flutter web... (1-2 minutes)`
+        );
+
+        const buildResult = await sandboxService.exec(sandboxId, 'flutter build web --release 2>&1', {
+          cwd: '/workspace',
+          timeout: 180000, // 3 minutes for Flutter build
+        });
+
+        if (buildResult.exitCode !== 0) {
+          console.warn(`   ⚠️ [${repoName}] Flutter build failed: ${buildResult.stderr || buildResult.stdout}`);
+          return null;
+        }
+
+        console.log(`   ✅ [${repoName}] Flutter build complete!`);
+
+        // Step 2: Start simple HTTP server in background
+        // Note: Health check will verify if server is actually responding (agnostic approach)
+        const serveCmd = `nohup python3 -m http.server ${port} --bind 0.0.0.0 > /tmp/preview-server.log 2>&1 &`;
+        await sandboxService.exec(sandboxId, serveCmd, {
+          cwd: '/workspace/build/web',
+          timeout: 5000,
+        });
+      } else {
+        // Non-Flutter: run dev server in background as before
+        const bgCommand = `nohup ${command} > /tmp/preview-server.log 2>&1 &`;
+
+        const result = await sandboxService.exec(sandboxId, bgCommand, {
+          cwd: '/workspace',
+          timeout: 30000, // 30 seconds to start
+        });
+
+        if (result.exitCode !== 0) {
+          console.warn(`   ⚠️ [${repoName}] Failed to start preview server: ${result.stderr}`);
+          return null;
+        }
+      }
+
+      // Wait a bit for server to start
+      const waitTime = isFlutter ? 2000 : 3000; // Flutter server starts fast after build
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+
+      // Check if server is responding (inside container)
+      const healthCheck = await sandboxService.exec(sandboxId, `curl -s -o /dev/null -w "%{http_code}" http://localhost:${port} || echo "000"`, {
+        cwd: '/workspace',
+        timeout: 10000,
+      });
+
+      const statusCode = healthCheck.stdout.trim();
+
+      // 🔥 CRITICAL: Get the HOST port (not container port) for the preview URL
+      // With dynamic port mapping (0:PORT), the container port is mapped to a different host port
+      const sandbox = sandboxService.getSandbox(sandboxId);
+      const hostPort = sandbox?.mappedPorts?.[String(port)] || String(port);
+      const previewUrl = `http://localhost:${hostPort}`;
+      console.log(`   🔌 [${repoName}] Port mapping: container:${port} → host:${hostPort}`);
+      // Map language to framework name for frontend display
+      const frameworkMap: Record<string, string> = {
+        flutter: 'Flutter Web',
+        nodejs: 'Node.js',
+        python: 'Python',
+        default: language,
+      };
+      const framework = frameworkMap[language] || frameworkMap.default;
+
+      if (statusCode !== '000' && statusCode !== '') {
+        console.log(`   ✅ [${repoName}] Preview server started on port ${port} (status: ${statusCode})`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `✅ Preview server running at ${previewUrl}`
+        );
+        // 🔥 Emit dev_server_ready for frontend auto-connect
+        NotificationService.emitDevServerReady(taskId, previewUrl, framework);
+        return port;
+      } else {
+        // Health check failed - retry a few times for slow-starting servers
+        console.log(`   ⏳ [${repoName}] Server not responding yet, retrying health check...`);
+
+        let retrySuccess = false;
+        for (let retry = 0; retry < 3; retry++) {
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds between retries
+
+          const retryCheck = await sandboxService.exec(sandboxId, `curl -s -o /dev/null -w "%{http_code}" http://localhost:${port} || echo "000"`, {
+            cwd: '/workspace',
+            timeout: 10000,
+          });
+
+          const retryStatus = retryCheck.stdout.trim();
+          console.log(`   🔄 [${repoName}] Retry ${retry + 1}/3: status=${retryStatus}`);
+
+          if (retryStatus !== '000' && retryStatus !== '') {
+            console.log(`   ✅ [${repoName}] Preview server responding after ${retry + 1} retries`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ Preview server running at ${previewUrl}`
+            );
+            NotificationService.emitDevServerReady(taskId, previewUrl, framework);
+            retrySuccess = true;
+            return port;
+          }
+        }
+
+        if (!retrySuccess) {
+          // After all retries failed, check if process is at least running
+          const psCheck = await sandboxService.exec(sandboxId, `pgrep -f "http.server" || pgrep -f "npm" || pgrep -f "node" || echo "none"`, {
+            timeout: 5000,
+          });
+
+          if (psCheck.stdout.trim() !== 'none') {
+            console.log(`   ⚠️ [${repoName}] Server process running but not responding - emitting anyway`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⚠️ Preview server starting... (may need more time)`
+            );
+            NotificationService.emitDevServerReady(taskId, previewUrl, framework);
+            return port;
+          } else {
+            console.warn(`   ❌ [${repoName}] Preview server failed to start - no process found`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'error',
+              `❌ Preview server failed to start for ${repoName}`
+            );
+            return null; // Don't emit dev_server_ready if server never started
+          }
+        }
+
+        return null; // Should not reach here, but TypeScript needs this
+      }
+    } catch (error: any) {
+      console.warn(`   ⚠️ [${repoName}] Preview server start error: ${error.message}`);
+      return null;
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 🔐 ENV TEMPLATE: Create .env files for new projects
+  // --------------------------------------------------------------------------
+
+  /**
+   * Create a .env template for a new project based on its language/framework.
+   *
+   * Templates include:
+   * - Common placeholders (PORT, DATABASE_URL, etc.)
+   * - Language-specific variables
+   * - Clear comments explaining each variable
+   *
+   * The .env file is created as a TEMPLATE - developers must fill in actual values.
+   */
+  private async createEnvIfNeeded(
+    taskId: string,
+    repoPath: string,
+    repoName: string,
+    language: string,
+    repoType: 'backend' | 'frontend' | 'fullstack' | 'unknown'
+  ): Promise<void> {
+    const envPath = path.join(repoPath, '.env');
+    const envExamplePath = path.join(repoPath, '.env.example');
+
+    // Skip if .env or .env.example already exists
+    if (fs.existsSync(envPath) || fs.existsSync(envExamplePath)) {
+      console.log(`   ℹ️ [${repoName}] .env already exists - skipping template creation`);
+      return;
+    }
+
+    // Generate template based on language and repo type
+    const envContent = this.generateEnvTemplate(language, repoType, repoName);
+
+    if (!envContent) {
+      console.log(`   ℹ️ [${repoName}] No .env template for language: ${language}`);
+      return;
+    }
+
+    try {
+      // Create both .env (for immediate use) and .env.example (for git)
+      fs.writeFileSync(envPath, envContent, 'utf-8');
+      fs.writeFileSync(envExamplePath, envContent, 'utf-8');
+
+      console.log(`   🔐 [${repoName}] Created .env template for ${language}/${repoType}`);
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `🔐 Created .env template in ${repoName} - fill in actual values before running`
+      );
+
+      // Also create .gitignore if it doesn't exist (to exclude .env)
+      await this.ensureGitignore(repoPath, repoName);
+    } catch (error: any) {
+      console.warn(`   ⚠️ [${repoName}] Failed to create .env: ${error.message}`);
+    }
+  }
+
+  /**
+   * Generate .env template content based on language and repository type.
+   *
+   * Each template includes:
+   * - Header with project name and generation date
+   * - Required variables for the tech stack
+   * - Optional variables with sensible defaults
+   * - Comments explaining each section
+   */
+  private generateEnvTemplate(
+    language: string,
+    repoType: 'backend' | 'frontend' | 'fullstack' | 'unknown',
+    repoName: string
+  ): string | null {
+    const timestamp = new Date().toISOString();
+    const header = `# ============================================================================
+# ${repoName} - Environment Configuration
+# ============================================================================
+# Generated by Multi-Agent Platform on ${timestamp}
+#
+# ⚠️  IMPORTANT: This is a TEMPLATE. Fill in actual values before running!
+# ⚠️  NEVER commit this file to git with real secrets!
+# ============================================================================
+
+`;
+
+    // Node.js / TypeScript Backend
+    if ((language === 'node' || language === 'typescript') && repoType === 'backend') {
+      return header + `# Application
+NODE_ENV=development
+PORT=3001
+
+# Database (choose one and fill in)
+# MongoDB
+MONGODB_URI=mongodb://localhost:27017/${repoName}
+
+# PostgreSQL (alternative)
+# DATABASE_URL=postgresql://user:password@localhost:5432/${repoName}
+
+# Authentication
+JWT_SECRET=CHANGE_ME_use_openssl_rand_base64_32
+JWT_REFRESH_SECRET=CHANGE_ME_use_openssl_rand_base64_32
+SESSION_SECRET=CHANGE_ME_use_openssl_rand_base64_32
+
+# External APIs (fill in as needed)
+# ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+# STRIPE_SECRET_KEY=sk_test_...
+
+# OAuth (if using social login)
+# GITHUB_CLIENT_ID=
+# GITHUB_CLIENT_SECRET=
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+
+# CORS
+FRONTEND_URL=http://localhost:3000
+
+# Logging
+LOG_LEVEL=debug
+
+# Redis (if using caching/sessions)
+# REDIS_URL=redis://localhost:6379
+
+# File Storage (if using uploads)
+# AWS_ACCESS_KEY_ID=
+# AWS_SECRET_ACCESS_KEY=
+# AWS_S3_BUCKET=
+# AWS_REGION=us-east-1
+`;
+    }
+
+    // Node.js / TypeScript Frontend (React, Next.js, etc.)
+    if ((language === 'node' || language === 'typescript') && repoType === 'frontend') {
+      return header + `# Application
+NODE_ENV=development
+PORT=3000
+
+# API Configuration
+NEXT_PUBLIC_API_URL=http://localhost:3001/api
+NEXT_PUBLIC_WS_URL=ws://localhost:3001
+
+# For Create React App (use REACT_APP_ prefix)
+# REACT_APP_API_URL=http://localhost:3001/api
+
+# Authentication
+NEXT_PUBLIC_AUTH_ENABLED=true
+
+# Feature Flags
+NEXT_PUBLIC_FEATURE_DARK_MODE=true
+NEXT_PUBLIC_FEATURE_ANALYTICS=false
+
+# Analytics (if using)
+# NEXT_PUBLIC_GA_TRACKING_ID=G-XXXXXXXXXX
+# NEXT_PUBLIC_MIXPANEL_TOKEN=
+
+# External Services
+# NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+# NEXT_PUBLIC_SENTRY_DSN=
+
+# OAuth (client-side)
+# NEXT_PUBLIC_GITHUB_CLIENT_ID=
+# NEXT_PUBLIC_GOOGLE_CLIENT_ID=
+`;
+    }
+
+    // Flutter / Dart
+    if (language === 'flutter' || language === 'dart') {
+      return header + `# API Configuration
+API_BASE_URL=http://localhost:3001/api
+WS_URL=ws://localhost:3001
+
+# Environment
+ENVIRONMENT=development
+
+# Feature Flags
+ENABLE_ANALYTICS=false
+ENABLE_CRASHLYTICS=false
+
+# API Keys (for Flutter apps, consider using --dart-define or .env with flutter_dotenv)
+# GOOGLE_MAPS_API_KEY=
+# FIREBASE_API_KEY=
+# STRIPE_PUBLISHABLE_KEY=
+
+# OAuth
+# GOOGLE_CLIENT_ID=
+# FACEBOOK_APP_ID=
+
+# Deep Linking
+APP_SCHEME=${repoName.toLowerCase().replace(/-/g, '')}
+APP_HOST=app.example.com
+
+# Note: For Flutter, install flutter_dotenv package:
+# flutter pub add flutter_dotenv
+# Then add .env to assets in pubspec.yaml
+`;
+    }
+
+    // Python
+    if (language === 'python') {
+      return header + `# Application
+FLASK_ENV=development
+# Or for Django:
+# DJANGO_SETTINGS_MODULE=${repoName}.settings.development
+# DJANGO_SECRET_KEY=CHANGE_ME_use_secrets_token_hex_32
+
+DEBUG=True
+PORT=5000
+
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/${repoName}
+# Or for SQLite:
+# DATABASE_URL=sqlite:///db.sqlite3
+
+# Redis (for Celery, caching)
+# REDIS_URL=redis://localhost:6379
+
+# Authentication
+SECRET_KEY=CHANGE_ME_use_secrets_token_hex_32
+JWT_SECRET_KEY=CHANGE_ME_use_secrets_token_hex_32
+
+# CORS
+CORS_ORIGINS=http://localhost:3000
+
+# External APIs
+# OPENAI_API_KEY=
+# ANTHROPIC_API_KEY=
+
+# Email (if using)
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=587
+# SMTP_USER=
+# SMTP_PASSWORD=
+
+# AWS (if using)
+# AWS_ACCESS_KEY_ID=
+# AWS_SECRET_ACCESS_KEY=
+# AWS_S3_BUCKET=
+`;
+    }
+
+    // Go
+    if (language === 'go') {
+      return header + `# Application
+APP_ENV=development
+PORT=8080
+
+# Database
+DATABASE_URL=postgres://user:password@localhost:5432/${repoName}?sslmode=disable
+# Or for MySQL:
+# DATABASE_URL=mysql://user:password@localhost:3306/${repoName}
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Authentication
+JWT_SECRET=CHANGE_ME_use_secure_random_string
+JWT_EXPIRATION=24h
+
+# CORS
+ALLOWED_ORIGINS=http://localhost:3000
+
+# Logging
+LOG_LEVEL=debug
+LOG_FORMAT=json
+
+# External APIs
+# ANTHROPIC_API_KEY=
+# STRIPE_SECRET_KEY=
+`;
+    }
+
+    // Rust
+    if (language === 'rust') {
+      return header + `# Application
+RUST_ENV=development
+RUST_LOG=debug
+PORT=8080
+
+# Database
+DATABASE_URL=postgres://user:password@localhost:5432/${repoName}
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Authentication
+JWT_SECRET=CHANGE_ME_use_secure_random_string
+
+# CORS
+ALLOWED_ORIGINS=http://localhost:3000
+`;
+    }
+
+    // Fullstack or unknown - basic template
+    if (repoType === 'fullstack' || repoType === 'unknown') {
+      return header + `# Application
+NODE_ENV=development
+PORT=3000
+
+# Database
+DATABASE_URL=mongodb://localhost:27017/${repoName}
+# Or PostgreSQL:
+# DATABASE_URL=postgresql://user:password@localhost:5432/${repoName}
+
+# Authentication
+JWT_SECRET=CHANGE_ME_generate_secure_secret
+SESSION_SECRET=CHANGE_ME_generate_secure_secret
+
+# API URLs
+API_BASE_URL=http://localhost:3001/api
+
+# External Services (fill in as needed)
+# Add your API keys here
+`;
+    }
+
+    return null;
+  }
+
+  /**
+   * Ensure .gitignore exists and includes .env
+   */
+  private async ensureGitignore(repoPath: string, repoName: string): Promise<void> {
+    const gitignorePath = path.join(repoPath, '.gitignore');
+
+    // Essential patterns to ignore
+    const essentialPatterns = [
+      '# Environment files',
+      '.env',
+      '.env.local',
+      '.env.*.local',
+      '',
+      '# Dependencies',
+      'node_modules/',
+      '.dart_tool/',
+      'build/',
+      'dist/',
+      '',
+      '# IDE',
+      '.idea/',
+      '.vscode/',
+      '*.swp',
+      '*.swo',
+      '.DS_Store',
+    ];
+
+    if (fs.existsSync(gitignorePath)) {
+      // Check if .env is already in .gitignore
+      const content = fs.readFileSync(gitignorePath, 'utf-8');
+      if (!content.includes('.env')) {
+        // Append .env to existing .gitignore
+        const appendContent = '\n\n# Environment files (auto-added)\n.env\n.env.local\n.env.*.local\n';
+        fs.appendFileSync(gitignorePath, appendContent, 'utf-8');
+        console.log(`   📝 [${repoName}] Added .env to existing .gitignore`);
+      }
+    } else {
+      // Create new .gitignore
+      const content = essentialPatterns.join('\n');
+      fs.writeFileSync(gitignorePath, content, 'utf-8');
+      console.log(`   📝 [${repoName}] Created .gitignore with essential patterns`);
+    }
   }
 }

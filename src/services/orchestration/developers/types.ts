@@ -6,6 +6,7 @@
 
 import { OrchestrationContext } from '../Phase';
 import { ProjectRadiography } from '../../ProjectRadiographyService';
+import { RejectReasonType } from '../JudgePhase';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🔥 TYPED CONTRACTS: Developer ↔ Judge Communication
@@ -140,6 +141,8 @@ export interface StoryPipelineContext {
   architectureBrief?: any;
   environmentCommands?: any;
   projectRadiographies?: Map<string, ProjectRadiography>;
+  // 🐳 SANDBOX: Explicit sandbox ID for Docker execution
+  sandboxId?: string;
 }
 
 /**
@@ -180,6 +183,16 @@ export interface JudgeStageResult {
   iteration?: number;
   maxRetries?: number;
   error?: string;
+  /**
+   * Reason for rejection - Used to route to appropriate specialist:
+   * - 'conflicts' → ConflictResolver specialist
+   * - 'code_issues' → Fixer specialist / Developer retry
+   * - 'scope_violation' → Developer retry with strict rules
+   * - 'placeholder_code' → Developer retry
+   * - 'missing_files' → Developer retry
+   * - 'other' → Developer retry
+   */
+  rejectReason?: RejectReasonType;
 }
 
 /**

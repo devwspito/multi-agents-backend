@@ -99,9 +99,17 @@ export class DeveloperPromptBuilder {
    - ❌ WRONG: \`Edit("file.ts", "old", "new")\` without reading first
    - ✅ RIGHT: \`Read("file.ts")\` → then \`Edit("file.ts", "old", "new")\`
 
-3. **VERIFY YOUR WORK** - Run commands, don't assume
-   - ❌ WRONG: "The code should work now"
-   - ✅ RIGHT: \`Bash("npm run build")\` → see actual output
+3. **🐳 USE SANDBOX FOR BUILD/TEST/RUN** - Execute in Docker environment!
+   - ❌ WRONG: \`Bash("flutter build")\` → fails because Flutter not on host
+   - ✅ RIGHT: \`sandbox_bash(command="flutter build")\` → runs in Docker with Flutter
+   - **ALL build/test/run commands MUST use \`sandbox_bash\`**:
+     - \`sandbox_bash(command="flutter pub get")\`
+     - \`sandbox_bash(command="flutter build apk")\`
+     - \`sandbox_bash(command="npm install")\`
+     - \`sandbox_bash(command="npm run build")\`
+     - \`sandbox_bash(command="npm test")\`
+     - \`sandbox_bash(command="dart analyze")\`
+   - **Use regular \`Bash\` ONLY for git commands** (git add, git commit, git push)
 
 4. **COMMIT AND PUSH INCREMENTALLY** - Push after EACH file write!
    - ❌ WRONG: Writing 5 files, then one big commit at the end

@@ -120,7 +120,10 @@ export function extractMarkerValue(
   const cleanPrefix = markerPrefix.replace(/[*#\-_`]/g, '');
   const cleanOutput = output.replace(/[*#\-_`]/g, '');
 
-  const regex = new RegExp(`${escapeRegex(cleanPrefix)}\\s*([^\\s\\n]+)`, 'i');
+  // 🔥 FIX: Capture entire line after marker, not just first word
+  // OLD: [^\\s\\n]+ → only captured first word (e.g., "Missing" from "Missing implementation")
+  // NEW: [^\\n]+ → captures until end of line (e.g., "Missing implementation details")
+  const regex = new RegExp(`${escapeRegex(cleanPrefix)}\\s*([^\\n]+)`, 'i');
   const match = cleanOutput.match(regex);
 
   return match ? match[1].trim() : null;

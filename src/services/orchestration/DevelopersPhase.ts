@@ -11,7 +11,7 @@ import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerVal
 import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
 import { ProjectRadiography } from '../ProjectRadiographyService';
 import { sessionCheckpointService } from '../SessionCheckpointService';
-import { granularMemoryService } from '../GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
 // 📦 Utility helpers
@@ -401,7 +401,7 @@ export class DevelopersPhase extends BasePhase {
         validation.errors.forEach(err => console.error(`  - ${err}`));
 
         // 🔥 CRITICAL: Emit completion event to prevent infinite loop
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
@@ -440,7 +440,7 @@ export class DevelopersPhase extends BasePhase {
 
       if (epics.length === 0) {
         // 🔥 CRITICAL: Emit completion event to prevent infinite loop
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
@@ -756,7 +756,15 @@ export class DevelopersPhase extends BasePhase {
 
             // 🔥 EVENT SOURCING: Emit StoryStarted event for recovery tracking
             const { eventStore } = await import('../EventStore');
-            await eventStore.append({
+
+            // Get target repository info for this story
+            const storyRepo = repositories.find(r =>
+              r.repository?.fullName === epic.targetRepository ||
+              r.repository?.name === epic.targetRepository?.split('/').pop()
+            );
+            const repoLocalPath = storyRepo?.localPath || workspacePath;
+
+            await eventStore.safeAppend({
               taskId: task.id as any,
               eventType: 'StoryStarted',
               agentName: 'developer',
@@ -765,9 +773,16 @@ export class DevelopersPhase extends BasePhase {
                 epicId: normalizedEpicId, // 🔥 CENTRALIZED: Use normalized epicId
                 title: story.title,
                 developer: member.instanceId,
+                // 🔥 NEW: Include workspace info for LivePreview
+                workspacePath: workspacePath,
+                repoLocalPath: repoLocalPath,
+                targetRepository: epic.targetRepository,
+                branchName: story.branchName || `story/${getStoryId(story)}`,
               },
             });
             console.log(`📝 [EventStore] Emitted StoryStarted for: ${story.title}`);
+            console.log(`   📂 Workspace: ${workspacePath}`);
+            console.log(`   📁 Repo path: ${repoLocalPath}`);
 
             // 🔥 RETRY LOGIC: Execute story pipeline with retry for transient errors
             const { RetryService } = await import('./RetryService');
@@ -875,7 +890,7 @@ export class DevelopersPhase extends BasePhase {
         console.error(`   Completed: 0 stories (NO StoryCompleted events found)`);
         console.error(`   🚨 Emitting DevelopersCompleted with failed=true to prevent false success`);
 
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
@@ -892,7 +907,7 @@ export class DevelopersPhase extends BasePhase {
         console.log(`📝 [Developers] Emitted DevelopersCompleted event (BUG-004 - no stories executed)`);
       } else {
         // 🔥 EVENT SOURCING: Emit completion event (TRUE SUCCESS CASE)
-        await eventStore.append({
+        await eventStore.safeAppend({
           taskId: task.id as any,
           eventType: 'DevelopersCompleted',
           agentName: 'developer',
@@ -907,24 +922,7 @@ export class DevelopersPhase extends BasePhase {
         console.log(`📝 [Developers] Emitted DevelopersCompleted event (success: ${actuallyCompletedCount}/${assignedStoriesCount} stories)`);
       }
 
-      // 🧠 GRANULAR MEMORY: Store phase-level completion marker
-      const projectId = task.projectId?.toString();
-      if (projectId) {
-        try {
-          // Use actuallyCompletedCount (already calculated above for BUG-004 check)
-          await granularMemoryService.storeProgress({
-            projectId,
-            taskId,
-            phaseType: 'developer',
-            agentType: 'developer',
-            status: actuallyCompletedCount > 0 ? 'completed' : 'failed',
-            details: `Development phase: ${actuallyCompletedCount}/${assignedStoriesCount} stories completed by ${team.length} developer(s) across ${orderedEpics.length} epic(s)`,
-          });
-          console.log(`🧠 [Memory] Stored phase completion marker`);
-        } catch (memError: any) {
-          console.warn(`⚠️ [Memory] Failed to store phase completion: ${memError.message}`);
-        }
-      }
+      // 🔥 REMOVED: granularMemoryService.storeProgress - SQLite tracks this via task.orchestration
 
       // 🎯 ACTIVITY: Emit Developers completion for Activity tab
       AgentActivityService.emitToolUse(taskId, developerLabel, 'Development', {
@@ -1011,7 +1009,7 @@ export class DevelopersPhase extends BasePhase {
 
       // 🔥 EVENT SOURCING: Emit failure event to prevent infinite loop
       const { eventStore } = await import('../EventStore');
-      await eventStore.append({
+      await eventStore.safeAppend({
         taskId: task.id as any,
         eventType: 'DevelopersCompleted', // Mark as completed even on error
         agentName: 'developer',
@@ -1068,6 +1066,10 @@ export class DevelopersPhase extends BasePhase {
     const taskId = (task.id as any).toString();
     const fs = require('fs');
     const { execSync } = require('child_process');
+
+    // 🐳 SANDBOX: Get sandbox ID for Docker execution
+    const pipelineSandboxMap = context.getData<Map<string, string>>('sandboxMap');
+    const pipelineSandboxId = pipelineSandboxMap?.get(epic.targetRepository);
 
     // 🔥🔥🔥 ISOLATED STORY WORKSPACE 🔥🔥🔥
     // Each DEV+JUDGE pair gets its own copy of the repository
@@ -1145,7 +1147,16 @@ export class DevelopersPhase extends BasePhase {
           }
 
           console.log(`   📋 Copying repository to isolated workspace...`);
-          execSync(`cp -r "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+          // 🔥 Use rsync instead of cp to handle broken symlinks (Flutter .plugin_symlinks)
+          try {
+            execSync(`rsync -a --ignore-errors "${sourceRepoPath}/" "${isolatedRepoPath}/"`, { encoding: 'utf8', stdio: 'pipe' });
+          } catch {
+            // Fallback: Delete broken symlinks first, then use cp
+            try {
+              execSync(`find "${sourceRepoPath}" -type l ! -exec test -e {} \\; -delete 2>/dev/null || true`, { encoding: 'utf8', stdio: 'pipe' });
+            } catch { /* ignore */ }
+            execSync(`cp -R "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
+          }
           console.log(`   ✅ Repository copied to isolated workspace`);
 
           // 🔥 CRITICAL: Ensure isolated repo has proper git remote
@@ -1156,6 +1167,49 @@ export class DevelopersPhase extends BasePhase {
             console.log(`   ✅ Git remote configured in isolated workspace`);
           } catch (remoteError: any) {
             console.warn(`   ⚠️ Could not set git remote: ${remoteError.message}`);
+          }
+
+          // 🔥🔥🔥 SEQUENTIAL SYNC: Pull epic branch to get changes from previous stories 🔥🔥🔥
+          // This is CRITICAL for sequential execution - without this, story-2 won't see story-1's changes
+          const epicBranch = epic.branchName;
+          if (epicBranch) {
+            try {
+              console.log(`\n   🔄 [SEQUENTIAL SYNC] Syncing with epic branch: ${epicBranch}`);
+
+              // 1. Fetch latest from remote
+              execSync(`git -C "${isolatedRepoPath}" fetch origin`, { encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Fetched from origin`);
+
+              // 2. Checkout epic branch (or create tracking branch if doesn't exist locally)
+              try {
+                execSync(`git -C "${isolatedRepoPath}" checkout ${epicBranch}`, { encoding: 'utf8' });
+              } catch (checkoutError: any) {
+                if (checkoutError.message.includes('did not match any file')) {
+                  // Branch doesn't exist locally, create from remote
+                  execSync(`git -C "${isolatedRepoPath}" checkout -b ${epicBranch} origin/${epicBranch}`, { encoding: 'utf8' });
+                } else {
+                  throw checkoutError;
+                }
+              }
+              console.log(`   ✅ Checked out ${epicBranch}`);
+
+              // 3. Pull latest changes (this brings story-1's changes for story-2, etc.)
+              const pullOutput = execSync(`git -C "${isolatedRepoPath}" pull origin ${epicBranch}`, { encoding: 'utf8', timeout: 60000 });
+              console.log(`   ✅ Pulled latest from ${epicBranch}`);
+              if (pullOutput.includes('Already up to date')) {
+                console.log(`   ℹ️  No new changes from previous stories`);
+              } else {
+                console.log(`   📥 Received changes from previous stories`);
+              }
+
+              console.log(`   🔄 [SEQUENTIAL SYNC] COMPLETE - workspace has all previous story changes\n`);
+            } catch (syncError: any) {
+              console.warn(`   ⚠️ [SEQUENTIAL SYNC] Could not sync with epic: ${syncError.message}`);
+              // Non-fatal: story can still work, but may have conflicts at merge time
+              if (syncError.message.includes("couldn't find remote ref")) {
+                console.log(`   ℹ️  Epic branch not on remote yet - this is likely the first story`);
+              }
+            }
           }
         } else {
           console.log(`   ℹ️  Isolated workspace already exists`);
@@ -1197,6 +1251,18 @@ export class DevelopersPhase extends BasePhase {
     }
 
     console.log(`   ✅ Workspace path valid: ${effectiveWorkspacePath}`);
+
+    // 🔥 Emit workspace ready notification for LivePreview
+    if (epic.targetRepository) {
+      const fullRepoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+      NotificationService.emitStoryWorkspaceReady(
+        taskId,
+        fullRepoPath,
+        epic.targetRepository,
+        epic.name,
+        story.title
+      );
+    }
 
     // 🔥 CRITICAL VALIDATION: Epic MUST have targetRepository
     if (!epic.targetRepository) {
@@ -1260,6 +1326,15 @@ export class DevelopersPhase extends BasePhase {
     const architectureBrief = context.getData<any>('architectureBrief');
     const environmentCommands = context.getData<any>('environmentCommands');
     const projectRadiographies = context.getData<Map<string, ProjectRadiography>>('projectRadiographies');
+
+    // 🐳 SANDBOX: Get sandbox map from context (created by PlanningPhase)
+    const sandboxMap = context.getData<Map<string, string>>('sandboxMap');
+    const sandboxId = sandboxMap?.get(epic.targetRepository);
+    if (sandboxId) {
+      console.log(`🐳 [DevelopersPhase] Using sandbox ${sandboxId} for repo ${epic.targetRepository}`);
+    } else {
+      console.log(`⚠️  [DevelopersPhase] No sandbox found for repo ${epic.targetRepository} - using host`);
+    }
 
     try {
       // STEP 1: Developer implements story
@@ -1394,6 +1469,7 @@ export class DevelopersPhase extends BasePhase {
               architectureBrief: context.getData<any>('architectureBrief'),
               environmentCommands: context.getData<any>('environmentCommands'),
               projectRadiographies: context.getData<Map<string, ProjectRadiography>>('projectRadiographies'),
+              sandboxId, // 🐳 Explicit sandbox ID for Docker execution
             };
 
             // 🔥 JUMP DIRECTLY TO JUDGE
@@ -1419,7 +1495,7 @@ export class DevelopersPhase extends BasePhase {
 
               // Emit completion events
               const { eventStore } = await import('../EventStore');
-              await eventStore.append({
+              await eventStore.safeAppend({
                 taskId: task.id as any,
                 eventType: 'StoryCompleted',
                 agentName: 'developer',
@@ -1588,7 +1664,8 @@ export class DevelopersPhase extends BasePhase {
         architectureBrief, // 🏗️ Architecture patterns from PlanningPhase
         environmentCommands, // 🔧 Environment commands from TechLead (dynamic verification)
         projectRadiographies, // 🔬 Language-agnostic project analysis from PlanningPhase
-        resumeOptions // 🔄 Session resume options
+        resumeOptions, // 🔄 Session resume options
+        sandboxId // 🐳 Explicit sandbox ID for Docker execution
       );
 
       // 🔄 Save session checkpoint after developer starts (for mid-execution recovery)
@@ -1623,8 +1700,13 @@ export class DevelopersPhase extends BasePhase {
       }
 
       // 🔥 CHECKPOINT 2: Mark story as "code_written" with SDK session for potential resume
+      // 🔥 NEW: Save granular tracking for recovery (files modified, created, tools used, cost)
       await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'code_written', {
         sdkSessionId: developerResult?.sdkSessionId,
+        filesModified: developerResult?.filesModified || [],
+        filesCreated: developerResult?.filesCreated || [],
+        toolsUsed: developerResult?.toolsUsed || [],
+        cost_usd: developerResult?.cost || 0,
       });
 
       // 🔥 CRITICAL: Wait for git push to fully complete on remote
@@ -2326,7 +2408,7 @@ export class DevelopersPhase extends BasePhase {
 
         // STEP 3: Merge to epic branch (from ISOLATED workspace)
         console.log(`\n🔀 [STEP 3/3] Merging approved story to epic branch...`);
-        await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+        await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId, pipelineSandboxId);
 
         // 🔥 CHECKPOINT 5: Mark story as "merged_to_epic" after successful merge
         await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
@@ -2394,7 +2476,7 @@ export class DevelopersPhase extends BasePhase {
           // 🔥 EVENT SOURCING: Emit StoryCompleted event for recovery tracking
           // This is CRITICAL - EventStore.buildState() uses this to mark stories as completed
           const { eventStore } = await import('../EventStore');
-          await eventStore.append({
+          await eventStore.safeAppend({
             taskId: task.id as any,
             eventType: 'StoryCompleted',
             agentName: 'developer',
@@ -2429,49 +2511,7 @@ export class DevelopersPhase extends BasePhase {
           // 🔄 Mark session checkpoint as completed (no resume needed for this story)
           await sessionCheckpointService.markCompleted(taskId, 'developer', story.id);
 
-          // 🧠 GRANULAR MEMORY: Store story completion and what was done
-          const projectId = task.projectId?.toString();
-          if (projectId) {
-            try {
-              // Store story completion as progress
-              await granularMemoryService.storeProgress({
-                projectId,
-                taskId,
-                phaseType: 'developer',
-                agentType: 'developer',
-                epicId: (story as any).epicId,
-                storyId: story.id,
-                status: 'completed',
-                details: `Story "${story.title}" completed by ${(story as any).assignedTo || 'developer'}`,
-              });
-
-              // Store file changes if available
-              if ((story as any).filesToModify?.length || (story as any).filesToCreate?.length) {
-                const allFiles = [
-                  ...((story as any).filesToModify || []),
-                  ...((story as any).filesToCreate || [])
-                ];
-                for (const filePath of allFiles.slice(0, 10)) { // Limit to 10 files
-                  await granularMemoryService.storeFileChange({
-                    projectId,
-                    taskId,
-                    phaseType: 'developer',
-                    agentType: 'developer',
-                    epicId: (story as any).epicId,
-                    storyId: story.id,
-                    filePath,
-                    operation: (story as any).filesToCreate?.includes(filePath) ? 'create' : 'modify',
-                    summary: `Changed for story: ${story.title}`,
-                  });
-                }
-              }
-
-              console.log(`🧠 [Memory] Stored completion for story: ${story.title}`);
-              // Note: Memory stored in Local + MongoDB only (not in client repos)
-            } catch (memError: any) {
-              console.warn(`⚠️ [Memory] Failed to store story completion: ${memError.message}`);
-            }
-          }
+          // 🔥 REMOVED: granularMemoryService calls - SQLite tracks files via unifiedMemoryService.saveStoryProgress
 
           // Emit activity for visibility
           const { AgentActivityService } = await import('../AgentActivityService');
@@ -2485,9 +2525,121 @@ export class DevelopersPhase extends BasePhase {
           // Non-critical - don't fail the pipeline, just log warning
         }
       } else {
-        // Judge REJECTED - keep branch for investigation
+        // Judge REJECTED - check if specialist can help before giving up
         console.error(`❌ [STEP ${iteration}/${maxRetries}] Judge REJECTED story: ${story.title}`);
         console.error(`   Feedback: ${judgeResult.data?.feedback || judgeResult.error}`);
+
+        // 🔥 SPECIALIST ROUTING: Check if rejection can be handled by a specialist
+        const rejectReason = judgeResult.data?.rejectReason;
+        console.log(`📋 [SPECIALIST ROUTING] Rejection reason: ${rejectReason || 'unknown'}`);
+
+        // 🔧 CONFLICTS: Route to ConflictResolver specialist
+        if (rejectReason === 'conflicts') {
+          console.log(`\n🔧 [SPECIALIST] Routing to ConflictResolver for merge conflict resolution...`);
+          try {
+            // Import and call ConflictResolverPhase
+            const { ConflictResolverPhase } = await import('./ConflictResolverPhase');
+            const conflictResolver = new ConflictResolverPhase(this.executeAgentFn);
+
+            // Create context for conflict resolution
+            const conflictContext = new OrchestrationContext(task, repositories, effectiveWorkspacePath);
+            conflictContext.setData('story', updatedStory);
+            conflictContext.setData('epic', epic);
+            conflictContext.setData('storyBranchName', updatedStory.branchName);
+            conflictContext.setData('commitSHA', commitSHA);
+            conflictContext.setData('targetRepository', epic.targetRepository);
+            conflictContext.setData('judgeFeedback', judgeResult.data?.feedback);
+            if (pipelineSandboxId) {
+              conflictContext.setData('sandboxId', pipelineSandboxId);
+            }
+
+            // Execute conflict resolution
+            const conflictResult = await conflictResolver.execute(conflictContext);
+
+            if (conflictResult.success) {
+              console.log(`✅ [SPECIALIST] ConflictResolver resolved the conflicts`);
+
+              // 🔄 RE-EVALUATE: Run Judge again after conflict resolution
+              console.log(`\n⚖️ [RE-EVALUATION] Running Judge again after conflict resolution...`);
+              const reEvalJudgePhase = new JudgePhase(this.executeAgentFn);
+              const reEvalJudgeResult = await reEvalJudgePhase.execute(judgeContext);
+
+              const reEvalApproved = reEvalJudgeResult.success && reEvalJudgeResult.data?.status === 'approved';
+
+              if (reEvalApproved) {
+                console.log(`✅ [RE-EVALUATION] Judge APPROVED after conflict resolution!`);
+
+                // Continue with merge stage
+                console.log(`\n🔀 [MERGE] Proceeding to merge approved story...`);
+                await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId, pipelineSandboxId);
+
+                // Mark story as completed
+                await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
+                  commitHash: commitSHA,
+                });
+
+                story.status = 'completed';
+                (story as any).mergedToEpic = true;
+                (story as any).completedAt = new Date();
+                (story as any).resolvedBySpecialist = 'ConflictResolver';
+
+                const { eventStore } = await import('../EventStore');
+                await eventStore.safeAppend({
+                  taskId: task.id as any,
+                  eventType: 'StoryCompleted',
+                  agentName: 'conflict-resolver',
+                  payload: {
+                    storyId: story.id,
+                    epicId: (story as any).epicId,
+                    title: story.title,
+                    completedBy: 'ConflictResolver',
+                    resolvedConflicts: true,
+                  },
+                });
+
+                await unifiedMemoryService.markStoryCompleted(
+                  taskId,
+                  normalizedEpicId,
+                  normalizedStoryId,
+                  'approved',
+                  updatedStory.branchName,
+                  undefined
+                );
+
+                console.log(`✅ [PIPELINE] Story completed via ConflictResolver specialist`);
+
+                // Return early - story is completed
+                return {
+                  developerCost,
+                  judgeCost: judgeCost + (reEvalJudgeResult.metadata?.cost || 0),
+                  conflictResolutionCost: conflictResult.metadata?.cost || 0,
+                  developerTokens,
+                  judgeTokens: {
+                    input: judgeTokens.input + Number(reEvalJudgeResult.metadata?.input_tokens || 0),
+                    output: judgeTokens.output + Number(reEvalJudgeResult.metadata?.output_tokens || 0),
+                  },
+                  conflictResolutionUsage: {
+                    input_tokens: conflictResult.metadata?.input_tokens || 0,
+                    output_tokens: conflictResult.metadata?.output_tokens || 0,
+                  },
+                };
+              } else {
+                console.warn(`⚠️ [RE-EVALUATION] Judge still rejected after conflict resolution`);
+                console.warn(`   New feedback: ${reEvalJudgeResult.data?.feedback}`);
+                // Fall through to normal rejection flow
+              }
+            } else {
+              console.warn(`⚠️ [SPECIALIST] ConflictResolver could not resolve conflicts`);
+              console.warn(`   Error: ${conflictResult.error || 'Unknown error'}`);
+              // Fall through to normal rejection flow
+            }
+          } catch (specialistError: any) {
+            console.error(`❌ [SPECIALIST] ConflictResolver failed: ${specialistError.message}`);
+            // Fall through to normal rejection flow
+          }
+        }
+
+        // Normal rejection flow - mark as failed
         console.error(`❌ [PIPELINE] Story pipeline FAILED - NOT merging`);
 
         // 📋 IMPORTANT: Branch preserved for investigation
@@ -2504,9 +2656,8 @@ export class DevelopersPhase extends BasePhase {
 
         // Emit notification so user sees this in the UI
         const { NotificationService } = await import('../NotificationService');
-        const taskId = (task.id as any).toString();
         NotificationService.emitConsoleLog(
-          taskId,
+          taskId, // taskId is already defined at function scope
           'error',
           `❌ Story rejected by Judge: ${story.title}\nBranch: ${updatedStory.branchName}\nFeedback: ${feedback}`
         );
@@ -2518,7 +2669,7 @@ export class DevelopersPhase extends BasePhase {
 
           // 🔥 EVENT SOURCING: Emit StoryFailed event for recovery tracking
           const { eventStore } = await import('../EventStore');
-          await eventStore.append({
+          await eventStore.safeAppend({
             taskId: task.id as any,
             eventType: 'StoryFailed',
             agentName: 'developer',
@@ -2547,26 +2698,7 @@ export class DevelopersPhase extends BasePhase {
           // 🔄 Mark session checkpoint as failed (keep checkpoint for potential retry)
           await sessionCheckpointService.markFailed(taskId, 'developer', story.id, feedback);
 
-          // 🧠 GRANULAR MEMORY: Store error for future learning
-          // This helps future retries understand what went wrong
-          const projectId = task.projectId?.toString();
-          if (projectId) {
-            try {
-              await granularMemoryService.storeError({
-                projectId,
-                taskId,
-                phaseType: 'developer',
-                agentType: 'judge',
-                epicId: (story as any).epicId,
-                storyId: story.id,
-                errorMessage: `Judge rejected story "${story.title}": ${feedback}`,
-                avoidanceRule: `When implementing "${story.title}", avoid: ${feedback.substring(0, 200)}`,
-              });
-              console.log(`🧠 [Memory] Stored error for story: ${story.title}`);
-            } catch (memError: any) {
-              console.warn(`⚠️ [Memory] Failed to store error: ${memError.message}`);
-            }
-          }
+          // 🔥 REMOVED: granularMemoryService.storeError - SQLite tracks errors via task.orchestration
         } catch (persistError: any) {
           console.error(`⚠️ [RECOVERY] Failed to persist story failure status: ${persistError.message}`);
         }
@@ -2732,6 +2864,7 @@ export class DevelopersPhase extends BasePhase {
               architectureBrief,
               environmentCommands,
               projectRadiographies,
+              sandboxId, // 🐳 Explicit sandbox ID for Docker execution
             };
 
             // Execute Judge stage directly
@@ -2764,7 +2897,7 @@ export class DevelopersPhase extends BasePhase {
 
                 // Emit StoryCompleted event
                 const { eventStore } = await import('../EventStore');
-                await eventStore.append({
+                await eventStore.safeAppend({
                   taskId: task.id as any,
                   eventType: 'StoryCompleted',
                   agentName: 'developer',
@@ -2803,7 +2936,7 @@ export class DevelopersPhase extends BasePhase {
               console.log(`\n❌ [RECOVERY-JUDGE] REJECTED: ${judgeResult.feedback}`);
               // Judge rejected - mark as failed
               const { eventStore } = await import('../EventStore');
-              await eventStore.append({
+              await eventStore.safeAppend({
                 taskId: task.id as any,
                 eventType: 'StoryFailed',
                 agentName: 'developer',
@@ -2854,6 +2987,7 @@ export class DevelopersPhase extends BasePhase {
                 architectureBrief,
                 environmentCommands,
                 projectRadiographies,
+                sandboxId, // 🐳 Explicit sandbox ID for Docker execution
               };
 
               // Execute Judge stage
@@ -2884,7 +3018,7 @@ export class DevelopersPhase extends BasePhase {
                   });
 
                   const { eventStore } = await import('../EventStore');
-                  await eventStore.append({
+                  await eventStore.safeAppend({
                     taskId: task.id as any,
                     eventType: 'StoryCompleted',
                     agentName: 'developer',
@@ -2983,6 +3117,7 @@ export class DevelopersPhase extends BasePhase {
       effectiveWorkspacePath, workspaceStructure, attachments, state, context: _context,
       taskId, normalizedEpicId, normalizedStoryId, epicBranchName,
       devAuth, architectureBrief, environmentCommands, projectRadiographies,
+      sandboxId, // 🐳 Explicit sandbox ID for Docker execution
     } = pipelineCtx;
 
     console.log(`\n👨‍💻 [DEVELOPER STAGE] Starting for story: ${story.title}`);
@@ -3055,7 +3190,8 @@ export class DevelopersPhase extends BasePhase {
         architectureBrief,
         environmentCommands,
         projectRadiographies,
-        resumeOptions
+        resumeOptions,
+        sandboxId // 🐳 Explicit sandbox ID for Docker execution
       );
 
       // 🔄 Save session checkpoint
@@ -3462,6 +3598,12 @@ export class DevelopersPhase extends BasePhase {
 
       console.log(`✅ [JUDGE STAGE] Verdict: ${isApproved ? 'APPROVED ✅' : 'REJECTED ❌'}`);
 
+      // 🔥 SPECIALIST ROUTING: Extract rejectReason for routing decision
+      const rejectReason = judgeResult.data?.rejectReason;
+      if (!isApproved && rejectReason) {
+        console.log(`📋 [JUDGE STAGE] Rejection reason: ${rejectReason}`);
+      }
+
       return {
         success: true,
         approved: isApproved,
@@ -3470,6 +3612,7 @@ export class DevelopersPhase extends BasePhase {
         feedback: judgeResult.data?.feedback || judgeResult.error,
         iteration: judgeResult.data?.iteration || 1,
         maxRetries: judgeResult.data?.maxRetries || 3,
+        rejectReason,
       };
 
     } catch (error: any) {
@@ -3502,6 +3645,7 @@ export class DevelopersPhase extends BasePhase {
     const {
       task, story, epic, repositories,
       effectiveWorkspacePath, taskId, normalizedEpicId, normalizedStoryId, context: _context,
+      sandboxId, // 🐳 Explicit sandbox ID for Docker execution
     } = pipelineCtx;
 
     console.log(`\n🔀 [MERGE STAGE] Merging story to epic branch: ${story.title}`);
@@ -3513,7 +3657,7 @@ export class DevelopersPhase extends BasePhase {
       const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
 
       // Merge to epic branch
-      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId);
+      await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId, sandboxId);
 
       // 🔥 CHECKPOINT: Mark as merged_to_epic
       await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'merged_to_epic', {
@@ -3586,7 +3730,8 @@ export class DevelopersPhase extends BasePhase {
     epic: any,
     workspacePath: string | null,
     repositories: any[],
-    taskId: string
+    taskId: string,
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<void> {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🔀 [Merge] STARTING STORY TO EPIC MERGE`);
@@ -3905,7 +4050,8 @@ export class DevelopersPhase extends BasePhase {
                     story,
                     epic,
                     repoPath,
-                    conflictedFiles
+                    conflictedFiles,
+                    sandboxId // 🐳 Pass sandbox ID for Docker execution
                   );
 
                   if (aiResolved.success) {
@@ -3996,7 +4142,8 @@ export class DevelopersPhase extends BasePhase {
     story: any,
     epic: any,
     repoPath: string,
-    conflictedFiles: string[]
+    conflictedFiles: string[],
+    sandboxId?: string // 🐳 Explicit sandbox ID for Docker execution
   ): Promise<{ success: boolean; cost?: number; usage?: any; error?: string }> {
     console.log(`\n🤖 [ConflictResolver] Starting AI-powered conflict resolution`);
     console.log(`   Story: ${story.title}`);
@@ -4075,6 +4222,7 @@ If you cannot resolve a conflict, output:
         {
           maxIterations: 10,  // Give it enough iterations to resolve conflicts
           timeout: AGENT_TIMEOUTS.DEFAULT,  // 5 minutes for conflict resolution
+          sandboxId, // 🐳 Explicit sandbox ID for Docker execution
         }
       );
 

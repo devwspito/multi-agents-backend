@@ -87,3 +87,13 @@ export {
   generateJsdocTool,
   extractApiDocsTool,
 } from './documentationTools';
+
+// Sandbox tools (Docker container execution)
+export {
+  sandboxBashTool,
+  sandboxStatusTool,
+  sandboxFileSyncTool,
+  setSandboxContext,
+  clearSandboxContext,
+  getSandboxContext,
+} from './sandboxTools';

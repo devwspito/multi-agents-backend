@@ -28,10 +28,14 @@ import { createExtraToolsServer } from '../../tools/extraTools';
 import { createExploratoryToolsServer } from '../../tools/exploratoryTools';
 import { createAutonomousToolsServer } from '../../tools/autonomousTools';
 
+// 🐳 Sandbox Service for Docker container execution
+import { sandboxService } from '../SandboxService';
+import { dockerBashHook, setDockerHookContext } from '../DockerBashHook';
+
 // Smart Context & Memory
 import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
-import { AgentMemoryBridge } from '../AgentMemoryBridge';
-import { granularMemoryService } from '../GranularMemoryService';
+import { unifiedMemoryService } from '../UnifiedMemoryService';
+// 🔥 REMOVED: AgentMemoryBridge, granularMemoryService - SQLite is single source of truth
 
 // Autonomous Services
 import { SessionService } from '../SessionService';
@@ -92,6 +96,11 @@ export interface AgentExecutionResult {
   executionDuration: number;
   sdkSessionId?: string;
   lastMessageUuid?: string;
+  // 🔥 NEW: Granular tracking for recovery
+  filesModified: string[];   // Files edited during execution (Edit tool)
+  filesCreated: string[];    // Files created from scratch (Write tool)
+  toolsUsed: string[];       // Tools used (Edit, Write, Bash, etc.)
+  turnsCompleted: number;    // Number of SDK turns completed
 }
 
 /**
@@ -100,8 +109,14 @@ export interface AgentExecutionResult {
 export interface DeveloperExecutionResult {
   output?: string;
   cost?: number;
+  usage?: any;
   sdkSessionId?: string;
   lastMessageUuid?: string;
+  // 🔥 NEW: Granular tracking for recovery
+  filesModified?: string[];   // Files edited
+  filesCreated?: string[];    // Files created from scratch
+  toolsUsed?: string[];
+  turnsCompleted?: number;
 }
 
 /**
@@ -179,6 +194,7 @@ export class AgentExecutorService {
     _options?: {
       maxIterations?: number;
       timeout?: number;
+      sandboxId?: string;  // 🐳 Explicit sandbox ID for Docker execution
     },
     contextOverride?: OrchestrationContext,
     skipOptimization?: boolean,
@@ -289,8 +305,7 @@ export class AgentExecutorService {
       const contextInjector = SmartContextInjector.getInstance();
       await contextInjector.initialize(workspacePath);
 
-      const memoryBridge = AgentMemoryBridge.getInstance();
-      await memoryBridge.initialize(workspacePath);
+      // 🔥 REMOVED: AgentMemoryBridge - SQLite is single source of truth
 
       const phaseMapping: Record<string, AgentPhase> = {
         'planning-agent': 'planning-agent',
@@ -312,56 +327,8 @@ export class AgentExecutorService {
 
       smartContextBlock = injectedContext.formattedContext;
 
-      // Granular memory from database
-      if (taskId) {
-        try {
-          const taskDoc = TaskRepository.findById(taskId);
-          if (taskDoc?.projectId) {
-            const projectId = taskDoc.projectId;
-
-            const granularMemories = await granularMemoryService.getPhaseMemories({
-              projectId,
-              taskId,
-              phaseType: phase,
-              limit: 30,
-            });
-
-            if (granularMemories.length > 0) {
-              smartContextBlock += granularMemoryService.formatForPrompt(
-                granularMemories,
-                'GRANULAR MEMORY (What you did before - USE THIS!)'
-              );
-            }
-
-            const errorsToAvoid = await granularMemoryService.getErrorsToAvoid({ projectId, taskId, limit: 5 });
-            if (errorsToAvoid.length > 0) {
-              smartContextBlock += '\n\n🚫 ERRORS TO AVOID (from previous runs):\n';
-              for (const err of errorsToAvoid) {
-                smartContextBlock += `• ${err.title}\n`;
-                if (err.error?.avoidanceRule) {
-                  smartContextBlock += `  → ${err.error.avoidanceRule}\n`;
-                }
-              }
-            }
-
-            const patterns = await granularMemoryService.getPatternsAndConventions({ projectId, limit: 10 });
-            if (patterns.length > 0) {
-              smartContextBlock += '\n\n📏 PROJECT CONVENTIONS:\n';
-              for (const p of patterns) {
-                smartContextBlock += `• ${p.title}: ${p.content.substring(0, 200)}\n`;
-              }
-            }
-          }
-        } catch (memError: any) {
-          console.warn(`⚠️ [AgentExecutor] Granular memory error: ${memError.message}`);
-        }
-      }
-
-      // File-based memory
-      const memories = memoryBridge.recallForPhase(phase, 8);
-      if (memories.length > 0) {
-        smartContextBlock += memoryBridge.formatForPrompt(memories, 'ADDITIONAL MEMORIES FROM FILE SYSTEM');
-      }
+      // 🔥 DISK PERSISTENCE REMOVED - SQLite is the single source of truth
+      // All memory is now in task.orchestration (SQLite) via UnifiedMemoryService
     } catch (contextError) {
       console.warn(`⚠️ [AgentExecutor] Smart context generation failed:`, contextError);
     }
@@ -393,9 +360,12 @@ export class AgentExecutorService {
     // SDK retry mechanism
     const MAX_SDK_RETRIES = 3;
     let lastError: any = null;
+    let sandboxContextConfigured = false; // 🐳 Moved outside try for scope in catch
 
     for (let sdkAttempt = 1; sdkAttempt <= MAX_SDK_RETRIES; sdkAttempt++) {
       try {
+        // Reset sandbox context for each retry attempt
+        sandboxContextConfigured = false;
         if (sdkAttempt > 1) {
           console.log(`\n🔄 [AgentExecutor] SDK RETRY attempt ${sdkAttempt}/${MAX_SDK_RETRIES}`);
           const delay = Math.min(5000 * Math.pow(2, sdkAttempt - 2), 30000);
@@ -425,11 +395,13 @@ export class AgentExecutorService {
         const autonomousToolsServer = createAutonomousToolsServer();
 
         // Build query options
+        const baseEnv = { ...process.env, ANTHROPIC_API_KEY: apiKey };
+
         const queryOptions: any = {
           cwd: workspacePath,
           model,
           permissionMode: effectivePermissionMode,
-          env: { ...process.env, ANTHROPIC_API_KEY: apiKey },
+          env: baseEnv,
           mcpServers: {
             'custom-dev-tools': customToolsServer,
             'extra-tools': extraToolsServer,
@@ -455,6 +427,80 @@ export class AgentExecutorService {
           ? 'Continue your work from where you left off. Complete any remaining tasks.'
           : promptContent;
 
+        // 🐳 DOCKER BASH HOOK: Intercept Bash commands and redirect to Docker
+        // This is the official SDK hook approach - transparent to the agent
+        if (taskId) {
+          let containerName: string | null = null;
+          const explicitSandboxId = _options?.sandboxId;
+
+          // 1️⃣ PRIORITY: Use explicit sandboxId if provided
+          if (explicitSandboxId) {
+            const explicitSandbox = sandboxService.getSandbox(explicitSandboxId);
+            if (explicitSandbox && explicitSandbox.status === 'running') {
+              containerName = explicitSandbox.containerName;
+              sandboxContextConfigured = true;
+              console.log(`🐳 [AgentExecutor] Using explicit sandbox ${explicitSandboxId}: ${containerName}`);
+            } else {
+              console.warn(`⚠️ [AgentExecutor] Explicit sandbox ${explicitSandboxId} not found or not running`);
+            }
+          }
+
+          // 2️⃣ FALLBACK: Try to find sandbox for this task
+          if (!containerName) {
+            const existingSandbox = sandboxService.getSandbox(taskId);
+            if (existingSandbox && existingSandbox.status === 'running') {
+              containerName = existingSandbox.containerName;
+              sandboxContextConfigured = true;
+              console.log(`🐳 [AgentExecutor] Found task sandbox for ${agentType}: ${containerName}`);
+            }
+          }
+
+          // 3️⃣ FALLBACK: Extract repo name from workspacePath
+          if (!containerName) {
+            // workspacePath format: /path/to/workspace/repo-name
+            // sandboxId format: taskId-setup-repo-name
+            const repoName = workspacePath.split('/').pop();
+            const expectedSandboxId = repoName ? `${taskId}-setup-${repoName}` : null;
+
+            if (expectedSandboxId) {
+              const exactSandbox = sandboxService.getSandbox(expectedSandboxId);
+              if (exactSandbox && exactSandbox.status === 'running') {
+                containerName = exactSandbox.containerName;
+                sandboxContextConfigured = true;
+                console.log(`🐳 [AgentExecutor] Found sandbox for repo ${repoName}: ${containerName}`);
+              }
+            }
+          }
+
+          // 4️⃣ LAST FALLBACK: Find any running setup sandbox for this task
+          if (!containerName) {
+            const allSandboxes = sandboxService.getAllSandboxes();
+            for (const [sandboxId, sandbox] of allSandboxes) {
+              if (sandboxId.startsWith(`${taskId}-setup-`) && sandbox.status === 'running') {
+                containerName = sandbox.containerName;
+                sandboxContextConfigured = true;
+                console.log(`🐳 [AgentExecutor] Using fallback sandbox for ${agentType}: ${containerName}`);
+                break;
+              }
+            }
+          }
+
+          if (containerName) {
+            // Set context for the Docker hook
+            setDockerHookContext({
+              taskId,
+              containerName,
+              workspacePath: '/workspace',
+            });
+
+            // Add PreToolUse hook to intercept Bash commands
+            queryOptions.hooks = dockerBashHook.createHooksConfig(taskId);
+            console.log(`🐳 [AgentExecutor] Docker Bash hook configured - commands will be redirected to container`);
+          } else if (sandboxService.isDockerAvailable()) {
+            console.log(`⚠️ [AgentExecutor] No sandbox found for ${agentType}, commands will run on host`);
+          }
+        }
+
         const stream = query({ prompt: effectivePrompt as any, options: queryOptions });
 
         // Start execution tracking
@@ -478,6 +524,15 @@ export class AgentExecutorService {
         const pendingToolCalls = new Map<string, { name: string; input: any }>();
         let historyMessagesReceived = 0;
 
+        // 🔥 NEW: Granular tracking for recovery
+        const filesModifiedSet = new Set<string>();  // Files edited (Edit tool)
+        const filesCreatedSet = new Set<string>();   // Files created (Write tool)
+        const toolsUsedSet = new Set<string>();      // Unique tools used
+
+        // 🔥 Cost tracking: Use SDK cost directly (not token-based calculation)
+        let accumulatedCost = 0; // USD from Claude Agent SDK
+
+        // Note: accumulatedUsage kept for backward compatibility logging
         const accumulatedUsage = {
           input_tokens: 0,
           output_tokens: 0,
@@ -658,15 +713,27 @@ export class AgentExecutorService {
               if (taskId && toolUseId) {
                 const pendingCall = pendingToolCalls.get(toolUseId);
                 if (pendingCall) {
+                  // 🔥 TRACK: Add tool to used set
+                  toolsUsedSet.add(pendingCall.name);
+
                   AgentActivityService.processToolResult(taskId, agentType, pendingCall.name, pendingCall.input, result);
 
                   const isError = (message as any).is_error === true;
                   StreamingService.streamToolComplete(taskId, agentType, pendingCall.name, toolUseId, result, 0, !isError);
 
-                  if (!isError && (pendingCall.name === 'Edit' || pendingCall.name === 'Write')) {
-                    const filePath = pendingCall.input?.file_path || pendingCall.input?.path;
+                  // 🔥 TRACK: Separate created vs modified files
+                  if (!isError) {
+                    const filePath = pendingCall.input?.file_path || pendingCall.input?.path || pendingCall.input?.notebook_path;
                     if (filePath) {
-                      StreamingService.streamFileChange(taskId, agentType, filePath, pendingCall.name === 'Write' ? 'created' : 'modified');
+                      if (pendingCall.name === 'Write') {
+                        // New file created from scratch
+                        filesCreatedSet.add(filePath);
+                        StreamingService.streamFileChange(taskId, agentType, filePath, 'created');
+                      } else if (pendingCall.name === 'Edit' || pendingCall.name === 'NotebookEdit') {
+                        // Existing file modified
+                        filesModifiedSet.add(filePath);
+                        StreamingService.streamFileChange(taskId, agentType, filePath, 'modified');
+                      }
                     }
                   }
 
@@ -699,7 +766,15 @@ export class AgentExecutorService {
               }
             }
 
-            // Usage accumulation
+            // 🔥 Cost from SDK (system messages contain accumulated cost in USD)
+            if ((message as any).type === 'system') {
+              const systemCost = (message as any).cost;
+              if (typeof systemCost === 'number' && systemCost > 0) {
+                accumulatedCost = systemCost; // SDK accumulates, we just capture latest
+              }
+            }
+
+            // Usage accumulation (kept for logging, not used for cost calculation)
             const msgUsage = (message as any).usage || (message as any).message?.usage || (message as any).data?.usage;
             if (msgUsage) {
               if (msgUsage.input_tokens) accumulatedUsage.input_tokens += msgUsage.input_tokens;
@@ -762,33 +837,23 @@ export class AgentExecutorService {
         // Extract output
         const output = this.extractOutputText(finalResult, allMessages) || '';
 
-        // Calculate cost
-        const usage = accumulatedUsage.input_tokens > 0 || accumulatedUsage.output_tokens > 0
-          ? accumulatedUsage
-          : ((finalResult as any)?.usage || {});
+        // 🔥 USE SDK COST DIRECTLY (no manual token-based calculation needed)
+        const cost = accumulatedCost;
 
-        const inputTokens = usage.input_tokens || 0;
-        const outputTokens = usage.output_tokens || 0;
-        const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
-        const cacheReadTokens = usage.cache_read_input_tokens || 0;
+        // Token stats for logging (not used for cost)
+        const inputTokens = accumulatedUsage.input_tokens;
+        const outputTokens = accumulatedUsage.output_tokens;
 
-        const { MODEL_PRICING } = await import('../../config/ModelConfigurations');
-        const pricing = MODEL_PRICING[modelAlias as keyof typeof MODEL_PRICING];
-
-        if (!pricing) {
-          throw new Error(`No pricing found for model alias "${modelAlias}"`);
+        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (from SDK)`);
+        if (inputTokens > 0 || outputTokens > 0) {
+          console.log(`   📊 Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`);
         }
 
-        const inputPricePerMillion = pricing.inputPerMillion;
-        const outputPricePerMillion = pricing.outputPerMillion;
-
-        const inputCost = (inputTokens * inputPricePerMillion) / 1_000_000;
-        const outputCost = (outputTokens * outputPricePerMillion) / 1_000_000;
-        const cacheCreationCost = (cacheCreationTokens * inputPricePerMillion * 1.25) / 1_000_000;
-        const cacheReadCost = (cacheReadTokens * inputPricePerMillion * 0.1) / 1_000_000;
-        const cost = inputCost + outputCost + cacheCreationCost + cacheReadCost;
-
-        console.log(`💰 [AgentExecutor] ${agentType} cost: $${cost.toFixed(4)}`);
+        // 🔥 SAVE SDK COST TO SQLite
+        if (taskId && cost > 0) {
+          unifiedMemoryService.addCost(taskId, cost, inputTokens + outputTokens);
+          console.log(`   💾 Cost saved: $${cost.toFixed(4)}`);
+        }
 
         // Post-execution hooks
         const executionDuration = Date.now() - executionStartTime;
@@ -833,6 +898,12 @@ export class AgentExecutorService {
           tokens: inputTokens + outputTokens,
         });
 
+        // 🐳 CLEANUP: Clear Docker hook context after successful execution
+        if (sandboxContextConfigured) {
+          setDockerHookContext(null);
+          console.log(`🐳 [AgentExecutor] Docker hook context cleared for ${agentType}`);
+        }
+
         return {
           output,
           usage: (finalResult as any)?.usage || {},
@@ -845,8 +916,18 @@ export class AgentExecutorService {
           executionDuration,
           sdkSessionId,
           lastMessageUuid,
+          // 🔥 NEW: Granular tracking for recovery
+          filesModified: Array.from(filesModifiedSet),
+          filesCreated: Array.from(filesCreatedSet),
+          toolsUsed: Array.from(toolsUsedSet),
+          turnsCompleted: turnCount,
         };
       } catch (error: any) {
+        // 🐳 CLEANUP: Clear Docker hook context on error
+        if (sandboxContextConfigured) {
+          setDockerHookContext(null);
+        }
+
         console.error(`❌ [AgentExecutor] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
 
         lastError = error;
