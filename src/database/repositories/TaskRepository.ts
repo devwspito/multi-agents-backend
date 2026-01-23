@@ -189,6 +189,7 @@ export interface IOrchestration {
     results?: any[];
   };
   currentPhase?: string;
+  workspacePath?: string; // 💾 Path to task workspace for debug and recovery
   phases?: any[];
   totalCost: number;
   totalTokens: number;
@@ -232,6 +233,13 @@ export interface IOrchestration {
   isMultiRepo?: boolean;
   humanIntervention?: any;
   branchRegistry?: any[];
+  // 🔄 Checkpoint for crash recovery (persists OrchestrationContext state)
+  checkpoint?: {
+    branchRegistry?: Array<[string, any]>;
+    sharedData?: Record<string, any>;
+    phaseResults?: any[];
+    savedAt?: Date;
+  };
 }
 
 export interface ILog {

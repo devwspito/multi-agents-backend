@@ -273,6 +273,15 @@ const LANGUAGE_PATTERNS: Record<string, {
       { pattern: /vapor/, name: 'vapor', ecosystem: 'swift' },
     ],
   },
+  dart: {
+    extensions: ['.dart'],
+    depFiles: ['pubspec.yaml', 'pubspec.lock'],
+    frameworks: [
+      { pattern: /flutter/, name: 'flutter', ecosystem: 'flutter' },
+      { pattern: /dart_frog/, name: 'dart_frog', ecosystem: 'dart' },
+      { pattern: /shelf/, name: 'shelf', ecosystem: 'dart' },
+    ],
+  },
 };
 
 // ============ SERVICE ============

@@ -10,7 +10,10 @@ import { z } from 'zod';
 
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../services/UnifiedMemoryService';
-import { granularMemoryService } from '../services/GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
+
+// 🔥 EventStore - For persisting approval events (critical for resume)
+import { eventStore } from '../services/EventStore';
 
 const router = Router();
 // Shared orchestration coordinator instance
@@ -937,6 +940,33 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
       await unifiedMemoryService.markPhaseApproved(taskId, phase, req.user?.id);
     } else {
       await unifiedMemoryService.markPhaseFailed(taskId, phase, validatedData.comments || 'Rejected by user');
+    }
+
+    // 🔥 CRITICAL: Emit EventStore events for resume/recovery
+    // Without these events, phases will re-execute after resume!
+    const phaseToEventType: Record<string, { approved: string; rejected: string }> = {
+      'planning': { approved: 'PlanningApproved', rejected: 'PlanningRejected' },
+      'tech-lead': { approved: 'TechLeadApproved', rejected: 'TechLeadRejected' },
+      'judge': { approved: 'PRApproved', rejected: 'PRRejected' },
+      'auto-merge': { approved: 'PRApproved', rejected: 'PRRejected' },
+    };
+
+    const eventTypes = phaseToEventType[phase];
+    if (eventTypes) {
+      const eventType = validatedData.approved ? eventTypes.approved : eventTypes.rejected;
+      await eventStore.safeAppend({
+        taskId,
+        eventType: eventType as any,
+        payload: {
+          phase,
+          approvedBy: req.user?.id,
+          approvedAt: new Date(),
+          comments: validatedData.comments,
+        },
+        userId: req.user?.id,
+        agentName: 'ApprovalAPI',
+      });
+      console.log(`💾 [Approval] Emitted EventStore event: ${eventType} for task ${taskId}`);
     }
 
     // Emitir notificación WebSocket
@@ -2898,134 +2928,13 @@ router.post('/:id/sync-to-mongodb', authenticate, async (req: AuthRequest, res) 
  * These endpoints allow syncing granular memories between local and MongoDB
  */
 
-/**
- * Sync ALL granular memories from local to MongoDB
- */
-router.post('/granular/sync-all', authenticate, async (req: AuthRequest, res) => {
-  try {
-    console.log(`🔄 [API] User ${req.user?.id} triggered granular memory sync for all tasks`);
-    const result = await granularMemoryService.syncAllLocalToMongoDB();
-    res.json({
-      success: true,
-      message: `Synced ${result.synced} memories from ${result.tasks} tasks`,
-      data: result,
-    });
-  } catch (error: any) {
-    console.error('Error syncing granular memories:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to sync granular memories',
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Sync granular memories for a specific task
- */
-router.post('/:id/granular/sync', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const taskId = req.params.id;
-    console.log(`🔄 [API] User ${req.user?.id} triggered granular memory sync for task ${taskId}`);
-    const result = await granularMemoryService.syncLocalToMongoDB(taskId);
-    res.json({
-      success: true,
-      message: `Synced ${result.synced} memories for task ${taskId}`,
-      data: result,
-    });
-  } catch (error: any) {
-    console.error('Error syncing granular memories:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to sync granular memories',
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Get granular memories from local files
- */
-router.get('/:id/granular/local', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const taskId = req.params.id;
-    const type = req.query.type as string | undefined;
-    const memories = await granularMemoryService.loadFromLocal(taskId, type as any);
-    res.json({
-      success: true,
-      count: memories.length,
-      data: memories,
-    });
-  } catch (error: any) {
-    console.error('Error loading local granular memories:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to load local granular memories',
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Commit agent action to git
- */
-router.post('/:id/git/commit', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const taskId = req.params.id;
-    const { agentType, phaseType, epicId, storyId, actionTitle, actionDetails, filePaths } = req.body;
-
-    const result = await granularMemoryService.commitAgentAction({
-      taskId,
-      agentType: agentType || 'manual',
-      phaseType: phaseType || 'manual',
-      epicId,
-      storyId,
-      actionTitle: actionTitle || 'Manual commit',
-      actionDetails: actionDetails || 'Committed via API',
-      filePaths,
-    });
-
-    res.json({
-      success: result.success,
-      commitSha: result.commitSha,
-      error: result.error,
-    });
-  } catch (error: any) {
-    console.error('Error committing to git:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to commit to git',
-      error: error.message,
-    });
-  }
-});
-
-/**
- * Push commits to remote
- */
-router.post('/:id/git/push', authenticate, async (req: AuthRequest, res) => {
-  try {
-    const taskId = req.params.id;
-    const { branch, force } = req.body;
-
-    const result = await granularMemoryService.pushToRemote({
-      taskId,
-      branch,
-      force,
-    });
-
-    res.json({
-      success: result.success,
-      error: result.error,
-    });
-  } catch (error: any) {
-    console.error('Error pushing to remote:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to push to remote',
-      error: error.message,
-    });
-  }
-});
+// 🔥 REMOVED: Granular memory endpoints - SQLite (UnifiedMemoryService) is the single source of truth
+// The following endpoints have been deprecated:
+// - POST /granular/sync-all
+// - POST /:id/granular/sync
+// - GET /:id/granular/local
+// - POST /:id/git/commit
+// - POST /:id/git/push
+// All state is now stored in SQLite via task.orchestration field
 
 export default router;

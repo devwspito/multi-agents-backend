@@ -29,6 +29,8 @@ import commandRoutes from './routes/commands';
 import diagnosticsRoutes from './routes/diagnostics';
 import sdkHealthRoutes from './routes/sdk-health';
 import healthRoutes from './routes/health';
+import devServerRoutes from './routes/dev-server';
+import sandboxRoutes from './routes/sandbox';
 
 /**
  * Multi-Agent Software Development Platform
@@ -257,6 +259,8 @@ class AgentPlatformApp {
     this.app.use('/api/v1/commands', commandRoutes);
     this.app.use('/api/v1/diagnostics', diagnosticsRoutes);
     this.app.use('/api/v1/sdk-health', sdkHealthRoutes);
+    this.app.use('/api/v1/dev-server', devServerRoutes);
+    this.app.use('/api/v1/sandbox', sandboxRoutes);
 
     // Legacy API routes (backward compatibility - will be deprecated)
     this.app.use('/api/auth', authRoutes);
@@ -272,6 +276,8 @@ class AgentPlatformApp {
     this.app.use('/api/commands', commandRoutes);
     this.app.use('/api/diagnostics', diagnosticsRoutes);
     this.app.use('/api/sdk-health', sdkHealthRoutes);
+    this.app.use('/api/dev-server', devServerRoutes);
+    this.app.use('/api/sandbox', sandboxRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
@@ -562,6 +568,25 @@ class AgentPlatformApp {
       scheduledCleanup.start();
       console.log('🧹 Scheduled branch cleanup: Enabled (runs daily at 2:00 AM)');
 
+      // 🐳 Initialize sandbox service (Docker isolation like Codex/Devin)
+      const { sandboxService } = await import('./services/SandboxService');
+      const dockerAvailable = await sandboxService.initialize();
+      if (dockerAvailable) {
+        console.log('🐳 Sandbox Service: Enabled (Docker isolation available)');
+
+        // 🔄 Restore sandbox pool from SQLite (survives server restarts)
+        const { sandboxPoolService } = await import('./services/SandboxPoolService');
+        await sandboxPoolService.restoreFromDatabase();
+        console.log('🔄 Sandbox Pool: Restored from SQLite');
+
+        // 🌐 Restore project networks from SQLite (multi-service communication)
+        const { projectNetworkService } = await import('./services/ProjectNetworkService');
+        await projectNetworkService.restoreFromDatabase();
+        console.log('🌐 Project Networks: Restored from SQLite');
+      } else {
+        console.log('⚠️  Sandbox Service: Docker not available, running in host mode');
+      }
+
       // Graceful shutdown
       process.on('SIGTERM', () => this.shutdown());
       process.on('SIGINT', () => this.shutdown());
@@ -606,6 +631,11 @@ class AgentPlatformApp {
 
       // Stop schedulers
       this.cleanupScheduler.stop();
+
+      // Cleanup sandboxes (stop all Docker containers)
+      const { sandboxService } = await import('./services/SandboxService');
+      await sandboxService.cleanup();
+      console.log('🐳 Sandboxes cleaned up');
 
       // Close database connection
       const { disconnectDatabase } = await import('./config/database');

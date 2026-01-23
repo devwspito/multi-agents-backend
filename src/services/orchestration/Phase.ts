@@ -1,6 +1,19 @@
 import { TaskRepository, ITask } from '../../database/repositories/TaskRepository.js';
 
 /**
+ * Orchestration Checkpoint
+ *
+ * Serializable snapshot of OrchestrationContext state for crash recovery.
+ * Saved to SQLite after each phase completes.
+ */
+export interface OrchestrationCheckpoint {
+  branchRegistry: Array<[string, BranchInfo]>;
+  sharedData: Record<string, any>;
+  phaseResults?: PhaseResult[];
+  timestamp: Date;
+}
+
+/**
  * Branch Registry Entry
  *
  * Stores branch information for Git operations
@@ -198,6 +211,110 @@ ${formattedDirectives}
 ---
 
 `;
+  }
+
+  // ==================== CHECKPOINT METHODS ====================
+
+  /**
+   * Keys that are safe to serialize to checkpoint
+   * (non-function, non-circular references)
+   */
+  private static readonly SERIALIZABLE_KEYS = [
+    'epics',
+    'stories',
+    'teamComposition',
+    'storyAssignments',
+    'architectureDesign',
+    'injectedDirectives',
+    'environmentConfig',
+    'planApproved',
+    'planData',
+  ];
+
+  /**
+   * Serialize context to checkpoint (for persistence)
+   * Called after each phase completes
+   */
+  toCheckpoint(): OrchestrationCheckpoint {
+    return {
+      branchRegistry: Array.from(this.branchRegistry.entries()),
+      sharedData: this.serializeSharedData(),
+      phaseResults: Array.from(this.phaseResults.entries()).map(([phaseName, result]) => ({
+        ...result,
+        phaseName,
+      })),
+      timestamp: new Date(),
+    };
+  }
+
+  /**
+   * Restore context from checkpoint
+   * Called at orchestration start for crash recovery
+   */
+  restoreFromCheckpoint(checkpoint: OrchestrationCheckpoint): void {
+    // Restore branchRegistry
+    if (checkpoint.branchRegistry && Array.isArray(checkpoint.branchRegistry)) {
+      this.branchRegistry = new Map(checkpoint.branchRegistry);
+      console.log(`🔄 [Context] Restored ${this.branchRegistry.size} branches from checkpoint`);
+    }
+
+    // Restore phaseResults
+    if (checkpoint.phaseResults && Array.isArray(checkpoint.phaseResults)) {
+      for (const result of checkpoint.phaseResults) {
+        if (result.phaseName) {
+          this.phaseResults.set(result.phaseName, result);
+        }
+      }
+      console.log(`🔄 [Context] Restored ${this.phaseResults.size} phase results from checkpoint`);
+    }
+
+    // Restore sharedData (only serializable keys)
+    this.restoreSharedData(checkpoint.sharedData);
+
+    console.log(`🔄 [Context] Checkpoint restoration complete`);
+  }
+
+  /**
+   * Serialize sharedData to JSON-safe format
+   * Only includes keys that are safe to serialize
+   */
+  private serializeSharedData(): Record<string, any> {
+    const serializable: Record<string, any> = {};
+
+    for (const key of OrchestrationContext.SERIALIZABLE_KEYS) {
+      if (this.sharedData.has(key)) {
+        const value = this.sharedData.get(key);
+        // Only serialize if it's not a function or has circular refs
+        try {
+          JSON.stringify(value); // Test if serializable
+          serializable[key] = value;
+        } catch {
+          console.warn(`⚠️ [Context] Skipping non-serializable key: ${key}`);
+        }
+      }
+    }
+
+    return serializable;
+  }
+
+  /**
+   * Restore sharedData from checkpoint
+   */
+  private restoreSharedData(data: Record<string, any>): void {
+    if (!data || typeof data !== 'object') return;
+
+    let restoredCount = 0;
+    for (const [key, value] of Object.entries(data)) {
+      // Only restore if it's a known serializable key
+      if (OrchestrationContext.SERIALIZABLE_KEYS.includes(key)) {
+        this.sharedData.set(key, value);
+        restoredCount++;
+      }
+    }
+
+    if (restoredCount > 0) {
+      console.log(`🔄 [Context] Restored ${restoredCount} shared data entries from checkpoint`);
+    }
   }
 }
 
@@ -631,6 +748,11 @@ export abstract class BasePhase implements IPhase {
 export function saveTaskFireAndForget(task: ITask, context?: string): void {
   const taskId = task.id?.toString() || 'unknown';
   try {
+    // 🔍 DIAGNOSTIC: Log what we're saving
+    const planningStatus = (task.orchestration as any)?.planning?.status;
+    const techLeadStatus = (task.orchestration as any)?.techLead?.status;
+    console.log(`[Task ${taskId}] Saving orchestration - planning.status=${planningStatus}, techLead.status=${techLeadStatus} (${context || 'no context'})`);
+
     // SQLite is synchronous, just update the task
     TaskRepository.update(taskId, task);
     console.log(`[Task] Background save OK${context ? ` (${context})` : ''}`);

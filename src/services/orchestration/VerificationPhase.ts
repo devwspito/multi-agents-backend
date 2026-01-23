@@ -339,6 +339,10 @@ export class VerificationPhase extends BasePhase {
     const fixerPrompt = this.buildFixerPrompt(verificationResult, failedEpics, primaryRepo.name, attempt, architectureBrief);
     const prompt = directivesBlock + fixerPrompt;
 
+    // 🐳 SANDBOX: Get sandbox ID for Docker execution
+    const sandboxMap = context.getData<Map<string, string>>('sandboxMap');
+    const sandboxId = sandboxMap?.get(primaryRepo.name);
+
     try {
       NotificationService.emitAgentStarted(taskId, 'Verification Fixer');
 
@@ -350,7 +354,8 @@ export class VerificationPhase extends BasePhase {
         'Verification Fixer',
         undefined,
         undefined,
-        undefined
+        undefined,
+        sandboxId ? { sandboxId } : undefined // 🐳 Explicit sandbox ID for Docker execution
       );
 
       // Emit full output to console

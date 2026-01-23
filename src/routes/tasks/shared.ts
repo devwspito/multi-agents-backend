@@ -13,7 +13,7 @@ import { RepositoryRepository, IRepository } from '../../database/repositories/R
 import { OrchestrationCoordinator } from '../../services/orchestration/OrchestrationCoordinator';
 import { storageService } from '../../services/storage/StorageService';
 import { unifiedMemoryService } from '../../services/UnifiedMemoryService';
-import { granularMemoryService } from '../../services/GranularMemoryService';
+// 🔥 REMOVED: granularMemoryService - SQLite (UnifiedMemoryService) is the single source of truth
 
 // Re-export commonly used items
 export {
@@ -28,7 +28,6 @@ export {
   IRepository,
   storageService,
   unifiedMemoryService,
-  granularMemoryService,
 };
 
 // Shared orchestration coordinator instance
