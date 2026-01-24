@@ -2357,7 +2357,8 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
     // Determine command based on language and framework
     switch (language) {
       case 'flutter':
-        // 🔥 For Flutter, startPreviewServer handles build+serve separately
+      case 'dart':
+        // 🔥 For Flutter/Dart, startPreviewServer handles build+serve separately
         // This command is only used if the server needs restart
         return {
           command: 'python3 -m http.server 8080 --bind 0.0.0.0',
