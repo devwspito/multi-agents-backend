@@ -18,6 +18,11 @@ export type EventType =
   | 'TaskPaused'
   | 'TaskResumed'
   | 'OrchestrationFailed'
+  // Sandbox events (runs BEFORE Planning)
+  | 'SandboxStarted'
+  | 'SandboxConfigured'
+  | 'SandboxValidated'
+  | 'SandboxFailed'
   // Planning events
   | 'PlanningStarted'
   | 'PlanningCompleted'

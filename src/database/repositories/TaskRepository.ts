@@ -19,7 +19,7 @@ import { generateId, now, parseJSON, toJSON } from '../utils.js';
 // ============================================================================
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'interrupted';
-export type AgentType = 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'auto-merge' | 'team-orchestration' | 'story-merge-agent' | 'git-flow-manager';
+export type AgentType = 'sandbox-setup' | 'planning-agent' | 'tech-lead' | 'developer' | 'judge' | 'auto-merge' | 'team-orchestration' | 'story-merge-agent' | 'git-flow-manager';
 export type StoryComplexity = 'trivial' | 'simple' | 'moderate' | 'complex' | 'epic';
 export type ReviewStatus = 'pending' | 'approved' | 'changes_requested' | 'not_required';
 
@@ -138,6 +138,16 @@ export interface IApprovalHistoryEntry {
 
 export interface IOrchestration {
   status?: TaskStatus;
+  // 🐳 Sandbox phase (runs BEFORE Planning)
+  sandbox?: IAgentStep & {
+    sandboxId?: string;
+    containerName?: string;
+    dockerImage?: string;
+    language?: string;
+    framework?: string;
+    validated?: boolean;
+    judgeDetails?: string;
+  };
   planning?: IAgentStep & {
     analysis?: any;
     epics?: IEpic[];
