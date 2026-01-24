@@ -7,6 +7,7 @@ import { AgentArtifactService } from '../AgentArtifactService';
 import { OrchestrationContext, IPhase, PhaseResult, saveTaskFireAndForget, updateTaskFireAndForget, saveTaskCritical } from './Phase';
 import { createTaskLogger } from '../../utils/structuredLogger';
 import { PlanningPhase } from './PlanningPhase';
+import { SandboxPhase } from './SandboxPhase';
 // Legacy phases REMOVED: ProductManagerPhase, ProjectManagerPhase, ProblemAnalystPhase
 // These are replaced by unified PlanningPhase
 import { TechLeadPhase } from './TechLeadPhase';
@@ -746,6 +747,10 @@ export class OrchestrationCoordinator {
     };
 
     switch (phaseName) {
+      case 'Sandbox':
+        // 🐳 SandboxPhase runs FIRST - creates environment, Judge validates
+        return new SandboxPhase(executeAgentWithContext);
+
       case 'Planning':
         return new PlanningPhase(executeAgentWithContext);
 
@@ -1004,6 +1009,7 @@ export class OrchestrationCoordinator {
     console.log(`   judge.status = ${orchestration.judge?.status || 'UNDEFINED'}`);
 
     const phases = [
+      { name: 'Sandbox', field: (orchestration as any).sandbox },
       { name: 'Planning', field: orchestration.planning },
       { name: 'Approval', field: orchestration.approval },
       { name: 'TechLead', field: orchestration.techLead },

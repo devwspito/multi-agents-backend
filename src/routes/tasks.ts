@@ -945,6 +945,7 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
     // 🔥 CRITICAL: Emit EventStore events for resume/recovery
     // Without these events, phases will re-execute after resume!
     const phaseToEventType: Record<string, { approved: string; rejected: string }> = {
+      'sandbox': { approved: 'SandboxValidated', rejected: 'SandboxFailed' },
       'planning': { approved: 'PlanningApproved', rejected: 'PlanningRejected' },
       'tech-lead': { approved: 'TechLeadApproved', rejected: 'TechLeadRejected' },
       'judge': { approved: 'PRApproved', rejected: 'PRRejected' },
