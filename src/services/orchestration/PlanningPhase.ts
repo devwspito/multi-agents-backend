@@ -2430,8 +2430,8 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
     );
 
     try {
-      // 🔥 For Flutter: separate build from serve (build is slow, serve is fast)
-      const isFlutter = language === 'flutter';
+      // 🔥 For Flutter/Dart: separate build from serve (build is slow, serve is fast)
+      const isFlutter = language === 'flutter' || language === 'dart';
 
       if (isFlutter) {
         // Step 1: Build Flutter web (synchronous, can take 60-120 seconds)
