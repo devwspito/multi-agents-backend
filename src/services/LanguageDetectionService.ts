@@ -154,6 +154,12 @@ JSON RESPONSE:`;
       if (parsed.createCmd) {
         console.log(`   Create command: ${parsed.createCmd}`);
       }
+      if (parsed.devCmd) {
+        console.log(`   Dev command: ${parsed.devCmd}`);
+        console.log(`   Dev port: ${parsed.devPort}`);
+      } else {
+        console.warn(`   ⚠️ NO devCmd returned by LLM!`);
+      }
 
       return {
         primary: {
