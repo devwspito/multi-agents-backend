@@ -136,12 +136,18 @@ router.get('/:taskId/info', (req: Request, res: Response): void => {
 /**
  * Native HTTP proxy handler
  * Proxies requests to Docker containers without external dependencies
+ *
+ * 🔥 IMPORTANT: Rewrites <base href="/"> in HTML responses to the proxy path.
+ * This is required for Flutter/React apps that use relative URLs.
+ * Without this fix, the browser would request /flutter_bootstrap.js from root
+ * instead of /api/v1/preview/{taskId}/port/{port}/flutter_bootstrap.js
  */
 function proxyToContainer(
   req: Request,
   res: Response,
   hostPort: string,
-  targetPath: string
+  targetPath: string,
+  proxyBasePath?: string
 ): void {
   const options: http.RequestOptions = {
     hostname: 'localhost',
@@ -151,6 +157,8 @@ function proxyToContainer(
     headers: {
       ...req.headers,
       host: `localhost:${hostPort}`,
+      // Remove accept-encoding to get uncompressed response for rewriting
+      'accept-encoding': 'identity',
     },
   };
 
@@ -161,6 +169,43 @@ function proxyToContainer(
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    const contentType = proxyRes.headers['content-type'] || '';
+    const isHtml = contentType.includes('text/html');
+
+    // 🔥 For HTML responses, buffer and rewrite base href
+    if (isHtml && proxyBasePath) {
+      const chunks: Buffer[] = [];
+      proxyRes.on('data', (chunk) => chunks.push(chunk));
+      proxyRes.on('end', () => {
+        let html = Buffer.concat(chunks).toString('utf-8');
+
+        // Rewrite <base href="/"> to proxy path
+        // This ensures all relative URLs resolve correctly through the proxy
+        html = html.replace(
+          /<base\s+href=["']\/["']/gi,
+          `<base href="${proxyBasePath}"`
+        );
+
+        // Also handle base href="/" with spaces
+        html = html.replace(
+          /<base\s+href\s*=\s*["']\/["']/gi,
+          `<base href="${proxyBasePath}"`
+        );
+
+        console.log(`[Preview Proxy] Rewrote base href to: ${proxyBasePath}`);
+
+        // Remove content-encoding and set correct content-length
+        const headers = { ...proxyRes.headers };
+        delete headers['content-encoding'];
+        delete headers['content-length'];
+        headers['content-length'] = Buffer.byteLength(html).toString();
+
+        res.writeHead(proxyRes.statusCode || 200, headers);
+        res.end(html);
+      });
+      return;
+    }
 
     // Copy status and headers from proxy response
     res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
@@ -233,7 +278,9 @@ router.all('/:taskId/port/:port/*', (req: Request, res: Response): void => {
   const portPathMatch = fullPath.match(/\/port\/\d+\/(.*)/);
   const targetPath = '/' + (portPathMatch?.[1] || '');
 
-  proxyToContainer(req, res, hostPort, targetPath);
+  // 🔥 Pass the proxy base path for HTML base href rewriting
+  const proxyBasePath = `/api/v1/preview/${taskId}/port/${port}/`;
+  proxyToContainer(req, res, hostPort, targetPath, proxyBasePath);
 });
 
 router.all('/:taskId/port/:port', (req: Request, res: Response): void => {
@@ -251,7 +298,9 @@ router.all('/:taskId/port/:port', (req: Request, res: Response): void => {
     return;
   }
 
-  proxyToContainer(req, res, hostPort, '/');
+  // 🔥 Pass the proxy base path for HTML base href rewriting
+  const proxyBasePath = `/api/v1/preview/${taskId}/port/${port}/`;
+  proxyToContainer(req, res, hostPort, '/', proxyBasePath);
 });
 
 /**
@@ -282,7 +331,9 @@ router.all('/:taskId/*', (req: Request, res: Response): void => {
   const match = fullPath.match(taskIdPattern);
   const targetPath = '/' + (match?.[1] || '');
 
-  proxyToContainer(req, res, hostPort, targetPath);
+  // 🔥 Pass the proxy base path for HTML base href rewriting
+  const proxyBasePath = `/api/v1/preview/${taskId}/`;
+  proxyToContainer(req, res, hostPort, targetPath, proxyBasePath);
 });
 
 router.all('/:taskId', (req: Request, res: Response): void => {
@@ -298,7 +349,9 @@ router.all('/:taskId', (req: Request, res: Response): void => {
     return;
   }
 
-  proxyToContainer(req, res, hostPort, '/');
+  // 🔥 Pass the proxy base path for HTML base href rewriting
+  const proxyBasePath = `/api/v1/preview/${taskId}/`;
+  proxyToContainer(req, res, hostPort, '/', proxyBasePath);
 });
 
 export default router;
