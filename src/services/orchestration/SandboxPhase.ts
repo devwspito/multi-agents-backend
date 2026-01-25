@@ -884,9 +884,13 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         const hostPort = sandbox.mappedPorts?.[devPort.toString()] || devPort;
 
         try {
-          // Start server in background
-          const startCmd = `cd ${repoDir} && nohup ${devCmd} > /tmp/${repoName}-server.log 2>&1 &`;
+          // Start server in background using setsid (creates new session, survives docker exec exit)
+          const logFile = `/tmp/${repoName}-server.log`;
+          const startCmd = `setsid bash -c 'cd ${repoDir} && ${devCmd}' > ${logFile} 2>&1 &`;
           await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
+
+          // Give it a moment to start
+          await new Promise(resolve => setTimeout(resolve, 2000));
 
           // 🔥 SIMPLE: Just use curl to check if server responds
           const MAX_WAIT_MS = 420000; // 7 minutes for slow Flutter builds
