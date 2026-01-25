@@ -92,6 +92,7 @@ export class OrchestrationCoordinator {
    * - Human approval gates (must wait for approval before next phase)
    */
   private readonly PHASE_ORDER = [
+    'Sandbox',             // 0. Create isolated Docker sandbox BEFORE anything else
     'Planning',            // 1. Unified planning (Problem + Product + Project in one pass)
     'Approval',            // 2. Human approval gate (epics + stories)
     'TeamOrchestration',   // 3. Multi-team parallel execution (TechLead → Developers+Judge per epic)
