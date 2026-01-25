@@ -672,6 +672,240 @@ router.get('/sdk-check/:language', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/dev-server/servers/:taskId
+ * Get all running dev servers for a task
+ *
+ * This endpoint returns information about all dev servers that are currently
+ * running for a task, including those started automatically by SandboxPhase.
+ */
+router.get('/servers/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+
+    console.log(`[DevServer API] Getting servers for task ${taskId}`);
+
+    // 1. Get server status from DevServerService (in-memory tracking)
+    const trackedServer = devServerService.getServerStatus(taskId);
+
+    // 2. Get all sandboxes for this task (may have running servers we don't track)
+    const sandboxes = sandboxService.getAllSandboxesForTask(taskId);
+
+    // 3. Get workspace info from EventStore for context
+    const state = await eventStore.getCurrentState(taskId);
+    const envConfig = state?.environmentConfig || {};
+
+    // Build server list
+    const servers: any[] = [];
+
+    // Add tracked server if exists
+    if (trackedServer) {
+      servers.push({
+        taskId,
+        url: trackedServer.url,
+        framework: trackedServer.framework,
+        port: trackedServer.port,
+        startedAt: trackedServer.startedAt,
+        isDocker: trackedServer.isDocker || false,
+        containerName: trackedServer.containerName,
+        source: 'tracked',
+      });
+    }
+
+    // Add servers from running sandboxes (may not be tracked if started by SandboxPhase)
+    for (const sandbox of sandboxes) {
+      if (sandbox.instance.status !== 'running') continue;
+
+      const repoName = sandbox.instance.repoName || 'unknown';
+      const config = envConfig[repoName] || {};
+      const serverPort = (config as any).port || (config as any).devPort || 8080;
+
+      // Check if this sandbox's server is already in the list
+      const alreadyListed = servers.some(s =>
+        s.containerName === sandbox.instance.containerName ||
+        s.port === serverPort
+      );
+
+      if (!alreadyListed) {
+        // Determine URL based on host network mode
+        const useHostNetwork = process.env.DOCKER_USE_BRIDGE_MODE !== 'true';
+        const url = useHostNetwork
+          ? `http://localhost:${serverPort}`
+          : sandbox.instance.mappedPorts?.[serverPort]
+            ? `http://localhost:${sandbox.instance.mappedPorts[serverPort]}`
+            : `http://localhost:${serverPort}`;
+
+        servers.push({
+          taskId,
+          url,
+          framework: config.framework || config.language || 'unknown',
+          port: serverPort,
+          isDocker: true,
+          sandboxId: sandbox.sandboxId,
+          containerName: sandbox.instance.containerName,
+          repoName,
+          sandboxType: sandbox.instance.sandboxType || 'unknown',
+          source: 'sandbox',
+          // Include environment config for frontend
+          envConfig: {
+            language: config.language,
+            framework: config.framework,
+            runCommand: config.runCommand,
+          },
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      taskId,
+      count: servers.length,
+      servers,
+      // Also include preview URLs via proxy (more reliable than direct ports)
+      previewUrls: servers.map(s => ({
+        direct: s.url,
+        proxy: `/api/v1/preview/${taskId}/port/${s.port}/`,
+        repoName: s.repoName || 'default',
+      })),
+    });
+
+  } catch (error: any) {
+    console.error(`[DevServer API] Error getting servers:`, error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get dev servers',
+    });
+  }
+});
+
+/**
+ * POST /api/dev-server/start-all/:taskId
+ * Start dev servers for all sandboxes in a task
+ *
+ * This endpoint is called by LivePreview to start all dev servers
+ * when the user wants to preview the project.
+ */
+router.post('/start-all/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+
+    console.log(`[DevServer API] Starting all servers for task ${taskId}`);
+
+    // 1. Get all sandboxes for this task
+    const sandboxes = sandboxService.getAllSandboxesForTask(taskId);
+
+    if (sandboxes.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No sandboxes found for this task',
+        taskId,
+      });
+    }
+
+    // 2. Get environment config from EventStore
+    const state = await eventStore.getCurrentState(taskId);
+    const envConfig = state?.environmentConfig || {};
+
+    // 3. Start servers for each running sandbox
+    const results: any[] = [];
+    let successCount = 0;
+
+    for (const sandbox of sandboxes) {
+      if (sandbox.instance.status !== 'running') {
+        results.push({
+          sandboxId: sandbox.sandboxId,
+          repoName: sandbox.instance.repoName,
+          success: false,
+          error: `Sandbox not running (status: ${sandbox.instance.status})`,
+        });
+        continue;
+      }
+
+      const repoName = sandbox.instance.repoName || 'unknown';
+      const config = envConfig[repoName] || {};
+      const serverPort = (config as any).port || (config as any).devPort || 8080;
+      const framework = config.framework || config.language || 'node';
+
+      try {
+        // Check if server already running
+        const existingStatus = devServerService.getServerStatus(`${taskId}-${repoName}`);
+        if (existingStatus) {
+          results.push({
+            sandboxId: sandbox.sandboxId,
+            repoName,
+            success: true,
+            alreadyRunning: true,
+            url: existingStatus.url,
+            port: existingStatus.port,
+            framework: existingStatus.framework,
+          });
+          successCount++;
+          continue;
+        }
+
+        // Start the dev server inside Docker
+        const result = await devServerService.startServerInDocker(
+          `${taskId}-${repoName}`,
+          sandbox.instance.containerName,
+          framework,
+          serverPort,
+          sandbox.instance.mappedPorts
+        );
+
+        if (result) {
+          results.push({
+            sandboxId: sandbox.sandboxId,
+            repoName,
+            success: true,
+            url: result.url,
+            port: serverPort,
+            framework: result.framework,
+            containerName: sandbox.instance.containerName,
+          });
+          successCount++;
+        } else {
+          results.push({
+            sandboxId: sandbox.sandboxId,
+            repoName,
+            success: false,
+            error: 'Failed to start server',
+          });
+        }
+      } catch (err: any) {
+        results.push({
+          sandboxId: sandbox.sandboxId,
+          repoName,
+          success: false,
+          error: err.message,
+        });
+      }
+    }
+
+    return res.json({
+      success: successCount > 0,
+      taskId,
+      totalSandboxes: sandboxes.length,
+      serversStarted: successCount,
+      results,
+      // Include preview URLs
+      previewUrls: results
+        .filter(r => r.success)
+        .map(r => ({
+          direct: r.url,
+          proxy: `/api/v1/preview/${taskId}/port/${r.port}/`,
+          repoName: r.repoName,
+        })),
+    });
+
+  } catch (error: any) {
+    console.error(`[DevServer API] Error starting all servers:`, error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to start dev servers',
+    });
+  }
+});
+
+/**
  * POST /api/dev-server/sdk-install/:language
  * Install an SDK on the server (Flutter, Node.js, Python)
  *
