@@ -500,16 +500,16 @@ JSON RESPONSE:`;
 
         if (deps['next']) {
           framework = 'nextjs';
-          devCmd = 'npm run dev';
-          devPort = 3000;
+          devCmd = 'npm run dev -- -p 5000';
+          devPort = 5000; // Avoid conflict with host port 3000/3001
         } else if (deps['react']) {
           framework = 'react';
-          devCmd = 'npm run dev -- --host 0.0.0.0 --port 3000 || npm start';
-          devPort = 3000;
+          devCmd = 'npm run dev -- --host 0.0.0.0 --port 5000 || npm start';
+          devPort = 5000; // Avoid conflict with host
         } else if (deps['express']) {
           framework = 'express';
-          devCmd = 'npm run dev || npm start';
-          devPort = 3001;
+          devCmd = 'PORT=4001 npm run dev || PORT=4001 npm start';
+          devPort = 4001; // Avoid conflict with agents-backend on 3001
         } else if (deps['vue']) {
           framework = 'vue';
           devCmd = 'npm run dev -- --host 0.0.0.0';
