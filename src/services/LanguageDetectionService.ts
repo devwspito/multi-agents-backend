@@ -315,6 +315,8 @@ JSON RESPONSE:`;
    * 1. File-based detection (package.json, pubspec.yaml, etc.)
    * 2. LLM detection if no files found
    *
+   * 🔥 ALSO: Resolves port conflicts between repos!
+   *
    * @param taskDescription - Task description for LLM fallback
    * @param repos - Array of {name, type} for each repo
    * @param workspacePath - Path to workspace for file detection
@@ -363,7 +365,124 @@ JSON RESPONSE:`;
       }
     }
 
+    // 🔥 PORT CONFLICT RESOLUTION: Ensure unique ports across all repos
+    result[repos[0]?.name] && this.resolvePortConflicts(result);
+
     return result;
+  }
+
+  /**
+   * 🔥 Resolve port conflicts between repos
+   * Ensures each repo gets a unique port
+   */
+  private resolvePortConflicts(configs: Record<string, DetectedLanguage>): void {
+    const usedPorts = new Set<number>();
+    const portAssignments: Array<{ repoName: string; port: number }> = [];
+
+    // First pass: collect all ports and detect conflicts
+    for (const [repoName, config] of Object.entries(configs)) {
+      const port = config.devPort || 3000;
+      portAssignments.push({ repoName, port });
+    }
+
+    // Sort by priority: Flutter/frontend first (gets 8080), then backend (gets 4001)
+    portAssignments.sort((a, b) => {
+      const aName = a.repoName.toLowerCase();
+      const bName = b.repoName.toLowerCase();
+      // Flutter gets priority for 8080
+      if (aName.includes('flutter')) return -1;
+      if (bName.includes('flutter')) return 1;
+      // Frontend gets priority over backend
+      if (aName.includes('frontend') && !bName.includes('frontend')) return -1;
+      if (bName.includes('frontend') && !aName.includes('frontend')) return 1;
+      return 0;
+    });
+
+    // Second pass: assign unique ports
+    const FALLBACK_PORTS = [8080, 4001, 3000, 5000, 5173, 8000, 8001, 9000];
+
+    for (const assignment of portAssignments) {
+      const config = configs[assignment.repoName];
+      let port = config.devPort || 3000;
+
+      // If port is already used, find a new one
+      if (usedPorts.has(port)) {
+        const repoName = assignment.repoName.toLowerCase();
+
+        // Smart port selection based on repo type
+        if (repoName.includes('backend') || repoName.includes('api') || repoName.includes('server')) {
+          // Backend should use 4001
+          port = 4001;
+        } else if (repoName.includes('flutter')) {
+          // Flutter should use 8080
+          port = 8080;
+        } else if (repoName.includes('frontend') || repoName.includes('web')) {
+          // Other frontend should use 3000 or 5000
+          port = 3000;
+        }
+
+        // If still conflict, find next available
+        while (usedPorts.has(port)) {
+          const nextPort = FALLBACK_PORTS.find(p => !usedPorts.has(p));
+          if (nextPort) {
+            port = nextPort;
+          } else {
+            port = 9000 + usedPorts.size;
+          }
+        }
+
+        // Update the config with new port
+        console.log(`   🔄 Port conflict: ${assignment.repoName} ${config.devPort} → ${port}`);
+        config.devPort = port;
+
+        // Update devCmd with new port
+        if (config.devCmd) {
+          config.devCmd = this.updateDevCmdPort(config.devCmd, port, config.ecosystem);
+        }
+      }
+
+      usedPorts.add(port);
+    }
+
+    console.log(`   ✅ Final port assignments:`);
+    for (const [repoName, config] of Object.entries(configs)) {
+      console.log(`      ${repoName}: ${config.devPort}`);
+    }
+  }
+
+  /**
+   * Update devCmd to use a specific port
+   */
+  private updateDevCmdPort(devCmd: string, port: number, ecosystem: string): string {
+    // Flutter
+    if (devCmd.includes('flutter') || devCmd.includes('http.server')) {
+      return devCmd.replace(/--web-port=\d+/, `--web-port=${port}`)
+                   .replace(/http\.server \d+/, `http.server ${port}`);
+    }
+
+    // Node.js
+    if (ecosystem === 'node') {
+      // Express/generic node
+      if (devCmd.includes('PORT=')) {
+        return devCmd.replace(/PORT=\d+/g, `PORT=${port}`);
+      }
+      // Vite/React
+      if (devCmd.includes('--port')) {
+        return devCmd.replace(/--port[= ]\d+/, `--port ${port}`);
+      }
+      // Add PORT prefix if not present
+      if (!devCmd.includes('PORT=')) {
+        return `PORT=${port} ${devCmd}`;
+      }
+    }
+
+    // Python
+    if (devCmd.includes('--port=') || devCmd.includes('-p ')) {
+      return devCmd.replace(/--port[= ]\d+/, `--port=${port}`)
+                   .replace(/-p \d+/, `-p ${port}`);
+    }
+
+    return devCmd;
   }
 
   /**
@@ -498,22 +617,28 @@ JSON RESPONSE:`;
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
         const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
 
+        // 🔥 Check if this is a BACKEND (has express, fastify, mongoose, etc.)
+        const isBackend = deps['express'] || deps['fastify'] || deps['koa'] ||
+                          deps['mongoose'] || deps['mongodb'] || deps['pg'] ||
+                          deps['typeorm'] || deps['prisma'] || deps['sequelize'];
+
         if (deps['next']) {
           framework = 'nextjs';
           devCmd = 'npm run dev -- -p 5000';
           devPort = 5000; // Avoid conflict with host port 3000/3001
+        } else if (deps['vue']) {
+          framework = 'vue';
+          devCmd = 'npm run dev -- --host 0.0.0.0 --port 5173';
+          devPort = 5173;
+        } else if (isBackend) {
+          // 🔥 ANY backend indicator → use port 4001
+          framework = deps['express'] ? 'express' : deps['fastify'] ? 'fastify' : 'node-backend';
+          devCmd = 'PORT=4001 npm run dev || PORT=4001 npm start';
+          devPort = 4001; // Avoid conflict with agents-backend on 3001
         } else if (deps['react']) {
           framework = 'react';
           devCmd = 'npm run dev -- --host 0.0.0.0 --port 5000 || npm start';
           devPort = 5000; // Avoid conflict with host
-        } else if (deps['express']) {
-          framework = 'express';
-          devCmd = 'PORT=4001 npm run dev || PORT=4001 npm start';
-          devPort = 4001; // Avoid conflict with agents-backend on 3001
-        } else if (deps['vue']) {
-          framework = 'vue';
-          devCmd = 'npm run dev -- --host 0.0.0.0';
-          devPort = 5173;
         }
       }
     } catch (error) {
@@ -560,7 +685,7 @@ JSON RESPONSE:`;
       };
     }
 
-    // Backend patterns
+    // Backend patterns - use 4001 to avoid conflict with agents-backend (3001)
     if (name.includes('backend') || name.includes('api') || name.includes('server')) {
       return {
         language: 'typescript',
@@ -571,8 +696,8 @@ JSON RESPONSE:`;
         reasoning: 'Detected backend pattern in repo name',
         checkFile: 'package.json',
         installCmd: 'npm install',
-        devCmd: 'npm run dev || npm start',
-        devPort: 3001,
+        devCmd: 'PORT=4001 npm run dev || PORT=4001 npm start',
+        devPort: 4001,
       };
     }
 
