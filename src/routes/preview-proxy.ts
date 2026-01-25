@@ -20,9 +20,26 @@ import { sandboxService } from '../services/SandboxService.js';
 const router = Router();
 
 /**
+ * Check if we're in host network mode (no port mapping needed)
+ * In host mode: container ports ARE host ports (no Docker port mapping)
+ */
+const USE_HOST_NETWORK = process.env.DOCKER_USE_BRIDGE_MODE !== 'true';
+
+/**
  * Get the host port for a given sandbox and container port
+ *
+ * In host network mode: the container port IS the host port (no mapping)
+ * In bridge mode: uses mappedPorts from Docker
  */
 function getHostPort(taskId: string, containerPort: string = '8080'): string | null {
+  // 🔥 FIX: In host network mode, the container port IS the host port
+  // No need to look up mappedPorts - just use the port directly
+  if (USE_HOST_NETWORK) {
+    console.log(`[Preview Proxy] Host network mode - using port ${containerPort} directly`);
+    return containerPort;
+  }
+
+  // Bridge mode - need port mapping from sandbox service
   const found = sandboxService.findSandboxForTask(taskId);
   if (!found) {
     console.log(`[Preview Proxy] No sandbox found for task ${taskId}`);
@@ -56,7 +73,34 @@ function getHostPort(taskId: string, containerPort: string = '8080'): string | n
  */
 router.get('/:taskId/info', (req: Request, res: Response): void => {
   const taskId = req.params.taskId as string;
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
 
+  // 🔥 FIX: In host network mode, return common ports even without sandbox record
+  if (USE_HOST_NETWORK) {
+    // Common dev server ports
+    const commonPorts = ['8080', '4001', '3000', '5173', '5000'];
+    const previewUrls: Record<string, string> = {};
+
+    for (const port of commonPorts) {
+      previewUrls[port] = `${baseUrl}/api/v1/preview/${taskId}/port/${port}/`;
+    }
+
+    const found = sandboxService.findSandboxForTask(taskId);
+
+    res.json({
+      success: true,
+      taskId,
+      sandboxId: found?.sandboxId || 'host-network',
+      status: found?.instance.status || 'running',
+      mappedPorts: commonPorts.reduce((acc, p) => ({ ...acc, [p]: p }), {}),
+      previewUrls,
+      defaultPreviewUrl: `${baseUrl}/api/v1/preview/${taskId}/`,
+      hostNetworkMode: true,
+    });
+    return;
+  }
+
+  // Bridge mode - need sandbox record
   const found = sandboxService.findSandboxForTask(taskId);
   if (!found) {
     res.status(404).json({
@@ -68,13 +112,12 @@ router.get('/:taskId/info', (req: Request, res: Response): void => {
   }
 
   const { sandboxId, instance } = found;
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
 
   // Build preview URLs for each mapped port
   const previewUrls: Record<string, string> = {};
   if (instance.mappedPorts) {
     for (const containerPort of Object.keys(instance.mappedPorts)) {
-      previewUrls[containerPort] = `${baseUrl}/api/preview/${taskId}/port/${containerPort}/`;
+      previewUrls[containerPort] = `${baseUrl}/api/v1/preview/${taskId}/port/${containerPort}/`;
     }
   }
 
@@ -85,7 +128,8 @@ router.get('/:taskId/info', (req: Request, res: Response): void => {
     status: instance.status,
     mappedPorts: instance.mappedPorts || {},
     previewUrls,
-    defaultPreviewUrl: `${baseUrl}/api/preview/${taskId}/`,
+    defaultPreviewUrl: `${baseUrl}/api/v1/preview/${taskId}/`,
+    hostNetworkMode: false,
   });
 });
 
