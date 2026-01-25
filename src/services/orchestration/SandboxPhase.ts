@@ -231,41 +231,104 @@ export class SandboxPhase extends BasePhase {
 
       // =======================================================================
       // STEP 1: Clone all repositories
+      // 🔥 FIX: Properly handle clone failures - don't create empty dirs!
       // =======================================================================
       console.log(`\n📦 [SandboxPhase] Step 1: Cloning ${repositories.length} repositories...`);
 
+      const cloneFailures: string[] = [];
+
       for (const repo of repositories) {
         const repoPath = path.join(workspacePath, repo.name);
+        const gitPath = path.join(repoPath, '.git');
 
-        if (fs.existsSync(path.join(repoPath, '.git'))) {
-          console.log(`   ✅ [${repo.name}] Already cloned`);
+        // Check if already properly cloned
+        if (fs.existsSync(gitPath)) {
+          console.log(`   ✅ [${repo.name}] Already cloned (valid .git)`);
           try {
             safeGitExecSync(`git -C "${repoPath}" pull --ff-only 2>/dev/null || true`, {
               encoding: 'utf8',
               timeout: 60000,
             });
           } catch {
-            // Ignore
+            // Ignore pull failures - repo is still valid
           }
-        } else if (repo.url) {
-          console.log(`   📥 [${repo.name}] Cloning...`);
+          continue;
+        }
+
+        // 🔥 FIX: If directory exists but NO .git, it's corrupted - remove it
+        if (fs.existsSync(repoPath) && !fs.existsSync(gitPath)) {
+          console.log(`   ⚠️ [${repo.name}] Corrupted (no .git) - removing and re-cloning...`);
           try {
-            fs.mkdirSync(repoPath, { recursive: true });
-            safeGitExecSync(`git clone "${repo.url}" "${repoPath}"`, {
-              encoding: 'utf8',
-              timeout: 120000,
-            });
-            console.log(`   ✅ [${repo.name}] Cloned`);
-          } catch (error: any) {
-            console.warn(`   ⚠️ [${repo.name}] Clone failed: ${error.message}`);
-            if (!fs.existsSync(repoPath)) {
-              fs.mkdirSync(repoPath, { recursive: true });
+            fs.rmSync(repoPath, { recursive: true, force: true });
+          } catch (e: any) {
+            console.error(`   ❌ [${repo.name}] Failed to remove corrupted dir: ${e.message}`);
+          }
+        }
+
+        // Clone the repository
+        if (repo.url) {
+          console.log(`   📥 [${repo.name}] Cloning from ${repo.url}...`);
+
+          // Retry up to 3 times for network issues
+          let cloneSuccess = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              // Don't create dir first - git clone creates it
+              safeGitExecSync(`git clone "${repo.url}" "${repoPath}"`, {
+                encoding: 'utf8',
+                timeout: 180000, // 3 minutes for large repos
+              });
+
+              // Verify .git was created
+              if (fs.existsSync(gitPath)) {
+                console.log(`   ✅ [${repo.name}] Cloned successfully`);
+                cloneSuccess = true;
+                break;
+              } else {
+                throw new Error('.git directory not created');
+              }
+            } catch (error: any) {
+              console.warn(`   ⚠️ [${repo.name}] Clone attempt ${attempt}/3 failed: ${error.message}`);
+              // Clean up partial clone
+              if (fs.existsSync(repoPath)) {
+                try {
+                  fs.rmSync(repoPath, { recursive: true, force: true });
+                } catch { /* ignore */ }
+              }
+              if (attempt < 3) {
+                await new Promise(r => setTimeout(r, 2000 * attempt)); // Exponential backoff
+              }
             }
           }
+
+          if (!cloneSuccess) {
+            cloneFailures.push(repo.name);
+            console.error(`   ❌ [${repo.name}] CLONE FAILED after 3 attempts`);
+            NotificationService.emitConsoleLog(taskId, 'error', `❌ Failed to clone ${repo.name}`);
+          }
         } else {
-          console.log(`   📁 [${repo.name}] Creating empty directory`);
+          // No URL - this is a NEW repo being created, not cloned
+          console.log(`   📁 [${repo.name}] No URL - creating new repo directory`);
           fs.mkdirSync(repoPath, { recursive: true });
+          // Initialize git for new repos
+          try {
+            safeGitExecSync(`git init`, { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+            console.log(`   ✅ [${repo.name}] Initialized new git repo`);
+          } catch (e: any) {
+            console.warn(`   ⚠️ [${repo.name}] git init failed: ${e.message}`);
+          }
         }
+      }
+
+      // 🔥 FIX: FAIL if any clones failed - don't proceed with broken repos
+      if (cloneFailures.length > 0) {
+        const errorMsg = `Failed to clone ${cloneFailures.length} repository(ies): ${cloneFailures.join(', ')}. Check GitHub credentials and disk space.`;
+        console.error(`\n❌ [SandboxPhase] ${errorMsg}`);
+        NotificationService.emitConsoleLog(taskId, 'error', errorMsg);
+        return {
+          success: false,
+          error: errorMsg,
+        };
       }
 
       // =======================================================================
