@@ -884,81 +884,93 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
           const startCmd = `cd ${repoDir} && nohup ${devCmd} > /tmp/${repoName}-server.log 2>&1 &`;
           await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
 
-          // 🔥 POLL for compilation completion (up to 5 minutes)
-          const MAX_WAIT_MS = 300000;
+          // 🔥 POLL for PORT LISTENING (most reliable method)
+          // Instead of pattern matching stdout, we check if the port is actually bound
+          const MAX_WAIT_MS = 420000; // 7 minutes for slow Flutter builds
           const POLL_INTERVAL_MS = 5000;
           const startTime = Date.now();
           let serverReady = false;
           let compilationError = false;
           let lastLogs = '';
 
+          console.log(`      🔍 [${repoName}] Waiting for port ${devPort} to be listening...`);
+
           while (Date.now() - startTime < MAX_WAIT_MS && !serverReady && !compilationError) {
             await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-            const logsResult = await sandboxService.exec(taskId, `cat /tmp/${repoName}-server.log 2>/dev/null | tail -100`, {
-              cwd: '/workspace', timeout: 10000,
-            });
-            lastLogs = logsResult.stdout || '';
+            // 🔥 PRIMARY: Check if port is listening (most reliable)
+            try {
+              const portCheckCmd = `ss -tlnp 2>/dev/null | grep ":${devPort} " || netstat -tlnp 2>/dev/null | grep ":${devPort} " || echo "NOT_LISTENING"`;
+              const portCheckResult = await sandboxService.exec(taskId, portCheckCmd, { cwd: '/workspace', timeout: 5000 });
+              const portOutput = portCheckResult.stdout || '';
 
-            // Success patterns (includes python http.server, node, flutter, etc.)
-            if (lastLogs.includes('is being served at') || lastLogs.includes('Flutter DevTools') ||
-                lastLogs.includes('Debug service listening') || lastLogs.includes('listening on') ||
-                lastLogs.includes('Server running') || lastLogs.includes('Started on port') ||
-                lastLogs.includes('ready on') || lastLogs.includes('server started') ||
-                lastLogs.includes('Serving HTTP on') ||  // python3 -m http.server
-                lastLogs.includes('Compiling lib/main.dart for the Web') || // flutter build web in progress
-                lastLogs.includes('Built build/web')) {  // flutter build web complete
-              serverReady = true;
-              console.log(`      ✅ [${repoName}] Compilation SUCCESS!`);
+              if (!portOutput.includes('NOT_LISTENING') && portOutput.trim().length > 0) {
+                // Port is listening! Verify with HTTP request
+                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 http://localhost:${devPort} 2>/dev/null || echo "000"`;
+                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 10000 });
+                const statusCode = parseInt(verifyResult.stdout.trim()) || 0;
+
+                if (statusCode > 0 && statusCode < 500) {
+                  serverReady = true;
+                  console.log(`      ✅ [${repoName}] Port ${devPort} LISTENING and responding (HTTP ${statusCode})!`);
+                } else if (portOutput.includes('LISTEN')) {
+                  // Port is bound but not responding to HTTP yet - might be starting up
+                  console.log(`      ⏳ [${repoName}] Port ${devPort} bound, waiting for HTTP response...`);
+                }
+              }
+            } catch {
+              // Ignore port check errors, continue polling
             }
 
-            // Error patterns
-            if (lastLogs.includes('Error:') || lastLogs.includes('error:') ||
-                lastLogs.includes('Cannot find module') || lastLogs.includes('ENOENT') ||
-                lastLogs.includes('compilation failed') || lastLogs.includes('Build failed') ||
-                lastLogs.includes('Exception:') || lastLogs.includes('failed to compile')) {
-              compilationError = true;
-              console.log(`      ❌ [${repoName}] Compilation FAILED!`);
+            // 🔥 SECONDARY: Check logs for errors (to fail fast)
+            if (!serverReady) {
+              try {
+                const logsResult = await sandboxService.exec(taskId, `cat /tmp/${repoName}-server.log 2>/dev/null | tail -50`, {
+                  cwd: '/workspace', timeout: 5000,
+                });
+                lastLogs = logsResult.stdout || '';
+
+                // Only check for FATAL errors that mean we should stop waiting
+                if (lastLogs.includes('ENOENT') || lastLogs.includes('Cannot find module') ||
+                    lastLogs.includes('SyntaxError') || lastLogs.includes('MODULE_NOT_FOUND') ||
+                    lastLogs.includes('pubspec.yaml not found') || lastLogs.includes('No pubspec.yaml')) {
+                  compilationError = true;
+                  console.log(`      ❌ [${repoName}] FATAL error detected in logs!`);
+                }
+              } catch {
+                // Ignore log read errors
+              }
             }
 
             // Progress every 30s
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            if (elapsed % 30 === 0 && elapsed > 0) {
-              console.log(`      ⏳ [${repoName}] Still compiling... (${elapsed}s)`);
+            if (elapsed % 30 === 0 && elapsed > 0 && !serverReady) {
+              // Get last line of log for progress info
+              let progressInfo = '';
+              try {
+                const tailResult = await sandboxService.exec(taskId, `tail -1 /tmp/${repoName}-server.log 2>/dev/null`, { cwd: '/workspace', timeout: 3000 });
+                progressInfo = (tailResult.stdout || '').trim().substring(0, 80);
+              } catch { /* ignore */ }
+
+              console.log(`      ⏳ [${repoName}] Still waiting... (${elapsed}s) ${progressInfo ? '- ' + progressInfo : ''}`);
               NotificationService.emitConsoleLog(taskId, 'info', `⏳ [${repoName}] Compiling... (${elapsed}s)`);
             }
           }
 
-          // Verify server responds (with retry - server may need time to bind to port)
-          let verified = false;
-          if (serverReady) {
-            const VERIFY_RETRIES = 5;
-            const VERIFY_DELAY_MS = 2000; // 2 seconds between retries
-
+          // Final verification with multiple retries
+          let verified = serverReady;
+          if (serverReady && !verified) {
+            const VERIFY_RETRIES = 3;
             for (let attempt = 1; attempt <= VERIFY_RETRIES && !verified; attempt++) {
               try {
-                // Wait before checking (give server time to bind)
-                if (attempt > 1) {
-                  await new Promise(resolve => setTimeout(resolve, VERIFY_DELAY_MS));
-                }
-
-                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" http://localhost:${devPort} 2>/dev/null || echo "000"`;
-                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 10000 });
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${devPort} 2>/dev/null || echo "000"`;
+                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 15000 });
                 const statusCode = parseInt(verifyResult.stdout.trim()) || 0;
                 verified = statusCode >= 200 && statusCode < 500;
-
-                if (!verified && attempt < VERIFY_RETRIES) {
-                  console.log(`      ⏳ [${repoName}] Verification attempt ${attempt}/${VERIFY_RETRIES} - waiting for port ${devPort}...`);
-                }
               } catch {
-                if (attempt === VERIFY_RETRIES) {
-                  console.log(`      ⚠️ [${repoName}] Curl verification failed after ${VERIFY_RETRIES} attempts`);
-                }
+                console.log(`      ⚠️ [${repoName}] Verification attempt ${attempt}/${VERIFY_RETRIES} failed`);
               }
-            }
-
-            if (verified) {
-              console.log(`      ✅ [${repoName}] Port ${devPort} verified and responding!`);
             }
           }
 
