@@ -13,8 +13,8 @@
  * /api/preview/:taskId/port/:port/*  (for specific ports)
  */
 
-import { Router, Request, Response, NextFunction } from 'express';
-import { createProxyMiddleware, Options } from 'http-proxy-middleware';
+import { Router, Request, Response } from 'express';
+import http from 'http';
 import { sandboxService } from '../services/SandboxService.js';
 
 const router = Router();
@@ -48,30 +48,6 @@ function getHostPort(taskId: string, containerPort: string = '8080'): string | n
   }
 
   return hostPort;
-}
-
-/**
- * Middleware to resolve sandbox and set target URL
- */
-function resolveSandboxTarget(req: Request, res: Response, next: NextFunction) {
-  const { taskId, port } = req.params;
-  const containerPort = port || '8080';
-
-  const hostPort = getHostPort(taskId, containerPort);
-  if (!hostPort) {
-    return res.status(404).json({
-      success: false,
-      error: 'Sandbox not found or no ports available',
-      taskId,
-      requestedPort: containerPort,
-    });
-  }
-
-  // Store target info for the proxy middleware
-  (req as any).proxyTarget = `http://localhost:${hostPort}`;
-  (req as any).hostPort = hostPort;
-
-  next();
 }
 
 /**
@@ -113,91 +89,164 @@ router.get('/:taskId/info', (req: Request, res: Response) => {
 });
 
 /**
- * Dynamic proxy handler
- * Creates a proxy middleware on-the-fly for each request
+ * Native HTTP proxy handler
+ * Proxies requests to Docker containers without external dependencies
  */
-function proxyHandler(req: Request, res: Response, next: NextFunction) {
-  const { taskId, port } = req.params;
-  const containerPort = port || '8080';
+function proxyToContainer(
+  req: Request,
+  res: Response,
+  hostPort: string,
+  targetPath: string
+): void {
+  const options: http.RequestOptions = {
+    hostname: 'localhost',
+    port: parseInt(hostPort, 10),
+    path: targetPath || '/',
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: `localhost:${hostPort}`,
+    },
+  };
 
-  const hostPort = getHostPort(taskId, containerPort);
+  console.log(`[Preview Proxy] ${req.method} → localhost:${hostPort}${targetPath}`);
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    // Add CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    // Copy status and headers from proxy response
+    res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+
+    // Pipe the response body
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error(`[Preview Proxy] Error: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(502).json({
+        success: false,
+        error: 'Failed to connect to sandbox',
+        details: err.message,
+      });
+    }
+  });
+
+  // Set timeout
+  proxyReq.setTimeout(30000, () => {
+    proxyReq.destroy();
+    if (!res.headersSent) {
+      res.status(504).json({
+        success: false,
+        error: 'Proxy request timeout',
+      });
+    }
+  });
+
+  // Pipe the request body if present
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+}
+
+/**
+ * Handle CORS preflight
+ */
+router.options('*', (_req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.status(204).end();
+});
+
+/**
+ * Proxy with specific port: /api/preview/:taskId/port/:port/*
+ */
+router.all('/:taskId/port/:port/*', (req: Request, res: Response) => {
+  const { taskId, port } = req.params;
+
+  const hostPort = getHostPort(taskId, port);
+  if (!hostPort) {
+    return res.status(404).json({
+      success: false,
+      error: 'Sandbox not found or port not available',
+      taskId,
+      requestedPort: port,
+    });
+  }
+
+  // Extract the path after /port/:port/
+  const fullPath = req.originalUrl;
+  const portPathMatch = fullPath.match(/\/port\/\d+\/(.*)/);
+  const targetPath = '/' + (portPathMatch?.[1] || '');
+
+  proxyToContainer(req, res, hostPort, targetPath);
+});
+
+router.all('/:taskId/port/:port', (req: Request, res: Response) => {
+  const { taskId, port } = req.params;
+
+  const hostPort = getHostPort(taskId, port);
+  if (!hostPort) {
+    return res.status(404).json({
+      success: false,
+      error: 'Sandbox not found or port not available',
+      taskId,
+      requestedPort: port,
+    });
+  }
+
+  proxyToContainer(req, res, hostPort, '/');
+});
+
+/**
+ * Proxy with default port (8080): /api/preview/:taskId/*
+ */
+router.all('/:taskId/*', (req: Request, res: Response) => {
+  const { taskId } = req.params;
+
+  // Skip /info endpoint (handled above)
+  if (req.path.endsWith('/info')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const hostPort = getHostPort(taskId, '8080');
   if (!hostPort) {
     return res.status(404).json({
       success: false,
       error: 'Sandbox not found or no ports available',
       taskId,
-      requestedPort: containerPort,
     });
   }
 
-  const target = `http://localhost:${hostPort}`;
+  // Extract the path after /:taskId/
+  const fullPath = req.originalUrl;
+  const taskIdPattern = new RegExp(`/api/v?1?/?preview/${taskId}/(.*)$`);
+  const match = fullPath.match(taskIdPattern);
+  const targetPath = '/' + (match?.[1] || '');
 
-  // Get the path after the proxy prefix
-  // For /api/preview/:taskId/some/path → /some/path
-  // For /api/preview/:taskId/port/:port/some/path → /some/path
-  let proxyPath = req.url;
-
-  // Log the proxy request
-  console.log(`[Preview Proxy] ${req.method} ${req.originalUrl} → ${target}${proxyPath}`);
-
-  const proxyOptions: Options = {
-    target,
-    changeOrigin: true,
-    ws: true, // Enable WebSocket proxying
-    pathRewrite: (_path, _req) => {
-      // The path is already correct after Express routing
-      return proxyPath;
-    },
-    onError: (err, _req, res) => {
-      console.error(`[Preview Proxy] Error: ${err.message}`);
-      if (!res.headersSent) {
-        (res as Response).status(502).json({
-          success: false,
-          error: 'Failed to proxy request to sandbox',
-          details: err.message,
-        });
-      }
-    },
-    onProxyRes: (proxyRes, _req, _res) => {
-      // Add CORS headers to proxied responses
-      proxyRes.headers['access-control-allow-origin'] = '*';
-      proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-      proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization';
-    },
-    logLevel: 'warn',
-  };
-
-  const proxy = createProxyMiddleware(proxyOptions);
-  return proxy(req, res, next);
-}
-
-/**
- * Proxy routes with different path patterns
- *
- * /api/preview/:taskId/*              → proxy to default port (8080)
- * /api/preview/:taskId/port/:port/*   → proxy to specific port
- */
-
-// Specific port proxy: /api/preview/:taskId/port/:port/*
-router.use('/:taskId/port/:port/*', proxyHandler);
-router.use('/:taskId/port/:port', proxyHandler);
-
-// Default port proxy: /api/preview/:taskId/*
-// Must come after /port/:port to avoid matching first
-router.use('/:taskId/*', (req, res, next) => {
-  // Skip if it's the /info endpoint
-  if (req.params['0'] === 'info' || req.params['0']?.startsWith('port/')) {
-    return next('route');
-  }
-  return proxyHandler(req, res, next);
+  proxyToContainer(req, res, hostPort, targetPath);
 });
 
-router.use('/:taskId', (req, res, next) => {
-  // Skip if it's the /info endpoint
-  if (req.path.endsWith('/info')) {
-    return next('route');
+router.all('/:taskId', (req: Request, res: Response) => {
+  const { taskId } = req.params;
+
+  const hostPort = getHostPort(taskId, '8080');
+  if (!hostPort) {
+    return res.status(404).json({
+      success: false,
+      error: 'Sandbox not found or no ports available',
+      taskId,
+    });
   }
-  return proxyHandler(req, res, next);
+
+  proxyToContainer(req, res, hostPort, '/');
 });
 
 export default router;
