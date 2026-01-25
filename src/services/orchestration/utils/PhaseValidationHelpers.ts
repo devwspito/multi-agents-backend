@@ -90,10 +90,15 @@ export function validateEpicsHaveRepository(
 /**
  * Validate all repositories have valid git remote URLs
  *
+ * 🔥 AUTO-FIX: If a repo is missing 'origin' remote but has a URL configured,
+ * this function will automatically set it up. This handles cases where:
+ * - flutter create / dart create overwrites the cloned repo
+ * - New repos are initialized with git init but no remote
+ *
  * @param repositories - Array of repositories to validate
  * @param phaseName - Name of the phase performing validation
  * @param options - Validation options (passed to validateGitRemoteUrl)
- * @throws Error if any repository has invalid remote URL
+ * @throws Error if any repository has invalid remote URL and can't be fixed
  */
 export async function validateRepositoryRemotes(
   repositories: any[],
@@ -107,6 +112,7 @@ export async function validateRepositoryRemotes(
   console.log(`\n🔍 [${phaseName}] Validating git remotes for ${repositories.length} repositories...`);
 
   const invalidRepos: Array<{ repo: any; reason: string }> = [];
+  const { execSync } = await import('child_process');
 
   for (const repo of repositories) {
     if (!repo.localPath) {
@@ -125,18 +131,119 @@ export async function validateRepositoryRemotes(
       });
 
       if (!validation.valid) {
-        invalidRepos.push({
-          repo,
-          reason: validation.reason || 'Unknown validation failure',
-        });
+        // 🔥 AUTO-FIX: Try to set up remote if repo has a URL configured
+        const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl;
+        if (repoUrl && validation.reason?.includes('No such remote')) {
+          console.log(`   ⚠️ [${repo.name}] No remote found, attempting auto-fix...`);
+          console.log(`      URL from config: ${repoUrl}`);
+
+          try {
+            // Check if .git exists, if not init it
+            const fs = await import('fs');
+            const gitDir = `${repo.localPath}/.git`;
+            if (!fs.existsSync(gitDir)) {
+              console.log(`      Initializing git repository...`);
+              execSync('git init', { cwd: repo.localPath, encoding: 'utf8', timeout: 10000 });
+            }
+
+            // Add origin remote
+            execSync(`git remote add origin "${repoUrl}"`, {
+              cwd: repo.localPath,
+              encoding: 'utf8',
+              timeout: 10000
+            });
+            console.log(`   ✅ [${repo.name}] Auto-configured origin remote: ${repoUrl}`);
+
+            // Re-validate
+            const reValidation = validateGitRemoteUrl(repo.localPath, {
+              allowedHosts: options.allowedHosts || ['github.com', 'gitlab.com', 'bitbucket.org'],
+              allowedOrganizations: options.allowedOrganizations,
+              requireHttps: options.requireHttps !== false,
+            });
+
+            if (!reValidation.valid) {
+              invalidRepos.push({
+                repo,
+                reason: `Auto-fix failed: ${reValidation.reason}`,
+              });
+            }
+          } catch (fixError: any) {
+            // Remote might already exist, try to update it
+            if (fixError.message?.includes('already exists')) {
+              try {
+                execSync(`git remote set-url origin "${repoUrl}"`, {
+                  cwd: repo.localPath,
+                  encoding: 'utf8',
+                  timeout: 10000
+                });
+                console.log(`   ✅ [${repo.name}] Updated existing origin remote: ${repoUrl}`);
+              } catch (updateError: any) {
+                invalidRepos.push({
+                  repo,
+                  reason: `Failed to update remote: ${updateError.message}`,
+                });
+              }
+            } else {
+              invalidRepos.push({
+                repo,
+                reason: `Auto-fix failed: ${fixError.message}`,
+              });
+            }
+          }
+        } else {
+          invalidRepos.push({
+            repo,
+            reason: validation.reason || 'Unknown validation failure',
+          });
+        }
       } else {
         console.log(`   ✅ ${repo.name || repo.githubRepoName}: ${validation.remoteUrl}`);
       }
     } catch (error: any) {
-      invalidRepos.push({
-        repo,
-        reason: `Exception during validation: ${error.message}`,
-      });
+      // 🔥 AUTO-FIX: Same logic for exceptions
+      const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl;
+      if (repoUrl && error.message?.includes('No such remote')) {
+        console.log(`   ⚠️ [${repo.name}] Exception - no remote, attempting auto-fix...`);
+        try {
+          const fs = await import('fs');
+          const gitDir = `${repo.localPath}/.git`;
+          if (!fs.existsSync(gitDir)) {
+            execSync('git init', { cwd: repo.localPath, encoding: 'utf8', timeout: 10000 });
+          }
+          execSync(`git remote add origin "${repoUrl}"`, {
+            cwd: repo.localPath,
+            encoding: 'utf8',
+            timeout: 10000
+          });
+          console.log(`   ✅ [${repo.name}] Auto-configured origin remote: ${repoUrl}`);
+        } catch (fixError: any) {
+          if (fixError.message?.includes('already exists')) {
+            try {
+              execSync(`git remote set-url origin "${repoUrl}"`, {
+                cwd: repo.localPath,
+                encoding: 'utf8',
+                timeout: 10000
+              });
+              console.log(`   ✅ [${repo.name}] Updated existing origin remote: ${repoUrl}`);
+            } catch {
+              invalidRepos.push({
+                repo,
+                reason: `Exception + auto-fix failed: ${error.message}`,
+              });
+            }
+          } else {
+            invalidRepos.push({
+              repo,
+              reason: `Exception + auto-fix failed: ${error.message}`,
+            });
+          }
+        }
+      } else {
+        invalidRepos.push({
+          repo,
+          reason: `Exception during validation: ${error.message}`,
+        });
+      }
     }
   }
 
@@ -151,7 +258,8 @@ export async function validateRepositoryRemotes(
     });
 
     console.error(`\n   🛑 REFUSING TO PROCEED with invalid git remotes`);
-    console.error(`   🛑 This prevents git operations from failing later`);
+    console.error(`\n   💡 TIP: Check that repos have valid URLs in project config`);
+    console.error(`   💡 TIP: Or manually run: git remote add origin <url>`);
 
     throw new Error(
       `HUMAN_REQUIRED: ${invalidRepos.length} repository(ies) have invalid git remotes. ` +
