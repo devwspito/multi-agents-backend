@@ -17,18 +17,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import globCallback from 'glob';
+import { glob } from 'glob';
 import * as crypto from 'crypto';
-
-// Promisified glob wrapper
-function glob(pattern: string, options: globCallback.IOptions = {}): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    globCallback(pattern, options, (err, matches) => {
-      if (err) reject(err);
-      else resolve(matches);
-    });
-  });
-}
 
 // ==================== TYPES ====================
 
