@@ -54,16 +54,17 @@ function getHostPort(taskId: string, containerPort: string = '8080'): string | n
  * GET /api/preview/:taskId/info
  * Get sandbox preview information (ports, URLs, etc.)
  */
-router.get('/:taskId/info', (req: Request, res: Response) => {
-  const { taskId } = req.params;
+router.get('/:taskId/info', (req: Request, res: Response): void => {
+  const taskId = req.params.taskId as string;
 
   const found = sandboxService.findSandboxForTask(taskId);
   if (!found) {
-    return res.status(404).json({
+    res.status(404).json({
       success: false,
       error: 'Sandbox not found',
       taskId,
     });
+    return;
   }
 
   const { sandboxId, instance } = found;
@@ -77,7 +78,7 @@ router.get('/:taskId/info', (req: Request, res: Response) => {
     }
   }
 
-  return res.json({
+  res.json({
     success: true,
     taskId,
     sandboxId,
@@ -157,7 +158,7 @@ function proxyToContainer(
 /**
  * Handle CORS preflight
  */
-router.options('*', (_req: Request, res: Response) => {
+router.options('*', (_req: Request, res: Response): void => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -168,17 +169,19 @@ router.options('*', (_req: Request, res: Response) => {
 /**
  * Proxy with specific port: /api/preview/:taskId/port/:port/*
  */
-router.all('/:taskId/port/:port/*', (req: Request, res: Response) => {
-  const { taskId, port } = req.params;
+router.all('/:taskId/port/:port/*', (req: Request, res: Response): void => {
+  const taskId = req.params.taskId as string;
+  const port = req.params.port as string;
 
   const hostPort = getHostPort(taskId, port);
   if (!hostPort) {
-    return res.status(404).json({
+    res.status(404).json({
       success: false,
       error: 'Sandbox not found or port not available',
       taskId,
       requestedPort: port,
     });
+    return;
   }
 
   // Extract the path after /port/:port/
@@ -189,17 +192,19 @@ router.all('/:taskId/port/:port/*', (req: Request, res: Response) => {
   proxyToContainer(req, res, hostPort, targetPath);
 });
 
-router.all('/:taskId/port/:port', (req: Request, res: Response) => {
-  const { taskId, port } = req.params;
+router.all('/:taskId/port/:port', (req: Request, res: Response): void => {
+  const taskId = req.params.taskId as string;
+  const port = req.params.port as string;
 
   const hostPort = getHostPort(taskId, port);
   if (!hostPort) {
-    return res.status(404).json({
+    res.status(404).json({
       success: false,
       error: 'Sandbox not found or port not available',
       taskId,
       requestedPort: port,
     });
+    return;
   }
 
   proxyToContainer(req, res, hostPort, '/');
@@ -208,21 +213,23 @@ router.all('/:taskId/port/:port', (req: Request, res: Response) => {
 /**
  * Proxy with default port (8080): /api/preview/:taskId/*
  */
-router.all('/:taskId/*', (req: Request, res: Response) => {
-  const { taskId } = req.params;
+router.all('/:taskId/*', (req: Request, res: Response): void => {
+  const taskId = req.params.taskId as string;
 
   // Skip /info endpoint (handled above)
   if (req.path.endsWith('/info')) {
-    return res.status(404).json({ error: 'Not found' });
+    res.status(404).json({ error: 'Not found' });
+    return;
   }
 
   const hostPort = getHostPort(taskId, '8080');
   if (!hostPort) {
-    return res.status(404).json({
+    res.status(404).json({
       success: false,
       error: 'Sandbox not found or no ports available',
       taskId,
     });
+    return;
   }
 
   // Extract the path after /:taskId/
@@ -234,16 +241,17 @@ router.all('/:taskId/*', (req: Request, res: Response) => {
   proxyToContainer(req, res, hostPort, targetPath);
 });
 
-router.all('/:taskId', (req: Request, res: Response) => {
-  const { taskId } = req.params;
+router.all('/:taskId', (req: Request, res: Response): void => {
+  const taskId = req.params.taskId as string;
 
   const hostPort = getHostPort(taskId, '8080');
   if (!hostPort) {
-    return res.status(404).json({
+    res.status(404).json({
       success: false,
       error: 'Sandbox not found or no ports available',
       taskId,
     });
+    return;
   }
 
   proxyToContainer(req, res, hostPort, '/');
