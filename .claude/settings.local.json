@@ -185,7 +185,8 @@
       "Bash(do echo \"$line\")",
       "Bash(docker build:*)",
       "Bash(docker run:*)",
-      "mcp__github__create_or_update_file"
+      "mcp__github__create_or_update_file",
+      "Bash(git rm:*)"
     ],
     "deny": [],
     "ask": []
