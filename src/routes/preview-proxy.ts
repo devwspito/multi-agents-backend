@@ -173,7 +173,7 @@ function proxyToContainer(
     const contentType = proxyRes.headers['content-type'] || '';
     const isHtml = contentType.includes('text/html');
 
-    // 🔥 For HTML responses, buffer and rewrite base href
+    // 🔥 For HTML responses, buffer and rewrite base href + fix CSP
     if (isHtml && proxyBasePath) {
       const chunks: Buffer[] = [];
       proxyRes.on('data', (chunk) => chunks.push(chunk));
@@ -193,13 +193,33 @@ function proxyToContainer(
           `<base href="${proxyBasePath}"`
         );
 
+        // 🔥 FIX: Remove restrictive CSP meta tags that break Flutter Web
+        // Flutter needs to load CanvasKit from gstatic.com and fonts from Google Fonts
+        html = html.replace(
+          /<meta\s+http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
+          '<!-- CSP removed by preview proxy for Flutter compatibility -->'
+        );
+
         console.log(`[Preview Proxy] Rewrote base href to: ${proxyBasePath}`);
 
         // Remove content-encoding and set correct content-length
         const headers = { ...proxyRes.headers };
         delete headers['content-encoding'];
         delete headers['content-length'];
+        // 🔥 FIX: Remove CSP headers and set permissive one for Flutter
+        delete headers['content-security-policy'];
+        delete headers['Content-Security-Policy'];
         headers['content-length'] = Buffer.byteLength(html).toString();
+        // 🔥 Set permissive CSP that allows Flutter Web to work
+        headers['content-security-policy'] = [
+          "default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:",
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.gstatic.com https://unpkg.com",
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+          "font-src 'self' data: https://fonts.gstatic.com",
+          "connect-src 'self' https://www.gstatic.com https://fonts.gstatic.com ws: wss: http://localhost:*",
+          "img-src 'self' data: blob: https:",
+          "worker-src 'self' blob:",
+        ].join('; ');
 
         res.writeHead(proxyRes.statusCode || 200, headers);
         res.end(html);
