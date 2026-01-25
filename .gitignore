@@ -127,3 +127,11 @@ GITHUB_APP_SETUP.md
 
 # Claude Code local settings
 .claude/settings.local.jsondata/
+
+# SQLite database files
+data/app.db
+data/app.db-shm
+data/app.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
