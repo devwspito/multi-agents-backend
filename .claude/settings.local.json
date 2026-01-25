@@ -186,7 +186,9 @@
       "Bash(docker build:*)",
       "Bash(docker run:*)",
       "mcp__github__create_or_update_file",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(ssh:*)",
+      "Bash(git restore:*)"
     ],
     "deny": [],
     "ask": []
