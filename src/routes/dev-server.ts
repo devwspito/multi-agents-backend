@@ -701,9 +701,11 @@ router.get('/servers/:taskId', async (req: Request, res: Response) => {
     if (trackedServer) {
       servers.push({
         taskId,
+        running: true,  // 🔥 FIX: Required for frontend auto-connect
         url: trackedServer.url,
         framework: trackedServer.framework,
         port: trackedServer.port,
+        hostPort: trackedServer.port,  // 🔥 FIX: Frontend expects hostPort
         startedAt: trackedServer.startedAt,
         isDocker: trackedServer.isDocker || false,
         containerName: trackedServer.containerName,
@@ -736,9 +738,11 @@ router.get('/servers/:taskId', async (req: Request, res: Response) => {
 
         servers.push({
           taskId,
+          running: true,  // 🔥 FIX: Required for frontend auto-connect
           url,
           framework: config.framework || config.language || 'unknown',
           port: serverPort,
+          hostPort: serverPort,  // 🔥 FIX: Frontend expects hostPort
           isDocker: true,
           sandboxId: sandbox.sandboxId,
           containerName: sandbox.instance.containerName,
