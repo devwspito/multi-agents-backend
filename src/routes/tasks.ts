@@ -1769,7 +1769,9 @@ router.post('/:id/cancel', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    if (task.status !== 'in_progress' && !task.orchestration.paused) {
+    // 🔥 FIX: Allow canceling any task except completed/cancelled
+    const nonCancellableStatuses = ['completed', 'cancelled'];
+    if (nonCancellableStatuses.includes(task.status)) {
       res.status(400).json({
         success: false,
         message: `Cannot cancel task with status: ${task.status}`,
