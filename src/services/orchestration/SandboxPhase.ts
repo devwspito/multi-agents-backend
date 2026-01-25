@@ -155,18 +155,16 @@ export class SandboxPhase extends BasePhase {
     this.executeAgent = executeAgent;
   }
 
-  async shouldSkip(context: OrchestrationContext): Promise<boolean> {
-    const taskId = this.getTaskIdString(context);
-
-    // Check if SandboxValidated event already exists (means Judge approved)
-    const events = await eventStore.getEvents(taskId);
-    const sandboxValidated = events.find(e => e.eventType === 'SandboxValidated');
-
-    if (sandboxValidated) {
-      this.logSkipDecision(true, 'Sandbox already validated by Judge');
-      return true;
-    }
-
+  async shouldSkip(_context: OrchestrationContext): Promise<boolean> {
+    // 🔥 SANDBOX ALWAYS RE-EXECUTES
+    // Sandbox is ephemeral and must be recreated on every run/resume/retry
+    // This ensures:
+    // 1. Fresh Docker container with clean state
+    // 2. No corrupted state from previous failed runs
+    // 3. Judge always validates the environment
+    //
+    // The executePhase will handle cleanup of any existing containers
+    this.logSkipDecision(false, 'Sandbox always re-executes (never skip)');
     return false;
   }
 
@@ -178,8 +176,9 @@ export class SandboxPhase extends BasePhase {
     metadata?: { cost?: number; [key: string]: any };
   }> {
     const taskId = this.getTaskIdString(context);
-    const projectId = context.getData<string>('projectId') || taskId;
-    const workspacePath = context.getData<string>('workspacePath') || '';
+    const projectId = context.getData<string>('projectId') || context.task?.projectId?.toString() || taskId;
+    // 🔥 FIX: workspacePath is a DIRECT property, not in sharedData
+    const workspacePath = context.workspacePath || '';
 
     console.log(`\n${'='.repeat(70)}`);
     console.log(`🐳 [SandboxPhase] STARTING - LLM decides EVERYTHING, Judge validates`);
@@ -204,14 +203,20 @@ export class SandboxPhase extends BasePhase {
         throw new Error(`Task not found: ${taskId}`);
       }
 
-      const repositories = (task.orchestration as any)?.repositories || [];
+      // 🔥 FIX: Use context.repositories (passed by OrchestrationCoordinator)
+      // NOT task.orchestration.repositories (which doesn't exist yet)
+      const repositories = context.repositories || [];
       if (repositories.length === 0) {
-        console.log(`[SandboxPhase] ⚠️ No repositories configured`);
+        console.log(`[SandboxPhase] ⚠️ No repositories in context`);
+        console.log(`   context.repositories: ${JSON.stringify(context.repositories)}`);
         return {
           success: false,
           error: 'No repositories configured - cannot create sandbox',
         };
       }
+
+      console.log(`[SandboxPhase] Found ${repositories.length} repositories in context`);
+      repositories.forEach((r: any) => console.log(`   - ${r.name} (${r.type || 'unknown'})`));
 
       // Ensure workspace exists
       if (!fs.existsSync(workspacePath)) {
@@ -258,31 +263,52 @@ export class SandboxPhase extends BasePhase {
       }
 
       // =======================================================================
-      // STEP 2: LLM detects language (SINGLE SOURCE OF TRUTH)
+      // STEP 2: DETECT LANGUAGE PER REPO (FILES FIRST, LLM FALLBACK)
       // =======================================================================
-      console.log(`\n🤖 [SandboxPhase] Step 2: LLM detecting language...`);
+      console.log(`\n🔍 [SandboxPhase] Step 2: Detecting language PER REPO...`);
+      console.log(`   📁 PRIORITY 1: File-based detection (package.json, pubspec.yaml, etc.)`);
+      console.log(`   🤖 PRIORITY 2: LLM detection (if files not found)`);
 
-      const repoNames = repositories.map((r: any) => r.name);
-      const detectionResult = await languageDetectionService.detectFromDescription(
+      // 🔥 NEW: Detect language for EACH repo separately - FILES FIRST!
+      const repoInfos = repositories.map((r: any) => ({
+        name: r.name,
+        type: r.type || 'unknown',
+      }));
+
+      const perRepoDetection = await languageDetectionService.detectPerRepoWithFiles(
         task.description || '',
-        undefined,
-        repoNames
+        repoInfos,
+        workspacePath  // 🔥 Pass workspace path for file detection
       );
 
-      llmDetected = detectionResult.primary;
+      // Store per-repo detection in context for later use
+      context.setData('perRepoDetection', perRepoDetection);
 
-      console.log(`\n   🔍 LLM Detection:`);
-      console.log(`      Language: ${llmDetected.language}`);
-      console.log(`      Framework: ${llmDetected.framework}`);
-      console.log(`      Docker Image: ${llmDetected.dockerImage}`);
-      console.log(`      Create: ${llmDetected.createCmd || 'N/A'}`);
-      console.log(`      Install: ${llmDetected.installCmd || 'N/A'}`);
-      console.log(`      Dev: ${llmDetected.devCmd || 'N/A'}`);
+      // Use first repo's config for sandbox image (we'll use multi-runtime)
+      // The actual per-repo commands will be applied in Step 4
+      const firstRepo = repositories[0];
+      llmDetected = perRepoDetection[firstRepo?.name] || {
+        language: 'unknown',
+        framework: 'unknown',
+        dockerImage: 'ubuntu:22.04',
+        ecosystem: 'unknown',
+        confidence: 'low' as const,
+        reasoning: 'No detection available',
+      };
+
+      // Log all detections
+      console.log(`\n   🔍 Per-Repo LLM Detection:`);
+      for (const [repoName, config] of Object.entries(perRepoDetection)) {
+        console.log(`      ${repoName}: ${config.language}/${config.framework}`);
+        console.log(`         Image: ${config.dockerImage}`);
+        console.log(`         Install: ${config.installCmd || 'N/A'}`);
+        console.log(`         Dev: ${config.devCmd || 'N/A'}`);
+      }
 
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `🤖 LLM: ${llmDetected.language}/${llmDetected.framework} → ${llmDetected.dockerImage}`
+        `🤖 LLM detected ${Object.keys(perRepoDetection).length} repos with different languages`
       );
 
       // =======================================================================
@@ -309,13 +335,24 @@ export class SandboxPhase extends BasePhase {
         });
       }
 
-      // Ports
-      const allPorts: string[] = [];
-      const devPort = llmDetected.devPort || 8080;
-      allPorts.push(`0:${devPort}`);
-      if (devPort !== 3000) allPorts.push('0:3000');
-      if (devPort !== 3001) allPorts.push('0:3001');
-      if (devPort !== 8000) allPorts.push('0:8000');
+      // Ports - collect ALL unique ports from ALL repos
+      const portSet = new Set<number>();
+
+      // 🔥 Add devPort from EACH repo (per-repo detection)
+      for (const [repoName, repoConfig] of Object.entries(perRepoDetection)) {
+        if (repoConfig.devPort) {
+          portSet.add(repoConfig.devPort);
+          console.log(`   📍 Port from ${repoName}: ${repoConfig.devPort}`);
+        }
+      }
+
+      // 🔥 ALWAYS include common ports for dev servers
+      portSet.add(3000);   // Node.js default
+      portSet.add(3001);   // Alternative Node.js
+      portSet.add(8000);   // Python/Django default
+      portSet.add(8080);   // Flutter web preview (MANDATORY)
+
+      const allPorts: string[] = Array.from(portSet).map(p => `0:${p}`);
 
       console.log(`   Image: ${llmDetected.dockerImage}`);
       console.log(`   Ports: ${allPorts.join(', ')}`);
@@ -347,49 +384,164 @@ export class SandboxPhase extends BasePhase {
 
       // =======================================================================
       // STEP 4: Create projects and install dependencies
+      // 🔥 100% AGNOSTIC - PER-REPO LLM CONFIG
       // =======================================================================
-      console.log(`\n📦 [SandboxPhase] Step 4: Setting up projects...`);
+      console.log(`\n📦 [SandboxPhase] Step 4: Setting up projects (PER-REPO LLM config)...`);
+
+      // perRepoDetection was set in Step 2, use it directly
 
       for (const repoConfig of repoConfigs) {
-        const checkFile = llmDetected.checkFile || 'pubspec.yaml';
-        const checkPath = path.join(repoConfig.hostPath, checkFile);
-
         console.log(`\n   [${repoConfig.name}]`);
 
-        // Create project if needed
-        if (!fs.existsSync(checkPath) && llmDetected.createCmd) {
-          console.log(`      Creating project...`);
+        // 🔥 GET CONFIG FOR THIS SPECIFIC REPO
+        const repoLLM = perRepoDetection[repoConfig.name] || llmDetected;
+        console.log(`      📋 Using ${repoLLM.language}/${repoLLM.framework} config`);
 
-          const createResult = await sandboxService.exec(taskId, llmDetected.createCmd, {
-            cwd: repoConfig.containerPath,
-            timeout: 180000,
+        // 🔥 AGNOSTIC: Install runtime for THIS repo (ubuntu:22.04 has no language tools)
+        // Every repo needs its runtime installed since we use ubuntu base
+        // 🛡️ FAULT-TOLERANT: Verify first, retry on failure, never block
+        if (repoLLM.runtimeInstallCmd) {
+          // 🔍 Check if runtime is already installed (avoid reinstalling)
+          const runtimeChecks: Record<string, string> = {
+            'Dart': 'which dart || test -f /opt/flutter/bin/dart',
+            'Flutter': 'which flutter || test -f /opt/flutter/bin/flutter',
+            'Node.js': 'which node',
+            'Python': 'which python3',
+            'Go': 'which go || test -f /usr/local/go/bin/go',
+          };
+
+          const checkCmd = runtimeChecks[repoLLM.language] || `which ${repoLLM.language.toLowerCase()}`;
+          const checkResult = await sandboxService.exec(taskId, checkCmd, {
+            cwd: '/workspace',
+            timeout: 5000,
           });
 
-          if (createResult.exitCode === 0) {
-            repoConfig.projectCreated = true;
-            console.log(`      ✅ Project created`);
+          if (checkResult.exitCode === 0) {
+            console.log(`      ✅ ${repoLLM.language} runtime already installed - skipping`);
+            NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoConfig.name}] ${repoLLM.language} already available`);
           } else {
-            console.warn(`      ⚠️ Create failed: ${createResult.stderr?.substring(0, 100)}`);
+            // Runtime not installed - install with retries
+            console.log(`      🔧 Installing ${repoLLM.language} runtime...`);
+            console.log(`         Command: ${repoLLM.runtimeInstallCmd.substring(0, 80)}...`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `🔧 [${repoConfig.name}] Installing ${repoLLM.language} runtime (may take several minutes)...`
+            );
+
+            let runtimeInstalled = false;
+            const MAX_RETRIES = 3;
+
+            for (let attempt = 1; attempt <= MAX_RETRIES && !runtimeInstalled; attempt++) {
+              if (attempt > 1) {
+                console.log(`      🔄 Retry ${attempt}/${MAX_RETRIES}...`);
+                NotificationService.emitConsoleLog(taskId, 'info', `🔄 [${repoConfig.name}] Retry ${attempt}/${MAX_RETRIES}...`);
+              }
+
+              // 🔥 Kill any stale apt processes before installing (prevent lock conflicts)
+              await sandboxService.exec(taskId, 'pkill -9 apt-get 2>/dev/null || pkill -9 apt 2>/dev/null || rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock* 2>/dev/null || true', {
+                cwd: '/workspace',
+                timeout: 10000,
+              });
+
+              // 🔥 Wait for apt lock to be released (max 60s)
+              await sandboxService.exec(taskId, 'for i in $(seq 1 60); do fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 1; done', {
+                cwd: '/workspace',
+                timeout: 65000,
+              });
+
+              const runtimeResult = await sandboxService.exec(taskId, repoLLM.runtimeInstallCmd, {
+                cwd: '/workspace',
+                timeout: 1800000, // 30 min - runtime installs take long (Flutter, Node.js, etc.)
+              });
+
+              if (runtimeResult.exitCode === 0) {
+                runtimeInstalled = true;
+                console.log(`      ✅ Runtime installed successfully`);
+                NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoConfig.name}] ${repoLLM.language} runtime ready`);
+              } else if (attempt < MAX_RETRIES) {
+                console.warn(`      ⚠️ Attempt ${attempt} failed, will retry...`);
+                // Wait before retry
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              } else {
+                // 🛑 CRITICAL: After all retries, FAIL THE PHASE
+                console.error(`      ❌ Runtime install FAILED after ${MAX_RETRIES} attempts:`);
+                console.error(`         stderr: ${runtimeResult.stderr?.substring(0, 200)}`);
+                NotificationService.emitConsoleLog(
+                  taskId,
+                  'error',
+                  `❌ [${repoConfig.name}] Runtime install failed after ${MAX_RETRIES} attempts - BLOCKING`
+                );
+
+                // 🛑 FAIL THE PHASE - cannot proceed without runtime
+                return {
+                  success: false,
+                  error: `Runtime installation failed for ${repoConfig.name} (${repoLLM.language}) after ${MAX_RETRIES} attempts. Last error: ${runtimeResult.stderr?.substring(0, 200)}`,
+                  metadata: { cost: 0 },
+                };
+              }
+            }
           }
         } else {
-          repoConfig.projectCreated = true;
-          console.log(`      ✅ Project exists`);
+          console.log(`      ⚠️ No runtimeInstallCmd provided by LLM - checking if runtime exists...`);
         }
 
-        // Install dependencies
-        if (llmDetected.installCmd) {
-          console.log(`      Installing deps...`);
+        // 🔥 LLM provides checkFile for THIS repo
+        const checkFile = repoLLM.checkFile;
+        let projectExists = false;
 
-          const installResult = await sandboxService.exec(taskId, llmDetected.installCmd, {
-            cwd: repoConfig.containerPath,
-            timeout: 300000,
-          });
+        if (checkFile) {
+          const checkPath = path.join(repoConfig.hostPath, checkFile);
+          projectExists = fs.existsSync(checkPath);
+          console.log(`      🔍 LLM checkFile: ${checkFile} → ${projectExists ? 'EXISTS' : 'NOT FOUND'}`);
+        }
 
-          if (installResult.exitCode === 0) {
-            repoConfig.dependenciesInstalled = true;
-            console.log(`      ✅ Dependencies installed`);
+        if (projectExists) {
+          // Project exists - run THIS repo's install command
+          repoConfig.projectCreated = true;
+          console.log(`      ✅ Project exists (${repoLLM.language})`);
+
+          if (repoLLM.installCmd) {
+            console.log(`      📦 Installing: ${repoLLM.installCmd}`);
+            const installResult = await sandboxService.exec(taskId, repoLLM.installCmd, {
+              cwd: repoConfig.containerPath,
+            });
+
+            if (installResult.exitCode === 0) {
+              repoConfig.dependenciesInstalled = true;
+              console.log(`      ✅ Dependencies installed`);
+            } else {
+              console.warn(`      ⚠️ Install warning: ${installResult.stderr?.substring(0, 100)}`);
+            }
+          }
+        } else {
+          // No project - run THIS repo's create command
+          if (repoLLM.createCmd) {
+            console.log(`      🆕 Creating project: ${repoLLM.createCmd}`);
+            const createResult = await sandboxService.exec(taskId, repoLLM.createCmd, {
+              cwd: repoConfig.containerPath,
+            });
+
+            if (createResult.exitCode === 0) {
+              repoConfig.projectCreated = true;
+              console.log(`      ✅ Project created`);
+
+              // Now install dependencies for THIS repo
+              if (repoLLM.installCmd) {
+                console.log(`      📦 Installing: ${repoLLM.installCmd}`);
+                const installResult = await sandboxService.exec(taskId, repoLLM.installCmd, {
+                  cwd: repoConfig.containerPath,
+                });
+                if (installResult.exitCode === 0) {
+                  repoConfig.dependenciesInstalled = true;
+                  console.log(`      ✅ Dependencies installed`);
+                }
+              }
+            } else {
+              console.warn(`      ⚠️ Create failed: ${createResult.stderr?.substring(0, 100)}`);
+            }
           } else {
-            console.warn(`      ⚠️ Install warning: ${installResult.stderr?.substring(0, 100)}`);
+            console.log(`      ⚠️ No createCmd from LLM - skipping project creation`);
           }
         }
       }
@@ -525,9 +677,49 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
       // Store in context
       context.setData('sandboxConfig', sandboxData);
       context.setData('llmDetectedLanguage', llmDetected);
+      context.setData('detectedLanguage', llmDetected);  // 🔥 For PlanningPhase compatibility
       context.setData('unifiedSandboxId', taskId);
       context.setData('sandboxCreated', true);
       context.setData('environmentValidated', true);
+
+      // 🔥 CRITICAL: Set sandboxMap and useSandbox for ALL downstream phases
+      // TechLead, Developers, Judge, TeamOrchestration, Verification ALL read from sandboxMap
+      const sandboxMap = new Map<string, string>();
+      for (const repo of repoConfigs) {
+        sandboxMap.set(repo.name, taskId);  // All repos point to unified sandbox
+        console.log(`   📍 sandboxMap: ${repo.name} → ${taskId}`);
+      }
+      context.setData('sandboxMap', sandboxMap);
+      context.setData('useSandbox', true);
+      console.log(`✅ [SandboxPhase] Set sandboxMap with ${sandboxMap.size} repo(s) for downstream phases`);
+
+      // 🔥 100% AGNOSTIC: Store per-repo sandbox configs from LLM
+      // EACH repo gets its OWN config from perRepoDetection
+      const repoSandboxConfigs: Record<string, {
+        language: string;
+        installCmd: string;
+        devCmd?: string;
+        devPort?: number;
+        repoType: string;
+      }> = {};
+
+      // perRepoDetection was set in Step 2
+
+      for (const repo of repoConfigs) {
+        // 🔥 Use THIS repo's LLM config
+        const repoLLM = perRepoDetection[repo.name] || llmDetected;
+        repoSandboxConfigs[repo.name] = {
+          language: repoLLM.language,
+          installCmd: repoLLM.installCmd || '',
+          devCmd: repoLLM.devCmd,
+          devPort: repoLLM.devPort,
+          repoType: repo.type,
+        };
+        console.log(`   📦 ${repo.name}: ${repoLLM.language}/${repoLLM.framework} (per-repo LLM)`);
+      }
+
+      context.setData('repoSandboxConfigs', repoSandboxConfigs);
+      console.log(`✅ [SandboxPhase] Set repoSandboxConfigs for ${Object.keys(repoSandboxConfigs).length} repo(s) - per-repo LLM`);
 
       // Emit events
       await eventStore.append({
@@ -565,17 +757,26 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
       });
 
       // EnvironmentConfigDefined for DevServerService
+      // 🔥 CRITICAL: Use per-repo config so each repo has its OWN runCommand
       const envConfig: Record<string, any> = {};
+      // perRepoDetection was set in Step 2
+
       for (const repo of repoConfigs) {
+        const repoLLM = perRepoDetection[repo.name] || llmDetected;
         envConfig[repo.name] = {
-          language: llmDetected.language,
-          framework: llmDetected.framework,
-          installCommand: llmDetected.installCmd,
-          runCommand: llmDetected.devCmd,
-          devPort: llmDetected.devPort,
-          dockerImage: llmDetected.dockerImage,
+          language: repoLLM.language,
+          framework: repoLLM.framework,
+          installCommand: repoLLM.installCmd,
+          runCommand: repoLLM.devCmd,
+          devPort: repoLLM.devPort,
+          dockerImage: repoLLM.dockerImage,
         };
+        console.log(`   🔧 ${repo.name}: ${repoLLM.language} → ${repoLLM.devCmd || 'no devCmd'}`);
       }
+
+      // 🔥 Store environmentConfig in context for direct access by downstream phases
+      context.setData('environmentConfig', envConfig);
+      console.log(`✅ [SandboxPhase] Set environmentConfig for ${Object.keys(envConfig).length} repo(s) - per-repo`);
 
       await eventStore.append({
         taskId,
@@ -599,20 +800,298 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         },
       }));
 
+      // =======================================================================
+      // STEP 7: 🚀 START & VERIFY ALL DEV SERVERS
+      // 🔥 FLOW:
+      //   - Success → Planning (normal)
+      //   - Crash → Planning (with crash info injected so devs fix it first)
+      // =======================================================================
       console.log(`\n${'='.repeat(70)}`);
-      console.log(`✅ [SandboxPhase] COMPLETE - Environment VALIDATED`);
-      console.log(`   Ready for development`);
+      console.log(`🚀 [SandboxPhase] Step 7: STARTING & VERIFYING ALL DEV SERVERS`);
+      console.log(`   ⚠️ MANDATORY: Wait for compilation before proceeding`);
+      console.log(`   Starting ${Object.keys(envConfig).length} server(s)...`);
       console.log(`${'='.repeat(70)}\n`);
 
       NotificationService.emitConsoleLog(
         taskId,
         'info',
-        `✅ SandboxPhase complete - Environment validated, ready for Planning`
+        `🚀 Compiling ${Object.keys(envConfig).length} server(s)... (may take 2-5 min for Flutter)`
+      );
+
+      const serverResults: Record<string, {
+        started: boolean;
+        verified: boolean;
+        url?: string;
+        port?: number;
+        error?: string;
+        compilationLogs?: string;
+      }> = {};
+
+      // 🔥 VALIDATION: Check ALL repos have devCmd BEFORE starting servers
+      const reposWithoutDevCmd: string[] = [];
+      for (const [repoName, config] of Object.entries(envConfig)) {
+        const repoConfig = config as any;
+        if (!repoConfig.runCommand) {
+          reposWithoutDevCmd.push(repoName);
+        }
+      }
+
+      if (reposWithoutDevCmd.length > 0) {
+        const errorMsg = `Missing devCmd/runCommand for: ${reposWithoutDevCmd.join(', ')}. The LLM must detect the correct dev command for each repository.`;
+        console.error(`\n   🚨 CRITICAL VALIDATION FAILURE: ${errorMsg}`);
+        NotificationService.emitConsoleLog(taskId, 'error', `🚨 ${errorMsg}`);
+
+        // 🔥 BLOCK: Return failure - cannot proceed to Planning without dev commands
+        return {
+          success: false,
+          error: errorMsg,
+          data: {
+            ...sandboxData,
+            validationError: errorMsg,
+            reposWithoutDevCmd,
+          },
+        };
+      }
+
+      // Start and WAIT for each repo's server
+      for (const [repoName, config] of Object.entries(envConfig)) {
+        const repoConfig = config as any;
+        const devCmd = repoConfig.runCommand;
+        const devPort = repoConfig.devPort || 3000;
+
+        // devCmd is guaranteed to exist here due to validation above
+        if (!devCmd) {
+          console.log(`   ⚠️ [${repoName}] No devCmd - skipping`);
+          serverResults[repoName] = { started: false, verified: false, error: 'No runCommand' };
+          continue;
+        }
+
+        console.log(`\n   🚀 [${repoName}] Compiling...`);
+        console.log(`      Command: ${devCmd}`);
+        console.log(`      Port: ${devPort}`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🚀 [${repoName}] Compiling on port ${devPort}...`
+        );
+
+        const repoDir = `/workspace/${repoName}`;
+        const hostPort = sandbox.mappedPorts?.[devPort.toString()] || devPort;
+
+        try {
+          // Start server in background
+          const startCmd = `cd ${repoDir} && nohup ${devCmd} > /tmp/${repoName}-server.log 2>&1 &`;
+          await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
+
+          // 🔥 POLL for compilation completion (up to 5 minutes)
+          const MAX_WAIT_MS = 300000;
+          const POLL_INTERVAL_MS = 5000;
+          const startTime = Date.now();
+          let serverReady = false;
+          let compilationError = false;
+          let lastLogs = '';
+
+          while (Date.now() - startTime < MAX_WAIT_MS && !serverReady && !compilationError) {
+            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+            const logsResult = await sandboxService.exec(taskId, `cat /tmp/${repoName}-server.log 2>/dev/null | tail -100`, {
+              cwd: '/workspace', timeout: 10000,
+            });
+            lastLogs = logsResult.stdout || '';
+
+            // Success patterns
+            if (lastLogs.includes('is being served at') || lastLogs.includes('Flutter DevTools') ||
+                lastLogs.includes('Debug service listening') || lastLogs.includes('listening on') ||
+                lastLogs.includes('Server running') || lastLogs.includes('Started on port') ||
+                lastLogs.includes('ready on') || lastLogs.includes('server started')) {
+              serverReady = true;
+              console.log(`      ✅ [${repoName}] Compilation SUCCESS!`);
+            }
+
+            // Error patterns
+            if (lastLogs.includes('Error:') || lastLogs.includes('error:') ||
+                lastLogs.includes('Cannot find module') || lastLogs.includes('ENOENT') ||
+                lastLogs.includes('compilation failed') || lastLogs.includes('Build failed') ||
+                lastLogs.includes('Exception:') || lastLogs.includes('failed to compile')) {
+              compilationError = true;
+              console.log(`      ❌ [${repoName}] Compilation FAILED!`);
+            }
+
+            // Progress every 30s
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            if (elapsed % 30 === 0 && elapsed > 0) {
+              console.log(`      ⏳ [${repoName}] Still compiling... (${elapsed}s)`);
+              NotificationService.emitConsoleLog(taskId, 'info', `⏳ [${repoName}] Compiling... (${elapsed}s)`);
+            }
+          }
+
+          // Verify server responds (with retry - server may need time to bind to port)
+          let verified = false;
+          if (serverReady) {
+            const VERIFY_RETRIES = 5;
+            const VERIFY_DELAY_MS = 2000; // 2 seconds between retries
+
+            for (let attempt = 1; attempt <= VERIFY_RETRIES && !verified; attempt++) {
+              try {
+                // Wait before checking (give server time to bind)
+                if (attempt > 1) {
+                  await new Promise(resolve => setTimeout(resolve, VERIFY_DELAY_MS));
+                }
+
+                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" http://localhost:${devPort} 2>/dev/null || echo "000"`;
+                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 10000 });
+                const statusCode = parseInt(verifyResult.stdout.trim()) || 0;
+                verified = statusCode >= 200 && statusCode < 500;
+
+                if (!verified && attempt < VERIFY_RETRIES) {
+                  console.log(`      ⏳ [${repoName}] Verification attempt ${attempt}/${VERIFY_RETRIES} - waiting for port ${devPort}...`);
+                }
+              } catch {
+                if (attempt === VERIFY_RETRIES) {
+                  console.log(`      ⚠️ [${repoName}] Curl verification failed after ${VERIFY_RETRIES} attempts`);
+                }
+              }
+            }
+
+            if (verified) {
+              console.log(`      ✅ [${repoName}] Port ${devPort} verified and responding!`);
+            }
+          }
+
+          // Store result
+          if (serverReady && verified) {
+            serverResults[repoName] = {
+              started: true, verified: true,
+              url: `http://localhost:${hostPort}`, port: devPort,
+            };
+            NotificationService.emitDevServerReady(taskId, `http://localhost:${hostPort}`, repoConfig.framework || 'unknown');
+            NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoName}] Ready at http://localhost:${hostPort}`);
+          } else {
+            // Extract error message
+            const errorMatch = lastLogs.match(/Error:.*$/m) || lastLogs.match(/error:.*$/m) ||
+                              lastLogs.match(/Cannot find module.*$/m) || lastLogs.match(/Exception:.*$/m);
+            const errorMsg = errorMatch ? errorMatch[0].substring(0, 300) : 'Compilation failed or timeout';
+
+            serverResults[repoName] = {
+              started: false, verified: false,
+              url: `http://localhost:${hostPort}`, port: devPort,
+              error: errorMsg,
+              compilationLogs: lastLogs.substring(0, 1500),
+            };
+            NotificationService.emitConsoleLog(taskId, 'error', `❌ [${repoName}] ${errorMsg.substring(0, 100)}`);
+          }
+
+        } catch (err: any) {
+          console.log(`      ❌ [${repoName}] Exception: ${err.message}`);
+          serverResults[repoName] = {
+            started: false, verified: false,
+            error: err.message,
+          };
+        }
+      }
+
+      // Store results
+      context.setData('devServerResults', serverResults);
+
+      const successCount = Object.values(serverResults).filter(r => r.verified).length;
+      const failedServers = Object.entries(serverResults).filter(([, r]) => !r.verified);
+      const totalServers = Object.keys(serverResults).length;
+
+      // Summary
+      console.log(`\n   📊 Compilation Results:`);
+      Object.entries(serverResults).forEach(([repo, result]) => {
+        if (result.verified) {
+          console.log(`      ✅ ${repo}: ${result.url}`);
+        } else {
+          console.log(`      ❌ ${repo}: ${result.error?.substring(0, 80)}`);
+        }
+      });
+
+      console.log(`\n${'='.repeat(70)}`);
+
+      // 🔥 BLOCK: If ANY server failed to start, the environment is NOT ready
+      // User requirement: "No podemos salir de sandbox sin que el servidor esté arriba"
+      if (failedServers.length > 0) {
+        const errorMsg = `${failedServers.length}/${totalServers} dev server(s) failed to start. ALL servers must be running before proceeding.`;
+        console.error(`\n🚨 [SandboxPhase] BLOCKING: ${errorMsg}`);
+
+        // Emit failure event for frontend
+        await eventStore.append({
+          taskId,
+          eventType: 'DevServersFailed',
+          payload: {
+            servers: serverResults,
+            successCount,
+            failedCount: failedServers.length,
+            totalCount: totalServers,
+            errors: failedServers.map(([repo, result]) => ({
+              repository: repo,
+              error: result.error || 'Unknown error',
+              logs: result.compilationLogs?.substring(0, 500),
+            })),
+          },
+        });
+
+        NotificationService.emitConsoleLog(taskId, 'error', `🚨 ${errorMsg}`);
+
+        // List all errors
+        failedServers.forEach(([repo, result]) => {
+          console.error(`   ❌ ${repo}: ${result.error?.substring(0, 100)}`);
+          NotificationService.emitConsoleLog(taskId, 'error', `   ❌ ${repo}: ${result.error?.substring(0, 80)}`);
+        });
+
+        console.log(`${'='.repeat(70)}\n`);
+
+        return {
+          success: false,
+          error: errorMsg,
+          data: {
+            ...sandboxData,
+            devServers: serverResults,
+            failedServers: failedServers.map(([repo, r]) => ({
+              repository: repo,
+              error: r.error,
+              logs: r.compilationLogs?.substring(0, 500),
+            })),
+          },
+        };
+      }
+
+      // All servers started successfully - emit success event
+      await eventStore.append({
+        taskId,
+        eventType: 'DevServersStarted',
+        payload: {
+          servers: serverResults,
+          successCount,
+          failedCount: 0,
+          totalCount: totalServers,
+        },
+      });
+
+      NotificationService.emitNotification(taskId, 'DevServersStarted', {
+        servers: serverResults,
+        successCount,
+        failedCount: 0,
+      });
+
+      console.log(`✅ [SandboxPhase] COMPLETE`);
+      console.log(`   🚀 Servers: ${successCount}/${totalServers} verified - ALL RUNNING`);
+      console.log(`${'='.repeat(70)}\n`);
+
+      NotificationService.emitConsoleLog(
+        taskId,
+        'info',
+        `✅ SandboxPhase complete - All ${successCount} server(s) running`
       );
 
       return {
         success: true,
-        data: sandboxData,
+        data: {
+          ...sandboxData,
+          devServers: serverResults,
+        },
         metadata: { cost: totalCost },
       };
 
