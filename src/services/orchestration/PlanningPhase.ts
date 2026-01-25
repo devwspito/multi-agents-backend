@@ -19,7 +19,7 @@ import { isEmpty } from './utils/ArrayHelpers';
 // 📦 SQLite Repository
 import { TaskRepository } from '../../database/repositories/TaskRepository';
 import { sandboxService } from '../SandboxService';
-import { sandboxPoolService } from '../SandboxPoolService';
+// sandboxPoolService removed - sandbox created by SandboxPhase
 import { languageDetectionService, DetectedLanguage } from '../LanguageDetectionService';
 import { eventStore } from '../EventStore';
 import fs from 'fs';
@@ -1694,92 +1694,23 @@ Read(".eslintrc*", ".prettierrc*", "tsconfig.json")
       },
     };
 
-    // Get projectId from task
-    const task = TaskRepository.findById(taskId);
-    const projectId = task?.projectId?.toString() || taskId;
-
     // ==========================================================================
-    // 🔥 STEP 1: Create ONE sandbox per TASK with ALL repos mounted
+    // 🔥 SANDBOX CREATED BY SandboxPhase - Just use it here
     // ==========================================================================
     const unifiedSandboxId = taskId; // ONE sandbox ID for the whole task
-    let sandbox: any = null;
-    let sandboxCreated = false;
+    const sandbox = sandboxService.getSandbox(taskId);
+    const sandboxCreated = !!sandbox;
 
-    if (sandboxService.isDockerAvailable() && repositories.length > 0) {
-      console.log(`\n   🐳 [Planning] Creating UNIFIED sandbox for task (multi-runtime image)`);
-      console.log(`      Task: ${taskId}`);
-      console.log(`      Repos: ${repositories.map(r => r.name).join(', ')}`);
-
-      // Build workspace mounts: each repo gets mounted at /workspace/{repo-name}
-      const workspaceMounts: Record<string, string> = {};
-      for (const repo of repositories) {
-        const hostPath = path.join(workspacePath, repo.name);
-        const containerPath = `/workspace/${repo.name}`;
-        workspaceMounts[hostPath] = containerPath;
-        console.log(`      Mount: ${hostPath} → ${containerPath}`);
-      }
-
-      // Collect ALL ports from ALL repos for the unified sandbox
-      const allPorts: string[] = [];
-      // Common preview ports
-      allPorts.push('0:3000');  // React/Vue/Angular
-      allPorts.push('0:3001');  // Node.js backend
-      allPorts.push('0:5000');  // Python Flask
-      allPorts.push('0:8080');  // General purpose
-      allPorts.push('0:5173');  // Vite
-      allPorts.push('0:8000');  // Python Django/FastAPI
-
-      NotificationService.emitConsoleLog(
-        taskId,
-        'info',
-        `🐳 Creating unified sandbox for all repos (multi-runtime: Flutter + Node.js + Python)`
-      );
-
-      // 🔥 AGNOSTIC: Use LLM-determined Docker image (not hardcoded)
-      // For empty repos, the LLM decides everything - language, image, commands
-      const dockerImage = llmDetectedLanguage?.dockerImage || 'ghcr.io/cirruslabs/flutter:stable';
-      const language = llmDetectedLanguage?.language || 'multi-runtime';
-
-      console.log(`   🤖 [Planning] LLM-determined config:`);
-      console.log(`      Language: ${language}`);
-      console.log(`      Docker Image: ${dockerImage}`);
-      if (llmDetectedLanguage?.createCmd) {
-        console.log(`      Create Command: ${llmDetectedLanguage.createCmd}`);
-      }
-
-      // Use sandboxPoolService to create the unified sandbox
-      const result = await sandboxPoolService.findOrCreateSandbox(
-        taskId,
-        projectId,
-        'unified', // Special repo name indicating unified sandbox
-        [], // plannedFiles - not used
-        workspacePath, // Base workspace path
-        language, // 🔥 LLM-determined language (not hardcoded)
-        {
-          image: dockerImage, // 🔥 LLM-determined Docker image
-          networkMode: 'bridge',
-          memoryLimit: '8g',
-          cpuLimit: '4',
-          ports: allPorts,
-          workspaceMounts, // Mount all repos
-        },
-        'fullstack' // Unified sandbox handles all types
-      );
-
-      sandbox = result.sandbox;
-      sandboxCreated = !!sandbox;
-
-      if (sandbox) {
-        console.log(`   ✅ [Planning] Unified sandbox created: ${sandbox.containerName}`);
-        if (sandbox.mappedPorts && Object.keys(sandbox.mappedPorts).length > 0) {
-          console.log(`      🔌 Mapped ports:`);
-          for (const [containerPort, hostPort] of Object.entries(sandbox.mappedPorts)) {
-            console.log(`         ${containerPort} → ${hostPort} (http://localhost:${hostPort})`);
-          }
+    if (sandbox) {
+      console.log(`\n   🐳 [Planning] Using sandbox created by SandboxPhase: ${sandbox.containerName}`);
+      if (sandbox.mappedPorts && Object.keys(sandbox.mappedPorts).length > 0) {
+        console.log(`      🔌 Mapped ports:`);
+        for (const [containerPort, hostPort] of Object.entries(sandbox.mappedPorts)) {
+          console.log(`         ${containerPort} → ${hostPort} (http://localhost:${hostPort})`);
         }
-      } else {
-        console.warn(`   ⚠️ [Planning] Failed to create unified sandbox, will use host execution`);
       }
+    } else {
+      console.warn(`   ⚠️ [Planning] No sandbox found (SandboxPhase may have failed), will use host execution`);
     }
 
     // ==========================================================================

@@ -601,6 +601,7 @@ export abstract class BasePhase implements IPhase {
 
     // Map phase names to their orchestration fields
     const phaseMap: Record<string, string> = {
+      'Sandbox': 'sandbox',
       'Planning': 'planning',
       'Approval': 'approval',
       'TechLead': 'techLead',
