@@ -132,7 +132,8 @@ export async function validateRepositoryRemotes(
 
       if (!validation.valid) {
         // 🔥 AUTO-FIX: Try to set up remote if repo has a URL configured
-        const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl;
+        // Repository model uses 'githubRepoUrl' as the field name
+        const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl || repo.githubRepoUrl;
         if (repoUrl && validation.reason?.includes('No such remote')) {
           console.log(`   ⚠️ [${repo.name}] No remote found, attempting auto-fix...`);
           console.log(`      URL from config: ${repoUrl}`);
@@ -201,7 +202,8 @@ export async function validateRepositoryRemotes(
       }
     } catch (error: any) {
       // 🔥 AUTO-FIX: Same logic for exceptions
-      const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl;
+      // Repository model uses 'githubRepoUrl' as the field name
+      const repoUrl = repo.url || repo.githubUrl || repo.cloneUrl || repo.githubRepoUrl;
       if (repoUrl && error.message?.includes('No such remote')) {
         console.log(`   ⚠️ [${repo.name}] Exception - no remote, attempting auto-fix...`);
         try {
