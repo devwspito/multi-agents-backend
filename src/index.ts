@@ -31,6 +31,7 @@ import sdkHealthRoutes from './routes/sdk-health';
 import healthRoutes from './routes/health';
 import devServerRoutes from './routes/dev-server';
 import sandboxRoutes from './routes/sandbox';
+import previewProxyRoutes from './routes/preview-proxy';
 
 /**
  * Multi-Agent Software Development Platform
@@ -261,6 +262,7 @@ class AgentPlatformApp {
     this.app.use('/api/v1/sdk-health', sdkHealthRoutes);
     this.app.use('/api/v1/dev-server', devServerRoutes);
     this.app.use('/api/v1/sandbox', sandboxRoutes);
+    this.app.use('/api/v1/preview', previewProxyRoutes);
 
     // Legacy API routes (backward compatibility - will be deprecated)
     this.app.use('/api/auth', authRoutes);
@@ -278,6 +280,7 @@ class AgentPlatformApp {
     this.app.use('/api/sdk-health', sdkHealthRoutes);
     this.app.use('/api/dev-server', devServerRoutes);
     this.app.use('/api/sandbox', sandboxRoutes);
+    this.app.use('/api/preview', previewProxyRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
