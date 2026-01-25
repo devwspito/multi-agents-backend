@@ -900,11 +900,14 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
             });
             lastLogs = logsResult.stdout || '';
 
-            // Success patterns
+            // Success patterns (includes python http.server, node, flutter, etc.)
             if (lastLogs.includes('is being served at') || lastLogs.includes('Flutter DevTools') ||
                 lastLogs.includes('Debug service listening') || lastLogs.includes('listening on') ||
                 lastLogs.includes('Server running') || lastLogs.includes('Started on port') ||
-                lastLogs.includes('ready on') || lastLogs.includes('server started')) {
+                lastLogs.includes('ready on') || lastLogs.includes('server started') ||
+                lastLogs.includes('Serving HTTP on') ||  // python3 -m http.server
+                lastLogs.includes('Compiling lib/main.dart for the Web') || // flutter build web in progress
+                lastLogs.includes('Built build/web')) {  // flutter build web complete
               serverReady = true;
               console.log(`      ✅ [${repoName}] Compilation SUCCESS!`);
             }
