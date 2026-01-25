@@ -29,6 +29,10 @@ import { safeGitExecSync } from '../../utils/safeGitExecution.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Network mode: 'host' for Linux (simple), 'bridge' for Mac (needs port mapping)
+const USE_BRIDGE_MODE = process.env.DOCKER_USE_BRIDGE_MODE === 'true';
+const NETWORK_MODE: 'bridge' | 'host' = USE_BRIDGE_MODE ? 'bridge' : 'host';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -366,10 +370,10 @@ export class SandboxPhase extends BasePhase {
         llmDetected.language,
         {
           image: llmDetected.dockerImage,
-          networkMode: 'bridge',
+          networkMode: NETWORK_MODE,
           memoryLimit: '8g',
           cpuLimit: '4',
-          ports: allPorts,
+          ports: USE_BRIDGE_MODE ? allPorts : [], // Host mode doesn't need port mapping
           workspaceMounts,
         },
         'fullstack'
@@ -884,93 +888,80 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
           const startCmd = `cd ${repoDir} && nohup ${devCmd} > /tmp/${repoName}-server.log 2>&1 &`;
           await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
 
-          // 🔥 POLL for PORT LISTENING (most reliable method)
-          // Instead of pattern matching stdout, we check if the port is actually bound
+          // 🔥 SIMPLE: Just use curl to check if server responds
           const MAX_WAIT_MS = 420000; // 7 minutes for slow Flutter builds
-          const POLL_INTERVAL_MS = 5000;
+          const POLL_INTERVAL_MS = 10000; // Check every 10 seconds
           const startTime = Date.now();
           let serverReady = false;
           let compilationError = false;
           let lastLogs = '';
 
-          console.log(`      🔍 [${repoName}] Waiting for port ${devPort} to be listening...`);
+          console.log(`      🔍 [${repoName}] Waiting for HTTP response on port ${devPort}...`);
 
           while (Date.now() - startTime < MAX_WAIT_MS && !serverReady && !compilationError) {
             await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-            // 🔥 PRIMARY: Check if port is listening (most reliable)
+            // 🔥 SIMPLE: Just curl the port directly
             try {
-              const portCheckCmd = `ss -tlnp 2>/dev/null | grep ":${devPort} " || netstat -tlnp 2>/dev/null | grep ":${devPort} " || echo "NOT_LISTENING"`;
-              const portCheckResult = await sandboxService.exec(taskId, portCheckCmd, { cwd: '/workspace', timeout: 5000 });
-              const portOutput = portCheckResult.stdout || '';
+              const curlCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${devPort}/ 2>/dev/null || echo "000"`;
+              const curlResult = await sandboxService.exec(taskId, curlCmd, { cwd: '/workspace', timeout: 15000 });
+              const statusCode = parseInt(curlResult.stdout.trim()) || 0;
 
-              if (!portOutput.includes('NOT_LISTENING') && portOutput.trim().length > 0) {
-                // Port is listening! Verify with HTTP request
-                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 http://localhost:${devPort} 2>/dev/null || echo "000"`;
-                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 10000 });
-                const statusCode = parseInt(verifyResult.stdout.trim()) || 0;
-
-                if (statusCode > 0 && statusCode < 500) {
-                  serverReady = true;
-                  console.log(`      ✅ [${repoName}] Port ${devPort} LISTENING and responding (HTTP ${statusCode})!`);
-                } else if (portOutput.includes('LISTEN')) {
-                  // Port is bound but not responding to HTTP yet - might be starting up
-                  console.log(`      ⏳ [${repoName}] Port ${devPort} bound, waiting for HTTP response...`);
-                }
+              if (statusCode > 0 && statusCode < 600) {
+                serverReady = true;
+                console.log(`      ✅ [${repoName}] Server responding on port ${devPort} (HTTP ${statusCode})!`);
               }
             } catch {
-              // Ignore port check errors, continue polling
+              // Curl failed, server not ready yet
             }
 
-            // 🔥 SECONDARY: Check logs for errors (to fail fast)
+            // Check logs for fatal errors
             if (!serverReady) {
               try {
-                const logsResult = await sandboxService.exec(taskId, `cat /tmp/${repoName}-server.log 2>/dev/null | tail -50`, {
+                const logsResult = await sandboxService.exec(taskId, `tail -30 /tmp/${repoName}-server.log 2>/dev/null || echo ""`, {
                   cwd: '/workspace', timeout: 5000,
                 });
                 lastLogs = logsResult.stdout || '';
 
-                // Only check for FATAL errors that mean we should stop waiting
+                // Fatal errors
                 if (lastLogs.includes('ENOENT') || lastLogs.includes('Cannot find module') ||
                     lastLogs.includes('SyntaxError') || lastLogs.includes('MODULE_NOT_FOUND') ||
-                    lastLogs.includes('pubspec.yaml not found') || lastLogs.includes('No pubspec.yaml')) {
+                    lastLogs.includes('pubspec.yaml not found') || lastLogs.includes('No pubspec.yaml') ||
+                    lastLogs.includes('Error: Could not find') || lastLogs.includes('FAILURE:')) {
                   compilationError = true;
-                  console.log(`      ❌ [${repoName}] FATAL error detected in logs!`);
+                  console.log(`      ❌ [${repoName}] FATAL error in logs!`);
+                  console.log(`         ${lastLogs.split('\n').slice(-3).join(' | ').substring(0, 200)}`);
                 }
-              } catch {
-                // Ignore log read errors
-              }
+              } catch { /* ignore */ }
             }
 
-            // Progress every 30s
+            // Progress update
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            if (elapsed % 30 === 0 && elapsed > 0 && !serverReady) {
-              // Get last line of log for progress info
-              let progressInfo = '';
+            if (!serverReady && !compilationError) {
+              let progressLine = '';
               try {
-                const tailResult = await sandboxService.exec(taskId, `tail -1 /tmp/${repoName}-server.log 2>/dev/null`, { cwd: '/workspace', timeout: 3000 });
-                progressInfo = (tailResult.stdout || '').trim().substring(0, 80);
+                const tail = await sandboxService.exec(taskId, `tail -1 /tmp/${repoName}-server.log 2>/dev/null`, { cwd: '/workspace', timeout: 3000 });
+                progressLine = (tail.stdout || '').trim().substring(0, 60);
               } catch { /* ignore */ }
-
-              console.log(`      ⏳ [${repoName}] Still waiting... (${elapsed}s) ${progressInfo ? '- ' + progressInfo : ''}`);
-              NotificationService.emitConsoleLog(taskId, 'info', `⏳ [${repoName}] Compiling... (${elapsed}s)`);
+              console.log(`      ⏳ [${repoName}] ${elapsed}s... ${progressLine}`);
             }
           }
 
-          // Final verification with multiple retries
+          // Already verified by curl
           let verified = serverReady;
-          if (serverReady && !verified) {
-            const VERIFY_RETRIES = 3;
-            for (let attempt = 1; attempt <= VERIFY_RETRIES && !verified; attempt++) {
-              try {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                const verifyCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${devPort} 2>/dev/null || echo "000"`;
-                const verifyResult = await sandboxService.exec(taskId, verifyCmd, { cwd: '/workspace', timeout: 15000 });
-                const statusCode = parseInt(verifyResult.stdout.trim()) || 0;
-                verified = statusCode >= 200 && statusCode < 500;
-              } catch {
-                console.log(`      ⚠️ [${repoName}] Verification attempt ${attempt}/${VERIFY_RETRIES} failed`);
+          if (!serverReady && !compilationError) {
+            // Final attempt
+            try {
+              const finalCurl = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 http://localhost:${devPort}/ 2>/dev/null || echo "000"`;
+              const finalResult = await sandboxService.exec(taskId, finalCurl, { cwd: '/workspace', timeout: 20000 });
+              const code = parseInt(finalResult.stdout.trim()) || 0;
+              if (code > 0 && code < 600) {
+                serverReady = true;
+                verified = true;
+                console.log(`      ✅ [${repoName}] Final check: Server ready (HTTP ${code})!`);
               }
+            } catch {
+              console.log(`      ❌ [${repoName}] Final check failed`);
             }
           }
 

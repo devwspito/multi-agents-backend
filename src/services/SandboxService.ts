@@ -116,11 +116,16 @@ const LANGUAGE_IMAGES: Record<string, string> = {
 // Alias for backward compatibility
 const DEFAULT_IMAGES = LANGUAGE_IMAGES;
 
+// Network mode: 'host' for Linux (simple), 'bridge' for Mac (needs port mapping)
+// Set DOCKER_USE_BRIDGE_MODE=true for Mac, false for Linux
+const USE_BRIDGE_MODE = process.env.DOCKER_USE_BRIDGE_MODE === 'true';
+const NETWORK_MODE: 'bridge' | 'host' = USE_BRIDGE_MODE ? 'bridge' : 'host';
+
 const DEFAULT_CONFIG: SandboxConfig = {
   image: DEFAULT_IMAGES.default,
   memoryLimit: '4g',
   cpuLimit: '2',
-  networkMode: 'bridge', // Allow internet for npm install, etc.
+  networkMode: NETWORK_MODE,
   workDir: '/workspace',
 };
 
