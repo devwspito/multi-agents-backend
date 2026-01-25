@@ -26,6 +26,8 @@ import { sandboxPoolService } from '../SandboxPoolService.js';
 import { sandboxService } from '../SandboxService.js';
 import { NotificationService } from '../NotificationService.js';
 import { safeGitExecSync } from '../../utils/safeGitExecution.js';
+import { serviceDetectionService, DetectedService } from '../ServiceDetectionService.js';
+import { serviceContainerManager, ServiceContainerGroup } from '../ServiceContainerManager.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -265,6 +267,87 @@ export class SandboxPhase extends BasePhase {
           fs.mkdirSync(repoPath, { recursive: true });
         }
       }
+
+      // =======================================================================
+      // STEP 1.5: DETECT EXTERNAL SERVICES (MongoDB, Redis, PostgreSQL, etc.)
+      // =======================================================================
+      console.log(`\n🔍 [SandboxPhase] Step 1.5: Detecting external services...`);
+
+      const allDetectedServices: DetectedService[] = [];
+      const servicesByRepo: Record<string, DetectedService[]> = {};
+
+      for (const repo of repositories) {
+        const repoPath = path.join(workspacePath, repo.name);
+        const detections: DetectedService[][] = [];
+
+        // Check package.json
+        const packageJsonPath = path.join(repoPath, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+          try {
+            const content = fs.readFileSync(packageJsonPath, 'utf-8');
+            const services = serviceDetectionService.detectFromPackageJson(content);
+            if (services.length > 0) {
+              detections.push(services);
+              console.log(`   [${repo.name}] package.json → ${services.map(s => s.type).join(', ')}`);
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Check docker-compose.yml
+        const composePaths = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml'];
+        for (const composePath of composePaths) {
+          const fullPath = path.join(repoPath, composePath);
+          if (fs.existsSync(fullPath)) {
+            try {
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              const services = serviceDetectionService.detectFromDockerCompose(content);
+              if (services.length > 0) {
+                detections.push(services);
+                console.log(`   [${repo.name}] ${composePath} → ${services.map(s => s.type).join(', ')}`);
+              }
+            } catch { /* ignore */ }
+          }
+        }
+
+        // Check .env.example
+        const envExamplePaths = ['.env.example', '.env.sample', '.env.template'];
+        for (const envPath of envExamplePaths) {
+          const fullPath = path.join(repoPath, envPath);
+          if (fs.existsSync(fullPath)) {
+            try {
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              const services = serviceDetectionService.detectFromEnvFile(content);
+              if (services.length > 0) {
+                detections.push(services);
+                console.log(`   [${repo.name}] ${envPath} → ${services.map(s => s.type).join(', ')}`);
+              }
+            } catch { /* ignore */ }
+          }
+        }
+
+        // Combine detections for this repo
+        const repoServices = serviceDetectionService.combineDetections(...detections);
+        servicesByRepo[repo.name] = repoServices;
+        allDetectedServices.push(...repoServices);
+      }
+
+      // Deduplicate services across all repos
+      const uniqueServices = serviceDetectionService.combineDetections(allDetectedServices);
+
+      if (uniqueServices.length > 0) {
+        console.log(`\n   🐳 Services needed: ${uniqueServices.map(s => s.type).join(', ')}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🐳 Detected services: ${uniqueServices.map(s => s.type).join(', ')}`
+        );
+      } else {
+        console.log(`\n   ✅ No external services detected`);
+      }
+
+      // Store for later use
+      context.setData('detectedServices', uniqueServices);
+      context.setData('servicesByRepo', servicesByRepo);
 
       // =======================================================================
       // STEP 2: DETECT LANGUAGE PER REPO (FILES FIRST, LLM FALLBACK)
@@ -805,6 +888,72 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
       }));
 
       // =======================================================================
+      // STEP 6.5: START EXTERNAL SERVICE CONTAINERS (MongoDB, Redis, etc.)
+      // =======================================================================
+      let serviceGroup: ServiceContainerGroup | undefined;
+      const detectedServices = context.getData<DetectedService[]>('detectedServices') || [];
+
+      if (detectedServices.length > 0) {
+        console.log(`\n${'='.repeat(70)}`);
+        console.log(`🐳 [SandboxPhase] Step 6.5: STARTING EXTERNAL SERVICES`);
+        console.log(`   Services: ${detectedServices.map(s => s.type).join(', ')}`);
+        console.log(`${'='.repeat(70)}\n`);
+
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🐳 Starting ${detectedServices.length} service(s): ${detectedServices.map(s => s.type).join(', ')}`
+        );
+
+        try {
+          serviceGroup = await serviceContainerManager.startServices(taskId, detectedServices);
+
+          if (serviceGroup.containers.length > 0) {
+            console.log(`\n   ✅ Services started:`);
+            for (const container of serviceGroup.containers) {
+              console.log(`      - ${container.service.type}: localhost:${container.port}`);
+            }
+            console.log(`\n   📝 Environment variables set:`);
+            for (const [key, value] of Object.entries(serviceGroup.envVars)) {
+              console.log(`      ${key}=${value}`);
+            }
+
+            // Emit event
+            await eventStore.append({
+              taskId,
+              eventType: 'ServicesStarted',
+              payload: {
+                services: serviceGroup.containers.map(c => ({
+                  type: c.service.type,
+                  port: c.port,
+                  containerName: c.containerName,
+                })),
+                envVars: serviceGroup.envVars,
+              },
+            });
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ ${serviceGroup.containers.length} service(s) ready`
+            );
+          }
+        } catch (error: any) {
+          console.error(`   ⚠️ Service startup error: ${error.message}`);
+          // Non-blocking - dev server might still work without services
+          NotificationService.emitConsoleLog(
+            taskId,
+            'warn',
+            `⚠️ Some services failed to start: ${error.message}`
+          );
+        }
+      }
+
+      // Store service env vars for dev server
+      const serviceEnvVars = serviceGroup?.envVars || {};
+      context.setData('serviceEnvVars', serviceEnvVars);
+
+      // =======================================================================
       // STEP 7: 🚀 START & VERIFY ALL DEV SERVERS
       // 🔥 FLOW:
       //   - Success → Planning (normal)
@@ -814,6 +963,9 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
       console.log(`🚀 [SandboxPhase] Step 7: STARTING & VERIFYING ALL DEV SERVERS`);
       console.log(`   ⚠️ MANDATORY: Wait for compilation before proceeding`);
       console.log(`   Starting ${Object.keys(envConfig).length} server(s)...`);
+      if (Object.keys(serviceEnvVars).length > 0) {
+        console.log(`   🔗 With services: ${Object.keys(serviceEnvVars).join(', ')}`);
+      }
       console.log(`${'='.repeat(70)}\n`);
 
       NotificationService.emitConsoleLog(
@@ -886,7 +1038,17 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         try {
           // Start server in background using setsid (creates new session, survives docker exec exit)
           const logFile = `/tmp/${repoName}-server.log`;
-          const startCmd = `setsid bash -c 'cd ${repoDir} && ${devCmd}' > ${logFile} 2>&1 &`;
+
+          // 🔥 Inject service environment variables (MongoDB, Redis, etc.)
+          let envPrefix = '';
+          if (Object.keys(serviceEnvVars).length > 0) {
+            envPrefix = Object.entries(serviceEnvVars)
+              .map(([key, value]) => `${key}="${value}"`)
+              .join(' ') + ' ';
+            console.log(`      🔗 Injecting: ${Object.keys(serviceEnvVars).join(', ')}`);
+          }
+
+          const startCmd = `setsid bash -c 'cd ${repoDir} && ${envPrefix}${devCmd}' > ${logFile} 2>&1 &`;
           await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
 
           // Give it a moment to start
