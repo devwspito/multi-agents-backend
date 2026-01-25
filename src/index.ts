@@ -392,24 +392,39 @@ class AgentPlatformApp {
             }
 
             // 3. Si hay aprobación pendiente, re-emitir evento usando datos persistidos
+            // 🔥 FIX: Skip re-emitting if the phase has auto-approval enabled
             const pendingApproval = task.orchestration?.pendingApproval;
             if (task.status === 'in_progress' && pendingApproval && pendingApproval.phase) {
-              console.log(`⏸️  Re-emitting approval_required from persisted data:`, {
-                phase: pendingApproval.phase,
-                phaseName: pendingApproval.phaseName,
-              });
-              socket.emit('notification', {
-                type: 'approval_required',
-                data: {
-                  phase: pendingApproval.phase, // Already kebab-case
+              const autoApprovalEnabled = task.orchestration?.autoApprovalEnabled;
+              const autoApprovalPhases = task.orchestration?.autoApprovalPhases || [];
+              const phaseHasAutoApproval = autoApprovalEnabled && autoApprovalPhases.includes(pendingApproval.phase);
+
+              if (phaseHasAutoApproval) {
+                console.log(`✅ [WebSocket] Skipping approval_required re-emit - ${pendingApproval.phase} has auto-approval`);
+                // Clear the stale pendingApproval since it will be auto-approved
+                const { TaskRepository } = await import('./database/repositories/TaskRepository.js');
+                TaskRepository.modifyOrchestration(taskId, (orch) => {
+                  const { pendingApproval: _, ...rest } = orch as any;
+                  return rest;
+                });
+              } else {
+                console.log(`⏸️  Re-emitting approval_required from persisted data:`, {
+                  phase: pendingApproval.phase,
                   phaseName: pendingApproval.phaseName,
-                  agentName: pendingApproval.phaseName,
-                  approvalType: 'planning',
-                  agentOutput: pendingApproval.agentOutput || {},
-                  retryCount: pendingApproval.retryCount || 0,
-                  timestamp: pendingApproval.timestamp || new Date(),
-                },
-              });
+                });
+                socket.emit('notification', {
+                  type: 'approval_required',
+                  data: {
+                    phase: pendingApproval.phase, // Already kebab-case
+                    phaseName: pendingApproval.phaseName,
+                    agentName: pendingApproval.phaseName,
+                    approvalType: 'planning',
+                    agentOutput: pendingApproval.agentOutput || {},
+                    retryCount: pendingApproval.retryCount || 0,
+                    timestamp: pendingApproval.timestamp || new Date(),
+                  },
+                });
+              }
             }
           }
         } catch (error) {
