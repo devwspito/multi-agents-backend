@@ -702,15 +702,22 @@ export class SandboxPhase extends BasePhase {
         if (repoLLM.language === 'Flutter' || repoLLM.language === 'Dart' || repoLLM.framework === 'Flutter') {
           console.log(`      🔧 Fixing Flutter SDK permissions (Docker image may have root-owned files)...`);
 
-          // Try multiple common Flutter SDK locations
+          // Try multiple common Flutter SDK locations - USE SUDO because files are root-owned
           const flutterPermFix = `
-            # Fix Flutter SDK cache permissions (common Docker issue)
+            # Fix Flutter SDK cache permissions (common Docker issue - files owned by root)
             for SDK_PATH in /sdks/flutter /opt/flutter /root/flutter /home/ubuntu/flutter; do
               if [ -d "\$SDK_PATH/bin/cache" ]; then
-                chown -R $(id -u):$(id -g) "\$SDK_PATH/bin/cache" 2>/dev/null || \\
-                chmod -R 777 "\$SDK_PATH/bin/cache" 2>/dev/null || \\
+                # Try sudo chown first, then sudo chmod if that fails
+                sudo chown -R $(id -u):$(id -g) "\$SDK_PATH/bin/cache" 2>/dev/null || \\
+                sudo chmod -R 777 "\$SDK_PATH/bin/cache" 2>/dev/null || \\
                 true
                 echo "Fixed permissions for \$SDK_PATH/bin/cache"
+              fi
+              # Also fix the SDK root (for pub-cache, etc.)
+              if [ -d "\$SDK_PATH" ]; then
+                sudo chown -R $(id -u):$(id -g) "\$SDK_PATH" 2>/dev/null || \\
+                sudo chmod -R 755 "\$SDK_PATH" 2>/dev/null || \\
+                true
               fi
             done
             # Also fix pub cache
