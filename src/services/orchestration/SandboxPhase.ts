@@ -56,6 +56,16 @@ interface SandboxPhaseData {
   dockerImage: string;
   mappedPorts: Record<string, string>;
   environmentValidated: boolean;
+  // 🔥 CRITICAL: containerWorkDir is the SINGLE SOURCE OF TRUTH for all agents
+  containerWorkDir: string;
+  // 🔥 100% AGNOSTIC: Commands from LLM detection
+  commands: {
+    create?: string;
+    install?: string;
+    dev?: string;
+    devPort?: number;
+    test?: string;
+  };
 }
 
 // ============================================================================
@@ -684,6 +694,43 @@ export class SandboxPhase extends BasePhase {
           console.log(`      ⚠️ No runtimeInstallCmd provided by LLM - checking if runtime exists...`);
         }
 
+        // =======================================================================
+        // 🔧 FIX FLUTTER SDK PERMISSIONS (AGNOSTIC - only runs for Flutter/Dart)
+        // Many Flutter Docker images have SDK owned by root but container runs as ubuntu
+        // This fixes the lockfile permission issue that prevents Flutter from working
+        // =======================================================================
+        if (repoLLM.language === 'Flutter' || repoLLM.language === 'Dart' || repoLLM.framework === 'Flutter') {
+          console.log(`      🔧 Fixing Flutter SDK permissions (Docker image may have root-owned files)...`);
+
+          // Try multiple common Flutter SDK locations
+          const flutterPermFix = `
+            # Fix Flutter SDK cache permissions (common Docker issue)
+            for SDK_PATH in /sdks/flutter /opt/flutter /root/flutter /home/ubuntu/flutter; do
+              if [ -d "\$SDK_PATH/bin/cache" ]; then
+                chown -R $(id -u):$(id -g) "\$SDK_PATH/bin/cache" 2>/dev/null || \\
+                chmod -R 777 "\$SDK_PATH/bin/cache" 2>/dev/null || \\
+                true
+                echo "Fixed permissions for \$SDK_PATH/bin/cache"
+              fi
+            done
+            # Also fix pub cache
+            mkdir -p ~/.pub-cache 2>/dev/null || true
+            chmod -R 755 ~/.pub-cache 2>/dev/null || true
+          `.trim();
+
+          const permResult = await sandboxService.exec(taskId, flutterPermFix, {
+            cwd: '/workspace',
+            timeout: 30000,
+          });
+
+          if (permResult.exitCode === 0) {
+            console.log(`      ✅ Flutter SDK permissions fixed`);
+          } else {
+            // Non-blocking - permissions might already be OK or SDK in different location
+            console.log(`      ⚠️ Permission fix returned non-zero (may be OK): ${permResult.stderr?.substring(0, 100)}`);
+          }
+        }
+
         // 🔥 LLM provides checkFile for THIS repo
         const checkFile = repoLLM.checkFile;
         let projectExists = false;
@@ -930,6 +977,16 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         dockerImage: llmDetected.dockerImage,
         mappedPorts: sandbox.mappedPorts || {},
         environmentValidated: true,
+        // 🔥 CRITICAL: containerWorkDir for all downstream phases
+        containerWorkDir,
+        // 🔥 100% AGNOSTIC: Commands from LLM (DevelopersPhase reads sandboxConfig.commands.dev)
+        commands: {
+          create: llmDetected.createCmd,
+          install: llmDetected.installCmd,
+          dev: llmDetected.devCmd,
+          devPort: llmDetected.devPort,
+          test: llmDetected.testCmd,
+        },
       };
 
       // Store in context
