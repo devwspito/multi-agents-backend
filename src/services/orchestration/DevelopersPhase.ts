@@ -7,6 +7,7 @@ import { HookService } from '../HookService';
 import { AgentActivityService } from '../AgentActivityService';
 import { NotificationService } from '../NotificationService';
 import { safeGitExecSync, fixGitRemoteAuth, smartGitFetch } from '../../utils/safeGitExecution';
+import { sandboxService } from '../SandboxService.js';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 import { ProactiveIssueDetector } from '../ProactiveIssueDetector';
 import { ProjectRadiography } from '../ProjectRadiographyService';
@@ -2491,6 +2492,42 @@ export class DevelopersPhase extends BasePhase {
         }
 
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
+
+        // 🔥 HOT RESTART: Restart dev server after story completion so preview shows latest code
+        // Flutter web doesn't have automatic hot reload in headless mode
+        try {
+          const sandboxConfig = context.getData<any>('sandboxConfig');
+          if (sandboxConfig && pipelineSandboxId && epic.targetRepository) {
+            const repoConfig = sandboxConfig.repos?.find((r: any) => r.name === epic.targetRepository);
+            const devCmd = repoConfig?.runCommand || sandboxConfig.commands?.dev;
+            // 🔥 100% AGNOSTIC: Use containerWorkDir from SandboxPhase (SINGLE SOURCE OF TRUTH)
+            const containerWorkDir = sandboxConfig.containerWorkDir || '/workspace';
+            const repoDir = `${containerWorkDir}/${epic.targetRepository}`;
+
+            if (devCmd) {
+              console.log(`\n🔄 [HOT RESTART] Restarting dev server for ${epic.targetRepository}...`);
+              NotificationService.emitConsoleLog(taskId, 'info', `🔄 Restarting preview server with latest code...`);
+
+              // Kill existing server process
+              const killCmd = `pkill -f "flutter" 2>/dev/null || pkill -f "${epic.targetRepository}" 2>/dev/null || true`;
+              await sandboxService.exec(pipelineSandboxId, killCmd, { cwd: repoDir, timeout: 10000 });
+
+              // Wait for process to die
+              await new Promise(resolve => setTimeout(resolve, 2000));
+
+              // Restart the dev server in background
+              const logFile = `/tmp/${epic.targetRepository}-server.log`;
+              const startCmd = `setsid bash -c 'cd ${repoDir} && ${devCmd}' > ${logFile} 2>&1 &`;
+              await sandboxService.exec(pipelineSandboxId, startCmd, { cwd: repoDir, timeout: 30000 });
+
+              console.log(`   ✅ Dev server restarted - preview will show latest code`);
+              NotificationService.emitConsoleLog(taskId, 'info', `✅ Preview server restarted with latest code!`);
+            }
+          }
+        } catch (hotRestartError: any) {
+          console.warn(`⚠️  [HOT RESTART] Could not restart dev server: ${hotRestartError.message}`);
+          // Non-critical - preview might show stale code but development continues
+        }
 
         // 🔄 GRANULAR RECOVERY: Persist story completion via EventStore
         // EventStore is the source of truth for story completion
