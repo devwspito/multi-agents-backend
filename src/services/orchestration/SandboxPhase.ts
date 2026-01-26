@@ -668,7 +668,7 @@ export class SandboxPhase extends BasePhase {
                 NotificationService.emitConsoleLog(
                   taskId,
                   'info',
-                  `🧪 [${repo.name}] Running default tests...`
+                  `🧪 [${repoConfig.name}] Running default tests...`
                 );
                 const testResult = await sandboxService.exec(taskId, repoLLM.testCmd, {
                   cwd: repoConfig.containerPath,
@@ -678,15 +678,15 @@ export class SandboxPhase extends BasePhase {
                   console.log(`      ✅ Default tests passed`);
                   NotificationService.emitConsoleLog(
                     taskId,
-                    'success',
-                    `✅ [${repo.name}] Default tests passed`
+                    'info',
+                    `✅ [${repoConfig.name}] Default tests passed`
                   );
                 } else {
                   console.warn(`      ⚠️ Tests failed (exit ${testResult.exitCode}): ${testResult.stderr?.substring(0, 200)}`);
                   NotificationService.emitConsoleLog(
                     taskId,
-                    'warning',
-                    `⚠️ [${repo.name}] Default tests failed - project may have issues`
+                    'warn',
+                    `⚠️ [${repoConfig.name}] Default tests failed - project may have issues`
                   );
                 }
               }
@@ -723,7 +723,7 @@ export class SandboxPhase extends BasePhase {
                     NotificationService.emitConsoleLog(
                       taskId,
                       'info',
-                      `🧪 [${repo.name}] Running default tests...`
+                      `🧪 [${repoConfig.name}] Running default tests...`
                     );
                     const testResult = await sandboxService.exec(taskId, repoLLM.testCmd, {
                       cwd: repoConfig.containerPath,
@@ -733,15 +733,15 @@ export class SandboxPhase extends BasePhase {
                       console.log(`      ✅ Default tests passed`);
                       NotificationService.emitConsoleLog(
                         taskId,
-                        'success',
-                        `✅ [${repo.name}] Default tests passed`
+                        'info',
+                        `✅ [${repoConfig.name}] Default tests passed`
                       );
                     } else {
                       console.warn(`      ⚠️ Tests failed (exit ${testResult.exitCode}): ${testResult.stderr?.substring(0, 200)}`);
                       NotificationService.emitConsoleLog(
                         taskId,
-                        'warning',
-                        `⚠️ [${repo.name}] Default tests failed - project may have issues`
+                        'warn',
+                        `⚠️ [${repoConfig.name}] Default tests failed - project may have issues`
                       );
                     }
                   }
