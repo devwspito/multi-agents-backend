@@ -17,7 +17,7 @@ import * as path from 'path';
 export interface DetectedLanguage {
   language: string;           // e.g., "dart", "typescript", "python", "rust"
   framework: string;          // e.g., "flutter", "react", "django", "actix"
-  dockerImage: string;        // e.g., "instrumentisto/flutter:3.24"
+  dockerImage: string;        // e.g., "ghcr.io/cirruslabs/flutter:3.24.0"
   ecosystem: string;          // e.g., "flutter", "node", "python"
   confidence: 'high' | 'medium' | 'low';
   reasoning: string;
@@ -89,7 +89,7 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
 {
   "language": "dart|typescript|python|go|rust|java|kotlin|swift",
   "framework": "flutter|react|nextjs|django|fastapi|gin|express|none",
-  "dockerImage": "exact docker image (e.g., instrumentisto/flutter:3.24)",
+  "dockerImage": "exact docker image (e.g., ghcr.io/cirruslabs/flutter:3.24.0)",
   "ecosystem": "flutter|node|python|jvm|go|rust",
   "confidence": "high|medium|low",
   "reasoning": "one sentence explanation",
@@ -133,8 +133,8 @@ CRITICAL NAMING RULES:
 CRITICAL: createCmd MUST include the --project-name flag with the VALID project name for that language!
 Example for Flutter: "flutter create . --project-name app_pasos_frontend --org com.example --overwrite"
 
-DOCKER IMAGES - USE OFFICIAL IMAGES ONLY (from Docker Hub official repositories):
-- Flutter/Dart → instrumentisto/flutter:3.24 (community standard, well-tested - no official Flutter image exists)
+DOCKER IMAGES - USE OFFICIAL/MULTI-ARCH IMAGES:
+- Flutter/Dart → ghcr.io/cirruslabs/flutter:3.24.0 (multi-arch, stable version - NOT :stable which has bugs)
 - Node/TypeScript → node:20-bookworm (OFFICIAL)
 - Python → python:3.12-bookworm (OFFICIAL)
 - Go → golang:1.22-bookworm (OFFICIAL)
@@ -145,7 +145,7 @@ DOCKER IMAGES - USE OFFICIAL IMAGES ONLY (from Docker Hub official repositories)
 - PHP → php:8.3-apache (OFFICIAL)
 - Unknown → ubuntu:22.04 (OFFICIAL)
 
-CRITICAL: NEVER use ghcr.io/cirruslabs images - they have known bugs. Always prefer official Docker Hub images.
+CRITICAL: For Flutter, ALWAYS use ghcr.io/cirruslabs/flutter:3.24.0 (specific version). NEVER use :stable or :latest tags.
 
 JSON RESPONSE:`;
 
@@ -228,7 +228,7 @@ JSON RESPONSE:`;
         result: {
           language: 'dart',
           framework: 'flutter',
-          dockerImage: 'instrumentisto/flutter:3.24',
+          dockerImage: 'ghcr.io/cirruslabs/flutter:3.24.0',
           ecosystem: 'flutter',
           confidence: 'medium',
           reasoning: 'Fallback: detected flutter/dart keywords',
@@ -621,7 +621,7 @@ JSON RESPONSE:`;
     return {
       language: 'dart',
       framework: 'flutter',
-      dockerImage: 'instrumentisto/flutter:3.24',
+      dockerImage: 'ghcr.io/cirruslabs/flutter:3.24.0',
       ecosystem: 'flutter',
       confidence: 'high',
       reasoning: 'Detected pubspec.yaml file',
@@ -724,7 +724,7 @@ JSON RESPONSE:`;
       return {
         language: 'dart',
         framework: 'flutter',
-        dockerImage: 'instrumentisto/flutter:3.24',
+        dockerImage: 'ghcr.io/cirruslabs/flutter:3.24.0',
         ecosystem: 'flutter',
         confidence: 'medium',
         reasoning: 'Detected flutter in repo name',
