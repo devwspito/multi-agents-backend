@@ -648,15 +648,22 @@ export class SandboxPhase extends BasePhase {
         // 🛡️ FAULT-TOLERANT: Verify first, retry on failure, never block
         if (repoLLM.runtimeInstallCmd) {
           // 🔍 Check if runtime is already installed (avoid reinstalling)
+          // 🔥 FIX: Use lowercase keys to match LanguageDetectionService output
           const runtimeChecks: Record<string, string> = {
-            'Dart': 'which dart || test -f /opt/flutter/bin/dart',
-            'Flutter': 'which flutter || test -f /opt/flutter/bin/flutter',
-            'Node.js': 'which node',
-            'Python': 'which python3',
-            'Go': 'which go || test -f /usr/local/go/bin/go',
+            'dart': 'which dart || test -f /opt/flutter/bin/dart || test -f /sdks/flutter/bin/dart',
+            'flutter': 'which flutter || test -f /opt/flutter/bin/flutter || test -f /sdks/flutter/bin/flutter',
+            'typescript': 'which node',  // TypeScript runs on Node.js
+            'javascript': 'which node',  // JavaScript runs on Node.js
+            'python': 'which python3',
+            'go': 'which go || test -f /usr/local/go/bin/go',
+            'rust': 'which cargo || test -f $HOME/.cargo/bin/cargo',
+            'java': 'which java',
+            'kotlin': 'which kotlin || which java',  // Kotlin runs on JVM
           };
 
-          const checkCmd = runtimeChecks[repoLLM.language] || `which ${repoLLM.language.toLowerCase()}`;
+          // 🔥 AGNOSTIC: Normalize language to lowercase for lookup
+          const langLower = repoLLM.language.toLowerCase();
+          const checkCmd = runtimeChecks[langLower] || `which ${langLower}`;
           const checkResult = await sandboxService.exec(taskId, checkCmd, {
             cwd: '/workspace',
             timeout: 5000,

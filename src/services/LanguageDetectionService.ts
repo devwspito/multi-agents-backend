@@ -99,7 +99,8 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
   "installCmd": "command to install dependencies",
   "devCmd": "REQUIRED: command to start dev server binding to 0.0.0.0",
   "devPort": 8080,
-  "testCmd": "OPTIONAL: command to run default tests if framework generates them"
+  "testCmd": "OPTIONAL: command to run default tests if framework generates them",
+  "runtimeInstallCmd": "REQUIRED FOR MULTI-RUNTIME: command to install this language runtime in ANY container"
 }
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
@@ -123,6 +124,18 @@ Examples:
 - Python: "pytest" or "python -m pytest" (if pytest configured)
 - Rust: "cargo test" (Cargo projects have test support built-in)
 - Express/Node: Only if package.json has a "test" script that isn't "exit 0"
+
+🔥 CRITICAL: runtimeInstallCmd - Command to install THIS language's runtime in ANY Docker container.
+This is REQUIRED for multi-repo projects where different repos use different languages.
+Example: If Flutter frontend and Node.js backend share one container, Node.js repo needs npm installed.
+MANDATORY examples:
+- Node.js/TypeScript: "apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs"
+- Python: "apt-get update && apt-get install -y python3 python3-pip python3-venv"
+- Go: "apt-get update && apt-get install -y wget && wget https://go.dev/dl/go1.22.0.linux-arm64.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-arm64.tar.gz && export PATH=$PATH:/usr/local/go/bin"
+- Rust: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+- Flutter/Dart: Already in Flutter container - use "echo 'Flutter already installed'"
+- Java: "apt-get update && apt-get install -y openjdk-17-jdk"
+IMPORTANT: The container may be Ubuntu, Flutter, Node, or ANY base image. runtimeInstallCmd must work regardless!
 
 CRITICAL NAMING RULES:
 - Dart/Flutter: Use snake_case (lowercase with underscores). "app-pasos-frontend" → "app_pasos_frontend"
@@ -193,6 +206,11 @@ JSON RESPONSE:`;
       if (parsed.testCmd) {
         console.log(`   Test command: ${parsed.testCmd}`);
       }
+      if (parsed.runtimeInstallCmd) {
+        console.log(`   Runtime install: ${parsed.runtimeInstallCmd.substring(0, 60)}...`);
+      } else {
+        console.warn(`   ⚠️ NO runtimeInstallCmd returned - multi-runtime may fail!`);
+      }
 
       return {
         primary: {
@@ -210,6 +228,7 @@ JSON RESPONSE:`;
           devCmd: parsed.devCmd || undefined,
           devPort: typeof parsed.devPort === 'number' ? parsed.devPort : undefined,
           testCmd: parsed.testCmd || undefined, // 🔥 AGNOSTIC: Optional test command
+          runtimeInstallCmd: parsed.runtimeInstallCmd || undefined, // 🔥 Install runtime in any container
         },
         rawResponse: jsonStr,
       };
@@ -244,7 +263,8 @@ JSON RESPONSE:`;
           installCmd: 'flutter pub get',
           devCmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0',
           devPort: 8080,
-          testCmd: 'flutter test', // flutter create generates widget_test.dart
+          testCmd: 'flutter test',
+          runtimeInstallCmd: 'echo "Flutter already in container"', // Flutter container has dart/flutter
         },
       },
       {
@@ -261,7 +281,8 @@ JSON RESPONSE:`;
           installCmd: 'npm install',
           devCmd: 'npm run dev || npm start',
           devPort: 3000,
-          // No testCmd by default - only if package.json has valid test script
+          // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
+          runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
         },
       },
       {
@@ -277,7 +298,8 @@ JSON RESPONSE:`;
           installCmd: 'pip install -r requirements.txt',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000 || python manage.py runserver 0.0.0.0:8000',
           devPort: 5000,
-          // No testCmd by default - only if pytest configured
+          // 🔥 Install Python in ANY container
+          runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
         },
       },
       {
@@ -294,7 +316,9 @@ JSON RESPONSE:`;
           installCmd: 'go mod download',
           devCmd: 'go run .',
           devPort: 8080,
-          testCmd: 'go test ./...', // Go has built-in test support
+          testCmd: 'go test ./...',
+          // 🔥 Install Go in ANY container (detect arch dynamically)
+          runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
         },
       },
       {
@@ -311,7 +335,9 @@ JSON RESPONSE:`;
           installCmd: 'cargo fetch',
           devCmd: 'cargo run',
           devPort: 8080,
-          testCmd: 'cargo test', // Cargo has built-in test support
+          testCmd: 'cargo test',
+          // 🔥 Install Rust in ANY container
+          runtimeInstallCmd: 'which cargo || (apt-get update && apt-get install -y curl && curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env)',
         },
       },
     ];
@@ -554,7 +580,8 @@ JSON RESPONSE:`;
           installCmd: 'go mod download',
           devCmd: 'go run .',
           devPort: 8080,
-          testCmd: 'go test ./...', // Go has built-in test support
+          testCmd: 'go test ./...',
+          runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
         },
       },
       {
@@ -570,7 +597,8 @@ JSON RESPONSE:`;
           installCmd: 'cargo fetch',
           devCmd: 'cargo run',
           devPort: 8080,
-          testCmd: 'cargo test', // Cargo has built-in test support
+          testCmd: 'cargo test',
+          runtimeInstallCmd: 'which cargo || (apt-get update && apt-get install -y curl && curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env)',
         },
       },
       {
@@ -586,7 +614,7 @@ JSON RESPONSE:`;
           installCmd: 'pip install -r requirements.txt',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000',
           devPort: 5000,
-          // No testCmd - only if pytest is configured
+          runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
         },
       },
       {
@@ -602,7 +630,8 @@ JSON RESPONSE:`;
           installCmd: 'pip install -e .',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000',
           devPort: 5000,
-          testCmd: 'pytest', // pyproject.toml usually configures pytest
+          testCmd: 'pytest',
+          runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
         },
       },
     ];
@@ -646,6 +675,8 @@ JSON RESPONSE:`;
       devPort: 8080,
       // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
       testCmd: 'flutter test',
+      // 🔥 Flutter container already has dart/flutter installed
+      runtimeInstallCmd: 'echo "Flutter already in container"',
     };
   }
 
@@ -716,6 +747,8 @@ JSON RESPONSE:`;
       devCmd: devCmd,
       devPort: devPort,
       testCmd: testCmd,
+      // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
+      runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
     };
   }
 
@@ -747,6 +780,7 @@ JSON RESPONSE:`;
         devPort: 8080,
         // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
         testCmd: 'flutter test',
+        runtimeInstallCmd: 'echo "Flutter already in container"',
       };
     }
 
@@ -763,6 +797,7 @@ JSON RESPONSE:`;
         installCmd: 'npm install',
         devCmd: 'PORT=4001 npm run dev || PORT=4001 npm start',
         devPort: 4001,
+        runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
       };
     }
 
@@ -779,6 +814,7 @@ JSON RESPONSE:`;
         installCmd: 'npm install',
         devCmd: 'npm run dev -- --host 0.0.0.0 --port 3000 || npm start',
         devPort: 3000,
+        runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
       };
     }
 
@@ -794,6 +830,7 @@ JSON RESPONSE:`;
       installCmd: 'npm install',
       devCmd: 'npm run dev || npm start',
       devPort: 3000,
+      runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
     };
   }
 }
