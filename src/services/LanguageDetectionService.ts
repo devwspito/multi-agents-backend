@@ -103,7 +103,7 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
 }
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
-- Flutter: "flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0"
+- Flutter: "flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0"
 - React/Vite: "npm run dev -- --host 0.0.0.0 --port 3000"
 - Next.js: "npm run dev"
 - Express: "npm run dev || npm start"
@@ -241,7 +241,7 @@ JSON RESPONSE:`;
           checkFile: 'pubspec.yaml',
           createCmd: 'flutter create . --org com.example --project-name app --overwrite',
           installCmd: 'flutter pub get',
-          devCmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0',
+          devCmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0',
           devPort: 8080,
           testCmd: 'flutter test', // flutter create generates widget_test.dart
         },
@@ -641,7 +641,7 @@ JSON RESPONSE:`;
       // But analyze catches many other issues (undefined vars, type errors, etc.)
       // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
       // 🔥 VERIFY: Check main.dart.js exists and has content after build
-      devCmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0',
+      devCmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0',
       devPort: 8080,
       // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
       testCmd: 'flutter test',
@@ -742,7 +742,7 @@ JSON RESPONSE:`;
         // 🔥 VALIDATION: Run analyze before build to catch static errors
         // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
         // 🔥 VERIFY: Check main.dart.js exists and has content after build
-        devCmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0',
+        devCmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0',
         devPort: 8080,
         // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
         testCmd: 'flutter test',
