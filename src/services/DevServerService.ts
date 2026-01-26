@@ -505,12 +505,13 @@ class DevServerService extends EventEmitter {
     }
 
     // Fallback to hardcoded commands if EventStore didn't have a command
+    // NOTE: For Flutter, use build+serve (NOT flutter run which hangs)
     if (!usedEventStore) {
       console.log(`📦 [DevServerService] Using hardcoded command for framework: ${framework}`);
       switch (framework) {
         case 'flutter':
           installFirst = 'flutter pub get 2>/dev/null || true && ';
-          command = `flutter run -d web-server --web-port=${port} --web-hostname=0.0.0.0`;
+          command = `flutter build web && python3 -m http.server ${port} --directory build/web --bind 0.0.0.0`;
           break;
         case 'vite':
           installFirst = 'npm install 2>/dev/null || true && ';

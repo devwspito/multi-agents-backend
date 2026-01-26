@@ -79,7 +79,7 @@ ssh user@multiagent.duckdns.org
 ### 2. Instalar Node.js 20
 
 ```bash
-# Instalar NVM
+# Instalar NVM<>
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
 source ~/.bashrc
 
