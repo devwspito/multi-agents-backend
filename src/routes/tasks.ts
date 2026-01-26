@@ -48,8 +48,9 @@ const continueTaskSchema = z.object({
 const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
   phases: z.array(
-    // Active phases from PHASE_ORDER: Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
+    // Active phases from PHASE_ORDER: Sandbox → Planning → Approval → TeamOrchestration → Recovery → Integration → AutoMerge
     z.enum([
+      'sandbox',            // Pre-phase (environment setup with LLM detection)
       'planning',           // Main phase
       'team-orchestration', // Main phase (contains TechLead → Developers → Judge)
       'recovery',           // Main phase (verify work, complete pending)

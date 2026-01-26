@@ -29,6 +29,10 @@ export interface DetectedLanguage {
   devCmd?: string;            // Command to run dev server (e.g., "flutter run -d web-server")
   devPort?: number;           // Default port for dev server (e.g., 8080)
   runtimeInstallCmd?: string; // Command to install additional runtime dependencies (e.g., python3 for http.server)
+  // 🔥 AGNOSTIC: Optional test command - runs if framework has default tests
+  // If the framework generates tests by default (e.g., flutter create, create-react-app),
+  // this command validates the project works before developers start writing code.
+  testCmd?: string;           // e.g., "flutter test", "npm test", "pytest", "go test ./..."
 }
 
 export interface DetectionResult {
@@ -94,7 +98,8 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
   "createCmd": "complete command to create project",
   "installCmd": "command to install dependencies",
   "devCmd": "REQUIRED: command to start dev server binding to 0.0.0.0",
-  "devPort": 8080
+  "devPort": 8080,
+  "testCmd": "OPTIONAL: command to run default tests if framework generates them"
 }
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
@@ -107,6 +112,16 @@ MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
 - FastAPI: "uvicorn main:app --host 0.0.0.0 --port 8000"
 - Go: "go run ."
 - Rust: "cargo run"
+
+OPTIONAL testCmd - If the framework/language generates default tests on project creation, include the test command.
+This validates the project is correctly set up before developers start writing code.
+Examples:
+- Flutter: "flutter test" (flutter create generates widget_test.dart)
+- React (CRA): "npm test -- --watchAll=false" (create-react-app generates App.test.js)
+- Go: "go test ./..." (go modules have test support built-in)
+- Python: "pytest" or "python -m pytest" (if pytest configured)
+- Rust: "cargo test" (Cargo projects have test support built-in)
+- Express/Node: Only if package.json has a "test" script that isn't "exit 0"
 
 CRITICAL NAMING RULES:
 - Dart/Flutter: Use snake_case (lowercase with underscores). "app-pasos-frontend" → "app_pasos_frontend"
@@ -163,6 +178,9 @@ JSON RESPONSE:`;
       } else {
         console.warn(`   ⚠️ NO devCmd returned by LLM!`);
       }
+      if (parsed.testCmd) {
+        console.log(`   Test command: ${parsed.testCmd}`);
+      }
 
       return {
         primary: {
@@ -179,6 +197,7 @@ JSON RESPONSE:`;
           installCmd: parsed.installCmd || undefined,
           devCmd: parsed.devCmd || undefined,
           devPort: typeof parsed.devPort === 'number' ? parsed.devPort : undefined,
+          testCmd: parsed.testCmd || undefined, // 🔥 AGNOSTIC: Optional test command
         },
         rawResponse: jsonStr,
       };
@@ -213,6 +232,7 @@ JSON RESPONSE:`;
           installCmd: 'flutter pub get',
           devCmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0',
           devPort: 8080,
+          testCmd: 'flutter test', // flutter create generates widget_test.dart
         },
       },
       {
@@ -229,6 +249,7 @@ JSON RESPONSE:`;
           installCmd: 'npm install',
           devCmd: 'npm run dev || npm start',
           devPort: 3000,
+          // No testCmd by default - only if package.json has valid test script
         },
       },
       {
@@ -244,6 +265,7 @@ JSON RESPONSE:`;
           installCmd: 'pip install -r requirements.txt',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000 || python manage.py runserver 0.0.0.0:8000',
           devPort: 5000,
+          // No testCmd by default - only if pytest configured
         },
       },
       {
@@ -260,6 +282,7 @@ JSON RESPONSE:`;
           installCmd: 'go mod download',
           devCmd: 'go run .',
           devPort: 8080,
+          testCmd: 'go test ./...', // Go has built-in test support
         },
       },
       {
@@ -276,6 +299,7 @@ JSON RESPONSE:`;
           installCmd: 'cargo fetch',
           devCmd: 'cargo run',
           devPort: 8080,
+          testCmd: 'cargo test', // Cargo has built-in test support
         },
       },
     ];
@@ -518,6 +542,7 @@ JSON RESPONSE:`;
           installCmd: 'go mod download',
           devCmd: 'go run .',
           devPort: 8080,
+          testCmd: 'go test ./...', // Go has built-in test support
         },
       },
       {
@@ -533,6 +558,7 @@ JSON RESPONSE:`;
           installCmd: 'cargo fetch',
           devCmd: 'cargo run',
           devPort: 8080,
+          testCmd: 'cargo test', // Cargo has built-in test support
         },
       },
       {
@@ -548,6 +574,7 @@ JSON RESPONSE:`;
           installCmd: 'pip install -r requirements.txt',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000',
           devPort: 5000,
+          // No testCmd - only if pytest is configured
         },
       },
       {
@@ -563,6 +590,7 @@ JSON RESPONSE:`;
           installCmd: 'pip install -e .',
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000',
           devPort: 5000,
+          testCmd: 'pytest', // pyproject.toml usually configures pytest
         },
       },
     ];
@@ -594,11 +622,18 @@ JSON RESPONSE:`;
       reasoning: 'Detected pubspec.yaml file',
       checkFile: 'pubspec.yaml',
       projectName: projectName,
-      createCmd: `flutter create . --project-name ${projectName} --org com.example --overwrite`,
+      // 🔥 CLEAN before create: Remove lib/ and build/ to prevent corrupted files from previous runs
+      createCmd: `rm -rf lib/ build/ .dart_tool/ && flutter create . --project-name ${projectName} --org com.example --overwrite`,
       installCmd: 'flutter pub get',
+      // 🔥 VALIDATION: Run analyze before build to catch static errors
+      // Note: LateInitializationError is RUNTIME, analyze won't catch it
+      // But analyze catches many other issues (undefined vars, type errors, etc.)
       // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
-      devCmd: 'flutter build web && cd build/web && python3 -m http.server 8080',
+      // 🔥 VERIFY: Check main.dart.js exists and has content after build
+      devCmd: 'echo "🔍 Running Flutter analyze..." && flutter analyze && echo "✅ Analyze passed" && flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified (main.dart.js exists)" && cd build/web && python3 -m http.server 8080',
       devPort: 8080,
+      // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
+      testCmd: 'flutter test',
     };
   }
 
@@ -609,6 +644,7 @@ JSON RESPONSE:`;
     let framework = 'unknown';
     let devCmd = 'npm run dev || npm start';
     let devPort = 3000;
+    let testCmd: string | undefined;
 
     // Try to read package.json to determine framework
     const packageJsonPath = path.join(repoPath, 'package.json');
@@ -616,6 +652,7 @@ JSON RESPONSE:`;
       if (fs.existsSync(packageJsonPath)) {
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
         const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+        const scripts = packageJson.scripts || {};
 
         // 🔥 Check if this is a BACKEND (has express, fastify, mongoose, etc.)
         const isBackend = deps['express'] || deps['fastify'] || deps['koa'] ||
@@ -640,6 +677,16 @@ JSON RESPONSE:`;
           devCmd = 'npm run dev -- --host 0.0.0.0 --port 5000 || npm start';
           devPort = 5000; // Avoid conflict with host
         }
+
+        // 🔥 AGNOSTIC: Check if package.json has a valid test script
+        // Only set testCmd if test script exists and isn't a placeholder
+        const testScript = scripts.test;
+        if (testScript &&
+            !testScript.includes('exit 0') &&
+            !testScript.includes('no test') &&
+            !testScript.includes('Error: no test')) {
+          testCmd = 'npm test -- --watchAll=false 2>/dev/null || npm test';
+        }
       }
     } catch (error) {
       // Ignore parsing errors
@@ -656,6 +703,7 @@ JSON RESPONSE:`;
       installCmd: 'npm install',
       devCmd: devCmd,
       devPort: devPort,
+      testCmd: testCmd,
     };
   }
 
@@ -677,11 +725,16 @@ JSON RESPONSE:`;
         reasoning: 'Detected flutter in repo name',
         checkFile: 'pubspec.yaml',
         projectName: projectName,
-        createCmd: `flutter create . --project-name ${projectName} --org com.example --overwrite`,
+        // 🔥 CLEAN before create: Remove lib/ and build/ to prevent corrupted files from previous runs
+        createCmd: `rm -rf lib/ build/ .dart_tool/ && flutter create . --project-name ${projectName} --org com.example --overwrite`,
         installCmd: 'flutter pub get',
+        // 🔥 VALIDATION: Run analyze before build to catch static errors
         // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
-        devCmd: 'flutter build web && cd build/web && python3 -m http.server 8080',
+        // 🔥 VERIFY: Check main.dart.js exists and has content after build
+        devCmd: 'echo "🔍 Running Flutter analyze..." && flutter analyze && echo "✅ Analyze passed" && flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified (main.dart.js exists)" && cd build/web && python3 -m http.server 8080',
         devPort: 8080,
+        // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
+        testCmd: 'flutter test',
       };
     }
 
