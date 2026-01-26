@@ -793,6 +793,7 @@ class SandboxService extends EventEmitter {
       cwd?: string;
       timeout?: number;
       env?: Record<string, string>;
+      user?: string;  // 🔥 Run as specific user (e.g., 'root' for permission fixes)
     }
   ): Promise<CommandResult> {
     // 🔍 SMART SANDBOX LOOKUP (4-level fallback)
@@ -843,6 +844,7 @@ class SandboxService extends EventEmitter {
       cwd?: string;
       timeout?: number;
       env?: Record<string, string>;
+      user?: string;  // 🔥 Run as specific user (e.g., 'root' for permission fixes)
     }
   ): Promise<CommandResult> {
     const startTime = Date.now();
@@ -856,9 +858,16 @@ class SandboxService extends EventEmitter {
       }
     }
 
+    // Build user args (for running as root to fix permissions)
+    const userArgs: string[] = [];
+    if (options?.user) {
+      userArgs.push('-u', options.user);
+    }
+
     // Build docker exec command
     const dockerArgs = [
       'exec',
+      ...userArgs,  // 🔥 Add user args BEFORE -w
       '-w', workDir,
       ...envArgs,
       instance.containerName,
