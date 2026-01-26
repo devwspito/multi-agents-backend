@@ -201,6 +201,8 @@ class AgentPlatformApp {
           '/status',           // Task status polling
           '/user-code-edit',   // Auto-accept polling
           '/approve/',         // Approval endpoints (critical path)
+          '/preview/',         // 🔥 FIX: Flutter loads 100s of JS modules - don't rate limit
+          '/dev-server/',      // Dev server polling
         ];
         return skipEndpoints.some(ep => req.path.includes(ep));
       },
