@@ -660,6 +660,36 @@ export class SandboxPhase extends BasePhase {
             if (installResult.exitCode === 0) {
               repoConfig.dependenciesInstalled = true;
               console.log(`      ✅ Dependencies installed`);
+
+              // 🔥 AGNOSTIC: Run testCmd if defined (framework has default tests)
+              // e.g., flutter test, go test, cargo test, npm test
+              if (repoLLM.testCmd) {
+                console.log(`      🧪 Running default tests: ${repoLLM.testCmd}`);
+                NotificationService.emitConsoleLog(
+                  taskId,
+                  'info',
+                  `🧪 [${repo.name}] Running default tests...`
+                );
+                const testResult = await sandboxService.exec(taskId, repoLLM.testCmd, {
+                  cwd: repoConfig.containerPath,
+                  timeout: 120000, // 2 min for tests
+                });
+                if (testResult.exitCode === 0) {
+                  console.log(`      ✅ Default tests passed`);
+                  NotificationService.emitConsoleLog(
+                    taskId,
+                    'success',
+                    `✅ [${repo.name}] Default tests passed`
+                  );
+                } else {
+                  console.warn(`      ⚠️ Tests failed (exit ${testResult.exitCode}): ${testResult.stderr?.substring(0, 200)}`);
+                  NotificationService.emitConsoleLog(
+                    taskId,
+                    'warning',
+                    `⚠️ [${repo.name}] Default tests failed - project may have issues`
+                  );
+                }
+              }
             } else {
               console.warn(`      ⚠️ Install warning: ${installResult.stderr?.substring(0, 100)}`);
             }
@@ -685,6 +715,36 @@ export class SandboxPhase extends BasePhase {
                 if (installResult.exitCode === 0) {
                   repoConfig.dependenciesInstalled = true;
                   console.log(`      ✅ Dependencies installed`);
+
+                  // 🔥 AGNOSTIC: Run testCmd if defined (framework has default tests)
+                  // e.g., flutter test, go test, cargo test, npm test
+                  if (repoLLM.testCmd) {
+                    console.log(`      🧪 Running default tests: ${repoLLM.testCmd}`);
+                    NotificationService.emitConsoleLog(
+                      taskId,
+                      'info',
+                      `🧪 [${repo.name}] Running default tests...`
+                    );
+                    const testResult = await sandboxService.exec(taskId, repoLLM.testCmd, {
+                      cwd: repoConfig.containerPath,
+                      timeout: 120000, // 2 min for tests
+                    });
+                    if (testResult.exitCode === 0) {
+                      console.log(`      ✅ Default tests passed`);
+                      NotificationService.emitConsoleLog(
+                        taskId,
+                        'success',
+                        `✅ [${repo.name}] Default tests passed`
+                      );
+                    } else {
+                      console.warn(`      ⚠️ Tests failed (exit ${testResult.exitCode}): ${testResult.stderr?.substring(0, 200)}`);
+                      NotificationService.emitConsoleLog(
+                        taskId,
+                        'warning',
+                        `⚠️ [${repo.name}] Default tests failed - project may have issues`
+                      );
+                    }
+                  }
                 }
               }
             } else {

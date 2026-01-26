@@ -6,6 +6,9 @@
  */
 
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { sandboxService } from '../services/SandboxService.js';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
 
@@ -105,19 +108,42 @@ router.post('/create/:taskId', async (req: Request, res: Response) => {
 /**
  * POST /api/sandbox/destroy/:taskId
  * Destroy a sandbox for a task
+ *
+ * Query params:
+ * - includeWorkspace: boolean (default: false) - Also delete the task's workspace directory
  */
 router.post('/destroy/:taskId', async (req: Request, res: Response) => {
   try {
     const { taskId } = req.params;
+    const includeWorkspace = req.query.includeWorkspace === 'true';
 
-    console.log(`[Sandbox API] Destroying sandbox for task ${taskId}`);
+    console.log(`[Sandbox API] Destroying sandbox for task ${taskId} (includeWorkspace: ${includeWorkspace})`);
 
     const destroyed = await sandboxService.destroySandbox(taskId);
+
+    let workspaceDeleted = false;
+
+    // Optionally clean up workspace directory
+    if (includeWorkspace) {
+      const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+      const taskWorkspace = path.join(workspaceDir, `task-${taskId}`);
+
+      try {
+        if (fs.existsSync(taskWorkspace)) {
+          fs.rmSync(taskWorkspace, { recursive: true, force: true });
+          workspaceDeleted = true;
+          console.log(`   🗑️ Deleted workspace: task-${taskId}`);
+        }
+      } catch (err: any) {
+        console.warn(`   ⚠️ Failed to delete workspace: ${err.message}`);
+      }
+    }
 
     return res.json({
       success: true,
       destroyed,
       taskId,
+      workspaceDeleted,
     });
   } catch (error: any) {
     console.error('[Sandbox API] Error destroying sandbox:', error);
@@ -295,16 +321,66 @@ router.get('/pool/:projectId/:repoName', async (req: Request, res: Response) => 
 /**
  * POST /api/sandbox/cleanup
  * Cleanup all sandboxes (admin endpoint)
+ *
+ * Query params:
+ * - includeWorkspaces: boolean (default: false) - Also delete agent-workspace directories
  */
-router.post('/cleanup', async (_req: Request, res: Response) => {
+router.post('/cleanup', async (req: Request, res: Response) => {
   try {
-    console.log(`[Sandbox API] Cleaning up all sandboxes`);
+    const includeWorkspaces = req.query.includeWorkspaces === 'true';
 
+    console.log(`[Sandbox API] Cleaning up all sandboxes (includeWorkspaces: ${includeWorkspaces})`);
+
+    // 1. Destroy all Docker containers
     await sandboxService.cleanup();
+
+    const result: {
+      containersDestroyed: boolean;
+      workspacesDeleted?: number;
+      workspaceErrors?: string[];
+    } = {
+      containersDestroyed: true,
+    };
+
+    // 2. Optionally clean up workspaces
+    if (includeWorkspaces) {
+      const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+
+      try {
+        if (fs.existsSync(workspaceDir)) {
+          const entries = fs.readdirSync(workspaceDir);
+          let deletedCount = 0;
+          const errors: string[] = [];
+
+          for (const entry of entries) {
+            // Only delete task-* directories (not other files)
+            if (entry.startsWith('task-')) {
+              const fullPath = path.join(workspaceDir, entry);
+              try {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+                deletedCount++;
+                console.log(`   🗑️ Deleted workspace: ${entry}`);
+              } catch (err: any) {
+                errors.push(`${entry}: ${err.message}`);
+              }
+            }
+          }
+
+          result.workspacesDeleted = deletedCount;
+          result.workspaceErrors = errors.length > 0 ? errors : undefined;
+          console.log(`   ✅ Deleted ${deletedCount} workspace(s)`);
+        }
+      } catch (err: any) {
+        result.workspaceErrors = [`Failed to read workspace dir: ${err.message}`];
+      }
+    }
 
     return res.json({
       success: true,
-      message: 'All sandboxes cleaned up',
+      message: includeWorkspaces
+        ? `All sandboxes and ${result.workspacesDeleted || 0} workspaces cleaned up`
+        : 'All sandboxes cleaned up',
+      ...result,
     });
   } catch (error: any) {
     console.error('[Sandbox API] Error cleaning up:', error);
