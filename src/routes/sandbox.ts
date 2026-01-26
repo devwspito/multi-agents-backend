@@ -353,8 +353,9 @@ router.post('/cleanup', async (req: Request, res: Response) => {
           const errors: string[] = [];
 
           for (const entry of entries) {
-            // Only delete task-* directories (not other files)
-            if (entry.startsWith('task-')) {
+            // Delete task-* directories (all workspaces are task-based)
+            // Also delete legacy project-* directories for cleanup
+            if (entry.startsWith('task-') || entry.startsWith('project-')) {
               const fullPath = path.join(workspaceDir, entry);
               try {
                 fs.rmSync(fullPath, { recursive: true, force: true });
