@@ -133,19 +133,25 @@ CRITICAL NAMING RULES:
 CRITICAL: createCmd MUST include the --project-name flag with the VALID project name for that language!
 Example for Flutter: "flutter create . --project-name app_pasos_frontend --org com.example --overwrite"
 
-DOCKER IMAGES - USE OFFICIAL/MULTI-ARCH IMAGES:
-- Flutter/Dart → ghcr.io/cirruslabs/flutter:3.24.0 (multi-arch, stable version - NOT :stable which has bugs)
-- Node/TypeScript → node:20-bookworm (OFFICIAL)
-- Python → python:3.12-bookworm (OFFICIAL)
-- Go → golang:1.22-bookworm (OFFICIAL)
-- Rust → rust:1.75-bookworm (OFFICIAL)
-- Java → eclipse-temurin:21-jdk (OFFICIAL - Adoptium)
-- .NET/C# → mcr.microsoft.com/dotnet/sdk:8.0 (OFFICIAL - Microsoft)
-- Ruby → ruby:3.3-bookworm (OFFICIAL)
-- PHP → php:8.3-apache (OFFICIAL)
-- Unknown → ubuntu:22.04 (OFFICIAL)
+HOST SYSTEM INFORMATION:
+- OS: Debian 12 Bookworm
+- Architecture: ARM64 (aarch64)
+- All Docker images MUST support linux/arm64 architecture!
 
-CRITICAL: For Flutter, ALWAYS use ghcr.io/cirruslabs/flutter:3.24.0 (specific version). NEVER use :stable or :latest tags.
+DOCKER IMAGES - MUST BE ARM64 COMPATIBLE:
+- Flutter/Dart → ghcr.io/cirruslabs/flutter:3.24.0 (multi-arch ARM64/AMD64, stable version)
+- Node/TypeScript → node:20-bookworm (OFFICIAL, multi-arch)
+- Python → python:3.12-bookworm (OFFICIAL, multi-arch)
+- Go → golang:1.22-bookworm (OFFICIAL, multi-arch)
+- Rust → rust:1.75-bookworm (OFFICIAL, multi-arch)
+- Java → eclipse-temurin:21-jdk (OFFICIAL Adoptium, multi-arch)
+- .NET/C# → mcr.microsoft.com/dotnet/sdk:8.0 (OFFICIAL Microsoft, multi-arch)
+- Ruby → ruby:3.3-bookworm (OFFICIAL, multi-arch)
+- PHP → php:8.3-apache (OFFICIAL, multi-arch)
+- Unknown → ubuntu:22.04 (OFFICIAL, multi-arch)
+
+CRITICAL: Host is ARM64! All images MUST support linux/arm64.
+CRITICAL: For Flutter, use ghcr.io/cirruslabs/flutter:3.24.0 (NOT :stable which has template bugs).
 
 JSON RESPONSE:`;
 
