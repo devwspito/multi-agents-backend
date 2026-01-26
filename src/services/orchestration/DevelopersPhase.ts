@@ -2493,8 +2493,9 @@ export class DevelopersPhase extends BasePhase {
 
         console.log(`✅ [PIPELINE] Story pipeline completed successfully: ${story.title}`);
 
-        // 🔥 HOT RESTART: Restart dev server after story completion so preview shows latest code
-        // Flutter web doesn't have automatic hot reload in headless mode
+        // 🔥 HOT RESTART: Rebuild and restart dev server after story completion
+        // For Flutter: rebuild web assets then restart http server
+        // For Node.js: just restart the process
         try {
           const sandboxConfig = context.getData<any>('sandboxConfig');
           if (sandboxConfig && pipelineSandboxId && epic.targetRepository) {
@@ -2505,27 +2506,31 @@ export class DevelopersPhase extends BasePhase {
             const repoDir = `${containerWorkDir}/${epic.targetRepository}`;
 
             if (devCmd) {
-              console.log(`\n🔄 [HOT RESTART] Restarting dev server for ${epic.targetRepository}...`);
-              NotificationService.emitConsoleLog(taskId, 'info', `🔄 Restarting preview server with latest code...`);
+              console.log(`\n🔄 [HOT RESTART] Rebuilding and restarting for ${epic.targetRepository}...`);
+              NotificationService.emitConsoleLog(taskId, 'info', `🔄 Rebuilding and restarting preview...`);
 
-              // Kill existing server process
-              const killCmd = `pkill -f "flutter" 2>/dev/null || pkill -f "${epic.targetRepository}" 2>/dev/null || true`;
+              // Kill existing server process (python http.server, flutter, node, etc.)
+              const killCmd = `pkill -f "http.server" 2>/dev/null || pkill -f "flutter" 2>/dev/null || pkill -f "${epic.targetRepository}" 2>/dev/null || true`;
               await sandboxService.exec(pipelineSandboxId, killCmd, { cwd: repoDir, timeout: 10000 });
 
               // Wait for process to die
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              await new Promise(resolve => setTimeout(resolve, 1000));
 
-              // Restart the dev server in background
+              // 🔥 AGNOSTIC: If Flutter/Dart, rebuild before serving
+              // devCmd already contains "flutter build web && python3 -m http.server..."
+              // Just run it again to rebuild and serve
               const logFile = `/tmp/${epic.targetRepository}-server.log`;
               const startCmd = `setsid bash -c 'cd ${repoDir} && ${devCmd}' > ${logFile} 2>&1 &`;
-              await sandboxService.exec(pipelineSandboxId, startCmd, { cwd: repoDir, timeout: 30000 });
 
-              console.log(`   ✅ Dev server restarted - preview will show latest code`);
-              NotificationService.emitConsoleLog(taskId, 'info', `✅ Preview server restarted with latest code!`);
+              console.log(`   📦 Running: ${devCmd.substring(0, 80)}...`);
+              await sandboxService.exec(pipelineSandboxId, startCmd, { cwd: repoDir, timeout: 300000 }); // 5 min for rebuild
+
+              console.log(`   ✅ Rebuild complete - preview shows latest code`);
+              NotificationService.emitConsoleLog(taskId, 'info', `✅ Preview rebuilt with latest code!`);
             }
           }
         } catch (hotRestartError: any) {
-          console.warn(`⚠️  [HOT RESTART] Could not restart dev server: ${hotRestartError.message}`);
+          console.warn(`⚠️  [HOT RESTART] Could not rebuild/restart: ${hotRestartError.message}`);
           // Non-critical - preview might show stale code but development continues
         }
 
