@@ -1779,6 +1779,28 @@ ${epic.description || 'No description provided'}
         }
         console.log(`   📋 Story branches to merge: ${storyBranches.length}`);
 
+        // Handle untracked files that might block merge
+        // This is critical for Flutter/other generators that create files in sandbox
+        try {
+          const untrackedOutput = safeGitExecSync(`git status --porcelain`, { cwd: repoPath, encoding: 'utf8' });
+          const untrackedFiles = untrackedOutput
+            .split('\n')
+            .filter((line: string) => line.startsWith('??'))
+            .map((line: string) => line.substring(3).trim());
+
+          if (untrackedFiles.length > 0) {
+            console.log(`   📁 Found ${untrackedFiles.length} untracked files before merge`);
+            safeGitExecSync(`git add -A`, { cwd: repoPath, encoding: 'utf8' });
+            const statusAfterAdd = safeGitExecSync(`git status --porcelain`, { cwd: repoPath, encoding: 'utf8' });
+            if (statusAfterAdd.trim().length > 0) {
+              safeGitExecSync(`git commit -m "chore: Add generated files before epic merge"`, { cwd: repoPath, encoding: 'utf8' });
+              console.log(`   ✅ Committed untracked files`);
+            }
+          }
+        } catch (untrackedError: any) {
+          console.warn(`   ⚠️ Error handling untracked files: ${untrackedError.message}`);
+        }
+
         for (const storyBranch of storyBranches) {
           if (!storyBranch) continue;
           try {

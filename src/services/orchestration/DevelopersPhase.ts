@@ -3822,7 +3822,7 @@ export class DevelopersPhase extends BasePhase {
       console.log(`   Git output: ${checkoutOutput.substring(0, 100)}`);
 
       // 2. Pull latest changes from epic branch
-      console.log(`\n[STEP 2/4] Pulling latest changes from remote...`);
+      console.log(`\n[STEP 2/5] Pulling latest changes from remote...`);
       try {
         const pullOutput = safeGitExecSync(`cd "${repoPath}" && git pull origin ${epicBranch}`, {
           encoding: 'utf8',
@@ -3839,6 +3839,43 @@ export class DevelopersPhase extends BasePhase {
         } else {
           console.warn(`   ℹ️  CAUSE: Unknown - check network/auth/remote status`);
         }
+      }
+
+      // 2.5. Handle untracked files that might block merge
+      // This is critical for Flutter/other generators that create files in sandbox
+      console.log(`\n[STEP 2.5/5] Checking for untracked files that might block merge...`);
+      try {
+        const untrackedOutput = safeGitExecSync(`cd "${repoPath}" && git status --porcelain`, { encoding: 'utf8' });
+        const untrackedFiles = untrackedOutput
+          .split('\n')
+          .filter((line: string) => line.startsWith('??'))
+          .map((line: string) => line.substring(3).trim());
+
+        if (untrackedFiles.length > 0) {
+          console.log(`   Found ${untrackedFiles.length} untracked files (e.g., from flutter create)`);
+          console.log(`   Files: ${untrackedFiles.slice(0, 5).join(', ')}${untrackedFiles.length > 5 ? '...' : ''}`);
+
+          // Add all untracked files and commit them
+          console.log(`   Adding and committing untracked files to prevent merge conflicts...`);
+          safeGitExecSync(`cd "${repoPath}" && git add -A`, { encoding: 'utf8' });
+
+          // Check if there's anything to commit
+          const statusAfterAdd = safeGitExecSync(`cd "${repoPath}" && git status --porcelain`, { encoding: 'utf8' });
+          if (statusAfterAdd.trim().length > 0) {
+            safeGitExecSync(
+              `cd "${repoPath}" && git commit -m "chore: Add generated files before merge (flutter create, etc.)"`,
+              { encoding: 'utf8' }
+            );
+            console.log(`   ✅ Committed ${untrackedFiles.length} generated files`);
+          } else {
+            console.log(`   No changes to commit after staging`);
+          }
+        } else {
+          console.log(`   No untracked files found, merge should proceed cleanly`);
+        }
+      } catch (untrackedError: any) {
+        console.warn(`⚠️  [Merge] Error handling untracked files: ${untrackedError.message}`);
+        // Continue anyway - the merge will fail if there are real conflicts
       }
 
       // 3. Merge story branch with timeout protection
