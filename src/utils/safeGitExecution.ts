@@ -7,55 +7,19 @@
  * Set GIT_ENABLE_TIMEOUTS=true to enable timeouts (use only if you have hanging issues)
  *
  * 🚀 PERFORMANCE: Includes fetch caching to avoid redundant git fetch operations
- * 🐳 SANDBOX: Commands execute inside Docker containers when sandbox is active (like Codex/Devin)
+ *
+ * 🔥 CRITICAL: Git commands ALWAYS execute on the HOST, never in Docker sandbox.
+ * Reason: Docker containers have different file ownership (UID mapping),
+ * causing "dubious ownership" errors when git runs inside the container.
+ *
+ * Sandbox is for: build, dev server, tests
+ * Host is for: git operations, file writes (via Claude SDK tools)
  */
 
 import { exec, execSync as nodeExecSync } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
-
-// 🐳 SANDBOX: Import sandbox service for isolated execution
-// Using dynamic import to avoid circular dependencies
-let _sandboxService: any = null;
-
-async function getSandboxService() {
-  if (!_sandboxService) {
-    const module = await import('../services/SandboxService.js');
-    _sandboxService = module.sandboxService;
-  }
-  return _sandboxService;
-}
-
-function getSandboxServiceSync() {
-  if (!_sandboxService) {
-    // For sync operations, we can't dynamically import
-    // The service should be initialized by the time we need it
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const module = require('../services/SandboxService.js');
-      _sandboxService = module.sandboxService;
-    } catch {
-      return null;
-    }
-  }
-  return _sandboxService;
-}
-
-/**
- * 🐳 Extract taskId from workspace path
- * Workspace paths are structured as: /path/to/workspace/task-{taskId}/...
- */
-function extractTaskIdFromPath(cwd?: string): string | null {
-  if (!cwd) return null;
-
-  // Match task-{taskId} in the path
-  const match = cwd.match(/task-([a-f0-9]+)/i);
-  if (match) {
-    return match[1];
-  }
-  return null;
-}
 
 // ==================== GIT FETCH CACHE ====================
 // Prevents redundant git fetch operations within a short time window
@@ -142,7 +106,14 @@ const GIT_TIMEOUTS = {
 
 /**
  * Execute a git command with timeout protection (async)
- * 🐳 Commands execute inside Docker sandbox when available
+ *
+ * 🔥 CRITICAL: Git commands ALWAYS execute on the HOST, never in sandbox.
+ * Reason: Docker containers have different file ownership (UID mapping),
+ * causing "dubious ownership" errors when git runs inside the container
+ * on files created/cloned by the host user.
+ *
+ * The sandbox is for: build, dev server, tests
+ * NOT for: git operations (clone, checkout, commit, push, etc.)
  *
  * @param command - Git command to execute
  * @param options - Execution options
@@ -157,54 +128,10 @@ export async function safeGitExec(
     env?: NodeJS.ProcessEnv;
   } = {}
 ): Promise<{ stdout: string; stderr: string }> {
-  // 🐳 SANDBOX: Check if we should execute in sandbox
-  const taskId = extractTaskIdFromPath(options.cwd);
-  if (taskId) {
-    try {
-      const sandboxService = await getSandboxService();
-      // 🔍 SMART SANDBOX LOOKUP
-      const found = sandboxService?.findSandboxForTask(taskId);
-      const sandbox = found?.instance;
+  // 🔥 GIT ALWAYS RUNS ON HOST - Never in sandbox
+  // This avoids "dubious ownership" errors from UID mismatch between host and container
 
-      if (sandbox && sandbox.status === 'running') {
-        console.log(`🐳 [Sandbox] Executing in container: ${command.substring(0, 50)}...`);
-
-        // Convert workspace path to container path
-        // Host: /path/to/workspace/task-xxx/repo-name
-        // Container: /workspace/repo-name (workspace is mounted at /workspace)
-        let containerCwd = options.cwd;
-        if (containerCwd && sandbox.workspacePath) {
-          // Replace host workspace path with /workspace
-          containerCwd = containerCwd.replace(sandbox.workspacePath, '/workspace');
-        }
-
-        const result = await sandboxService.exec(taskId, command, {
-          cwd: containerCwd,
-          timeout: options.timeout,
-          env: options.env as Record<string, string>,
-        });
-
-        if (result.exitCode !== 0 && result.stderr) {
-          const error: any = new Error(result.stderr);
-          error.code = result.exitCode;
-          error.stdout = result.stdout;
-          error.stderr = result.stderr;
-          throw error;
-        }
-
-        return { stdout: result.stdout, stderr: result.stderr };
-      }
-    } catch (sandboxError: any) {
-      // If sandbox fails, fall back to host execution
-      if (!sandboxError.code) {
-        console.warn(`⚠️ [Sandbox] Falling back to host: ${sandboxError.message}`);
-      } else {
-        throw sandboxError; // Re-throw actual command errors
-      }
-    }
-  }
-
-  // Host execution (no sandbox or sandbox unavailable)
+  // Host execution
   // Only use timeout if explicitly enabled or explicitly provided
   const useTimeout = TIMEOUTS_ENABLED || options.timeout !== undefined;
 
@@ -247,7 +174,14 @@ export async function safeGitExec(
 
 /**
  * Execute a git command with timeout protection (sync)
- * 🐳 Commands execute inside Docker sandbox when available
+ *
+ * 🔥 CRITICAL: Git commands ALWAYS execute on the HOST, never in sandbox.
+ * Reason: Docker containers have different file ownership (UID mapping),
+ * causing "dubious ownership" errors when git runs inside the container
+ * on files created/cloned by the host user.
+ *
+ * The sandbox is for: build, dev server, tests
+ * NOT for: git operations (clone, checkout, commit, push, etc.)
  *
  * @param command - Git command to execute
  * @param options - Execution options
@@ -262,50 +196,10 @@ export function safeGitExecSync(
     encoding?: BufferEncoding;
   } = {}
 ): string {
-  // 🐳 SANDBOX: Check if we should execute in sandbox
-  const taskId = extractTaskIdFromPath(options.cwd);
-  if (taskId) {
-    try {
-      const sandboxService = getSandboxServiceSync();
-      // 🔍 SMART SANDBOX LOOKUP
-      const found = sandboxService?.findSandboxForTask(taskId);
-      const sandbox = found?.instance;
+  // 🔥 GIT ALWAYS RUNS ON HOST - Never in sandbox
+  // This avoids "dubious ownership" errors from UID mismatch between host and container
 
-      if (sandbox && sandbox.status === 'running') {
-        console.log(`🐳 [Sandbox] Executing sync in container: ${command.substring(0, 50)}...`);
-
-        // Convert workspace path to container path
-        let containerCwd = options.cwd;
-        if (containerCwd && sandbox.workspacePath) {
-          containerCwd = containerCwd.replace(sandbox.workspacePath, '/workspace');
-        }
-
-        const result = sandboxService.execSync(taskId, command, {
-          cwd: containerCwd,
-          timeout: options.timeout,
-        });
-
-        if (result.exitCode !== 0 && result.stderr) {
-          const error: any = new Error(result.stderr);
-          error.code = result.exitCode;
-          error.stdout = result.stdout;
-          error.stderr = result.stderr;
-          throw error;
-        }
-
-        return result.stdout;
-      }
-    } catch (sandboxError: any) {
-      // If sandbox fails, fall back to host execution
-      if (!sandboxError.code) {
-        console.warn(`⚠️ [Sandbox] Falling back to host (sync): ${sandboxError.message}`);
-      } else {
-        throw sandboxError; // Re-throw actual command errors
-      }
-    }
-  }
-
-  // Host execution (no sandbox or sandbox unavailable)
+  // Host execution
   // Only use timeout if explicitly enabled or explicitly provided
   const useTimeout = TIMEOUTS_ENABLED || options.timeout !== undefined;
 
