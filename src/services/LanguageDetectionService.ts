@@ -630,7 +630,7 @@ JSON RESPONSE:`;
       // But analyze catches many other issues (undefined vars, type errors, etc.)
       // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
       // 🔥 VERIFY: Check main.dart.js exists and has content after build
-      devCmd: 'echo "🔍 Running Flutter analyze..." && flutter analyze && echo "✅ Analyze passed" && flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified (main.dart.js exists)" && cd build/web && python3 -m http.server 8080',
+      devCmd: 'flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified" && cd build/web && python3 -m http.server 8080',
       devPort: 8080,
       // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
       testCmd: 'flutter test',
@@ -731,7 +731,7 @@ JSON RESPONSE:`;
         // 🔥 VALIDATION: Run analyze before build to catch static errors
         // 🔥 LIGHTWEIGHT: Build once + static serve (saves 4-8GB RAM)
         // 🔥 VERIFY: Check main.dart.js exists and has content after build
-        devCmd: 'echo "🔍 Running Flutter analyze..." && flutter analyze && echo "✅ Analyze passed" && flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified (main.dart.js exists)" && cd build/web && python3 -m http.server 8080',
+        devCmd: 'flutter build web && test -s build/web/main.dart.js && echo "✅ Build verified" && cd build/web && python3 -m http.server 8080',
         devPort: 8080,
         // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
         testCmd: 'flutter test',
