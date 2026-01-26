@@ -17,6 +17,7 @@ import {
   PhaseResult,
 } from './Phase';
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
+import { sandboxService } from '../SandboxService';
 import * as path from 'path';
 import * as fs from 'fs';
 import { NotificationService } from '../NotificationService';
@@ -157,7 +158,7 @@ export class IntegrationPhase extends BasePhase {
 
       // 5. Validate build and fix issues
       console.log(`\n🔧 [Step 4/4] Validating build...`);
-      const validation = await this.validateAndFix(repoPath, taskId);
+      const validation = await this.validateAndFix(repoPath, taskId, targetRepository);
 
       if (!validation.buildSuccess) {
         console.error(`   ❌ Build validation failed:`);
@@ -169,7 +170,7 @@ export class IntegrationPhase extends BasePhase {
           console.log(`   ✅ Auto-fixed ${fixAttempt.fixedCount} issues`);
 
           // Re-validate
-          const revalidation = await this.validateBuild(repoPath);
+          const revalidation = await this.validateBuild(repoPath, taskId, targetRepository);
           if (revalidation.buildSuccess) {
             console.log(`   ✅ Build passes after auto-fix`);
           } else {
@@ -578,17 +579,24 @@ export class IntegrationPhase extends BasePhase {
 
   /**
    * Validate build and collect errors
+   * 🔥 CRITICAL: Build runs in SANDBOX, not on HOST
+   * This ensures the correct tools (Flutter, Node.js version) are available
    */
-  private async validateBuild(repoPath: string): Promise<ValidationResult> {
+  private async validateBuild(_repoPath: string, taskId: string, repoName: string): Promise<ValidationResult> {
     try {
-      // Try to build
-      safeGitExecSync(`npm run build`, {
-        cwd: repoPath,
-        encoding: 'utf8',
+      // 🔥 Build in SANDBOX - correct environment with Flutter/Node/etc.
+      const containerPath = `/workspace/${repoName}`;
+      const buildResult = await sandboxService.exec(taskId, 'npm run build 2>&1', {
+        cwd: containerPath,
         timeout: 300000, // 5 minutes
       });
 
-      return { buildSuccess: true, errors: [], warnings: [] };
+      if (buildResult.exitCode === 0) {
+        return { buildSuccess: true, errors: [], warnings: [] };
+      } else {
+        const errors = this.parseBuildErrors(buildResult.stderr || buildResult.stdout);
+        return { buildSuccess: false, errors, warnings: [] };
+      }
     } catch (buildErr: any) {
       // Parse build errors
       const errorOutput = buildErr.message || buildErr.stderr || '';
@@ -600,25 +608,31 @@ export class IntegrationPhase extends BasePhase {
 
   /**
    * Validate and fix build issues
+   * 🔥 CRITICAL: Dependencies install and build run in SANDBOX
    */
   private async validateAndFix(
-    repoPath: string,
-    _taskId: string
+    _repoPath: string,
+    taskId: string,
+    repoName: string
   ): Promise<ValidationResult> {
-    // First, install dependencies
+    // First, install dependencies in SANDBOX
+    const containerPath = `/workspace/${repoName}`;
     try {
-      console.log(`   Installing dependencies...`);
-      safeGitExecSync(`npm install`, {
-        cwd: repoPath,
-        encoding: 'utf8',
+      console.log(`   Installing dependencies in sandbox...`);
+      const installResult = await sandboxService.exec(taskId, 'npm install 2>&1', {
+        cwd: containerPath,
         timeout: 300000,
       });
-      console.log(`   ✅ Dependencies installed`);
+      if (installResult.exitCode === 0) {
+        console.log(`   ✅ Dependencies installed`);
+      } else {
+        console.warn(`   ⚠️ npm install warning: ${installResult.stderr}`);
+      }
     } catch (installErr: any) {
       console.warn(`   ⚠️ npm install warning: ${installErr.message}`);
     }
 
-    return this.validateBuild(repoPath);
+    return this.validateBuild(_repoPath, taskId, repoName);
   }
 
   /**
