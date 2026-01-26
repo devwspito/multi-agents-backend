@@ -52,6 +52,23 @@ import {
   createJudgeInput,
 } from './developers/types';
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔧 STORY ISOLATION TOGGLE (configurable via .env)
+// ═══════════════════════════════════════════════════════════════════════════════
+// When FALSE: All developers work on the SAME shared workspace (sequential execution)
+//            - dev-2 sees dev-1's changes directly
+//            - Simpler flow, no git sync between stories
+//            - Required for current sequential execution model
+//
+// When TRUE: Each story gets an isolated copy of the repository
+//            - Enables parallel story execution in the future
+//            - Requires git sync to merge changes between stories
+//            - More complex but allows true parallelism
+//
+// Set in .env: ENABLE_STORY_ISOLATION=false (default) or ENABLE_STORY_ISOLATION=true
+// ═══════════════════════════════════════════════════════════════════════════════
+const ENABLE_STORY_ISOLATION = process.env.ENABLE_STORY_ISOLATION === 'true';
+
 // Re-export for backward compatibility
 export {
   DeveloperOutput,
@@ -1074,9 +1091,21 @@ export class DevelopersPhase extends BasePhase {
     // 🔥🔥🔥 ISOLATED STORY WORKSPACE 🔥🔥🔥
     // Each DEV+JUDGE pair gets its own copy of the repository
     // This prevents git conflicts when multiple stories are worked on in parallel
-    const storyWorkspacePath = workspacePath ? `${workspacePath}/story-${story.id}` : null;
+    // 🔧 TOGGLE: Controlled by ENABLE_STORY_ISOLATION constant at top of file
+    let storyWorkspacePath: string | null = null;
 
-    if (storyWorkspacePath && epic.targetRepository) {
+    if (ENABLE_STORY_ISOLATION) {
+      // When enabled: Each story gets isolated workspace
+      storyWorkspacePath = workspacePath ? `${workspacePath}/story-${story.id}` : null;
+    } else {
+      // When disabled: All devs share the same workspace (sequential execution)
+      console.log(`\n🔧 [Story ${story.id}] STORY ISOLATION DISABLED - using shared workspace`);
+      console.log(`   📁 Shared workspace: ${workspacePath}`);
+      console.log(`   👨‍💻 Developer: ${developer.instanceId}`);
+      console.log(`   ℹ️  All developers work on the same workspace sequentially\n`);
+    }
+
+    if (ENABLE_STORY_ISOLATION && storyWorkspacePath && epic.targetRepository) {
       const isolatedRepoPath = `${storyWorkspacePath}/${epic.targetRepository}`;
       const sourceRepoPath = `${workspacePath}/${epic.targetRepository}`;
       const lockFilePath = `${storyWorkspacePath}/.workspace.lock`;
@@ -2723,7 +2752,10 @@ export class DevelopersPhase extends BasePhase {
 
       // 🔍🔍🔍 FAILURE CLASSIFICATION: Determine recovery strategy 🔍🔍🔍
       const storyBranch = story.branchName;
-      const effectiveWorkspaceForRecovery = workspacePath ? `${workspacePath}/story-${story.id}` : null;
+      // 🔧 Respect ENABLE_STORY_ISOLATION flag - use same logic as main pipeline
+      const effectiveWorkspaceForRecovery = ENABLE_STORY_ISOLATION
+        ? (workspacePath ? `${workspacePath}/story-${story.id}` : null)
+        : workspacePath;
       const repoPath = effectiveWorkspaceForRecovery && epic.targetRepository
         ? `${effectiveWorkspaceForRecovery}/${epic.targetRepository}`
         : null;
