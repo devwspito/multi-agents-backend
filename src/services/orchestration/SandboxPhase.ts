@@ -706,6 +706,7 @@ export class SandboxPhase extends BasePhase {
               const runtimeResult = await sandboxService.exec(taskId, repoLLM.runtimeInstallCmd, {
                 cwd: '/workspace',
                 timeout: 1800000, // 30 min - runtime installs take long (Flutter, Node.js, etc.)
+                user: 'root', // 🔥 apt-get needs root permissions
               });
 
               if (runtimeResult.exitCode === 0) {
