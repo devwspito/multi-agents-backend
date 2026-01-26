@@ -591,6 +591,44 @@ export class SandboxPhase extends BasePhase {
       console.log(`      ✅ containerWorkDir stored in context for all downstream phases`);
 
       // =======================================================================
+      // 🔧 FIX SDK PERMISSIONS (100% AGNOSTIC - runs for ANY Docker image)
+      // Many Docker images have SDKs owned by root but container runs as non-root user
+      // This fixes permission issues for ANY SDK at common paths
+      // =======================================================================
+      console.log(`\n   🔧 Fixing SDK permissions (running as root)...`);
+
+      const sdkPermFix = `
+        # Fix permissions for common SDK paths - 100% AGNOSTIC
+        # Changes ownership to container user (1000:1000) for any SDK that exists
+        for SDK_PATH in /sdks/flutter /opt/flutter /sdks/dart /opt/dart /sdks/go /opt/go /sdks/node /opt/node /usr/local/go; do
+          if [ -d "\$SDK_PATH" ]; then
+            chown -R 1000:1000 "\$SDK_PATH" 2>/dev/null || chmod -R 777 "\$SDK_PATH" 2>/dev/null || true
+            echo "Fixed permissions for \$SDK_PATH"
+          fi
+        done
+        # Fix common cache directories
+        for CACHE_PATH in ~/.pub-cache ~/.npm ~/.cache ~/.local; do
+          mkdir -p "\$CACHE_PATH" 2>/dev/null || true
+          chown -R 1000:1000 "\$CACHE_PATH" 2>/dev/null || chmod -R 755 "\$CACHE_PATH" 2>/dev/null || true
+        done
+      `.trim();
+
+      const permResult = await sandboxService.exec(taskId, sdkPermFix, {
+        cwd: '/',
+        timeout: 120000,  // 2 min for large SDKs
+        user: 'root',     // 🔥 RUN AS ROOT
+      });
+
+      if (permResult.exitCode === 0) {
+        console.log(`      ✅ SDK permissions fixed`);
+        if (permResult.stdout) {
+          console.log(`         ${permResult.stdout.replace(/\n/g, '\n         ')}`);
+        }
+      } else {
+        console.log(`      ⚠️ Permission fix: ${permResult.stderr?.substring(0, 100) || 'no error'}`);
+      }
+
+      // =======================================================================
       // STEP 4: Create projects and install dependencies
       // 🔥 100% AGNOSTIC - PER-REPO LLM CONFIG
       // =======================================================================
@@ -692,55 +730,6 @@ export class SandboxPhase extends BasePhase {
           }
         } else {
           console.log(`      ⚠️ No runtimeInstallCmd provided by LLM - checking if runtime exists...`);
-        }
-
-        // =======================================================================
-        // 🔧 FIX FLUTTER SDK PERMISSIONS (AGNOSTIC - only runs for Flutter/Dart)
-        // Many Flutter Docker images have SDK owned by root but container runs as ubuntu
-        // This fixes the lockfile permission issue that prevents Flutter from working
-        // =======================================================================
-        if (repoLLM.language === 'Flutter' || repoLLM.language === 'Dart' || repoLLM.framework === 'Flutter') {
-          console.log(`      🔧 Fixing Flutter SDK permissions (running as root to change ownership)...`);
-
-          // 🔥 CRITICAL: Run as ROOT to fix permissions (container runs as ubuntu 1000:1000)
-          // This is the ONLY reliable way to change root-owned files to ubuntu ownership
-          const flutterPermFix = `
-            # Fix Flutter SDK cache permissions - change owner to 1000:1000 (ubuntu)
-            for SDK_PATH in /sdks/flutter /opt/flutter /root/flutter /home/ubuntu/flutter; do
-              if [ -d "\$SDK_PATH/bin/cache" ]; then
-                chown -R 1000:1000 "\$SDK_PATH/bin/cache" 2>/dev/null || \\
-                chmod -R 777 "\$SDK_PATH/bin/cache" 2>/dev/null || \\
-                true
-                echo "Fixed permissions for \$SDK_PATH/bin/cache"
-              fi
-              # Also fix the SDK root (for pub-cache, etc.)
-              if [ -d "\$SDK_PATH" ]; then
-                chown -R 1000:1000 "\$SDK_PATH" 2>/dev/null || \\
-                chmod -R 755 "\$SDK_PATH" 2>/dev/null || \\
-                true
-              fi
-            done
-          `.trim();
-
-          // 🔥 Execute AS ROOT - this is the key fix
-          const permResult = await sandboxService.exec(taskId, flutterPermFix, {
-            cwd: '/workspace',
-            timeout: 60000,  // Give it more time for large SDK
-            user: 'root',    // 🔥 RUN AS ROOT to fix permissions
-          });
-
-          if (permResult.exitCode === 0) {
-            console.log(`      ✅ Flutter SDK permissions fixed (ownership changed to ubuntu 1000:1000)`);
-          } else {
-            // Non-blocking - permissions might already be OK or SDK in different location
-            console.log(`      ⚠️ Permission fix returned non-zero (may be OK): ${permResult.stderr?.substring(0, 100)}`);
-          }
-
-          // Also fix pub-cache as ubuntu user
-          await sandboxService.exec(taskId, 'mkdir -p ~/.pub-cache && chmod -R 755 ~/.pub-cache', {
-            cwd: '/workspace',
-            timeout: 10000,
-          });
         }
 
         // 🔥 LLM provides checkFile for THIS repo
