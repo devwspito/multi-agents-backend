@@ -2498,9 +2498,11 @@ export class DevelopersPhase extends BasePhase {
         // For Node.js: just restart the process
         try {
           const sandboxConfig = context.getData<any>('sandboxConfig');
+          const environmentConfig = context.getData<any>('environmentConfig');
           if (sandboxConfig && pipelineSandboxId && epic.targetRepository) {
-            const repoConfig = sandboxConfig.repos?.find((r: any) => r.name === epic.targetRepository);
-            const devCmd = repoConfig?.runCommand || sandboxConfig.commands?.dev;
+            // 🔥 FIX: Get devCmd from environmentConfig (per-repo) or sandboxConfig.commands.dev (global)
+            const envRepoConfig = environmentConfig?.[epic.targetRepository];
+            const devCmd = envRepoConfig?.runCommand || sandboxConfig.commands?.dev;
             // 🔥 100% AGNOSTIC: Use containerWorkDir from SandboxPhase (SINGLE SOURCE OF TRUTH)
             const containerWorkDir = sandboxConfig.containerWorkDir || '/workspace';
             const repoDir = `${containerWorkDir}/${epic.targetRepository}`;
