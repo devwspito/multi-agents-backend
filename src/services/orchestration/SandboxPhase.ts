@@ -466,12 +466,17 @@ export class SandboxPhase extends BasePhase {
       // =======================================================================
       console.log(`\n🐳 [SandboxPhase] Step 3: Creating sandbox...`);
 
-      const workspaceMounts: Record<string, string> = {};
+      // 🔥 CRITICAL FIX: Mount the PARENT workspace, not individual repos
+      // This allows TeamOrchestrationPhase to create team-1-epic-xxx/ subdirectories
+      // that will be visible inside the container as /workspace/team-1-epic-xxx/
+      const workspaceMounts: Record<string, string> = {
+        [workspacePath]: '/workspace',  // Mount parent: /app/projects/xxx → /workspace
+      };
 
       for (const repo of repositories) {
         const hostPath = path.join(workspacePath, repo.name);
         const containerPath = `/workspace/${repo.name}`;
-        workspaceMounts[hostPath] = containerPath;
+        // Note: No longer adding individual mounts - parent mount covers everything
 
         repoConfigs.push({
           name: repo.name,
@@ -531,6 +536,49 @@ export class SandboxPhase extends BasePhase {
 
       sandbox = sandboxResult.sandbox;
       console.log(`   ✅ Container: ${sandbox.containerName}`);
+
+      // =======================================================================
+      // 🔥 MANDATORY: VERIFY CONTAINER WORKSPACE (containerWorkDir)
+      // This is the SINGLE SOURCE OF TRUTH for all agents
+      // Without this verification, the phase MUST fail
+      // =======================================================================
+      const containerWorkDir = sandbox.config?.workDir || '/workspace';
+      console.log(`\n   🔍 Verifying containerWorkDir: ${containerWorkDir}`);
+
+      // 1. Verify directory exists inside container
+      const existsResult = await sandboxService.exec(taskId, `test -d "${containerWorkDir}" && echo "EXISTS" || echo "NOT_EXISTS"`, {
+        cwd: '/',
+        timeout: 10000,
+      });
+
+      if (!existsResult.stdout.includes('EXISTS')) {
+        // Try to create it
+        console.log(`      ⚠️ Directory doesn't exist, creating...`);
+        const mkdirResult = await sandboxService.exec(taskId, `mkdir -p "${containerWorkDir}"`, {
+          cwd: '/',
+          timeout: 10000,
+        });
+        if (mkdirResult.exitCode !== 0) {
+          throw new Error(`FATAL: Cannot create containerWorkDir ${containerWorkDir}: ${mkdirResult.stderr}`);
+        }
+      }
+
+      // 2. Verify directory is writable
+      const writeTestFile = `${containerWorkDir}/.sandbox-write-test-${Date.now()}`;
+      const writeResult = await sandboxService.exec(taskId, `touch "${writeTestFile}" && rm "${writeTestFile}" && echo "WRITABLE"`, {
+        cwd: '/',
+        timeout: 10000,
+      });
+
+      if (!writeResult.stdout.includes('WRITABLE')) {
+        throw new Error(`FATAL: containerWorkDir ${containerWorkDir} is not writable: ${writeResult.stderr}`);
+      }
+
+      console.log(`      ✅ containerWorkDir verified: ${containerWorkDir} (exists & writable)`);
+
+      // 3. Store containerWorkDir in context - THIS IS MANDATORY FOR ALL AGENTS
+      context.setData('containerWorkDir', containerWorkDir);
+      console.log(`      ✅ containerWorkDir stored in context for all downstream phases`);
 
       // =======================================================================
       // STEP 4: Create projects and install dependencies
@@ -941,6 +989,8 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
           dockerImage: llmDetected.dockerImage,
           language: llmDetected.language,
           framework: llmDetected.framework,
+          // 🔥 CRITICAL: containerWorkDir is the SINGLE SOURCE OF TRUTH for all agents
+          containerWorkDir,
           repos: repoConfigs.map(r => ({
             name: r.name,
             type: r.type,
