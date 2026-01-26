@@ -89,17 +89,114 @@ export class TechLeadPhase extends BasePhase {
   }
 
   /**
-   * Restore stories when skipping due to epic completion
+   * Restore ALL data when skipping due to epic completion (multi-team mode)
+   *
+   * 🔥 CRITICAL FIX: Must restore storyAssignments and teamComposition
+   * Otherwise DevelopersPhase won't know which developers to spawn
    */
   private async restoreStoriesOnSkip(
     context: OrchestrationContext,
-    epicStories?: Array<{ storyId: string; title: string }>
+    epicStories?: Array<{ storyId: string; title: string; developerId?: string; status?: string }>
   ): Promise<void> {
+    const taskId = this.getTaskIdString(context);
+    const teamEpic = context.getData<any>('teamEpic');
+
+    console.log(`\n🔄 [TechLead.restoreStoriesOnSkip] Restoring data for epic: ${teamEpic?.id || 'unknown'}`);
+
+    // 1. Restore stories
     if (!isEmpty(epicStories)) {
       const stories = epicStories!.map(s => ({ id: s.storyId, title: s.title }));
       context.setData('stories', stories);
-      console.log(`   ✅ Restored ${stories.length} stories from unified memory`);
+      console.log(`   ✅ Restored ${stories.length} stories`);
+
+      // 2. Build storyAssignments from epicStories if developerId is available
+      const storyAssignments = epicStories!
+        .filter(s => s.developerId)
+        .map(s => ({ storyId: s.storyId, assignedTo: s.developerId }));
+
+      if (storyAssignments.length > 0) {
+        context.setData('storyAssignments', storyAssignments);
+        console.log(`   ✅ Restored ${storyAssignments.length} story assignments from epicStories`);
+      }
     }
+
+    // 3. Restore teamComposition from UnifiedMemory (CRITICAL for DevelopersPhase)
+    try {
+      const teamComp = await unifiedMemoryService.getTeamComposition(taskId);
+      if (teamComp) {
+        context.setData('teamComposition', teamComp);
+        console.log(`   ✅ Restored teamComposition: ${teamComp.developers} developers`);
+      } else {
+        console.warn(`   ⚠️ No teamComposition found in UnifiedMemory`);
+      }
+    } catch (error: any) {
+      console.warn(`   ⚠️ Failed to restore teamComposition: ${error.message}`);
+    }
+
+    // 4. Restore storyAssignments from UnifiedMemory if not already restored
+    if (!context.getData<any[]>('storyAssignments') || context.getData<any[]>('storyAssignments')!.length === 0) {
+      try {
+        const assignments = await unifiedMemoryService.getStoryAssignments(taskId);
+        if (assignments.length > 0) {
+          // Filter to only this epic's stories if in multi-team mode
+          const epicStoryIds = new Set(epicStories?.map(s => s.storyId) || []);
+          const filteredAssignments = epicStoryIds.size > 0
+            ? assignments.filter((a: { storyId: string }) => epicStoryIds.has(a.storyId))
+            : assignments;
+
+          context.setData('storyAssignments', filteredAssignments);
+          console.log(`   ✅ Restored ${filteredAssignments.length} story assignments from UnifiedMemory`);
+        } else {
+          console.warn(`   ⚠️ No storyAssignments found in UnifiedMemory`);
+        }
+      } catch (error: any) {
+        console.warn(`   ⚠️ Failed to restore storyAssignments: ${error.message}`);
+      }
+    }
+
+    // 5. Fallback: Try EventStore for TeamCompositionDefined event
+    if (!context.getData<any>('teamComposition') || !context.getData<any[]>('storyAssignments')) {
+      try {
+        const { eventStore } = await import('../EventStore');
+        const events = await eventStore.getEvents(context.task.id as any);
+
+        // Find TeamCompositionDefined for this epic
+        const teamEvents = events.filter((e: any) =>
+          e.eventType === 'TeamCompositionDefined' &&
+          (!teamEpic || e.payload.epicId === teamEpic.id)
+        );
+
+        if (teamEvents.length > 0) {
+          const teamEvent = teamEvents[teamEvents.length - 1]; // Use latest
+
+          if (!context.getData<any>('teamComposition') && teamEvent.payload.developers) {
+            context.setData('teamComposition', { developers: teamEvent.payload.developers });
+            console.log(`   ✅ Restored teamComposition from EventStore: ${teamEvent.payload.developers} developers`);
+          }
+
+          if ((!context.getData<any[]>('storyAssignments') || context.getData<any[]>('storyAssignments')!.length === 0)
+              && teamEvent.payload.storyAssignments) {
+            context.setData('storyAssignments', teamEvent.payload.storyAssignments);
+            console.log(`   ✅ Restored ${teamEvent.payload.storyAssignments.length} story assignments from EventStore`);
+          }
+        }
+      } catch (error: any) {
+        console.warn(`   ⚠️ EventStore fallback failed: ${error.message}`);
+      }
+    }
+
+    // Final validation
+    const finalAssignments = context.getData<any[]>('storyAssignments') || [];
+    const finalComposition = context.getData<any>('teamComposition');
+
+    if (finalAssignments.length === 0) {
+      console.error(`   ❌ CRITICAL: No storyAssignments restored - DevelopersPhase will fail!`);
+    }
+    if (!finalComposition) {
+      console.error(`   ❌ CRITICAL: No teamComposition restored - DevelopersPhase will fail!`);
+    }
+
+    console.log(`   📊 Final state: ${finalAssignments.length} assignments, ${finalComposition?.developers || 0} developers\n`);
   }
 
   protected async executePhase(

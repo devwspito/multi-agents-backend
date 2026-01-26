@@ -33,25 +33,23 @@ const TECH_LEAD_APPROVAL_TIMEOUT_MS = APPROVAL_TIMEOUTS.TECH_LEAD_APPROVAL;
 /**
  * Team Orchestration Phase
  *
- * Implements Multi-Team parallel orchestration following Anthropic's recommendations
- * for complex problem-solving with Claude agents.
+ * 🔒 100% SEQUENTIAL EXECUTION - NO PARALLELISM
  *
  * Architecture:
- * - Receives epics from Planning phase (Sonnet orchestrator)
- * - Creates isolated team per epic
- * - Each team runs: TechLead → Developers → Judge
- * - All teams execute in parallel (Promise.allSettled)
- * - Aggregates results from all teams
+ * - Receives epics from Planning phase
+ * - Processes ONE epic at a time (fully sequential)
+ * - Each epic: TechLead → Developers → Judge → Complete → Next Epic
+ * - Checkpoints saved after each epic for reliable retry/resume
  *
  * Benefits:
- * - Avoids token limits by splitting work across teams
- * - Enables parallel execution for faster completion
- * - Each team focuses on single epic (reduces complexity)
- * - Better cost optimization (Haiku for execution)
+ * - Predictable, traceable execution
+ * - Easy debugging (one epic at a time)
+ * - Reliable retry/resume from any point
+ * - No race conditions or state conflicts
  */
 export class TeamOrchestrationPhase extends BasePhase {
   readonly name = 'TeamOrchestration';
-  readonly description = 'Coordinating parallel teams for each epic';
+  readonly description = 'Sequential team execution for each epic';
 
   constructor(
     private executeAgentFn: Function,
@@ -413,7 +411,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       for (const [order, epics] of orderedGroups) {
         console.log(`   Order ${order}: ${epics.length} epic(s) - ${epics.map((e: any) => e.targetRepository || 'unknown').join(', ')}`);
       }
-      console.log(`   Strategy: Sequential by order, parallel within same order\n`);
+      console.log(`   Strategy: 100% SEQUENTIAL (one epic at a time)\n`);
 
       NotificationService.emitConsoleLog(
         taskId,
