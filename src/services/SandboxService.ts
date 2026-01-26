@@ -96,21 +96,24 @@ export interface SandboxStatus {
  * For multi-language projects, uses the primary language's image and installs extras.
  */
 const LANGUAGE_IMAGES: Record<string, string> = {
-  // Each language has its optimal image
-  flutter: 'ghcr.io/cirruslabs/flutter:stable',
-  dart: 'ghcr.io/cirruslabs/flutter:stable',
-  nodejs: 'node:20-bookworm',
-  typescript: 'node:20-bookworm',
-  python: 'python:3.12-bookworm',
-  go: 'golang:1.22-bookworm',
-  rust: 'rust:1.75-bookworm',
-  java: 'eclipse-temurin:21-jdk',
+  // 🔥 USE OFFICIAL DOCKER HUB IMAGES ONLY
+  // NEVER use ghcr.io/cirruslabs - they have known bugs with 'flutter create'
+  flutter: 'instrumentisto/flutter:3.24', // Community standard (no official Flutter image)
+  dart: 'instrumentisto/flutter:3.24',    // Same image, includes both Flutter and Dart
+  nodejs: 'node:20-bookworm',             // OFFICIAL Docker Hub
+  typescript: 'node:20-bookworm',         // OFFICIAL Docker Hub
+  python: 'python:3.12-bookworm',         // OFFICIAL Docker Hub
+  go: 'golang:1.22-bookworm',             // OFFICIAL Docker Hub
+  rust: 'rust:1.75-bookworm',             // OFFICIAL Docker Hub
+  java: 'eclipse-temurin:21-jdk',         // OFFICIAL (Adoptium)
+  ruby: 'ruby:3.3-bookworm',              // OFFICIAL Docker Hub
+  php: 'php:8.3-apache',                  // OFFICIAL Docker Hub
+  dotnet: 'mcr.microsoft.com/dotnet/sdk:8.0', // OFFICIAL Microsoft
   // 🔥 Multi-runtime: Use Flutter image (Node.js installed at runtime)
-  // Flutter SDK is complex to install, Node.js is easy (~30s)
-  'multi-runtime': 'ghcr.io/cirruslabs/flutter:stable',
-  fullstack: 'ghcr.io/cirruslabs/flutter:stable',
+  'multi-runtime': 'instrumentisto/flutter:3.24',
+  fullstack: 'instrumentisto/flutter:3.24',
   // Default: Ubuntu with basic tools
-  default: 'ubuntu:22.04',
+  default: 'ubuntu:22.04',                // OFFICIAL Docker Hub
 };
 
 // Alias for backward compatibility
