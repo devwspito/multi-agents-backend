@@ -1081,15 +1081,25 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
 
       for (const repo of repoConfigs) {
         const repoLLM = perRepoDetection[repo.name] || llmDetected;
+
+        // 🔥 SAFETY NET: If LLM returned "flutter run", replace with build+serve
+        // "flutter run" hangs indefinitely, "flutter build web + http.server" is fast
+        let devCmd = repoLLM.devCmd;
+        if (devCmd && devCmd.includes('flutter run')) {
+          const port = repoLLM.devPort || 8080;
+          console.log(`   ⚠️ [${repo.name}] LLM returned "flutter run" - REPLACING with build+serve`);
+          devCmd = `flutter build web && python3 -m http.server ${port} --directory build/web --bind 0.0.0.0`;
+        }
+
         envConfig[repo.name] = {
           language: repoLLM.language,
           framework: repoLLM.framework,
           installCommand: repoLLM.installCmd,
-          runCommand: repoLLM.devCmd,
+          runCommand: devCmd,
           devPort: repoLLM.devPort,
           dockerImage: repoLLM.dockerImage,
         };
-        console.log(`   🔧 ${repo.name}: ${repoLLM.language} → ${repoLLM.devCmd || 'no devCmd'}`);
+        console.log(`   🔧 ${repo.name}: ${repoLLM.language} → ${devCmd || 'no devCmd'}`);
       }
 
       // 🔥 Store environmentConfig in context for direct access by downstream phases

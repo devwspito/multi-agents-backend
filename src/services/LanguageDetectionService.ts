@@ -104,6 +104,7 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
 - Flutter: "flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0"
+  ⚠️ NEVER use "flutter run" for Flutter - it hangs! ALWAYS use build+serve pattern above.
 - React/Vite: "npm run dev -- --host 0.0.0.0 --port 3000"
 - Next.js: "npm run dev"
 - Express: "npm run dev || npm start"

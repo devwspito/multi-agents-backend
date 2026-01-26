@@ -143,10 +143,11 @@ export class PlanningPhase extends BasePhase {
         let devPort = detectedLanguage.devPort;
 
         // 🔥 FALLBACK: If LLM didn't return devCmd, use defaults based on detected language
+        // NOTE: For Flutter, use build+serve (NOT flutter run which hangs)
         if (!devCmd) {
           const devDefaults: Record<string, { cmd: string; port: number }> = {
-            flutter: { cmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0', port: 8080 },
-            dart: { cmd: 'flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0', port: 8080 },
+            flutter: { cmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0', port: 8080 },
+            dart: { cmd: 'flutter build web && python3 -m http.server 8080 --directory build/web --bind 0.0.0.0', port: 8080 },
             typescript: { cmd: 'npm run dev || npm start', port: 3000 },
             node: { cmd: 'npm run dev || npm start', port: 3000 },
             python: { cmd: 'python -m flask run --host=0.0.0.0 --port=5000', port: 5000 },
