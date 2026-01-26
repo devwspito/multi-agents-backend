@@ -1262,6 +1262,14 @@ ENVEOF`);
       '--hostname', `sandbox-${instance.taskId.substring(0, 8)}`,
     ];
 
+    // 🔥 CRITICAL: Run container as host user to avoid permission issues
+    // Without this, files created in container are owned by root,
+    // and git operations on host fail with "Permission denied"
+    const uid = process.getuid?.() || 1000;
+    const gid = process.getgid?.() || 1000;
+    args.push('--user', `${uid}:${gid}`);
+    console.log(`[SandboxService] Running container as user ${uid}:${gid} (matching host user)`);
+
     // Resource limits
     if (config.memoryLimit) {
       args.push('--memory', config.memoryLimit);
