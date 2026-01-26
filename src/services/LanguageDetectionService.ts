@@ -103,10 +103,7 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
 }
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
-- Flutter (RECOMMENDED - lightweight): "flutter build web --release && cd build/web && python3 -m http.server 8080 --bind 0.0.0.0"
-  (Builds once then serves static files. Uses ~50MB RAM vs 4-8GB for hot-reload)
-- Flutter (alternative - hot-reload): "flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0"
-  (Hot-reload but uses 4-8GB RAM and loads 200+ JS modules)
+- Flutter: "flutter run -d web-server --web-port=8080 --web-hostname=0.0.0.0"
 - React/Vite: "npm run dev -- --host 0.0.0.0 --port 3000"
 - Next.js: "npm run dev"
 - Express: "npm run dev || npm start"
