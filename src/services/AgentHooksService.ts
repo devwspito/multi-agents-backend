@@ -117,6 +117,7 @@ class AgentHooksServiceClass {
         'rm -rf /',
         'rm -rf ~',
         'sudo rm',
+        'sudo docker',  // Docker doesn't need sudo if user is in docker group
         ':(){:|:&};:',  // Fork bomb
         'dd if=/dev/zero',
         '> /dev/sda',
