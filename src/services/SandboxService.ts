@@ -482,8 +482,8 @@ class SandboxService extends EventEmitter {
       return null;
     }
 
-    // 🔍 SMART CHECK: Check if sandbox already exists (using smart lookup)
-    // This handles retry/resume scenarios where sandbox was created with different ID
+    // 🔥 EXACT CHECK: Only reuse sandbox if EXACT taskId match or starts with taskId-
+    // Never use partial matching (includes) - it causes cross-task contamination
     const existingDirect = this.sandboxes.get(taskId);
     if (existingDirect && existingDirect.status === 'running') {
       console.log(`[SandboxService] Sandbox already exists for task ${taskId}`);
@@ -491,8 +491,9 @@ class SandboxService extends EventEmitter {
     }
 
     // Also check for sandboxes created with extended IDs (taskId-setup-repoName)
+    // Only EXACT prefix match, never partial/includes
     for (const [sandboxId, sb] of this.sandboxes) {
-      if ((sandboxId.startsWith(`${taskId}-`) || sandboxId.includes(taskId)) && sb.status === 'running') {
+      if (sandboxId.startsWith(`${taskId}-`) && sb.status === 'running') {
         console.log(`[SandboxService] 🔄 Found existing sandbox from previous run: ${sandboxId}`);
         return sb;
       }
@@ -737,37 +738,33 @@ class SandboxService extends EventEmitter {
    * a different ID pattern (e.g., taskId-setup-repoName)
    */
   findSandboxForTask(taskId: string): { sandboxId: string; instance: SandboxInstance } | undefined {
-    // 1️⃣ PRIORITY: Direct lookup by taskId
+    // 🔥 CRITICAL: Lookup must be EXACT to prevent cross-task contamination
+    // Never use partial matching (includes) as it can match wrong containers
+
+    // 1️⃣ PRIORITY: Direct lookup by taskId (EXACT match)
     let instance = this.sandboxes.get(taskId);
     if (instance && instance.status === 'running') {
       return { sandboxId: taskId, instance };
     }
 
-    // 2️⃣ FALLBACK: Search for setup sandboxes (taskId-setup-*)
+    // 2️⃣ FALLBACK: Search for setup sandboxes (taskId-setup-* or taskId-repoName)
+    // Only matches sandboxes that START WITH this exact taskId
     for (const [sandboxId, sb] of this.sandboxes) {
-      if (sandboxId.startsWith(`${taskId}-setup-`) && sb.status === 'running') {
-        console.log(`[SandboxService] 🔍 Found setup sandbox: ${sandboxId}`);
+      if (sandboxId.startsWith(`${taskId}-`) && sb.status === 'running') {
+        console.log(`[SandboxService] 🔍 Found related sandbox: ${sandboxId}`);
         return { sandboxId, instance: sb };
       }
     }
 
-    // 3️⃣ FALLBACK: Partial match on taskId
-    for (const [sandboxId, sb] of this.sandboxes) {
-      if (sandboxId.includes(taskId) && sb.status === 'running') {
-        console.log(`[SandboxService] 🔍 Found partial match sandbox: ${sandboxId}`);
-        return { sandboxId, instance: sb };
-      }
-    }
-
-    // 4️⃣ LAST: Return any instance even if not running (for destroy operations)
+    // 3️⃣ LAST: Return any instance even if not running (for destroy operations)
     instance = this.sandboxes.get(taskId);
     if (instance) {
       return { sandboxId: taskId, instance };
     }
 
-    // Search in non-running sandboxes too
+    // Search in non-running sandboxes (only exact prefix match)
     for (const [sandboxId, sb] of this.sandboxes) {
-      if (sandboxId.startsWith(`${taskId}-setup-`) || sandboxId.includes(taskId)) {
+      if (sandboxId.startsWith(`${taskId}-`)) {
         return { sandboxId, instance: sb };
       }
     }
