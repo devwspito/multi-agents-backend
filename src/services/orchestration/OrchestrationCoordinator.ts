@@ -813,10 +813,10 @@ export class OrchestrationCoordinator {
    * │   └── mobile/
    * └── task-{taskId}/            ← Legacy (for tasks without projectId)
    */
-  private async setupWorkspace(taskId: string, projectId: string, repositories: any[], githubToken: string): Promise<string> {
-    // 🏊 Use project-based workspace for sandbox reuse
-    // Falls back to task-based for backwards compatibility
-    const workspaceKey = projectId !== taskId ? `project-${projectId}` : `task-${taskId}`;
+  private async setupWorkspace(taskId: string, _projectId: string, repositories: any[], githubToken: string): Promise<string> {
+    // 🔥 FIX: Always use task-based workspace for consistency with cleanup
+    // Each task gets its own workspace: task-{taskId}
+    const workspaceKey = `task-${taskId}`;
     const projectWorkspace = path.join(this.workspaceDir, workspaceKey);
 
     // ⚡ FAST PATH: Check if workspace already exists with all required repos
