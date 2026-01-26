@@ -96,10 +96,10 @@ export interface SandboxStatus {
  * For multi-language projects, uses the primary language's image and installs extras.
  */
 const LANGUAGE_IMAGES: Record<string, string> = {
-  // 🔥 USE OFFICIAL DOCKER HUB IMAGES ONLY
-  // NEVER use ghcr.io/cirruslabs - they have known bugs with 'flutter create'
-  flutter: 'instrumentisto/flutter:3.24', // Community standard (no official Flutter image)
-  dart: 'instrumentisto/flutter:3.24',    // Same image, includes both Flutter and Dart
+  // 🔥 USE OFFICIAL/MULTI-ARCH DOCKER IMAGES
+  // Flutter: Use cirruslabs 3.24.0 (multi-arch, stable) - NOT :stable which has broken templates
+  flutter: 'ghcr.io/cirruslabs/flutter:3.24.0', // Multi-arch, stable version
+  dart: 'ghcr.io/cirruslabs/flutter:3.24.0',    // Same image, includes both Flutter and Dart
   nodejs: 'node:20-bookworm',             // OFFICIAL Docker Hub
   typescript: 'node:20-bookworm',         // OFFICIAL Docker Hub
   python: 'python:3.12-bookworm',         // OFFICIAL Docker Hub
@@ -110,8 +110,8 @@ const LANGUAGE_IMAGES: Record<string, string> = {
   php: 'php:8.3-apache',                  // OFFICIAL Docker Hub
   dotnet: 'mcr.microsoft.com/dotnet/sdk:8.0', // OFFICIAL Microsoft
   // 🔥 Multi-runtime: Use Flutter image (Node.js installed at runtime)
-  'multi-runtime': 'instrumentisto/flutter:3.24',
-  fullstack: 'instrumentisto/flutter:3.24',
+  'multi-runtime': 'ghcr.io/cirruslabs/flutter:3.24.0',
+  fullstack: 'ghcr.io/cirruslabs/flutter:3.24.0',
   // Default: Ubuntu with basic tools
   default: 'ubuntu:22.04',                // OFFICIAL Docker Hub
 };
