@@ -140,6 +140,90 @@ The task CANNOT proceed without a valid environment.
 Use the Bash tool to execute commands in the container and verify the environment.`;
 
 // ============================================================================
+// Sandbox Fixer Prompt - Diagnoses and fixes server startup issues
+// ============================================================================
+
+export const SANDBOX_FIXER_PROMPT = `You are the Sandbox Fixer Agent. Your job is to diagnose WHY a dev server failed to start and FIX IT.
+
+## Your Mission
+
+A dev server crashed or failed to start. You must:
+1. ANALYZE the error logs to identify the root cause
+2. FIX the issue by editing code, installing dependencies, or fixing configuration
+3. VERIFY your fix worked
+
+## Common Issues & Solutions
+
+### Node.js / Express / TypeScript
+- **Missing dependencies**: Run \`npm install\` or install specific package
+- **TypeScript errors**: Fix type errors in the code
+- **Missing .env**: Create .env from .env.example or add required vars
+- **Port conflict**: Kill process on port or use different port
+- **Module not found**: Check import paths, install missing packages
+- **nodemon crash**: Check for syntax errors, missing files
+
+### Flutter / Dart
+- **pubspec.yaml missing**: Wrong directory - find correct path
+- **Dart SDK not found**: Check PATH or reinstall Flutter
+- **Package conflicts**: Run \`flutter pub get\` or update versions
+- **Build errors**: Fix Dart syntax errors
+
+### Python / Django / FastAPI
+- **Missing virtualenv**: Create and activate venv
+- **Missing requirements**: \`pip install -r requirements.txt\`
+- **Import errors**: Fix Python imports or install packages
+
+## Your Workflow
+
+1. **READ the error logs** provided in context
+2. **IDENTIFY the root cause** (missing file? syntax error? missing package?)
+3. **FIX the issue**:
+   - If code error: Use Edit tool to fix the file
+   - If missing package: Install with sandbox_bash
+   - If missing file: Create with Write tool
+   - If missing env: Create .env file
+4. **VERIFY** by running a quick test command
+
+## Connection Checks (Proactive)
+
+After fixing, also check for common connection issues:
+- Backend .env has correct CORS settings for frontend URL
+- Frontend has correct API_URL pointing to backend
+- Database connection strings are correct (if using MongoDB, PostgreSQL, etc.)
+- Both frontend and backend use compatible ports
+
+## Response Format
+
+After fixing, output:
+\`\`\`json
+{
+  "fixed": true,
+  "rootCause": "Description of what was wrong",
+  "fixApplied": "Description of what you fixed",
+  "filesModified": ["file1.ts", "file2.dart"],
+  "readyToRetry": true
+}
+\`\`\`
+
+Or if you cannot fix:
+\`\`\`json
+{
+  "fixed": false,
+  "rootCause": "Description of the issue",
+  "reason": "Why it cannot be automatically fixed",
+  "manualAction": "What the user needs to do"
+}
+\`\`\`
+
+## CRITICAL RULES
+
+1. ALWAYS use sandbox_bash for commands (not Bash)
+2. READ files before editing
+3. Make MINIMAL changes - fix the bug, don't refactor
+4. If unsure about a fix, try it and verify
+5. Output DEVELOPER_FINISHED_SUCCESSFULLY when done`;
+
+// ============================================================================
 // ExecuteAgent Function Type
 // ============================================================================
 
@@ -1319,7 +1403,7 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         };
       }
 
-      // Start and WAIT for each repo's server
+      // 🔥 Start and WAIT for each repo's server (WITH FIXER RETRY)
       for (const [repoName, config] of Object.entries(envConfig)) {
         const repoConfig = config as any;
         const devCmd = repoConfig.runCommand;
@@ -1335,6 +1419,9 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         console.log(`\n   🚀 [${repoName}] Compiling...`);
         console.log(`      Command: ${devCmd}`);
         console.log(`      Port: ${devPort}`);
+        if (Object.keys(serviceEnvVars).length > 0) {
+          console.log(`      🔗 Services: ${Object.keys(serviceEnvVars).join(', ')}`);
+        }
 
         NotificationService.emitConsoleLog(
           taskId,
@@ -1346,128 +1433,48 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         const hostPort = sandbox.mappedPorts?.[devPort.toString()] || devPort;
 
         try {
-          // Start server in background using setsid (creates new session, survives docker exec exit)
-          const logFile = `/tmp/${repoName}-server.log`;
+          // 🔥 USE FIXER RETRY: If server fails, run Fixer and retry
+          const result = await this.startServerWithFixerRetry(
+            taskId,
+            repoName,
+            repoDir,
+            devCmd,
+            devPort,
+            sandbox,
+            serviceEnvVars,
+            workspacePath,
+            context
+          );
 
-          // 🔥 Inject service environment variables (MongoDB, Redis, etc.)
-          let envPrefix = '';
-          if (Object.keys(serviceEnvVars).length > 0) {
-            envPrefix = Object.entries(serviceEnvVars)
-              .map(([key, value]) => `${key}="${value}"`)
-              .join(' ') + ' ';
-            console.log(`      🔗 Injecting: ${Object.keys(serviceEnvVars).join(', ')}`);
-          }
+          // Add fixer cost to total
+          totalCost += result.fixerCost;
 
-          const startCmd = `setsid bash -c 'cd ${repoDir} && ${envPrefix}${devCmd}' > ${logFile} 2>&1 &`;
-          await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
-
-          // Give it a moment to start
-          await new Promise(resolve => setTimeout(resolve, 2000));
-
-          // 🔥 SIMPLE: Just use curl to check if server responds
-          const MAX_WAIT_MS = 420000; // 7 minutes for slow Flutter builds
-          const POLL_INTERVAL_MS = 10000; // Check every 10 seconds
-          const startTime = Date.now();
-          let serverReady = false;
-          let compilationError = false;
-          let lastLogs = '';
-
-          console.log(`      🔍 [${repoName}] Waiting for HTTP response on port ${devPort}...`);
-
-          while (Date.now() - startTime < MAX_WAIT_MS && !serverReady && !compilationError) {
-            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-
-            // 🔥 SIMPLE: Just curl the port directly
-            try {
-              const curlCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${devPort}/ 2>/dev/null || echo "000"`;
-              const curlResult = await sandboxService.exec(taskId, curlCmd, { cwd: '/workspace', timeout: 15000 });
-              const statusCode = parseInt(curlResult.stdout.trim()) || 0;
-
-              if (statusCode > 0 && statusCode < 600) {
-                serverReady = true;
-                console.log(`      ✅ [${repoName}] Server responding on port ${devPort} (HTTP ${statusCode})!`);
-              }
-            } catch {
-              // Curl failed, server not ready yet
-            }
-
-            // Check logs for fatal errors
-            if (!serverReady) {
-              try {
-                const logsResult = await sandboxService.exec(taskId, `tail -30 /tmp/${repoName}-server.log 2>/dev/null || echo ""`, {
-                  cwd: '/workspace', timeout: 5000,
-                });
-                lastLogs = logsResult.stdout || '';
-
-                // Fatal errors
-                if (lastLogs.includes('ENOENT') || lastLogs.includes('Cannot find module') ||
-                    lastLogs.includes('SyntaxError') || lastLogs.includes('MODULE_NOT_FOUND') ||
-                    lastLogs.includes('pubspec.yaml not found') || lastLogs.includes('No pubspec.yaml') ||
-                    lastLogs.includes('Error: Could not find') || lastLogs.includes('FAILURE:')) {
-                  compilationError = true;
-                  console.log(`      ❌ [${repoName}] FATAL error in logs!`);
-                  console.log(`         ${lastLogs.split('\n').slice(-3).join(' | ').substring(0, 200)}`);
-                }
-              } catch { /* ignore */ }
-            }
-
-            // Progress update
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            if (!serverReady && !compilationError) {
-              let progressLine = '';
-              try {
-                const tail = await sandboxService.exec(taskId, `tail -1 /tmp/${repoName}-server.log 2>/dev/null`, { cwd: '/workspace', timeout: 3000 });
-                progressLine = (tail.stdout || '').trim().substring(0, 60);
-              } catch { /* ignore */ }
-              console.log(`      ⏳ [${repoName}] ${elapsed}s... ${progressLine}`);
-            }
-          }
-
-          // Already verified by curl
-          let verified = serverReady;
-          if (!serverReady && !compilationError) {
-            // Final attempt
-            try {
-              const finalCurl = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 http://localhost:${devPort}/ 2>/dev/null || echo "000"`;
-              const finalResult = await sandboxService.exec(taskId, finalCurl, { cwd: '/workspace', timeout: 20000 });
-              const code = parseInt(finalResult.stdout.trim()) || 0;
-              if (code > 0 && code < 600) {
-                serverReady = true;
-                verified = true;
-                console.log(`      ✅ [${repoName}] Final check: Server ready (HTTP ${code})!`);
-              }
-            } catch {
-              console.log(`      ❌ [${repoName}] Final check failed`);
-            }
-          }
-
-          // Store result
-          if (serverReady && verified) {
+          if (result.verified) {
             serverResults[repoName] = {
-              started: true, verified: true,
-              url: `http://localhost:${hostPort}`, port: devPort,
+              started: true,
+              verified: true,
+              url: result.url,
+              port: devPort,
             };
-            NotificationService.emitDevServerReady(taskId, `http://localhost:${hostPort}`, repoConfig.framework || 'unknown');
-            NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoName}] Ready at http://localhost:${hostPort}`);
+            NotificationService.emitDevServerReady(taskId, result.url || `http://localhost:${hostPort}`, repoConfig.framework || 'unknown');
+            NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoName}] Ready at ${result.url}`);
           } else {
-            // Extract error message
-            const errorMatch = lastLogs.match(/Error:.*$/m) || lastLogs.match(/error:.*$/m) ||
-                              lastLogs.match(/Cannot find module.*$/m) || lastLogs.match(/Exception:.*$/m);
-            const errorMsg = errorMatch ? errorMatch[0].substring(0, 300) : 'Compilation failed or timeout';
-
             serverResults[repoName] = {
-              started: false, verified: false,
-              url: `http://localhost:${hostPort}`, port: devPort,
-              error: errorMsg,
-              compilationLogs: lastLogs.substring(0, 1500),
+              started: false,
+              verified: false,
+              url: result.url,
+              port: devPort,
+              error: result.error,
+              compilationLogs: result.compilationLogs,
             };
-            NotificationService.emitConsoleLog(taskId, 'error', `❌ [${repoName}] ${errorMsg.substring(0, 100)}`);
+            NotificationService.emitConsoleLog(taskId, 'error', `❌ [${repoName}] ${result.error?.substring(0, 100)}`);
           }
 
         } catch (err: any) {
           console.log(`      ❌ [${repoName}] Exception: ${err.message}`);
           serverResults[repoName] = {
-            started: false, verified: false,
+            started: false,
+            verified: false,
             error: err.message,
           };
         }
@@ -1591,6 +1598,308 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
         metadata: { cost: totalCost },
       };
     }
+  }
+
+  // ==========================================================================
+  // SANDBOX FIXER: Diagnoses and fixes server startup issues
+  // ==========================================================================
+
+  private async runSandboxFixer(
+    taskId: string,
+    repoName: string,
+    repoDir: string,
+    error: string,
+    compilationLogs: string,
+    workspacePath: string,
+    context: OrchestrationContext
+  ): Promise<{
+    fixed: boolean;
+    rootCause?: string;
+    fixApplied?: string;
+    filesModified?: string[];
+    reason?: string;
+    cost: number;
+  }> {
+    console.log(`\n   🔧 [SandboxFixer] Attempting to fix ${repoName}...`);
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `🔧 [${repoName}] Running Fixer to diagnose and fix...`
+    );
+
+    // Build context for the fixer
+    const fixerPrompt = `${SANDBOX_FIXER_PROMPT}
+
+## Server That Failed
+
+**Repository**: ${repoName}
+**Working Directory**: ${repoDir}
+**Sandbox ID**: ${taskId}
+
+## Error Information
+
+**Error Message**:
+\`\`\`
+${error}
+\`\`\`
+
+**Compilation Logs** (last 1500 chars):
+\`\`\`
+${compilationLogs || 'No logs captured'}
+\`\`\`
+
+## Your Task
+
+1. Analyze the error above
+2. Use sandbox_bash to investigate (read files, check processes, etc.)
+3. Fix the issue
+4. Verify your fix worked
+5. Return your result as JSON
+
+Remember: Use sandbox_bash for ALL commands (sandbox ID: ${taskId})
+Working directory: ${repoDir}`;
+
+    try {
+      const fixerResult = await this.executeAgent(
+        'fixer',  // Use fixer agent type
+        fixerPrompt,
+        workspacePath,
+        taskId,
+        `sandbox-fixer-${repoName}`,
+        undefined,
+        false,
+        undefined,
+        { sandboxId: taskId },
+        context
+      );
+
+      const cost = fixerResult.cost || 0;
+
+      // Parse fixer response
+      let fixed = false;
+      let rootCause = '';
+      let fixApplied = '';
+      let filesModified: string[] = [];
+      let reason = '';
+
+      try {
+        const jsonMatch = fixerResult.output.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[1]);
+          fixed = parsed.fixed === true;
+          rootCause = parsed.rootCause || '';
+          fixApplied = parsed.fixApplied || '';
+          filesModified = parsed.filesModified || [];
+          reason = parsed.reason || parsed.manualAction || '';
+        } else {
+          // Try direct parse
+          const parsed = JSON.parse(fixerResult.output.trim());
+          fixed = parsed.fixed === true;
+          rootCause = parsed.rootCause || '';
+          fixApplied = parsed.fixApplied || '';
+          filesModified = parsed.filesModified || [];
+          reason = parsed.reason || parsed.manualAction || '';
+        }
+      } catch {
+        // Fallback: look for keywords
+        const output = fixerResult.output.toLowerCase();
+        fixed = output.includes('"fixed": true') || output.includes('"fixed":true');
+        rootCause = 'Response parsing failed';
+      }
+
+      if (fixed) {
+        console.log(`   ✅ [SandboxFixer] Fix applied!`);
+        console.log(`      Root cause: ${rootCause}`);
+        console.log(`      Fix: ${fixApplied}`);
+        if (filesModified.length > 0) {
+          console.log(`      Files: ${filesModified.join(', ')}`);
+        }
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `✅ [${repoName}] Fixed: ${rootCause} → ${fixApplied}`
+        );
+      } else {
+        console.log(`   ⚠️ [SandboxFixer] Could not fix automatically`);
+        console.log(`      Root cause: ${rootCause}`);
+        console.log(`      Reason: ${reason}`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'warn',
+          `⚠️ [${repoName}] Cannot auto-fix: ${reason}`
+        );
+      }
+
+      return { fixed, rootCause, fixApplied, filesModified, reason, cost };
+    } catch (err: any) {
+      console.error(`   ❌ [SandboxFixer] Exception: ${err.message}`);
+      return { fixed: false, reason: err.message, cost: 0 };
+    }
+  }
+
+  // ==========================================================================
+  // START SERVER WITH FIXER RETRY
+  // ==========================================================================
+
+  private async startServerWithFixerRetry(
+    taskId: string,
+    repoName: string,
+    repoDir: string,
+    devCmd: string,
+    devPort: number,
+    sandbox: any,
+    serviceEnvVars: Record<string, string>,
+    workspacePath: string,
+    context: OrchestrationContext
+  ): Promise<{
+    started: boolean;
+    verified: boolean;
+    url?: string;
+    port?: number;
+    error?: string;
+    compilationLogs?: string;
+    fixerCost: number;
+  }> {
+    const MAX_FIXER_ATTEMPTS = 2; // Max times to run fixer
+    let fixerCost = 0;
+    let lastError = '';
+    let lastLogs = '';
+
+    for (let attempt = 1; attempt <= MAX_FIXER_ATTEMPTS + 1; attempt++) {
+      const isRetry = attempt > 1;
+      if (isRetry) {
+        console.log(`\n   🔄 [${repoName}] Retry ${attempt - 1}/${MAX_FIXER_ATTEMPTS} after fix...`);
+        NotificationService.emitConsoleLog(
+          taskId,
+          'info',
+          `🔄 [${repoName}] Retrying server start (attempt ${attempt - 1}/${MAX_FIXER_ATTEMPTS})...`
+        );
+      }
+
+      // Kill any previous server process on this port
+      await sandboxService.exec(taskId, `pkill -f "port.*${devPort}" 2>/dev/null || fuser -k ${devPort}/tcp 2>/dev/null || true`, {
+        cwd: '/workspace',
+        timeout: 10000,
+      });
+
+      // Wait a moment
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Start server
+      const logFile = `/tmp/${repoName}-server.log`;
+      let envPrefix = '';
+      if (Object.keys(serviceEnvVars).length > 0) {
+        envPrefix = Object.entries(serviceEnvVars)
+          .map(([key, value]) => `${key}="${value}"`)
+          .join(' ') + ' ';
+      }
+
+      const startCmd = `setsid bash -c 'cd ${repoDir} && ${envPrefix}${devCmd}' > ${logFile} 2>&1 &`;
+      await sandboxService.exec(taskId, startCmd, { cwd: repoDir, timeout: 30000 });
+
+      // Wait for compilation
+      const MAX_WAIT_MS = 420000; // 7 minutes
+      const POLL_INTERVAL_MS = 10000;
+      const startTime = Date.now();
+      let serverReady = false;
+      let compilationError = false;
+
+      console.log(`      🔍 [${repoName}] Waiting for HTTP response on port ${devPort}...`);
+
+      while (Date.now() - startTime < MAX_WAIT_MS && !serverReady && !compilationError) {
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+        // Check if server responds
+        try {
+          const curlCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${devPort}/ 2>/dev/null || echo "000"`;
+          const curlResult = await sandboxService.exec(taskId, curlCmd, { cwd: '/workspace', timeout: 15000 });
+          const statusCode = parseInt(curlResult.stdout.trim()) || 0;
+
+          if (statusCode > 0 && statusCode < 600) {
+            serverReady = true;
+            console.log(`      ✅ [${repoName}] Server responding on port ${devPort} (HTTP ${statusCode})!`);
+          }
+        } catch { /* Server not ready */ }
+
+        // Check for fatal errors in logs
+        if (!serverReady) {
+          try {
+            const logsResult = await sandboxService.exec(taskId, `tail -50 ${logFile} 2>/dev/null || echo ""`, {
+              cwd: '/workspace', timeout: 5000,
+            });
+            lastLogs = logsResult.stdout || '';
+
+            // Detect fatal errors
+            if (lastLogs.includes('ENOENT') || lastLogs.includes('Cannot find module') ||
+                lastLogs.includes('SyntaxError') || lastLogs.includes('MODULE_NOT_FOUND') ||
+                lastLogs.includes('pubspec.yaml not found') || lastLogs.includes('Error: Could not find') ||
+                lastLogs.includes('FAILURE:') || lastLogs.includes('app crashed') ||
+                lastLogs.includes('TypeError') || lastLogs.includes('ReferenceError') ||
+                lastLogs.includes('error TS') || lastLogs.includes('Exception:')) {
+              compilationError = true;
+              console.log(`      ❌ [${repoName}] Fatal error detected in logs`);
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Progress
+        if (!serverReady && !compilationError) {
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          console.log(`      ⏳ [${repoName}] ${elapsed}s...`);
+        }
+      }
+
+      // Extract error message
+      const errorMatch = lastLogs.match(/Error:.*$/m) || lastLogs.match(/error:.*$/m) ||
+                        lastLogs.match(/Cannot find module.*$/m) || lastLogs.match(/Exception:.*$/m) ||
+                        lastLogs.match(/SyntaxError:.*$/m) || lastLogs.match(/TypeError:.*$/m);
+      lastError = errorMatch ? errorMatch[0].substring(0, 300) : 'Compilation failed or timeout';
+
+      // If server started, return success
+      if (serverReady) {
+        const hostPort = sandbox.mappedPorts?.[devPort.toString()] || devPort;
+        return {
+          started: true,
+          verified: true,
+          url: `http://localhost:${hostPort}`,
+          port: devPort,
+          fixerCost,
+        };
+      }
+
+      // Server failed - if we haven't exhausted fixer attempts, run fixer
+      if (attempt <= MAX_FIXER_ATTEMPTS) {
+        const fixerResult = await this.runSandboxFixer(
+          taskId,
+          repoName,
+          repoDir,
+          lastError,
+          lastLogs.substring(0, 1500),
+          workspacePath,
+          context
+        );
+        fixerCost += fixerResult.cost;
+
+        if (!fixerResult.fixed) {
+          // Fixer couldn't fix it, no point retrying
+          console.log(`   ⚠️ [${repoName}] Fixer couldn't fix - stopping retries`);
+          break;
+        }
+        // Fixer applied fix, retry starting server
+      }
+    }
+
+    // All attempts exhausted
+    const hostPort = sandbox.mappedPorts?.[devPort.toString()] || devPort;
+    return {
+      started: false,
+      verified: false,
+      url: `http://localhost:${hostPort}`,
+      port: devPort,
+      error: lastError,
+      compilationLogs: lastLogs.substring(0, 1500),
+      fixerCost,
+    };
   }
 }
 
