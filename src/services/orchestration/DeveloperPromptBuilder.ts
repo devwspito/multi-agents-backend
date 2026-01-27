@@ -6,6 +6,7 @@
  */
 
 import { NotificationService } from '../NotificationService';
+import { getRoleInstructions, getInstructionSection, TEST_CREDENTIALS, LOCAL_DB_CONNECTIONS } from '../../agents/ReadmeSystem';
 
 export interface DeveloperPromptContext {
   story: any;
@@ -30,6 +31,9 @@ export class DeveloperPromptBuilder {
    */
   static async build(ctx: DeveloperPromptContext): Promise<string> {
     const parts: string[] = [];
+
+    // 0. System instructions (isolation, self-sufficiency)
+    parts.push(this.buildSystemInstructionsSection());
 
     // 1. Header with philosophy
     parts.push(this.buildHeader(ctx));
@@ -80,6 +84,70 @@ export class DeveloperPromptBuilder {
     parts.push(this.buildGitWorkflowSection(ctx));
 
     return parts.join('\n\n');
+  }
+
+  /**
+   * Build system instructions section - Isolation rules and self-sufficiency
+   */
+  private static buildSystemInstructionsSection(): string {
+    // Get role-specific instructions for developer
+    const roleInstructions = getRoleInstructions('developer');
+
+    // Get isolation rules (critical for safety)
+    const isolationRules = getInstructionSection('isolation');
+
+    return `# 🤖 MULTI-AGENT SYSTEM - DEVELOPER INSTRUCTIONS
+
+${roleInstructions}
+
+---
+
+## 🔒 CRITICAL: ISOLATION RULES
+
+${isolationRules}
+
+---
+
+## 🧪 SELF-SUFFICIENCY: You Create Your Own Test Data
+
+**You are FULLY RESPONSIBLE for creating any test data you need.**
+
+If the project requires authentication to work:
+
+### Step 1: Check if test user exists
+\`\`\`bash
+# Look for existing seeds or test data
+grep -r "seed" --include="*.ts" --include="*.js" package.json || true
+\`\`\`
+
+### Step 2: If no seed exists, CREATE ONE
+- Find the user model/schema
+- Create a seed script or insert directly
+- Use these standard credentials:
+
+| Purpose | Email | Password |
+|---------|-------|----------|
+| Test User | ${TEST_CREDENTIALS.user.email} | ${TEST_CREDENTIALS.user.password} |
+| Admin User | ${TEST_CREDENTIALS.admin.email} | ${TEST_CREDENTIALS.admin.password} |
+
+### Step 3: Get auth token for testing
+\`\`\`bash
+# Example: Login and get token
+curl -X POST http://localhost:3000/api/auth/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"${TEST_CREDENTIALS.user.email}","password":"${TEST_CREDENTIALS.user.password}"}'
+\`\`\`
+
+### Database Connections (LOCAL ONLY!)
+| Database | Local Connection String |
+|----------|------------------------|
+| MongoDB | ${LOCAL_DB_CONNECTIONS.mongodb} |
+| PostgreSQL | ${LOCAL_DB_CONNECTIONS.postgresql} |
+| MySQL | ${LOCAL_DB_CONNECTIONS.mysql} |
+| Redis | ${LOCAL_DB_CONNECTIONS.redis} |
+
+**⚠️ NEVER use production database URLs from .env!**
+`;
   }
 
   private static buildHeader(ctx: DeveloperPromptContext): string {
