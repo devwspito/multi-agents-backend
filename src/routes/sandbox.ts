@@ -11,6 +11,7 @@ import path from 'path';
 import os from 'os';
 import { sandboxService } from '../services/SandboxService.js';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
+import { eventStore } from '../services/EventStore.js';
 
 const router = Router();
 
@@ -150,6 +151,138 @@ router.post('/destroy/:taskId', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to destroy sandbox',
+    });
+  }
+});
+
+/**
+ * POST /api/sandbox/relaunch/:taskId
+ * Re-launch a sandbox for an existing task (even if completed/failed days ago)
+ *
+ * This allows users to:
+ * - Revisit completed projects in IDE + Preview
+ * - Make quick changes via Lite Team
+ * - Manually edit and commit/push
+ *
+ * The workspace directory must still exist on disk.
+ */
+router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { startDevServer = false } = req.body;
+
+    console.log(`[Sandbox API] 🔄 Relaunch requested for task ${taskId}`);
+
+    // 1. Check if sandbox already exists and is running
+    const existing = sandboxService.findSandboxForTask(taskId);
+    if (existing && existing.instance.status === 'running') {
+      console.log(`   ✅ Sandbox already running: ${existing.instance.containerId?.substring(0, 12)}`);
+      return res.json({
+        success: true,
+        reused: true,
+        sandbox: {
+          taskId,
+          containerId: existing.instance.containerId?.substring(0, 12),
+          containerName: existing.instance.containerName,
+          status: existing.instance.status,
+          workspacePath: existing.instance.workspacePath,
+          mappedPorts: existing.instance.mappedPorts,
+        },
+      });
+    }
+
+    // 2. Get workspace info from EventStore
+    const state = await eventStore.getCurrentState(taskId);
+    const workspace = state.workspaces?.[0];
+
+    if (!workspace) {
+      return res.status(404).json({
+        success: false,
+        error: 'No workspace found in EventStore for this task. The task may not have been executed yet.',
+      });
+    }
+
+    const workspacePath = workspace.repoLocalPath || workspace.workspacePath;
+
+    // 3. Verify workspace directory exists on disk
+    if (!fs.existsSync(workspacePath)) {
+      return res.status(404).json({
+        success: false,
+        error: `Workspace directory not found: ${workspacePath}. It may have been deleted.`,
+      });
+    }
+
+    console.log(`   📁 Workspace found: ${workspacePath}`);
+
+    // 4. Detect language/framework from workspace
+    let language = 'nodejs';
+    if (fs.existsSync(path.join(workspacePath, 'pubspec.yaml'))) {
+      language = 'flutter';
+    } else if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
+      language = 'nodejs';
+    } else if (fs.existsSync(path.join(workspacePath, 'requirements.txt'))) {
+      language = 'python';
+    }
+
+    console.log(`   🔧 Detected language: ${language}`);
+
+    // 5. Create new sandbox with existing workspace
+    const instance = await sandboxService.createSandbox(
+      taskId,
+      workspacePath,
+      language,
+      undefined, // Use default config
+      workspace.targetRepository || undefined
+    );
+
+    if (!instance) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create sandbox. Docker may not be available.',
+      });
+    }
+
+    console.log(`   ✅ Sandbox relaunched: ${instance.containerId?.substring(0, 12)}`);
+
+    // 6. Optionally start dev server
+    let devServerStarted = false;
+    if (startDevServer) {
+      try {
+        const envConfig = state.environmentConfig || {};
+        const firstConfig = Object.values(envConfig)[0] as any;
+        const devCmd = firstConfig?.devCmd;
+
+        if (devCmd) {
+          console.log(`   🚀 Starting dev server: ${devCmd}`);
+          // Run in background (don't await)
+          sandboxService.exec(taskId, `cd /workspace && ${devCmd}`, { timeout: 300000 })
+            .catch(err => console.warn(`   ⚠️ Dev server error: ${err.message}`));
+          devServerStarted = true;
+        }
+      } catch (err: any) {
+        console.warn(`   ⚠️ Could not start dev server: ${err.message}`);
+      }
+    }
+
+    return res.json({
+      success: true,
+      reused: false,
+      devServerStarted,
+      sandbox: {
+        taskId,
+        containerId: instance.containerId?.substring(0, 12),
+        containerName: instance.containerName,
+        status: instance.status,
+        workspacePath: instance.workspacePath,
+        mappedPorts: instance.mappedPorts,
+        language,
+      },
+    });
+  } catch (error: any) {
+    console.error('[Sandbox API] Error relaunching sandbox:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to relaunch sandbox',
     });
   }
 });
