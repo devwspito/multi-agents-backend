@@ -28,6 +28,7 @@ import {
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { safeGitExecSync } from '../../utils/safeGitExecution';
+import { getRoleInstructions } from '../../agents/ReadmeSystem';
 
 // Git timeout for push operations (2 minutes)
 const PUSH_TIMEOUT = 120000;
@@ -340,7 +341,14 @@ export class ConflictResolverPhase extends BasePhase {
       }
     }
 
-    return `# 🔧 GIT CONFLICT RESOLUTION TASK
+    // 🧠 CEREBRO: Inject role consciousness
+    const roleInstructions = getRoleInstructions('conflict_resolver');
+
+    return `${roleInstructions}
+
+---
+
+# 🔧 GIT CONFLICT RESOLUTION TASK
 
 ## Context
 - **Story**: ${story?.title || 'Unknown'}

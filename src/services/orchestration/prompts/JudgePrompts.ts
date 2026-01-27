@@ -11,6 +11,7 @@
  */
 
 import { ProjectRadiographyService, ProjectRadiography } from '../../ProjectRadiographyService';
+import { getRoleInstructions } from '../../../agents/ReadmeSystem';
 
 // ============================================================================
 // 📋 PLANNING JUDGE PROMPT
@@ -29,7 +30,14 @@ export function buildPlanningJudgePrompt(ctx: PlanningJudgeContext): string {
     return `- ${repo.name} (${repo.type}): ${ctx.workspacePath}/${repo.name}`;
   }).join('\n');
 
-  return `You are a STRICT Planning Judge with access to READ THE ACTUAL CODEBASE.
+  // 🧠 CEREBRO: Inject role consciousness
+  const roleInstructions = getRoleInstructions('judge');
+
+  return `${roleInstructions}
+
+---
+
+You are a STRICT Planning Judge with access to READ THE ACTUAL CODEBASE.
 
 ## YOUR MISSION
 Evaluate if the Planning Agent's epics FULLY cover the user's requirements.
@@ -135,7 +143,14 @@ export function buildTechLeadJudgePrompt(ctx: TechLeadJudgeContext): string {
   const isMultiEpicTask = (ctx.totalEpicsInTask || 1) > 1;
   const currentEpicIndex = ctx.currentEpicIndex || 1;
 
-  return `You are a STRICT TechLead Judge with access to READ THE ACTUAL CODEBASE.
+  // 🧠 CEREBRO: Inject role consciousness
+  const roleInstructions = getRoleInstructions('judge');
+
+  return `${roleInstructions}
+
+---
+
+You are a STRICT TechLead Judge with access to READ THE ACTUAL CODEBASE.
 
 ## YOUR MISSION
 Evaluate if the Tech Lead's architecture and stories are valid and implementable.
@@ -272,7 +287,14 @@ export function buildDeveloperJudgePrompt(ctx: DeveloperJudgeContext): string {
   // Build full repository path - now we know workspacePath is valid
   const fullRepoPath = `${workspacePath}/${targetRepository}`;
 
-  return `# ⚖️ JUDGE AGENT - CODE REVIEW
+  // 🧠 CEREBRO: Inject role consciousness
+  const roleInstructions = getRoleInstructions('judge');
+
+  return `${roleInstructions}
+
+---
+
+# ⚖️ JUDGE AGENT - CODE REVIEW
 
 ## 🚨🚨🚨 CRITICAL: WORKSPACE PATH 🚨🚨🚨
 **ALL file operations MUST use this repository path:**
