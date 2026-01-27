@@ -31,6 +31,7 @@ import { createAutonomousToolsServer } from '../../tools/autonomousTools';
 // 🐳 Sandbox Service for Docker container execution
 import { sandboxService } from '../SandboxService';
 import { dockerBashHook, setDockerHookContext } from '../DockerBashHook';
+import { setSandboxContext, clearSandboxContext } from '../../tools/categories/sandboxTools';
 
 // Smart Context & Memory
 import { SmartContextInjector, AgentPhase } from '../SmartContextInjector';
@@ -488,10 +489,17 @@ export class AgentExecutorService {
           }
 
           if (containerName) {
-            // Set context for the Docker hook
+            // Set context for the Docker hook (for Bash tool interception)
             setDockerHookContext({
               taskId,
               containerName,
+              workspacePath: '/workspace',
+            });
+
+            // 🔧 FIX: Also set context for sandbox_bash tool (uses different context)
+            setSandboxContext({
+              taskId,
+              sandboxId: taskId,  // sandbox_bash uses taskId to find sandbox
               workspacePath: '/workspace',
             });
 
@@ -903,6 +911,7 @@ export class AgentExecutorService {
         // 🐳 CLEANUP: Clear Docker hook context after successful execution
         if (sandboxContextConfigured) {
           setDockerHookContext(null);
+          clearSandboxContext();  // 🔧 FIX: Also clear sandbox_bash context
           console.log(`🐳 [AgentExecutor] Docker hook context cleared for ${agentType}`);
         }
 
@@ -928,6 +937,7 @@ export class AgentExecutorService {
         // 🐳 CLEANUP: Clear Docker hook context on error
         if (sandboxContextConfigured) {
           setDockerHookContext(null);
+          clearSandboxContext();  // 🔧 FIX: Also clear sandbox_bash context
         }
 
         console.error(`❌ [AgentExecutor] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
