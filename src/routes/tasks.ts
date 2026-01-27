@@ -15,6 +15,10 @@ import { unifiedMemoryService } from '../services/UnifiedMemoryService';
 // 🔥 EventStore - For persisting approval events (critical for resume)
 import { eventStore } from '../services/EventStore';
 
+// 🔥 Sandbox and Notifications - For manual rebuild
+import { sandboxService } from '../services/SandboxService';
+import { NotificationService } from '../services/NotificationService';
+
 const router = Router();
 // Shared orchestration coordinator instance
 const orchestrationCoordinator = new OrchestrationCoordinator();
@@ -2940,5 +2944,119 @@ router.post('/:id/sync-to-mongodb', authenticate, async (req: AuthRequest, res) 
 // - POST /:id/git/commit
 // - POST /:id/git/push
 // All state is now stored in SQLite via task.orchestration field
+
+/**
+ * 🔨 POST /api/tasks/:id/rebuild
+ *
+ * Manual rebuild trigger for LivePreview.
+ * Executes the rebuildCmd from environmentConfig in the sandbox.
+ * Used when auto-rebuild fails or user wants to force a rebuild.
+ */
+router.post('/:id/rebuild', authenticate, async (req: AuthRequest, res) => {
+  const taskId = req.params.id;
+  console.log(`🔨 [API] Manual rebuild requested for task ${taskId}`);
+
+  try {
+    // 1. Get task to find sandboxId
+    const task = await TaskRepository.findById(taskId);
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Task not found' });
+      return;
+    }
+
+    const sandboxId = (task as any).sandboxId;
+    if (!sandboxId) {
+      res.status(400).json({ success: false, message: 'No sandbox running for this task' });
+      return;
+    }
+
+    // 2. Get rebuildCmd from EventStore
+    const state = await eventStore.getCurrentState(taskId as any);
+    const envConfig = state.environmentConfig || {};
+
+    // Find the first repo with a rebuildCmd
+    let rebuildCmd: string | undefined;
+    let framework = 'unknown';
+    let repoName = '';
+
+    for (const [name, config] of Object.entries(envConfig)) {
+      const cfg = config as any;
+      if (cfg.rebuildCmd && !cfg.rebuildCmd.startsWith('echo ')) {
+        rebuildCmd = cfg.rebuildCmd;
+        framework = cfg.framework || cfg.language || 'unknown';
+        repoName = name;
+        break;
+      }
+    }
+
+    if (!rebuildCmd) {
+      res.status(400).json({
+        success: false,
+        message: 'No rebuildCmd configured for this task (HMR project or not detected)',
+      });
+      return;
+    }
+
+    // 3. Emit rebuild_started notification
+    NotificationService.emitNotification(taskId, 'rebuild_started', {
+      framework,
+      message: `Manual rebuild triggered for ${framework}...`,
+    });
+
+    // 4. Execute rebuild in sandbox
+    const startTime = Date.now();
+    const result = await sandboxService.exec(sandboxId, rebuildCmd, {
+      cwd: '/workspace',
+      timeout: 300000, // 5 minutes
+    });
+    const duration = Math.round((Date.now() - startTime) / 1000);
+
+    // 5. Emit result notification
+    if (result.exitCode === 0) {
+      console.log(`   ✅ [Rebuild] ${framework} rebuild completed in ${duration}s`);
+
+      NotificationService.emitNotification(taskId, 'rebuild_complete', {
+        framework,
+        success: true,
+        duration,
+        message: `${framework} rebuild complete! Refreshing preview...`,
+      });
+
+      res.json({
+        success: true,
+        message: `Rebuild completed in ${duration}s`,
+        data: { framework, duration, repoName },
+      });
+    } else {
+      console.warn(`   ⚠️ [Rebuild] ${framework} rebuild failed (exit ${result.exitCode})`);
+
+      NotificationService.emitNotification(taskId, 'rebuild_complete', {
+        framework,
+        success: false,
+        error: result.stderr?.substring(0, 200) || 'Build failed',
+        message: `${framework} rebuild failed`,
+      });
+
+      res.status(500).json({
+        success: false,
+        message: 'Rebuild failed',
+        error: result.stderr?.substring(0, 500),
+      });
+    }
+  } catch (error: any) {
+    console.error(`❌ [Rebuild] Error: ${error.message}`);
+
+    NotificationService.emitNotification(taskId, 'rebuild_complete', {
+      success: false,
+      error: error.message,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Rebuild failed',
+      error: error.message,
+    });
+  }
+});
 
 export default router;
