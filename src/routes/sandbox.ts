@@ -398,14 +398,17 @@ router.post('/cleanup', async (req: Request, res: Response) => {
  *
  * This runs OUTSIDE the orchestrator - no epic/story required.
  * The agent will:
- * 1. Execute the user's task
- * 2. Auto-commit and push when done
- * 3. Stream output via WebSocket
+ * 1. Execute the user's task (NO commit/push - user does manually)
+ * 2. Stream output via WebSocket
+ *
+ * @body command - Task description (required)
+ * @body model - Model to use: 'opus' | 'sonnet' | 'haiku' (default: sonnet)
+ * @body enableJudge - Run Judge review after (optional)
  */
 router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
   try {
     const { taskId } = req.params;
-    const { command, enableJudge, commitMessage } = req.body;
+    const { command, enableJudge, model } = req.body;
 
     // Validate required field
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -415,7 +418,11 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
       });
     }
 
-    console.log(`[Sandbox API] Quick task for ${taskId}: "${command.substring(0, 50)}..."`);
+    // Validate model if provided
+    const validModels = ['opus', 'sonnet', 'haiku'];
+    const selectedModel = validModels.includes(model) ? model : 'sonnet';
+
+    console.log(`[Sandbox API] Quick task for ${taskId}: "${command.substring(0, 50)}..." | Model: ${selectedModel}`);
 
     // Import QuickDevService dynamically to avoid circular dependencies
     const { quickDevService } = await import('../services/QuickDevService.js');
@@ -426,9 +433,9 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
       taskId,
       command: command.trim(),
       enableJudge: enableJudge === true,
-      commitMessage,
+      model: selectedModel,
     }).then(result => {
-      console.log(`[Sandbox API] Quick task completed: success=${result.success}`);
+      console.log(`[Sandbox API] Quick task completed: success=${result.success}, model=${selectedModel}`);
     }).catch(err => {
       console.error(`[Sandbox API] Quick task failed:`, err);
     });
@@ -439,6 +446,7 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
       message: 'Quick task started. Output will stream via WebSocket.',
       taskId,
       command: command.trim(),
+      model: selectedModel,
     });
 
   } catch (error: any) {
