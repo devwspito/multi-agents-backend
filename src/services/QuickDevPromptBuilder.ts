@@ -3,6 +3,8 @@
  *
  * Builds minimal prompts for quick developer tasks in the Lite Team feature.
  * This is intentionally simple - no epic/story structure, just task + workspace.
+ *
+ * IMPORTANT: Agent does NOT commit/push - user does it manually from Build tab.
  */
 
 import { getInstructionSection, getRoleSummary } from '../agents/ReadmeSystem';
@@ -25,9 +27,6 @@ export function buildQuickDevPrompt(ctx: QuickDevContext): string {
 
   // Get condensed developer role (shorter than full getRoleInstructions)
   const developerSummary = getRoleSummary('developer');
-
-  // Generate commit message from task
-  const commitMsg = generateCommitMessage(ctx.command);
 
   return `# QUICK DEVELOPER TASK - LITE TEAM MODE
 
@@ -68,22 +67,16 @@ ${ctx.fileList}
 - Use \`sandbox_bash\` for ALL shell commands (NOT Bash)
 - Use \`Read\` before \`Edit\` for any file modification
 
-### 3. VERIFY
-- Run build/lint if applicable:
+### 3. VERIFY (if applicable)
+- Run build/lint to check your changes:
   \`\`\`
   sandbox_bash(command="npm run build 2>&1 | head -50")
   # or for Flutter:
   sandbox_bash(command="flutter analyze 2>&1 | head -50")
   \`\`\`
 
-### 4. COMMIT & PUSH (MANDATORY)
-When done, commit and push your changes:
-\`\`\`
-sandbox_bash(command="git add -A && git commit -m '${commitMsg}' && git push origin ${ctx.currentBranch || 'main'}")
-\`\`\`
-
-### 5. FINISH
-Output this marker when complete:
+### 4. FINISH
+When your code changes are complete, output this marker:
 \`\`\`
 DEVELOPER_FINISHED_SUCCESSFULLY
 \`\`\`
@@ -94,8 +87,14 @@ DEVELOPER_FINISHED_SUCCESSFULLY
 - Use \`sandbox_bash\` for ALL commands (not \`Bash\`)
 - Read files before editing them
 - Keep changes focused on the task
-- Always commit and push when done
-- Output the success marker at the end
+- Output the success marker when done
+
+---
+
+## ⛔ PROHIBITED - DO NOT DO THIS
+**DO NOT run git commit, git push, or any git write operations.**
+The user will review your changes and commit/push manually from the UI.
+Only make code changes - no git operations except \`git status\` or \`git diff\`.
 
 ---
 
@@ -105,35 +104,6 @@ should use \`sandbox_bash\`. The workspace is already cloned and ready.
 
 Now complete the task: **${ctx.command}**
 `;
-}
-
-/**
- * Generate a conventional commit message from task description
- */
-function generateCommitMessage(command: string): string {
-  const lower = command.toLowerCase();
-
-  // Determine commit type
-  let type = 'feat';
-  if (lower.includes('fix') || lower.includes('bug') || lower.includes('error')) {
-    type = 'fix';
-  } else if (lower.includes('refactor') || lower.includes('clean')) {
-    type = 'refactor';
-  } else if (lower.includes('style') || lower.includes('format')) {
-    type = 'style';
-  } else if (lower.includes('test')) {
-    type = 'test';
-  } else if (lower.includes('doc')) {
-    type = 'docs';
-  }
-
-  // Truncate and clean the message
-  const cleanMessage = command
-    .replace(/['"]/g, '')
-    .substring(0, 50)
-    .trim();
-
-  return `${type}: ${cleanMessage}`;
 }
 
 /**

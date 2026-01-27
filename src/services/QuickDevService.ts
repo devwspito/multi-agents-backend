@@ -8,7 +8,7 @@
  * 1. User types task in IDE tab (e.g., "connect auth with app.dart")
  * 2. This service builds a minimal prompt
  * 3. Calls Agent SDK directly (via AgentExecutorService)
- * 4. Agent executes, commits, and pushes
+ * 4. Agent executes code changes (NO commit/push - user does manually)
  * 5. Output streams to frontend via WebSocket
  */
 
