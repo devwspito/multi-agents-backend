@@ -192,10 +192,13 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     }
 
     // 2. Get workspace info from EventStore
+    console.log(`   📂 Getting EventStore state for task ${taskId}...`);
     const state = await eventStore.getCurrentState(taskId);
     const workspace = state.workspaces?.[0];
+    console.log(`   📂 Workspaces found: ${state.workspaces?.length || 0}`);
 
     if (!workspace) {
+      console.log(`   ❌ No workspace found in EventStore!`);
       return res.status(404).json({
         success: false,
         error: 'No workspace found in EventStore for this task. The task may not have been executed yet.',
@@ -203,16 +206,18 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     }
 
     const workspacePath = workspace.repoLocalPath || workspace.workspacePath;
+    console.log(`   📁 Workspace path: ${workspacePath}`);
 
     // 3. Verify workspace directory exists on disk
     if (!fs.existsSync(workspacePath)) {
+      console.log(`   ❌ Workspace directory NOT FOUND on disk: ${workspacePath}`);
       return res.status(404).json({
         success: false,
         error: `Workspace directory not found: ${workspacePath}. It may have been deleted.`,
       });
     }
 
-    console.log(`   📁 Workspace found: ${workspacePath}`);
+    console.log(`   ✅ Workspace found: ${workspacePath}`);
 
     // 4. Detect language/framework from workspace
     let language = 'nodejs';
@@ -227,6 +232,11 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     console.log(`   🔧 Detected language: ${language}`);
 
     // 5. Create new sandbox with existing workspace
+    console.log(`   🐳 Creating sandbox for task ${taskId}...`);
+    console.log(`      - workspacePath: ${workspacePath}`);
+    console.log(`      - language: ${language}`);
+    console.log(`      - targetRepository: ${workspace.targetRepository || 'none'}`);
+
     const instance = await sandboxService.createSandbox(
       taskId,
       workspacePath,
@@ -236,13 +246,17 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     );
 
     if (!instance) {
+      console.log(`   ❌ createSandbox returned null/undefined!`);
       return res.status(500).json({
         success: false,
         error: 'Failed to create sandbox. Docker may not be available.',
       });
     }
 
-    console.log(`   ✅ Sandbox relaunched: ${instance.containerId?.substring(0, 12)}`);
+    console.log(`   ✅ Sandbox relaunched successfully!`);
+    console.log(`      - containerId: ${instance.containerId?.substring(0, 12)}`);
+    console.log(`      - containerName: ${instance.containerName}`);
+    console.log(`      - status: ${instance.status}`);
 
     // 6. Optionally start dev server
     let devServerStarted = false;
