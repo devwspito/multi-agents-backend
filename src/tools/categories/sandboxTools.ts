@@ -98,27 +98,33 @@ Example usage:
     const startTime = Date.now();
 
     try {
-      // 🔍 Use centralized smart lookup from SandboxService
-      // Try multiple sources for taskId
-      const taskIdToSearch = currentTaskContext?.sandboxId ||
-                             currentTaskContext?.taskId ||
-                             null;
+      // 🔒 CRITICAL: sandbox_bash MUST use the current task's sandbox ONLY
+      // NEVER fall back to a different task's sandbox - that causes cross-contamination
+      const taskId = currentTaskContext?.taskId;
 
-      let found = taskIdToSearch ? sandboxService.findSandboxForTask(taskIdToSearch) : null;
-
-      // Last fallback: use any running sandbox
-      if (!found) {
-        const allSandboxes = sandboxService.getAllSandboxes();
-        for (const [sbId, sb] of allSandboxes) {
-          if (sb.status === 'running') {
-            found = { sandboxId: sbId, instance: sb };
-            console.warn(`[sandbox_bash] ⚠️ Using first available sandbox: ${sbId}`);
-            break;
-          }
-        }
+      if (!taskId) {
+        const status = sandboxService.getStatus();
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              error: 'No task context set. sandbox_bash requires setSandboxContext to be called first.',
+              suggestion: 'This is a bug - AgentExecutorService should set sandbox context before agent runs.',
+              executedIn: 'none',
+              debug: {
+                currentTaskContext,
+                activeSandboxes: status.activeSandboxes,
+                sandboxIds: Array.from(status.sandboxes.keys()),
+              },
+            }, null, 2),
+          }],
+        };
       }
 
-      // No sandbox found at all
+      // Find sandbox for THIS task only - no fallbacks
+      const found = sandboxService.findSandboxForTask(taskId);
+
       if (!found) {
         const status = sandboxService.getStatus();
         return {
@@ -126,12 +132,11 @@ Example usage:
             type: 'text',
             text: JSON.stringify({
               success: false,
-              error: 'No active sandbox found. Sandbox must be created before executing commands.',
-              suggestion: 'Ensure the task setup has completed and sandbox is running.',
+              error: `No sandbox found for task ${taskId}. Each task has ONE unique sandbox.`,
+              suggestion: 'Sandbox must be created before executing commands. Check SandboxPhase.',
               executedIn: 'none',
               debug: {
-                contextTaskId: currentTaskContext?.taskId,
-                contextSandboxId: currentTaskContext?.sandboxId,
+                taskId,
                 activeSandboxes: status.activeSandboxes,
                 sandboxIds: Array.from(status.sandboxes.keys()),
               },
@@ -141,7 +146,7 @@ Example usage:
       }
 
       const { sandboxId } = found;
-      console.log(`[sandbox_bash] ✅ Using sandbox: ${sandboxId}`);
+      console.log(`[sandbox_bash] ✅ Using sandbox for task ${taskId}: ${sandboxId}`);
 
       // Determine working directory
       const workDir = args.cwd
