@@ -344,13 +344,18 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     if (startDevServer) {
       try {
         const envConfig = state.environmentConfig || {};
-        const firstConfig = Object.values(envConfig)[0] as any;
+        // 🔥 FIX: envConfig is keyed by repoName - get both key and value
+        const repoNames = Object.keys(envConfig);
+        const firstRepoName = repoNames[0];
+        const firstConfig = envConfig[firstRepoName] as any;
         const devCmd = firstConfig?.devCmd;
 
-        if (devCmd) {
-          console.log(`   🚀 Starting dev server: ${devCmd}`);
+        if (devCmd && firstRepoName) {
+          // 🔥 FIX: Use /workspace/${repoName}, NOT /workspace
+          const repoWorkDir = `/workspace/${firstRepoName}`;
+          console.log(`   🚀 Starting dev server in ${repoWorkDir}: ${devCmd}`);
           // Run in background (don't await)
-          sandboxService.exec(taskId, `cd /workspace && ${devCmd}`, { timeout: 300000 })
+          sandboxService.exec(taskId, `cd ${repoWorkDir} && ${devCmd}`, { timeout: 300000 })
             .catch(err => console.warn(`   ⚠️ Dev server error: ${err.message}`));
           devServerStarted = true;
         }
