@@ -1,13 +1,13 @@
 # Multi-Agent Platform - VM Deployment Guide
 
-## Quick Deploy (No Docker)
+## Quick Deploy
 
 ### Full Stack Update (Backend + Frontend)
 
 Single command to update both services:
 
 ```bash
-cd ~/agents-software-arq && git pull && npm run build && cd ~/mult-agents-frontend && git pull && npm run build && sudo cp -r dist/* /var/www/html/
+cd ~/agents-software-arq && git pull && npm run build && sudo systemctl restart agents-backend && cd ~/mult-agents-frontend && git pull && npm run build && sudo cp -r dist/* /var/www/html/
 ```
 
 ### Individual Services
@@ -15,7 +15,7 @@ cd ~/agents-software-arq && git pull && npm run build && cd ~/mult-agents-fronte
 #### Backend Only
 
 ```bash
-cd ~/agents-software-arq && git pull && npm run build
+cd ~/agents-software-arq && git pull && npm run build && sudo systemctl restart agents-backend
 ```
 
 #### Frontend Only
@@ -26,26 +26,32 @@ cd ~/mult-agents-frontend && git pull && npm run build && sudo cp -r dist/* /var
 
 ## Directory Structure
 
-| Service  | Path                     | Served By     |
-|----------|--------------------------|---------------|
-| Backend  | `~/agents-software-arq`  | PM2 (Node.js) |
-| Frontend | `~/mult-agents-frontend` | Nginx         |
-| Static   | `/var/www/html/`         | Nginx         |
+| Service  | Path                     | Served By        |
+|----------|--------------------------|------------------|
+| Backend  | `~/agents-software-arq`  | systemd (Node.js)|
+| Frontend | `~/mult-agents-frontend` | Nginx            |
+| Static   | `/var/www/html/`         | Nginx            |
 
 ## Troubleshooting
 
 ### Backend not responding
 
 ```bash
-pm2 logs agents-backend --lines 100
-pm2 restart agents-backend
+# Check status
+sudo systemctl status agents-backend
+
+# View logs
+sudo journalctl -u agents-backend -f --no-pager -n 100
+
+# Restart
+sudo systemctl restart agents-backend
 ```
 
 ### Frontend not updating
 
 ```bash
 # Verify build completed
-ls -la /mult-agents-frontend/dist/
+ls -la ~/mult-agents-frontend/dist/
 
 # Check nginx status
 sudo systemctl status nginx
