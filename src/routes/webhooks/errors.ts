@@ -16,7 +16,7 @@ import { OrchestrationCoordinator } from '../../services/orchestration/Orchestra
 import { LogService } from '../../services/logging/LogService';
 import { NotificationService } from '../../services/NotificationService';
 import { ErrorDetectiveService } from '../../services/ErrorDetectiveService';
-import { STANDARD_CONFIG, PREMIUM_CONFIG, RECOMMENDED_CONFIG, MAX_CONFIG } from '../../config/ModelConfigurations';
+// Model config simplified: All agents use OPUS by default
 import { z } from 'zod';
 
 const router = Router();
@@ -241,23 +241,8 @@ router.post(
         });
       } else {
         // ✨ NEW ERROR: Create new task
-        // Map taskConfig to model configuration
-        const configMap = {
-          standard: STANDARD_CONFIG,
-          recommended: RECOMMENDED_CONFIG, // 🌟 Best balance
-          premium: PREMIUM_CONFIG,
-          max: MAX_CONFIG,
-        };
-        const taskConfig = apiKeyDoc.taskConfig || 'recommended'; // Default to recommended
-        const modelConfig = configMap[taskConfig as keyof typeof configMap];
-
-        console.log(`📋 Creating task with config: ${taskConfig}`);
-        console.log(`   Model config:`, {
-          planningAgent: modelConfig['planning-agent'],
-          techLead: modelConfig['tech-lead'],
-          developer: modelConfig.developer,
-          judge: modelConfig.judge,
-        });
+        // SIMPLIFIED: All agents use OPUS by default
+        console.log(`📋 Creating task with OPUS model (default)`);
 
         // Create task (SQLite - synchronous)
         // Note: userId is empty for webhook-generated tasks
@@ -285,11 +270,7 @@ router.post(
               'auto-merge',
             ],
 
-            // Model configuration from API key
-            modelConfig: {
-              preset: taskConfig,
-              customConfig: modelConfig,
-            },
+            // Model config removed - All agents use OPUS by default
           },
           webhookMetadata: {
             errorHash,

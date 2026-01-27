@@ -392,4 +392,62 @@ router.post('/cleanup', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/sandbox/quick-task/:taskId
+ * Execute a quick developer task in the sandbox (Lite Team feature)
+ *
+ * This runs OUTSIDE the orchestrator - no epic/story required.
+ * The agent will:
+ * 1. Execute the user's task
+ * 2. Auto-commit and push when done
+ * 3. Stream output via WebSocket
+ */
+router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { command, enableJudge, commitMessage } = req.body;
+
+    // Validate required field
+    if (!command || typeof command !== 'string' || command.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing or invalid "command" field. Provide the task description.',
+      });
+    }
+
+    console.log(`[Sandbox API] Quick task for ${taskId}: "${command.substring(0, 50)}..."`);
+
+    // Import QuickDevService dynamically to avoid circular dependencies
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    // Execute the quick task (runs async, streams via WebSocket)
+    // Don't await - return immediately and let WebSocket handle streaming
+    quickDevService.executeQuickTask({
+      taskId,
+      command: command.trim(),
+      enableJudge: enableJudge === true,
+      commitMessage,
+    }).then(result => {
+      console.log(`[Sandbox API] Quick task completed: success=${result.success}`);
+    }).catch(err => {
+      console.error(`[Sandbox API] Quick task failed:`, err);
+    });
+
+    // Return immediately - output will stream via WebSocket
+    return res.json({
+      success: true,
+      message: 'Quick task started. Output will stream via WebSocket.',
+      taskId,
+      command: command.trim(),
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error starting quick task:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to start quick task',
+    });
+  }
+});
+
 export default router;

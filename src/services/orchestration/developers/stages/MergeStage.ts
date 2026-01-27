@@ -666,13 +666,15 @@ If you cannot resolve a conflict, output:
    */
   private async triggerAutoRebuild(
     taskId: string,
-    sandboxId: string | undefined,
+    _sandboxId: string | undefined,
     _workspacePath: string | null,
     repositories: any[],
     epic: any
   ): Promise<void> {
-    if (!sandboxId) {
-      console.log(`   ⚠️ [AutoRebuild] No sandboxId - skipping auto-rebuild`);
+    // Check if sandbox is running using SandboxService (which uses taskId for lookup)
+    const sandbox = sandboxService.getSandbox(taskId);
+    if (!sandbox) {
+      console.log(`   ⚠️ [AutoRebuild] No sandbox running for task ${taskId} - skipping auto-rebuild`);
       return;
     }
 
@@ -723,8 +725,8 @@ If you cannot resolve a conflict, output:
     try {
       const startTime = Date.now();
 
-      // Execute rebuild command in sandbox
-      const result = await sandboxService.exec(sandboxId, rebuildCmd, {
+      // Execute rebuild command in sandbox (sandboxService.exec uses taskId for lookup)
+      const result = await sandboxService.exec(taskId, rebuildCmd, {
         cwd: '/workspace',
         timeout: 300000, // 5 minutes for builds
       });

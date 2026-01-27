@@ -20,7 +20,7 @@ import { VerificationPhase } from './VerificationPhase';
 import { AutoMergePhase } from './AutoMergePhase';
 import { RecoveryPhase } from './RecoveryPhase';
 import { IntegrationPhase } from './IntegrationPhase';
-import { AgentModelConfig } from '../../config/ModelConfigurations';
+// Model config simplified: All agents use OPUS by default
 import { safeGitExecSync } from '../../utils/safeGitExecution';
 
 // 🔥 Best practice services
@@ -530,84 +530,31 @@ export class OrchestrationCoordinator {
         } catch (error: any) {
           // Check if this is a timeout error
           if (error.isTimeout || error.message?.includes('timeout')) {
-            console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying with top model from user's config`);
+            console.error(`⏰ [${phaseName}] Agent execution timeout detected - retrying`);
 
-            // Get current model config to find the top model
-            const retryTask = TaskRepository.findById(taskId);
-            if (retryTask) {
-              const configs = await import('../../config/ModelConfigurations');
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⏰ ${phaseName} timed out after 10 minutes - retrying with Opus`
+            );
 
-              // Get current model config (default to RECOMMENDED for optimal quality/cost)
-              let currentModelConfig: AgentModelConfig = configs.ALL_OPUS_CONFIG;
-              if (task.orchestration?.modelConfig) {
-                const { preset, customConfig } = task.orchestration.modelConfig;
-                if (preset === 'custom' && customConfig) {
-                  currentModelConfig = customConfig as AgentModelConfig;
-                } else if (preset === 'max') {
-                  currentModelConfig = configs.ALL_OPUS_CONFIG;
-                } else if (preset === 'premium') {
-                  currentModelConfig = configs.ALL_OPUS_CONFIG;
-                } else if (preset === 'recommended') {
-                  currentModelConfig = configs.ALL_OPUS_CONFIG;
-                } else if (preset === 'standard') {
-                  currentModelConfig = configs.ALL_OPUS_CONFIG;
-                }
-              }
+            try {
+              // Retry with same config (already using Opus by default)
+              result = await phase.execute(context);
 
-              // Find the most powerful model in the user's current config
-              const topModel = configs.getTopModelFromConfig(currentModelConfig);
-              const topModelName = topModel.includes('opus') ? 'Opus' :
-                                  topModel.includes('sonnet') ? 'Sonnet' : 'Haiku';
-
-              console.log(`🚀 [${phaseName}] Top model in user's config: ${topModelName}`);
+              console.log(`✅ [${phaseName}] Timeout retry succeeded!`);
               NotificationService.emitConsoleLog(
                 taskId,
-                'warn',
-                `⏰ ${phaseName} timed out after 10 minutes - retrying with ${topModelName} (best model in your config)`
+                'info',
+                `✅ ${phaseName} succeeded after timeout retry`
               );
-
-              // Save current model config
-              const previousModelConfig = task.orchestration.modelConfig;
-
-              // Escalate to top model for all agents
-              const escalatedConfig = configs.escalateConfigToTopModel(currentModelConfig);
-
-              task.orchestration.modelConfig = {
-                preset: 'custom',
-                customConfig: escalatedConfig,
-              };
-              saveTaskFireAndForget(task, 'escalate model config');
-
-              console.log(`🚀 [${phaseName}] Escalated all agents to ${topModelName} for timeout retry`);
-
-              try {
-                // Retry with escalated config
-                result = await phase.execute(context);
-
-                console.log(`✅ [${phaseName}] Timeout retry with ${topModelName} succeeded!`);
-                NotificationService.emitConsoleLog(
-                  taskId,
-                  'info',
-                  `✅ ${phaseName} succeeded with ${topModelName} after timeout`
-                );
-              } catch (retryError: any) {
-                console.error(`❌ [${phaseName}] Timeout retry with ${topModelName} also failed:`, retryError.message);
-
-                // Restore previous model config
-                task.orchestration.modelConfig = previousModelConfig;
-                saveTaskFireAndForget(task, 'restore model config after retry fail');
-
-                throw retryError; // Re-throw to fail the phase
-              }
-
-              // Restore previous model config for next phases
-              task.orchestration.modelConfig = previousModelConfig;
-              saveTaskFireAndForget(task, 'restore model config');
-            } else {
-              throw error; // Can't retry without task
+            } catch (retryError: any) {
+              console.error(`❌ [${phaseName}] Timeout retry also failed:`, retryError.message);
+              throw retryError;
             }
           } else {
-            throw error; // Non-timeout error, re-throw
+            // Non-timeout error, re-throw
+            throw error;
           }
         }
 
@@ -1448,46 +1395,10 @@ ${formattedDirectives}
   ): Promise<{ output?: string; cost?: number; usage?: any; sdkSessionId?: string; lastMessageUuid?: string; filesModified?: string[]; filesCreated?: string[]; toolsUsed?: string[]; turnsCompleted?: number } | void> {
     const taskId = (task.id as any).toString();
 
-    // 🚀 RETRY OPTIMIZATION: Use topModel when Judge rejected code
+    // 🚀 RETRY: Log when retrying after Judge rejection
+    // SIMPLIFIED: All agents use OPUS by default, no model escalation needed
     if (forceTopModel && judgeFeedback) {
-      const configs = await import('../../config/ModelConfigurations');
-
-      // Get the actual AgentModelConfig from the task (default to RECOMMENDED)
-      let actualConfig: typeof configs.ALL_OPUS_CONFIG = configs.ALL_OPUS_CONFIG;
-
-      if (task.orchestration.modelConfig) {
-        const { preset, customConfig } = task.orchestration.modelConfig;
-
-        if (preset === 'custom' && customConfig) {
-          actualConfig = configs.mapDbConfigToAgentModelConfig(customConfig);
-        } else if (preset) {
-          switch (preset) {
-            case 'max': actualConfig = configs.ALL_OPUS_CONFIG; break;
-            case 'premium': actualConfig = configs.ALL_OPUS_CONFIG; break;
-            case 'recommended': actualConfig = configs.ALL_OPUS_CONFIG; break;
-            case 'standard': actualConfig = configs.ALL_OPUS_CONFIG; break;
-          }
-        }
-      }
-
-      const topModel = configs.getTopModelFromConfig(actualConfig);
-      const topModelName = topModel.includes('opus') ? 'Opus' :
-                          topModel.includes('sonnet') ? 'Sonnet' : 'Haiku';
-
-      console.log(`🚀 [Developer ${member.instanceId}] RETRY with topModel: ${topModelName}`);
-      console.log(`   Reason: Judge rejected code, using best available model for retry`);
-
-      // Temporarily override developer model to topModel
-      const updatedConfig: typeof configs.ALL_OPUS_CONFIG = {
-        ...actualConfig,
-        'developer': topModel
-      };
-
-      // Save back with correct structure (preset + customConfig wrapper)
-      task.orchestration.modelConfig = {
-        preset: 'custom',
-        customConfig: updatedConfig as any
-      };
+      console.log(`🚀 [Developer ${member.instanceId}] RETRY with Opus (Judge rejected code)`);
     }
 
     // 🔥🔥🔥 STRICT VALIDATION: 1 DEVELOPER = 1 STORY (NEVER MORE) 🔥🔥🔥
