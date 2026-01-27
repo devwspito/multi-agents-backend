@@ -685,6 +685,169 @@ router.get('/:id/dev-auth', authenticate, async (req: AuthRequest, res): Promise
 
 /**
  * ===================================================================
+ * PROJECT SETTINGS ENDPOINTS
+ * ===================================================================
+ */
+
+// Project settings validation schema
+const updateSettingsSchema = z.object({
+  defaultBranch: z.string().optional(),
+  autoDeployment: z.boolean().optional(),
+  autoRecoveryEnabled: z.boolean().optional(),
+  autoMergeEnabled: z.boolean().optional(), // 🔥 Toggle auto-merge PRs to main
+  requiredReviews: z.number().min(0).max(10).optional(),
+  educationalContext: z.string().optional(),
+  complianceLevel: z.string().optional(),
+});
+
+/**
+ * GET /api/projects/:id/settings
+ * Get project settings
+ */
+router.get('/:id/settings', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const project = ProjectRepository.findById(req.params.id);
+
+    if (!project || project.userId !== req.user!.id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        settings: project.settings || {
+          defaultBranch: 'main',
+          autoDeployment: false,
+          autoRecoveryEnabled: true,
+          autoMergeEnabled: false, // 🔥 Default: PRs require human review
+          requiredReviews: 0,
+        },
+      },
+    });
+  } catch (error: any) {
+    console.error('Error getting project settings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project settings',
+    });
+  }
+});
+
+/**
+ * PATCH /api/projects/:id/settings
+ * Update project settings (partial update)
+ */
+router.patch('/:id/settings', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const validatedData = updateSettingsSchema.parse(req.body);
+
+    // Verify ownership first
+    const existing = ProjectRepository.findById(req.params.id);
+    if (!existing || existing.userId !== req.user!.id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    // Merge with existing settings
+    const currentSettings = existing.settings || {};
+    const newSettings = {
+      ...currentSettings,
+      ...validatedData,
+    };
+
+    const project = ProjectRepository.update(req.params.id, { settings: newSettings });
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    console.log(`✅ Updated settings for project ${existing.name}:`, validatedData);
+
+    res.json({
+      success: true,
+      message: 'Project settings updated successfully',
+      data: {
+        settings: project.settings,
+      },
+    });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid settings data',
+        errors: error.errors,
+      });
+    }
+
+    console.error('Error updating project settings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update project settings',
+    });
+  }
+});
+
+/**
+ * PUT /api/projects/:id/settings/auto-merge
+ * Toggle auto-merge setting (convenience endpoint)
+ */
+router.put('/:id/settings/auto-merge', authenticate, async (req: AuthRequest, res): Promise<any> => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request: "enabled" must be a boolean',
+      });
+    }
+
+    // Verify ownership first
+    const existing = ProjectRepository.findById(req.params.id);
+    if (!existing || existing.userId !== req.user!.id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found',
+      });
+    }
+
+    // Update autoMergeEnabled setting
+    const currentSettings = existing.settings || {};
+    const newSettings = {
+      ...currentSettings,
+      autoMergeEnabled: enabled,
+    };
+
+    ProjectRepository.update(req.params.id, { settings: newSettings });
+
+    console.log(`🔀 [AutoMerge] ${enabled ? 'Enabled' : 'Disabled'} for project: ${existing.name}`);
+
+    res.json({
+      success: true,
+      message: `Auto-merge ${enabled ? 'enabled' : 'disabled'} successfully`,
+      data: {
+        autoMergeEnabled: enabled,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error toggling auto-merge:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to toggle auto-merge',
+    });
+  }
+});
+
+/**
+ * ===================================================================
  * WEBHOOK API KEY MANAGEMENT ENDPOINTS
  * ===================================================================
  */

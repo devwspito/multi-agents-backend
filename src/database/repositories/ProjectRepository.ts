@@ -28,6 +28,7 @@ export interface IProjectSettings {
   defaultBranch?: string;
   autoDeployment?: boolean;
   autoRecoveryEnabled?: boolean;
+  autoMergeEnabled?: boolean; // 🔥 Auto-merge PRs to main after epic completion (default: false)
   requiredReviews?: number;
   educationalContext?: string;
   complianceLevel?: string;
