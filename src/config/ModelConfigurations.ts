@@ -1,41 +1,31 @@
 /**
  * Model Configuration System
  *
- * Uses EXPLICIT model IDs to ensure we always use the latest 4.5 versions.
- * SDK aliases might resolve to older models.
+ * SIMPLIFIED: All agents use OPUS by default for maximum code quality.
+ * Optional: Switch to Sonnet at project level for cost savings.
  *
- * Latest models (as of Nov 2025):
- * - Claude Haiku 4.5 (claude-haiku-4-5-20251001) - Fastest with near-frontier intelligence
- * - Claude Sonnet 4.5 (claude-sonnet-4-5-20250929) - Smartest for complex agents
- * - Claude Opus 4.5 (claude-opus-4-5-20251101) - Maximum intelligence + performance
- *
- * Source: https://docs.anthropic.com/en/docs/about-claude/models
+ * Latest models (as of Jan 2026):
+ * - Claude Opus 4.5 (claude-opus-4-5-20251101) - DEFAULT - Maximum intelligence
+ * - Claude Sonnet 4.5 (claude-sonnet-4-5-20250929) - Optional - Good balance
  */
 
 // Model IDs - explicit versions for predictable behavior
-// Source: https://docs.anthropic.com/en/docs/about-claude/models
 export const MODEL_IDS = {
-  HAIKU: 'claude-haiku-4-5-20251001',      // Haiku 4.5 - fastest model
-  SONNET: 'claude-sonnet-4-5-20250929',    // Sonnet 4.5 - smartest for complex agents
-  OPUS: 'claude-opus-4-5-20251101',        // Opus 4.5 - maximum intelligence
+  OPUS: 'claude-opus-4-5-20251101',
+  SONNET: 'claude-sonnet-4-5-20250929',
 } as const;
 
-// Keep alias type for backward compatibility, but map to explicit IDs
-export type ClaudeModel = 'sonnet' | 'haiku' | 'opus';
+// Model alias type
+export type ClaudeModel = 'opus' | 'sonnet';
 
 // Convert alias to explicit model ID
-// THROWS if alias is invalid - no silent defaults
 export function getExplicitModelId(alias: string): string {
   switch (alias) {
-    case 'haiku': return MODEL_IDS.HAIKU;
-    case 'sonnet': return MODEL_IDS.SONNET;
     case 'opus': return MODEL_IDS.OPUS;
+    case 'sonnet': return MODEL_IDS.SONNET;
     default:
-      throw new Error(
-        `❌ [getExplicitModelId] Invalid model alias "${alias}". ` +
-        `Valid aliases: 'haiku', 'sonnet', 'opus'. ` +
-        `Check your model configuration.`
-      );
+      console.warn(`[ModelConfig] Unknown alias "${alias}", defaulting to OPUS`);
+      return MODEL_IDS.OPUS;
   }
 }
 
@@ -45,257 +35,74 @@ export interface ModelPricing {
 }
 
 // Pricing per million tokens (as of Jan 2026)
-// Source: https://docs.anthropic.com/en/docs/about-claude/models
-// 🔥 OPUS 4.5 PRICING: $15 input, $75 output per MTok
 export const MODEL_PRICING: Record<ClaudeModel, ModelPricing> = {
+  'opus': {
+    inputPerMillion: 15,
+    outputPerMillion: 75,
+  },
   'sonnet': {
     inputPerMillion: 3,
     outputPerMillion: 15,
   },
-  'haiku': {
-    inputPerMillion: 1,
-    outputPerMillion: 5,
-  },
-  'opus': {
-    inputPerMillion: 15,   // 🔥 Opus 4.5 pricing
-    outputPerMillion: 75,  // 🔥 Opus 4.5 pricing
-  },
 };
 
 /**
- * Agent Model Configuration Interface
+ * Agent types in the orchestration system
+ */
+export type AgentType =
+  | 'planning-agent'
+  | 'tech-lead'
+  | 'developer'
+  | 'judge'
+  | 'verification-fixer'
+  | 'recovery-analyst'
+  | 'auto-merge'
+  | 'story-merge-agent'
+  | 'git-flow-manager'
+  | 'conflict-resolver';
+
+/**
+ * Get model for any agent
  *
- * Active agents in the current orchestration system:
- * - planning-agent: Unified planning (replaces legacy problem-analyst + product-manager + project-manager)
- * - tech-lead: Architecture design per epic
- * - developer: Code implementation per story
- * - judge: Code review and quality validation
- * - auto-merge: PR creation and merge
- * - story-merge-agent: Story branch merging
- * - git-flow-manager: Git operations
- * - conflict-resolver: Git merge conflict resolution
- * - verification-fixer: Verification issue fixer
- * - recovery-analyst: Deep error analysis for recovery
- */
-export interface AgentModelConfig {
-  'planning-agent': ClaudeModel;
-  'tech-lead': ClaudeModel;
-  'developer': ClaudeModel;
-  'judge': ClaudeModel;
-  'verification-fixer': ClaudeModel;
-  'recovery-analyst': ClaudeModel;
-  'auto-merge': ClaudeModel;
-  'story-merge-agent': ClaudeModel;
-  'git-flow-manager': ClaudeModel;
-  'conflict-resolver': ClaudeModel;
-}
-
-/**
- * Premium Configuration (Opus + Sonnet)
- */
-export const PREMIUM_CONFIG: AgentModelConfig = {
-  'planning-agent': 'opus',
-  'tech-lead': 'opus',
-  'developer': 'sonnet',
-  'judge': 'opus',
-  'verification-fixer': 'sonnet',
-  'recovery-analyst': 'opus',
-  'auto-merge': 'sonnet',
-  'story-merge-agent': 'sonnet',
-  'git-flow-manager': 'sonnet',
-  'conflict-resolver': 'sonnet',
-};
-
-/**
- * Standard Configuration (Sonnet + Haiku)
- * Note: Developer ALWAYS uses Sonnet for code quality
- */
-export const STANDARD_CONFIG: AgentModelConfig = {
-  'planning-agent': 'sonnet',
-  'tech-lead': 'sonnet',
-  'developer': 'sonnet',
-  'judge': 'sonnet',
-  'verification-fixer': 'sonnet',
-  'recovery-analyst': 'sonnet',
-  'auto-merge': 'haiku',
-  'story-merge-agent': 'haiku',
-  'git-flow-manager': 'haiku',
-  'conflict-resolver': 'haiku',
-};
-
-/**
- * 🌟 RECOMMENDED Configuration (Opus + Sonnet + Haiku)
- *
- * OPTIMAL BALANCE: Maximum quality where it matters, cost-effective elsewhere
- *
- * Strategy:
- * - Opus: Strategic decisions (Planning, TechLead)
- * - Sonnet: Code execution (Developer, Judge)
- * - Haiku: Merge operations
- */
-export const RECOMMENDED_CONFIG: AgentModelConfig = {
-  // 🧠 STRATEGIC - Opus
-  'planning-agent': 'opus',
-  'tech-lead': 'opus',
-  'recovery-analyst': 'opus',
-
-  // ⚡ CODE QUALITY - Sonnet
-  'developer': 'sonnet',
-  'judge': 'sonnet',
-  'verification-fixer': 'sonnet',
-
-  // 💨 MERGE OPERATIONS - Haiku
-  'auto-merge': 'haiku',
-  'story-merge-agent': 'haiku',
-  'git-flow-manager': 'haiku',
-  'conflict-resolver': 'haiku',
-};
-
-/**
- * Max Configuration (All Opus, except Developer = Sonnet)
- * Note: Developer ALWAYS uses Sonnet for optimal code generation
- */
-export const MAX_CONFIG: AgentModelConfig = {
-  'planning-agent': 'opus',
-  'tech-lead': 'opus',
-  'developer': 'sonnet',
-  'judge': 'opus',
-  'verification-fixer': 'opus',
-  'recovery-analyst': 'opus',
-  'auto-merge': 'opus',
-  'story-merge-agent': 'opus',
-  'git-flow-manager': 'opus',
-  'conflict-resolver': 'opus',
-};
-
-/**
- * 🔥 ALL OPUS Configuration - Maximum intelligence for all agents
- * TEMPORARY: For testing/debugging purposes
- */
-export const ALL_OPUS_CONFIG: AgentModelConfig = {
-  'planning-agent': 'opus',
-  'tech-lead': 'opus',
-  'developer': 'opus',
-  'judge': 'opus',
-  'verification-fixer': 'opus',
-  'recovery-analyst': 'opus',
-  'auto-merge': 'opus',
-  'story-merge-agent': 'opus',
-  'git-flow-manager': 'opus',
-  'conflict-resolver': 'opus',
-};
-
-/**
- * Optimize a configuration for best cost-performance ratio
- * Note: Developer ALWAYS uses Sonnet regardless of optimization
- */
-export function optimizeConfigForBudget(userConfig: AgentModelConfig): AgentModelConfig {
-  const models = Array.from(new Set(Object.values(userConfig))) as ClaudeModel[];
-
-  // Sort by price (most expensive first): opus > sonnet > haiku
-  const priceOrder: Record<ClaudeModel, number> = { 'opus': 3, 'sonnet': 2, 'haiku': 1 };
-  const sortedModels = models.sort((a, b) => priceOrder[b] - priceOrder[a]);
-
-  const topModel = sortedModels[0];
-  const bottomModel = sortedModels[sortedModels.length - 1];
-
-  return {
-    // 🧠 CRITICAL THINKING - Use TOP MODEL
-    'planning-agent': topModel,
-    'tech-lead': topModel,
-    'judge': topModel,
-    'recovery-analyst': topModel,
-
-    // 👨‍💻 DEVELOPER & FIXERS - 🔒 ALWAYS Sonnet (never downgrade)
-    'developer': 'sonnet',
-    'verification-fixer': 'sonnet',
-
-    // 💨 MERGE OPERATIONS - Use BOTTOM MODEL
-    'auto-merge': bottomModel,
-    'story-merge-agent': bottomModel,
-    'git-flow-manager': bottomModel,
-    'conflict-resolver': bottomModel,
-  };
-}
-
-/**
- * Convert DB config to AgentModelConfig
- * 🔥 HARDCODED: All agents use Opus
- */
-export function mapDbConfigToAgentModelConfig(_dbConfig: any): AgentModelConfig {
-  // 🔥 HARDCODED: Ignore DB config, always use ALL_OPUS_CONFIG
-  return ALL_OPUS_CONFIG;
-}
-
-/**
- * Get model for a specific agent type
- * THROWS if agent type is not in config - no silent defaults
- * 🔥 HARDCODED: Using ALL_OPUS_CONFIG for maximum intelligence
+ * @param _agentType - Agent type (ignored - all use same model)
+ * @param projectModel - Optional project-level override ('opus' | 'sonnet')
+ * @returns Model alias to use
  */
 export function getAgentModel(
-  agentType: string,
-  config: AgentModelConfig = ALL_OPUS_CONFIG
+  _agentType: string,
+  projectModel: ClaudeModel = 'opus'
 ): ClaudeModel {
-  const model = config[agentType as keyof AgentModelConfig];
-
-  if (!model) {
-    throw new Error(
-      `❌ [getAgentModel] Unknown agent type "${agentType}". ` +
-      `Valid types: ${Object.keys(config).join(', ')}. ` +
-      `Add this agent to AgentModelConfig if it's new.`
-    );
-  }
-
-  return model;
+  return projectModel;
 }
 
 /**
- * Calculate estimated cost for a configuration
+ * Calculate cost for token usage
  */
-export function estimateConfigCost(
-  config: AgentModelConfig,
-  estimatedTokens = { input: 500000, output: 200000 }
+export function calculateCost(
+  model: ClaudeModel,
+  inputTokens: number,
+  outputTokens: number
 ): number {
-  let totalCost = 0;
-
-  Object.values(config).forEach((model: ClaudeModel) => {
-    const pricing = MODEL_PRICING[model];
-    const inputCost = (estimatedTokens.input * pricing.inputPerMillion) / 1_000_000;
-    const outputCost = (estimatedTokens.output * pricing.outputPerMillion) / 1_000_000;
-    totalCost += inputCost + outputCost;
-  });
-
-  return totalCost;
+  const pricing = MODEL_PRICING[model];
+  const inputCost = (inputTokens * pricing.inputPerMillion) / 1_000_000;
+  const outputCost = (outputTokens * pricing.outputPerMillion) / 1_000_000;
+  return inputCost + outputCost;
 }
 
 /**
- * Validate that a configuration doesn't exceed budget
+ * Get display info for a model
  */
-export function validateBudget(config: AgentModelConfig, maxBudgetUSD: number): boolean {
-  return estimateConfigCost(config) <= maxBudgetUSD;
-}
-
-/**
- * Get the most powerful model from a configuration
- */
-export function getTopModelFromConfig(config: AgentModelConfig): ClaudeModel {
-  const modelsUsed = new Set(Object.values(config));
-
-  if (modelsUsed.has('opus')) return 'opus';
-  if (modelsUsed.has('sonnet')) return 'sonnet';
-  return 'haiku';
-}
-
-/**
- * Escalate all agents to top model
- */
-export function escalateConfigToTopModel(config: AgentModelConfig): AgentModelConfig {
-  const topModel = getTopModelFromConfig(config);
-  const escalated: AgentModelConfig = {} as AgentModelConfig;
-
-  for (const agent in config) {
-    escalated[agent as keyof AgentModelConfig] = topModel;
+export function getModelInfo(model: ClaudeModel): { name: string; description: string } {
+  switch (model) {
+    case 'opus':
+      return {
+        name: 'Opus 4.5',
+        description: 'Maximum intelligence - best code quality',
+      };
+    case 'sonnet':
+      return {
+        name: 'Sonnet 4.5',
+        description: 'Good balance of quality and cost',
+      };
   }
-
-  return escalated;
 }

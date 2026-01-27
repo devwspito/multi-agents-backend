@@ -542,13 +542,19 @@ class UnifiedMemoryServiceClass {
     branchName?: string,
     _extra?: any
   ): void {
-    this.updateStoryInEpic(taskId, epicId, storyId, (story) => ({
-      ...story,
-      status: 'completed',
-      completedAt: new Date(),
-      output: statusOrOutput,
-      ...(branchName ? { branchName } : {}),
-    }));
+    // 🔍 DEBUG: Log story completion for tracking
+    console.log(`📝 [UnifiedMemory] markStoryCompleted: epicId=${epicId}, storyId=${storyId}`);
+
+    this.updateStoryInEpic(taskId, epicId, storyId, (story) => {
+      console.log(`   ✅ Found & updating story: id=${story.id}, storyId=${story.storyId}, title=${story.title?.substring(0, 30)}`);
+      return {
+        ...story,
+        status: 'completed',
+        completedAt: new Date(),
+        output: statusOrOutput,
+        ...(branchName ? { branchName } : {}),
+      };
+    });
   }
 
   markStoryFailed(taskId: string, storyId: string, error?: string): void {
@@ -638,26 +644,47 @@ class UnifiedMemoryServiceClass {
     storyId: string,
     modifier: (story: any) => any
   ): void {
+    let foundEpic = false;
+    let foundStory = false;
+
     this.updateOrchestration(taskId, (orch) => {
       const epics = orch.planning?.epics || [];
       const updatedEpics = epics.map((e: any) => {
-        if (e.id !== epicId) return e;
-        const stories = (e.stories || []).map((s: any) =>
-          s.id === storyId ? modifier(s) : s
-        );
+        // 🔥 FIX: Use consistent ID extraction (epic could have id, epicId, or title)
+        const currentEpicId = e.id || e.epicId || e.title;
+        if (currentEpicId !== epicId) return e;
+        foundEpic = true;
+        const stories = (e.stories || []).map((s: any) => {
+          // 🔥 FIX: Use consistent ID extraction for stories too
+          const currentStoryId = s.id || s.storyId || s.title;
+          if (currentStoryId === storyId) {
+            foundStory = true;
+            return modifier(s);
+          }
+          return s;
+        });
         return { ...e, stories };
       });
       return { ...orch, planning: { ...orch.planning, epics: updatedEpics } };
     });
+
+    // 🔍 DEBUG: Log if epic/story was not found
+    if (!foundEpic) {
+      console.warn(`⚠️ [UnifiedMemory] updateStoryInEpic: Epic NOT FOUND! epicId=${epicId}`);
+    } else if (!foundStory) {
+      console.warn(`⚠️ [UnifiedMemory] updateStoryInEpic: Story NOT FOUND in epic! epicId=${epicId}, storyId=${storyId}`);
+    }
   }
 
   private updateStoryInAllEpics(taskId: string, storyId: string, modifier: (story: any) => any): void {
     this.updateOrchestration(taskId, (orch) => {
       const epics = orch.planning?.epics || [];
       const updatedEpics = epics.map((e: any) => {
-        const stories = (e.stories || []).map((s: any) =>
-          s.id === storyId ? modifier(s) : s
-        );
+        const stories = (e.stories || []).map((s: any) => {
+          // 🔥 FIX: Use consistent ID extraction for stories
+          const currentStoryId = s.id || s.storyId || s.title;
+          return currentStoryId === storyId ? modifier(s) : s;
+        });
         return { ...e, stories };
       });
       return { ...orch, planning: { ...orch.planning, epics: updatedEpics } };

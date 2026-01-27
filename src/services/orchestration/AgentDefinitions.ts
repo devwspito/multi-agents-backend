@@ -1,8 +1,5 @@
 import { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
-import {
-  getAgentModel as getConfiguredModel,
-  AgentModelConfig
-} from '../../config/ModelConfigurations';
+import { ClaudeModel } from '../../config/ModelConfigurations';
 
 // Import MCP tools documentation sections (extracted to reduce file size)
 import {
@@ -4366,35 +4363,16 @@ export function getAgentTools(agentType: string): string[] {
 }
 
 /**
- * Get agent model name for SDK (haiku/sonnet/opus)
- * Uses configured model from ModelConfigurations if available
+ * Get agent model name for SDK (sonnet/opus)
+ *
+ * SIMPLIFIED: All agents use the same model (defaults to 'opus').
+ * Optional: Pass project-level override for cost savings.
+ *
+ * @param _agentType - Agent type (ignored - all use same model)
+ * @param projectModel - Optional override ('opus' | 'sonnet')
  */
-export function getAgentModel(agentType: string, modelConfig?: AgentModelConfig): string {
-  // If a configuration is provided, use it
-  if (modelConfig) {
-    const configuredModel = getConfiguredModel(agentType, modelConfig);
-    // Map full model names to SDK model names
-    // Support both old incorrect IDs and any future variations
-    if (configuredModel.includes('haiku') || configuredModel.includes('claude-haiku')) return 'haiku';
-    if (configuredModel.includes('sonnet') || configuredModel.includes('claude-sonnet')) return 'sonnet';
-    if (configuredModel.includes('opus') || configuredModel.includes('claude-opus')) return 'opus';
-
-    // No silent defaults - throw if model not recognized
-    throw new Error(
-      `❌ [getAgentModel] Could not determine model for "${agentType}" from configured value "${configuredModel}". ` +
-      `Expected value containing 'haiku', 'sonnet', or 'opus'.`
-    );
-  }
-
-  // Fall back to definition default - MUST exist
-  const definition = getAgentDefinition(agentType);
-  if (!definition?.model) {
-    throw new Error(
-      `❌ [getAgentModel] No model configured for agent "${agentType}" and no default in definition. ` +
-      `Add this agent to ModelConfigurations or AgentDefinitions.`
-    );
-  }
-  return definition.model;
+export function getAgentModel(_agentType: string, projectModel: ClaudeModel = 'opus'): string {
+  return projectModel;
 }
 
 // getFullModelId removed - SDK uses 'sonnet', 'haiku', 'opus' directly

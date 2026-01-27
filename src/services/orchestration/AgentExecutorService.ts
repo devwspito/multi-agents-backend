@@ -20,7 +20,7 @@ import { FailedExecutionRepository, FailureType } from '../../database/repositor
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { OrchestrationContext } from './Phase';
-import { AgentModelConfig } from '../../config/ModelConfigurations';
+import { getExplicitModelId } from '../../config/ModelConfigurations';
 
 // MCP Tools
 import { createCustomToolsServer } from '../../tools/customTools';
@@ -202,7 +202,7 @@ export class AgentExecutorService {
     resumeOptions?: ResumeOptions
   ): Promise<AgentExecutionResult> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { getAgentDefinition, getAgentDefinitionWithSpecialization, getAgentModel } = await import('./AgentDefinitions');
+    const { getAgentDefinition, getAgentDefinitionWithSpecialization } = await import('./AgentDefinitions');
 
     // Get repository type from task or context for developer specialization
     let repositoryType: 'frontend' | 'backend' | 'unknown' = 'unknown';
@@ -231,14 +231,9 @@ export class AgentExecutorService {
       throw new Error(`Agent type "${agentType}" not found in agent definitions`);
     }
 
-    // Model configuration - using ALL_OPUS_CONFIG (hardcoded)
-    const configs = await import('../../config/ModelConfigurations');
-    const modelConfig: AgentModelConfig = configs.ALL_OPUS_CONFIG;
-    console.log(`🔥 [AgentExecutor] Using ALL_OPUS_CONFIG for agent: ${agentType}`);
-
-    // Dynamic model routing or static config
+    // SIMPLIFIED: All agents use OPUS by default
     let model: string;
-    let modelAlias: string;
+    let modelAlias: string = 'opus';
     let thinkingBudget = 0;
 
     if (DynamicModelRouter.isEnabled() && !skipOptimization) {
@@ -254,8 +249,9 @@ export class AgentExecutorService {
         AgentActivityService.emitMessage(taskId || '', agentType, `🧠 Extended Thinking: ${thinkingBudget.toLocaleString()} token budget`);
       }
     } else {
-      modelAlias = getAgentModel(agentType, modelConfig);
-      model = configs.getExplicitModelId(modelAlias);
+      // Default: All agents use OPUS
+      modelAlias = 'opus';
+      model = getExplicitModelId(modelAlias);
     }
 
     // Validate workspacePath

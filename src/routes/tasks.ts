@@ -2066,28 +2066,18 @@ router.get('/:id/model-config', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Import model configurations
-    const { MAX_CONFIG, PREMIUM_CONFIG, RECOMMENDED_CONFIG, STANDARD_CONFIG } = await import('../config/ModelConfigurations');
-
-    // Get current configuration
-    const modelConfig = task.orchestration.modelConfig || {
-      preset: 'recommended', // Default to recommended for optimal quality/cost
-      customConfig: undefined,
-    };
-
-    // Get preset configurations for reference
-    const presets = {
-      max: MAX_CONFIG,
-      premium: PREMIUM_CONFIG,
-      recommended: RECOMMENDED_CONFIG, // 🌟 Best balance of quality and cost
-      standard: STANDARD_CONFIG,
+    // SIMPLIFIED: All agents use OPUS by default
+    // Optional: Project-level switch to Sonnet for cost savings
+    const modelConfig = {
+      model: 'opus', // Default model for all agents
+      description: 'Maximum intelligence - best code quality',
     };
 
     res.json({
       success: true,
       data: {
         current: modelConfig,
-        presets,
+        available: ['opus', 'sonnet'],
       },
     });
   } catch (error: any) {
@@ -2962,20 +2952,22 @@ router.post('/:id/rebuild', authenticate, async (req: AuthRequest, res) => {
   console.log(`🔨 [API] Manual rebuild requested for task ${taskId}`);
 
   try {
-    // 1. Get task to find sandboxId
+    // 1. Verify task exists
     const task = await TaskRepository.findById(taskId);
     if (!task) {
       res.status(404).json({ success: false, message: 'Task not found' });
       return;
     }
 
-    const sandboxId = (task as any).sandboxId;
-    if (!sandboxId) {
+    // 2. Check if sandbox is running (SandboxService uses taskId for lookup)
+    const sandbox = sandboxService.getSandbox(taskId);
+    if (!sandbox) {
       res.status(400).json({ success: false, message: 'No sandbox running for this task' });
       return;
     }
+    console.log(`🔨 [API] Found sandbox: ${sandbox.containerId?.substring(0, 12)}`);
 
-    // 2. Get rebuildCmd from EventStore
+    // 3. Get rebuildCmd from EventStore
     const state = await eventStore.getCurrentState(taskId as any);
     const envConfig = state.environmentConfig || {};
 
@@ -3008,9 +3000,9 @@ router.post('/:id/rebuild', authenticate, async (req: AuthRequest, res) => {
       message: `Manual rebuild triggered for ${framework}...`,
     });
 
-    // 4. Execute rebuild in sandbox
+    // 4. Execute rebuild in sandbox (sandboxService.exec uses taskId for lookup)
     const startTime = Date.now();
-    const result = await sandboxService.exec(sandboxId, rebuildCmd, {
+    const result = await sandboxService.exec(taskId, rebuildCmd, {
       cwd: '/workspace',
       timeout: 300000, // 5 minutes
     });
