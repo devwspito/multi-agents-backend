@@ -3860,6 +3860,7 @@ export class DevelopersPhase extends BasePhase {
 
     console.log(`\n🔨 [AutoRebuild] Detected ${framework} project - triggering rebuild...`);
     console.log(`   Command: ${rebuildCmd}`);
+    console.log(`   Repository: ${repoName}`);
 
     // Notify frontend that rebuild is starting
     NotificationService.emitNotification(taskId, 'rebuild_started', {
@@ -3870,9 +3871,10 @@ export class DevelopersPhase extends BasePhase {
     try {
       const startTime = Date.now();
 
-      // Execute rebuild command in sandbox (sandboxService.exec uses taskId for lookup)
+      // 🔥 FIX: Execute in the correct repo directory, NOT /workspace root
+      const repoWorkDir = `/workspace/${repoName}`;
       const result = await sandboxService.exec(taskId, rebuildCmd, {
-        cwd: '/workspace',
+        cwd: repoWorkDir,
         timeout: 300000, // 5 minutes for builds
       });
 

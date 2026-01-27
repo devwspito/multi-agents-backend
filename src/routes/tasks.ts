@@ -3001,9 +3001,13 @@ router.post('/:id/rebuild', authenticate, async (req: AuthRequest, res) => {
     });
 
     // 4. Execute rebuild in sandbox (sandboxService.exec uses taskId for lookup)
+    // 🔥 FIX: Use repo directory, NOT /workspace root
+    const repoWorkDir = `/workspace/${repoName}`;
+    console.log(`   Executing in: ${repoWorkDir}`);
+
     const startTime = Date.now();
     const result = await sandboxService.exec(taskId, rebuildCmd, {
-      cwd: '/workspace',
+      cwd: repoWorkDir,
       timeout: 300000, // 5 minutes
     });
     const duration = Math.round((Date.now() - startTime) / 1000);

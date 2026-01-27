@@ -148,10 +148,15 @@ Example usage:
       const { sandboxId } = found;
       console.log(`[sandbox_bash] ✅ Using sandbox for task ${taskId}: ${sandboxId}`);
 
-      // Determine working directory
+      // 🔥 FIX: Determine working directory - use repoName if available
+      // The project is at /workspace/<repoName>/, NOT directly at /workspace/
+      const defaultWorkDir = currentTaskContext?.repoName
+        ? `/workspace/${currentTaskContext.repoName}`
+        : '/workspace';
+
       const workDir = args.cwd
         ? (args.cwd.startsWith('/') ? args.cwd : `/workspace/${args.cwd}`)
-        : '/workspace';
+        : defaultWorkDir;
 
       console.log(`\n🐳 [sandbox_bash] Executing in sandbox ${sandboxId}:`);
       console.log(`   Command: ${args.command}`);

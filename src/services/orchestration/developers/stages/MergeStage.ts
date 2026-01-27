@@ -715,6 +715,7 @@ If you cannot resolve a conflict, output:
 
     console.log(`\n🔨 [AutoRebuild] Detected ${framework} project - triggering rebuild...`);
     console.log(`   Command: ${rebuildCmd}`);
+    console.log(`   Repository: ${repoName}`);
 
     // Notify frontend that rebuild is starting
     NotificationService.emitNotification(taskId, 'rebuild_started', {
@@ -725,9 +726,10 @@ If you cannot resolve a conflict, output:
     try {
       const startTime = Date.now();
 
-      // Execute rebuild command in sandbox (sandboxService.exec uses taskId for lookup)
+      // 🔥 FIX: Execute in the correct repo directory, NOT /workspace root
+      const repoWorkDir = `/workspace/${repoName}`;
       const result = await sandboxService.exec(taskId, rebuildCmd, {
-        cwd: '/workspace',
+        cwd: repoWorkDir,
         timeout: 300000, // 5 minutes for builds
       });
 
@@ -784,10 +786,17 @@ If you cannot resolve a conflict, output:
   private async reinstallDependenciesIfNeeded(
     conflictedFiles: string[],
     sandboxId: string | undefined,
-    _repoPath: string // Kept for future logging, sandbox uses /workspace
+    repoPath: string // 🔥 FIX: Now using this to extract repoName
   ): Promise<void> {
     if (!sandboxId) {
       console.log(`   ⚠️ [Merge] No sandboxId - skipping dependency reinstall`);
+      return;
+    }
+
+    // 🔥 FIX: Extract repoName from repoPath (e.g., /workspace/task123/my-repo -> my-repo)
+    const repoName = repoPath.split('/').filter(Boolean).pop() || '';
+    if (!repoName) {
+      console.log(`   ⚠️ [Merge] Could not extract repoName from ${repoPath} - skipping`);
       return;
     }
 
@@ -807,6 +816,7 @@ If you cannot resolve a conflict, output:
     }
 
     console.log(`\n🔄 [Merge] Dependency files modified: ${Array.from(modifiedDeps).join(', ')}`);
+    console.log(`   Repository: ${repoName}`);
 
     // Determine which install commands to run (dedupe by language)
     const commandsByLanguage: Map<string, string> = new Map();
@@ -817,13 +827,15 @@ If you cannot resolve a conflict, output:
       }
     });
 
-    // Execute install commands in sandbox
+    // 🔥 FIX: Execute in the correct repo directory, NOT /workspace root
+    const repoWorkDir = `/workspace/${repoName}`;
     for (const [language, installCmd] of Array.from(commandsByLanguage.entries())) {
       console.log(`   📦 [Merge] Reinstalling ${language} dependencies: ${installCmd}`);
+      console.log(`   Directory: ${repoWorkDir}`);
 
       try {
         const result = await sandboxService.exec(sandboxId, installCmd, {
-          cwd: '/workspace',
+          cwd: repoWorkDir,
           timeout: 120000, // 2 minutes for install
         });
 
