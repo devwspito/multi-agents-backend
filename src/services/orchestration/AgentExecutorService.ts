@@ -436,6 +436,10 @@ export class AgentExecutorService {
           let containerName: string | null = null;
           const explicitSandboxId = _options?.sandboxId;
 
+          // 🔥 FIX: Extract repoName EARLY so it's available for context setting
+          // workspacePath format: /path/to/workspace/repo-name
+          const repoName = workspacePath.split('/').pop() || '';
+
           // 1️⃣ PRIORITY: Use explicit sandboxId if provided
           if (explicitSandboxId) {
             const explicitSandbox = sandboxService.getSandbox(explicitSandboxId);
@@ -458,11 +462,9 @@ export class AgentExecutorService {
             }
           }
 
-          // 3️⃣ FALLBACK: Extract repo name from workspacePath
+          // 3️⃣ FALLBACK: Try sandbox ID pattern taskId-setup-repoName
           if (!containerName) {
-            // workspacePath format: /path/to/workspace/repo-name
             // sandboxId format: taskId-setup-repo-name
-            const repoName = workspacePath.split('/').pop();
             const expectedSandboxId = repoName ? `${taskId}-setup-${repoName}` : null;
 
             if (expectedSandboxId) {
@@ -489,18 +491,23 @@ export class AgentExecutorService {
           }
 
           if (containerName) {
+            // 🔥 FIX: Use /workspace/${repoName} NOT /workspace
+            // Repos are cloned to /workspace/<repoName>/ inside container
+            const containerWorkDir = repoName ? `/workspace/${repoName}` : '/workspace';
+
             // Set context for the Docker hook (for Bash tool interception)
             setDockerHookContext({
               taskId,
               containerName,
-              workspacePath: '/workspace',
+              workspacePath: containerWorkDir,
             });
 
             // 🔧 FIX: Also set context for sandbox_bash tool (uses different context)
             setSandboxContext({
               taskId,
               sandboxId: taskId,  // sandbox_bash uses taskId to find sandbox
-              workspacePath: '/workspace',
+              workspacePath: containerWorkDir,
+              repoName,  // 🔥 Pass repoName for defaultWorkDir calculation
             });
 
             // Add PreToolUse hook to intercept Bash commands

@@ -374,20 +374,26 @@ export function createDockerBashHook(taskId: string): HookCallback {
       // Try to find a running sandbox for this task
       const sandbox = sandboxService.getSandbox(taskId);
       if (sandbox && sandbox.status === 'running') {
+        // 🔥 FIX: Try to get repoName from sandbox config or workDir
+        // sandbox.config?.workDir is typically set to /workspace or /workspace/repoName
+        const configWorkDir = sandbox.config?.workDir || '/workspace';
         currentSandboxContext = {
           taskId,
           containerName: sandbox.containerName,
-          workspacePath: '/workspace',
+          workspacePath: configWorkDir,
         };
       } else {
-        // Check for setup sandboxes
+        // Check for setup sandboxes (format: taskId-setup-repoName)
         const allSandboxes = sandboxService.getAllSandboxes();
         for (const [sandboxId, sb] of allSandboxes) {
           if (sandboxId.startsWith(`${taskId}-setup-`) && sb.status === 'running') {
+            // 🔥 FIX: Extract repoName from sandboxId pattern
+            const repoName = sandboxId.replace(`${taskId}-setup-`, '');
+            const workDir = repoName ? `/workspace/${repoName}` : '/workspace';
             currentSandboxContext = {
               taskId,
               containerName: sb.containerName,
-              workspacePath: '/workspace',
+              workspacePath: workDir,
             };
             break;
           }
