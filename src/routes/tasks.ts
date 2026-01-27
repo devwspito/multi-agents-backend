@@ -19,6 +19,11 @@ import { eventStore } from '../services/EventStore';
 import { sandboxService } from '../services/SandboxService';
 import { NotificationService } from '../services/NotificationService';
 
+// 🔥 Safe Git Execution - For commit/push from host
+import { safeGitExec } from '../utils/safeGitExecution';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
 const router = Router();
 // Shared orchestration coordinator instance
 const orchestrationCoordinator = new OrchestrationCoordinator();
@@ -3054,6 +3059,212 @@ router.post('/:id/rebuild', authenticate, async (req: AuthRequest, res) => {
     res.status(500).json({
       success: false,
       message: 'Rebuild failed',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * 📝 PUT /api/tasks/:id/sandbox/file
+ *
+ * Save a file in the sandbox workspace.
+ * Since sandbox and host share filesystem via volume mount,
+ * this writes to the host filesystem directly.
+ */
+router.put('/:id/sandbox/file', authenticate, async (req: AuthRequest, res) => {
+  const taskId = req.params.id;
+  const { filePath, content } = req.body;
+
+  console.log(`📝 [API] Save file requested: ${filePath}`);
+
+  try {
+    // 1. Validate input
+    if (!filePath || content === undefined) {
+      res.status(400).json({
+        success: false,
+        message: 'filePath and content are required',
+      });
+      return;
+    }
+
+    // 2. Security: Prevent path traversal
+    if (filePath.includes('..') || filePath.startsWith('/')) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid file path (no .. or absolute paths allowed)',
+      });
+      return;
+    }
+
+    // 3. Get workspace path from EventStore
+    const state = await eventStore.getCurrentState(taskId as any);
+    const workspaces = state.workspaces || [];
+
+    if (workspaces.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'No workspace path found for this task',
+      });
+      return;
+    }
+
+    // Use first workspace's path as base
+    const workspacePath = workspaces[0].workspacePath;
+
+    // 4. Write file to host filesystem (shared with sandbox)
+    const fullPath = path.join(workspacePath, filePath);
+
+    // Ensure parent directory exists
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+
+    // Write file
+    await fs.writeFile(fullPath, content, 'utf-8');
+
+    console.log(`   ✅ [SaveFile] Saved: ${fullPath}`);
+
+    res.json({
+      success: true,
+      message: `File saved: ${filePath}`,
+      path: fullPath,
+    });
+  } catch (error: any) {
+    console.error(`❌ [SaveFile] Error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to save file',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * 🚀 POST /api/tasks/:id/sandbox/commit
+ *
+ * Commit and push changes from the host workspace.
+ * This runs git commands on the HOST (not sandbox) because
+ * the host has git credentials configured.
+ */
+router.post('/:id/sandbox/commit', authenticate, async (req: AuthRequest, res) => {
+  const taskId = req.params.id;
+  const { message, repoName } = req.body;
+
+  console.log(`🚀 [API] Commit & Push requested for task ${taskId}`);
+
+  try {
+    // 1. Validate input
+    if (!message) {
+      res.status(400).json({
+        success: false,
+        message: 'Commit message is required',
+      });
+      return;
+    }
+
+    // 2. Get workspaces from EventStore
+    const state = await eventStore.getCurrentState(taskId as any);
+    const workspaces = state.workspaces || [];
+
+    if (workspaces.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'No workspace path found for this task',
+      });
+      return;
+    }
+
+    // 3. Determine which repo to commit to
+    const workspacePath = workspaces[0].workspacePath;
+    let targetRepoPath: string;
+
+    if (repoName) {
+      // Specific repo requested
+      targetRepoPath = path.join(workspacePath, repoName);
+    } else if (workspaces.length === 1) {
+      // Single workspace - use its repo
+      targetRepoPath = workspaces[0].repoLocalPath || path.join(workspacePath, workspaces[0].targetRepository);
+    } else {
+      // Multiple workspaces - need to specify
+      res.status(400).json({
+        success: false,
+        message: 'Multiple repositories found. Please specify repoName.',
+        repositories: workspaces.map((w: any) => w.targetRepository),
+      });
+      return;
+    }
+
+    // 4. Check if there are changes to commit
+    const statusResult = await safeGitExec('git status --porcelain', {
+      cwd: targetRepoPath,
+      timeout: 30000,
+    });
+
+    if (!statusResult.stdout.trim()) {
+      res.json({
+        success: true,
+        message: 'No changes to commit',
+        committed: false,
+      });
+      return;
+    }
+
+    console.log(`   📋 Changes detected:\n${statusResult.stdout}`);
+
+    // 5. Get current branch
+    const branchResult = await safeGitExec('git branch --show-current', {
+      cwd: targetRepoPath,
+      timeout: 10000,
+    });
+    const currentBranch = branchResult.stdout.trim() || 'main';
+
+    // 6. Stage all changes
+    await safeGitExec('git add -A', {
+      cwd: targetRepoPath,
+      timeout: 30000,
+    });
+
+    // 7. Commit with provided message
+    const commitResult = await safeGitExec(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+      cwd: targetRepoPath,
+      timeout: 30000,
+    });
+
+    console.log(`   ✅ Committed: ${commitResult.stdout}`);
+
+    // 8. Push to remote
+    const pushResult = await safeGitExec(`git push origin ${currentBranch}`, {
+      cwd: targetRepoPath,
+      timeout: 120000,
+    });
+
+    console.log(`   🚀 Pushed to ${currentBranch}`);
+
+    // 9. Notify frontend
+    NotificationService.emitConsoleLog(
+      taskId,
+      'info',
+      `✅ Committed and pushed: "${message}" to ${currentBranch}`
+    );
+
+    res.json({
+      success: true,
+      message: `Committed and pushed to ${currentBranch}`,
+      committed: true,
+      branch: currentBranch,
+      commitOutput: commitResult.stdout,
+      pushOutput: pushResult.stdout,
+    });
+  } catch (error: any) {
+    console.error(`❌ [Commit] Error: ${error.message}`);
+
+    NotificationService.emitConsoleLog(
+      taskId,
+      'error',
+      `❌ Commit failed: ${error.message}`
+    );
+
+    res.status(500).json({
+      success: false,
+      message: 'Commit/push failed',
       error: error.message,
     });
   }
