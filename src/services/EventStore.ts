@@ -133,6 +133,7 @@ export interface TaskState {
       lintCommand?: string;
       typecheckCommand?: string;
       requiredServices?: string[];
+      rebuildCmd?: string; // 🔥 AGNOSTIC: Command to rebuild after code changes (for static builds)
     };
   };
 

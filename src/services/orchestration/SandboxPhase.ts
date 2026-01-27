@@ -172,15 +172,19 @@ export class SandboxPhase extends BasePhase {
   }
 
   async shouldSkip(_context: OrchestrationContext): Promise<boolean> {
-    // 🔥 SANDBOX ALWAYS RE-EXECUTES
-    // Sandbox is ephemeral and must be recreated on every run/resume/retry
-    // This ensures:
-    // 1. Fresh Docker container with clean state
-    // 2. No corrupted state from previous failed runs
-    // 3. Judge always validates the environment
+    // 🔥 SANDBOX PHASE: Always executes but behavior depends on task status
     //
-    // The executePhase will handle cleanup of any existing containers
-    this.logSkipDecision(false, 'Sandbox always re-executes (never skip)');
+    // For INITIAL start (status = 'pending'): CREATE new sandbox
+    // For RETRY/CONTINUE/RESUME: START existing sandbox (don't rebuild)
+    //
+    // This is critical because:
+    // 1. EventStore has environmentConfig with commands from initial detection
+    // 2. Rebuilding would lose all that configuration
+    // 3. Docker container already has dependencies installed
+    // 4. Just need to START the container, not recreate it
+    //
+    // The executePhase handles the logic to detect and start existing sandboxes
+    this.logSkipDecision(false, 'Sandbox always executes (start existing or create new)');
     return false;
   }
 
@@ -217,6 +221,67 @@ export class SandboxPhase extends BasePhase {
       const task = TaskRepository.findById(taskId);
       if (!task) {
         throw new Error(`Task not found: ${taskId}`);
+      }
+
+      // =======================================================================
+      // 🔥 CRITICAL: DETECT RETRY/CONTINUE/RESUME - START EXISTING SANDBOX
+      //
+      // If task status is NOT 'pending', this is a retry/continue/resume.
+      // We should NOT rebuild the sandbox - just START the existing container.
+      //
+      // Why? Because:
+      // 1. EventStore already has environmentConfig with all commands
+      // 2. Rebuilding would trigger new LLM detection and overwrite config
+      // 3. Docker container already has dependencies installed
+      // 4. Just need to START the container, not recreate everything
+      // =======================================================================
+      const isInitialStart = task.status === 'pending';
+      const taskStatus = task.status;
+
+      if (!isInitialStart) {
+        console.log(`\n🔄 [SandboxPhase] Task status: '${taskStatus}' - attempting to START existing sandbox`);
+        console.log(`   ℹ️ This is a retry/continue/resume - NOT creating new sandbox`);
+
+        // Try to find and start existing sandbox
+        const existingSandbox = await sandboxService.findOrStartExistingSandbox(taskId, workspacePath);
+
+        if (existingSandbox) {
+          console.log(`   ✅ Existing sandbox found and started: ${existingSandbox.containerName}`);
+
+          // Store sandbox info in context for downstream phases
+          context.setData('sandboxId', taskId);
+          context.setData('containerName', existingSandbox.containerName);
+          context.setData('containerWorkDir', existingSandbox.config?.workDir || '/workspace');
+
+          // Get existing environmentConfig from EventStore
+          const state = await eventStore.getCurrentState(taskId as any);
+          if (state.environmentConfig) {
+            context.setData('environmentConfig', state.environmentConfig);
+            console.log(`   ✅ Restored environmentConfig from EventStore with ${Object.keys(state.environmentConfig).length} repo(s)`);
+          }
+
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `🔄 Reusing existing sandbox (${taskStatus} → running)`
+          );
+
+          return {
+            success: true,
+            data: {
+              sandboxId: taskId,
+              containerName: existingSandbox.containerName,
+              reused: true,
+              previousStatus: taskStatus,
+            },
+            metadata: { cost: 0 },
+          };
+        } else {
+          console.log(`   ⚠️ No existing sandbox found - will create new one`);
+          console.log(`   ℹ️ This may happen if container was manually deleted`);
+        }
+      } else {
+        console.log(`\n🆕 [SandboxPhase] Task status: 'pending' - creating NEW sandbox`);
       }
 
       // 🔥 FIX: Use context.repositories (passed by OrchestrationCoordinator)
@@ -1101,8 +1166,9 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
           runCommand: devCmd,
           devPort: repoLLM.devPort,
           dockerImage: repoLLM.dockerImage,
+          rebuildCmd: repoLLM.rebuildCmd, // 🔥 Command to rebuild after code changes (for static builds)
         };
-        console.log(`   🔧 ${repo.name}: ${repoLLM.language} → ${devCmd || 'no devCmd'}`);
+        console.log(`   🔧 ${repo.name}: ${repoLLM.language} → ${devCmd || 'no devCmd'} (rebuild: ${repoLLM.rebuildCmd || 'none'})`);
       }
 
       // 🔥 Store environmentConfig in context for direct access by downstream phases

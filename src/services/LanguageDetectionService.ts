@@ -33,6 +33,10 @@ export interface DetectedLanguage {
   // If the framework generates tests by default (e.g., flutter create, create-react-app),
   // this command validates the project works before developers start writing code.
   testCmd?: string;           // e.g., "flutter test", "npm test", "pytest", "go test ./..."
+  // 🔥 AGNOSTIC: Rebuild command for static builds
+  // Used after code merges to rebuild the app (for frameworks using static build + serve pattern)
+  // For frameworks with HMR (hot module replacement), this can be "echo 'HMR handles rebuild'"
+  rebuildCmd?: string;        // e.g., "flutter build web", "npm run build", "cargo build"
 }
 
 export interface DetectionResult {
@@ -100,7 +104,8 @@ RESPOND WITH THIS EXACT JSON STRUCTURE. ALL FIELDS ARE REQUIRED:
   "devCmd": "REQUIRED: command to start dev server binding to 0.0.0.0",
   "devPort": 8080,
   "testCmd": "OPTIONAL: command to run default tests if framework generates them",
-  "runtimeInstallCmd": "REQUIRED FOR MULTI-RUNTIME: command to install this language runtime in ANY container"
+  "runtimeInstallCmd": "REQUIRED FOR MULTI-RUNTIME: command to install this language runtime in ANY container",
+  "rebuildCmd": "REQUIRED: command to rebuild after code changes (for static builds)"
 }
 
 MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
@@ -114,6 +119,19 @@ MANDATORY devCmd EXAMPLES (you MUST return one of these or similar):
 - FastAPI: "uvicorn main:app --host 0.0.0.0 --port 8000"
 - Go: "go run ."
 - Rust: "cargo run"
+
+🔥 MANDATORY rebuildCmd - Command to rebuild the project after code changes.
+This is used for frameworks with static builds where the dev server serves pre-built files.
+After code is merged, rebuildCmd runs to update the served files.
+EXAMPLES:
+- Flutter (static build): "flutter build web" (rebuilds build/web which python http.server serves)
+- React/Vite (HMR): "echo 'HMR handles rebuild'" (dev server has hot reload, no manual rebuild needed)
+- Next.js (HMR): "echo 'HMR handles rebuild'" (dev server has hot reload)
+- Express/Node: "echo 'No rebuild needed'" (watches files automatically)
+- Python Flask/Django: "echo 'No rebuild needed'" (auto-reloads)
+- Go: "go build ." (if using static binary)
+- Rust: "cargo build"
+NOTE: For frameworks with Hot Module Replacement (HMR), use "echo 'HMR handles rebuild'" since the dev server handles updates automatically.
 
 OPTIONAL testCmd - If the framework/language generates default tests on project creation, include the test command.
 This validates the project is correctly set up before developers start writing code.
@@ -211,6 +229,9 @@ JSON RESPONSE:`;
       } else {
         console.warn(`   ⚠️ NO runtimeInstallCmd returned - multi-runtime may fail!`);
       }
+      if (parsed.rebuildCmd) {
+        console.log(`   Rebuild command: ${parsed.rebuildCmd}`);
+      }
 
       return {
         primary: {
@@ -229,6 +250,7 @@ JSON RESPONSE:`;
           devPort: typeof parsed.devPort === 'number' ? parsed.devPort : undefined,
           testCmd: parsed.testCmd || undefined, // 🔥 AGNOSTIC: Optional test command
           runtimeInstallCmd: parsed.runtimeInstallCmd || undefined, // 🔥 Install runtime in any container
+          rebuildCmd: parsed.rebuildCmd || undefined, // 🔥 AGNOSTIC: Rebuild command for static builds
         },
         rawResponse: jsonStr,
       };
@@ -265,6 +287,7 @@ JSON RESPONSE:`;
           devPort: 8080,
           testCmd: 'flutter test',
           runtimeInstallCmd: 'echo "Flutter already in container"', // Flutter container has dart/flutter
+          rebuildCmd: 'flutter clean && flutter build web', // Clean cache + rebuild static files
         },
       },
       {
@@ -283,6 +306,7 @@ JSON RESPONSE:`;
           devPort: 3000,
           // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
           runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+          rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
         },
       },
       {
@@ -300,6 +324,7 @@ JSON RESPONSE:`;
           devPort: 5000,
           // 🔥 Install Python in ANY container
           runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
+          rebuildCmd: "echo 'Python auto-reloads'", // Flask/Django dev servers auto-reload
         },
       },
       {
@@ -319,6 +344,7 @@ JSON RESPONSE:`;
           testCmd: 'go test ./...',
           // 🔥 Install Go in ANY container (detect arch dynamically)
           runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
+          rebuildCmd: 'go build .', // Rebuild binary after code changes
         },
       },
       {
@@ -338,6 +364,7 @@ JSON RESPONSE:`;
           testCmd: 'cargo test',
           // 🔥 Install Rust in ANY container
           runtimeInstallCmd: 'which cargo || (apt-get update && apt-get install -y curl && curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env)',
+          rebuildCmd: 'cargo build', // Rebuild binary after code changes
         },
       },
     ];
@@ -582,6 +609,7 @@ JSON RESPONSE:`;
           devPort: 8080,
           testCmd: 'go test ./...',
           runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
+          rebuildCmd: 'go build .', // Rebuild binary after code changes
         },
       },
       {
@@ -599,6 +627,7 @@ JSON RESPONSE:`;
           devPort: 8080,
           testCmd: 'cargo test',
           runtimeInstallCmd: 'which cargo || (apt-get update && apt-get install -y curl && curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env)',
+          rebuildCmd: 'cargo build', // Rebuild binary after code changes
         },
       },
       {
@@ -615,6 +644,7 @@ JSON RESPONSE:`;
           devCmd: 'python -m flask run --host=0.0.0.0 --port=5000',
           devPort: 5000,
           runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
+          rebuildCmd: "echo 'Python auto-reloads'", // Flask/Django dev servers auto-reload
         },
       },
       {
@@ -632,6 +662,7 @@ JSON RESPONSE:`;
           devPort: 5000,
           testCmd: 'pytest',
           runtimeInstallCmd: 'which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)',
+          rebuildCmd: "echo 'Python auto-reloads'", // Flask/Django dev servers auto-reload
         },
       },
     ];
@@ -677,6 +708,7 @@ JSON RESPONSE:`;
       testCmd: 'flutter test',
       // 🔥 Flutter container already has dart/flutter installed
       runtimeInstallCmd: 'echo "Flutter already in container"',
+      rebuildCmd: 'flutter clean && flutter build web', // Clean cache + rebuild static files
     };
   }
 
@@ -749,6 +781,7 @@ JSON RESPONSE:`;
       testCmd: testCmd,
       // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
       runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+      rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload (Vite, Webpack, etc.)
     };
   }
 
@@ -781,6 +814,7 @@ JSON RESPONSE:`;
         // 🔥 AGNOSTIC: flutter create generates test/widget_test.dart by default
         testCmd: 'flutter test',
         runtimeInstallCmd: 'echo "Flutter already in container"',
+        rebuildCmd: 'flutter clean && flutter build web', // Clean cache + rebuild static files
       };
     }
 
@@ -798,6 +832,7 @@ JSON RESPONSE:`;
         devCmd: 'PORT=4001 npm run dev || PORT=4001 npm start',
         devPort: 4001,
         runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+        rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
       };
     }
 
@@ -815,6 +850,7 @@ JSON RESPONSE:`;
         devCmd: 'npm run dev -- --host 0.0.0.0 --port 3000 || npm start',
         devPort: 3000,
         runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+        rebuildCmd: "echo 'HMR handles rebuild'", // Vite/Webpack dev servers have hot reload
       };
     }
 
@@ -831,6 +867,7 @@ JSON RESPONSE:`;
       devCmd: 'npm run dev || npm start',
       devPort: 3000,
       runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+      rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
     };
   }
 }
