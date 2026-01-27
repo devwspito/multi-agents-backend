@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult, saveTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { getRoleInstructions } from '../../agents/ReadmeSystem';
 import { AgentActivityService } from '../AgentActivityService';
 import { validateStoryOverlap, logOverlapValidation } from './utils/StoryOverlapValidator';
 import { storageService } from '../storage/StorageService';
@@ -949,7 +950,14 @@ Use these when calling \`recall()\` and \`remember()\` tools to leverage past le
 - ❌ Using repository names that don't exist → WRONG (use EXACT names from list above)
 ` : '';
 
-    return `# 🛑🛑🛑 STOP! READ THIS FIRST - MANDATORY RULES 🛑🛑🛑
+    // 🧠 CEREBRO: Inject role consciousness
+    const roleInstructions = getRoleInstructions('planning');
+
+    return `${roleInstructions}
+
+---
+
+# 🛑🛑🛑 STOP! READ THIS FIRST - MANDATORY RULES 🛑🛑🛑
 ${memoryContext}
 ## ⛔ FORBIDDEN BEHAVIORS - SYSTEM WILL CRASH IF YOU DO THESE:
 

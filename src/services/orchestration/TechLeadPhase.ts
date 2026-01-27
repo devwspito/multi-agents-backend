@@ -1,6 +1,7 @@
 import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { getRoleInstructions } from '../../agents/ReadmeSystem';
 import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
@@ -1617,7 +1618,14 @@ ${ProjectRadiographyService.formatForPrompt(targetRadiography)}
       }
     }
 
-    return `${retrySection || ''}TECH LEAD
+    // 🧠 CEREBRO: Inject role consciousness
+    const roleInstructions = getRoleInstructions('tech_lead');
+
+    return `${retrySection || ''}${roleInstructions}
+
+---
+
+# TECH LEAD TASK
 ${masterEpicContext}
 ${archBriefSection}
 ${radiographySection}

@@ -189,7 +189,9 @@
       "Bash(git rm:*)",
       "Bash(ssh:*)",
       "Bash(git restore:*)",
-      "Bash(git revert:*)"
+      "Bash(git revert:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/multi-agent-frontend status --short)"
     ],
     "deny": [],
     "ask": []
