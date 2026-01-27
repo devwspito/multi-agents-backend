@@ -24,6 +24,7 @@ export interface QuickTaskParams {
   command: string;           // User's task description
   enableJudge?: boolean;     // Optional: run Judge after dev completes
   commitMessage?: string;    // Optional: custom commit message
+  model?: 'opus' | 'sonnet' | 'haiku';  // Optional: model selection (default: sonnet)
 }
 
 export interface QuickTaskResult {
@@ -67,7 +68,7 @@ export class QuickDevService {
    * 5. Streams output via WebSocket
    */
   async executeQuickTask(params: QuickTaskParams): Promise<QuickTaskResult> {
-    const { taskId, command, enableJudge } = params;
+    const { taskId, command, enableJudge, model = 'sonnet' } = params;  // Default: sonnet (balanced)
     const startTime = Date.now();
 
     console.log(`[QuickDev] Starting quick task for ${taskId}: "${command}"`);
@@ -103,7 +104,7 @@ export class QuickDevService {
         targetRepository: context.targetRepository,
       });
 
-      console.log(`[QuickDev] Executing developer agent...`);
+      console.log(`[QuickDev] Executing developer agent with model: ${model}`);
 
       // 5. Execute developer agent
       const devResult = await this.agentExecutor.executeAgent(
@@ -118,6 +119,7 @@ export class QuickDevService {
         {
           timeout: 10 * 60 * 1000,      // 10 min max
           sandboxId: context.sandboxId, // For sandbox_bash
+          model,                        // 🎯 User-selected model
         },
         undefined,                      // contextOverride
         false,                          // skipOptimization

@@ -195,6 +195,7 @@ export class AgentExecutorService {
       maxIterations?: number;
       timeout?: number;
       sandboxId?: string;  // 🐳 Explicit sandbox ID for Docker execution
+      model?: 'opus' | 'sonnet' | 'haiku';  // 🎯 Explicit model override (for Lite Team)
     },
     contextOverride?: OrchestrationContext,
     skipOptimization?: boolean,
@@ -231,12 +232,17 @@ export class AgentExecutorService {
       throw new Error(`Agent type "${agentType}" not found in agent definitions`);
     }
 
-    // SIMPLIFIED: All agents use OPUS by default
+    // Model selection logic
     let model: string;
     let modelAlias: string = 'opus';
     let thinkingBudget = 0;
 
-    if (DynamicModelRouter.isEnabled() && !skipOptimization) {
+    // 🎯 EXPLICIT MODEL OVERRIDE (for Lite Team user selection)
+    if (_options?.model) {
+      modelAlias = _options.model;
+      model = getExplicitModelId(modelAlias);
+      AgentActivityService.emitMessage(taskId || '', agentType, `🎯 Model: ${modelAlias.toUpperCase()} (user selected)`);
+    } else if (DynamicModelRouter.isEnabled() && !skipOptimization) {
       const modelSelection = DynamicModelRouter.selectModel(taskId, agentType, prompt, { forceTopModel: skipOptimization });
       model = modelSelection.modelId;
       modelAlias = modelSelection.tier;
