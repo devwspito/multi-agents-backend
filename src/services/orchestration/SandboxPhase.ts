@@ -339,9 +339,11 @@ export class SandboxPhase extends BasePhase {
 
           // Get existing environmentConfig from EventStore
           const state = await eventStore.getCurrentState(taskId as any);
-          if (state.environmentConfig) {
-            context.setData('environmentConfig', state.environmentConfig);
-            console.log(`   ✅ Restored environmentConfig from EventStore with ${Object.keys(state.environmentConfig).length} repo(s)`);
+          const envConfig = state.environmentConfig || {};
+
+          if (Object.keys(envConfig).length > 0) {
+            context.setData('environmentConfig', envConfig);
+            console.log(`   ✅ Restored environmentConfig from EventStore with ${Object.keys(envConfig).length} repo(s)`);
           }
 
           NotificationService.emitConsoleLog(
@@ -350,6 +352,99 @@ export class SandboxPhase extends BasePhase {
             `🔄 Reusing existing sandbox (${taskStatus} → running)`
           );
 
+          // =================================================================
+          // 🔥 CRITICAL: VERIFY & START DEV SERVERS FOR REUSED SANDBOX
+          // User requirement: "salir de sandboxPhase con un entorno favorable"
+          // We MUST ensure servers are running, not just that container exists
+          // =================================================================
+          console.log(`\n   🚀 [SandboxPhase] Verifying dev servers for reused sandbox...`);
+
+          if (Object.keys(envConfig).length === 0) {
+            console.log(`   ⚠️ No environmentConfig found - cannot start dev servers`);
+            NotificationService.emitConsoleLog(taskId, 'warn', '⚠️ No environment config - servers may not start');
+          } else {
+            const serverResults: Record<string, { started: boolean; verified: boolean; url?: string; error?: string }> = {};
+            const containerWorkDir = existingSandbox.config?.workDir || '/workspace';
+
+            for (const [repoName, config] of Object.entries(envConfig)) {
+              const repoConfig = config as any;
+              const devCmd = repoConfig.runCommand || repoConfig.devCmd;
+              const devPort = repoConfig.devPort || 8080;
+
+              if (!devCmd) {
+                console.log(`      ⚠️ [${repoName}] No devCmd - skipping`);
+                serverResults[repoName] = { started: false, verified: false, error: 'No runCommand' };
+                continue;
+              }
+
+              console.log(`      🚀 [${repoName}] Starting server on port ${devPort}...`);
+              NotificationService.emitConsoleLog(taskId, 'info', `🚀 [${repoName}] Starting dev server...`);
+
+              const repoDir = `${containerWorkDir}/${repoName}`;
+
+              try {
+                // Use the Fixer-enabled server start for reused sandboxes too
+                const result = await this.startServerWithFixerRetry(
+                  taskId,
+                  repoName,
+                  repoDir,
+                  devCmd,
+                  devPort,
+                  existingSandbox,
+                  {}, // No service env vars for reuse (they should already be running)
+                  workspacePath,
+                  context
+                );
+
+                totalCost += result.fixerCost;
+
+                if (result.verified) {
+                  serverResults[repoName] = { started: true, verified: true, url: result.url };
+                  NotificationService.emitDevServerReady(taskId, result.url || `http://localhost:${devPort}`, repoConfig.framework || 'unknown');
+                  NotificationService.emitConsoleLog(taskId, 'info', `✅ [${repoName}] Ready at ${result.url}`);
+                } else {
+                  serverResults[repoName] = { started: false, verified: false, error: result.error };
+                  NotificationService.emitConsoleLog(taskId, 'error', `❌ [${repoName}] ${result.error?.substring(0, 80)}`);
+                }
+              } catch (err: any) {
+                console.log(`      ❌ [${repoName}] Exception: ${err.message}`);
+                serverResults[repoName] = { started: false, verified: false, error: err.message };
+              }
+            }
+
+            // Check if ALL servers started successfully
+            const failedServers = Object.entries(serverResults).filter(([, r]) => !r.verified);
+            const successCount = Object.values(serverResults).filter(r => r.verified).length;
+
+            console.log(`\n   📊 Reused Sandbox Server Results:`);
+            Object.entries(serverResults).forEach(([repo, result]) => {
+              console.log(`      ${result.verified ? '✅' : '❌'} ${repo}: ${result.verified ? result.url : result.error}`);
+            });
+
+            // 🔥 BLOCK if any server failed - environment is NOT ready
+            if (failedServers.length > 0) {
+              const errorMsg = `${failedServers.length} dev server(s) failed in reused sandbox. Environment NOT ready.`;
+              console.error(`\n   🚨 ${errorMsg}`);
+              NotificationService.emitConsoleLog(taskId, 'error', `🚨 ${errorMsg}`);
+
+              return {
+                success: false,
+                error: errorMsg,
+                data: {
+                  sandboxId: taskId,
+                  containerName: existingSandbox.containerName,
+                  reused: true,
+                  serverResults,
+                  failedServers: failedServers.map(([name, r]) => ({ name, error: r.error })),
+                },
+                metadata: { cost: totalCost },
+              };
+            }
+
+            context.setData('devServerResults', serverResults);
+            console.log(`   ✅ All ${successCount} server(s) running - environment ready!`);
+          }
+
           return {
             success: true,
             data: {
@@ -357,8 +452,9 @@ export class SandboxPhase extends BasePhase {
               containerName: existingSandbox.containerName,
               reused: true,
               previousStatus: taskStatus,
+              serversVerified: true,
             },
-            metadata: { cost: 0 },
+            metadata: { cost: totalCost },
           };
         } else {
           console.log(`   ⚠️ No existing sandbox found - will create new one`);
