@@ -235,7 +235,13 @@ export class NotificationService {
       repository: string;
     }[];
   }): void {
-    this.emitNotification(taskId, 'orchestration_completed', costSummary || {});
+    // 🔥 Include sandbox cleanup hint in the notification
+    const notificationData = {
+      ...(costSummary || {}),
+      sandboxHint: 'Docker container is still running. Use Tools menu to destroy it when you\'re done reviewing.',
+    };
+
+    this.emitNotification(taskId, 'orchestration_completed', notificationData);
 
     // Log PRs for easy access
     if (costSummary?.pullRequests && costSummary.pullRequests.length > 0) {
@@ -247,7 +253,11 @@ export class NotificationService {
   }
 
   static emitOrchestrationFailed(taskId: string, error: string): void {
-    this.emitNotification(taskId, 'orchestration_failed', { error });
+    // 🔥 Include sandbox hint even on failure - container is still available
+    this.emitNotification(taskId, 'orchestration_failed', {
+      error,
+      sandboxHint: 'Docker container is still running. Use Tools menu to destroy it when you\'re done.',
+    });
   }
 
   /**

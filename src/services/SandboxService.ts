@@ -779,6 +779,119 @@ class SandboxService extends EventEmitter {
     return this.sandboxes;
   }
 
+  /**
+   * 🔥 FIND AND START EXISTING SANDBOX (for retry/continue/resume)
+   *
+   * When a task is retried, continued, or resumed, we DON'T want to create a new
+   * sandbox - we want to START the existing container that was created when the
+   * task first started.
+   *
+   * This method:
+   * 1. Generates the container name from taskId (deterministic)
+   * 2. Checks if that container exists in Docker
+   * 3. If exists but stopped: starts it and registers in our map
+   * 4. If exists and running: just registers in our map
+   * 5. Returns the sandbox instance or null if container doesn't exist
+   *
+   * @param taskId - The task ID to find the sandbox for
+   * @param workspacePath - Workspace path (needed to reconstruct SandboxInstance)
+   * @returns SandboxInstance if found and started, null otherwise
+   */
+  async findOrStartExistingSandbox(
+    taskId: string,
+    workspacePath: string
+  ): Promise<SandboxInstance | null> {
+    await this.initialize();
+
+    if (!this.dockerAvailable) {
+      console.warn(`[SandboxService] Docker not available for findOrStartExistingSandbox`);
+      return null;
+    }
+
+    // 1. Check if already in our in-memory map and running
+    const existingInMap = this.sandboxes.get(taskId);
+    if (existingInMap && existingInMap.status === 'running') {
+      console.log(`[SandboxService] ♻️ Sandbox already in map and running: ${taskId}`);
+      return existingInMap;
+    }
+
+    // 2. Generate the container name (deterministic from taskId)
+    const crypto = await import('crypto');
+    const hash = crypto.createHash('md5').update(taskId).digest('hex').substring(0, 12);
+    const containerName = `agent-sandbox-${hash}`;
+
+    console.log(`[SandboxService] 🔍 Looking for existing container: ${containerName}`);
+
+    try {
+      // 3. Check if container exists in Docker (running or stopped)
+      const inspectResult = await this.runDockerCommand(['inspect', '--format', '{{.State.Status}}', containerName]);
+      const containerStatus = inspectResult.trim();
+
+      console.log(`[SandboxService] 📦 Found container ${containerName} with status: ${containerStatus}`);
+
+      // 4. If container is stopped/exited, start it
+      if (containerStatus === 'exited' || containerStatus === 'stopped' || containerStatus === 'created') {
+        console.log(`[SandboxService] ▶️ Starting stopped container: ${containerName}`);
+        await this.runDockerCommand(['start', containerName]);
+        console.log(`[SandboxService] ✅ Container started: ${containerName}`);
+      } else if (containerStatus !== 'running') {
+        // Container exists but in an unexpected state (paused, restarting, dead, etc.)
+        console.warn(`[SandboxService] ⚠️ Container ${containerName} in unexpected state: ${containerStatus}`);
+        // Try to remove and return null so a new one is created
+        await this.runDockerCommand(['rm', '-f', containerName]).catch(() => {});
+        return null;
+      }
+
+      // 5. Get container details to reconstruct SandboxInstance
+      const containerIdResult = await this.runDockerCommand(['inspect', '--format', '{{.Id}}', containerName]);
+      const imageResult = await this.runDockerCommand(['inspect', '--format', '{{.Config.Image}}', containerName]);
+
+      const instance: SandboxInstance = {
+        taskId,
+        containerId: containerIdResult.trim(),
+        containerName,
+        image: imageResult.trim(),
+        workspacePath,
+        status: 'running',
+        createdAt: new Date(), // Approximation, actual creation time is lost
+        config: {
+          image: imageResult.trim(),
+          memoryLimit: '8g', // Default, actual limit is in container
+          cpuLimit: '4',
+          networkMode: 'host',
+        },
+        repoName: 'unified',
+        sandboxType: 'fullstack',
+      };
+
+      // 6. Get mapped ports if any
+      try {
+        instance.mappedPorts = await this.getMappedPorts(instance.containerId);
+        if (Object.keys(instance.mappedPorts).length > 0) {
+          console.log(`[SandboxService] 🔌 Port mappings recovered:`, instance.mappedPorts);
+        }
+      } catch {
+        // Port mapping not available, that's OK
+      }
+
+      // 7. Register in our in-memory map
+      this.sandboxes.set(taskId, instance);
+      this.emit('sandbox:recovered', { taskId, containerName });
+
+      console.log(`[SandboxService] ✅ Existing sandbox recovered and started: ${containerName}`);
+      return instance;
+
+    } catch (error: any) {
+      // Container doesn't exist (docker inspect failed)
+      if (error.message?.includes('No such object') || error.message?.includes('Error: No such')) {
+        console.log(`[SandboxService] 📭 No existing container found for ${containerName}`);
+      } else {
+        console.warn(`[SandboxService] ⚠️ Error checking for existing container: ${error.message}`);
+      }
+      return null;
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Command Execution
   // --------------------------------------------------------------------------
