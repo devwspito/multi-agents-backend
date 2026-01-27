@@ -588,6 +588,9 @@ class UnifiedMemoryServiceClass {
     this.updateStoryInEpic(taskId, epicId, storyId, (story) => ({
       ...story,
       stage,
+      // 🔥 FIX: Also update status when stage is 'completed'
+      // TeamOrchestrationPhase checks story.status === 'completed' for verification
+      ...(stage === 'completed' ? { status: 'completed' } : {}),
       lastUpdated: new Date(),
       ...(metadata ? { metadata: { ...(story.metadata || {}), ...metadata } } : {}),
       ...(metadata?.filesModified ? { filesModified: metadata.filesModified } : {}),

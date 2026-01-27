@@ -24,8 +24,9 @@ import { CostAccumulator } from './utils/CostAccumulator';
 import { getEpicId, getEpicIdSafe, validateEpicIds } from './utils/IdNormalizer';
 // ⏱️ Centralized timeout constants
 import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
-// 📦 SQLite Repository
+// 📦 SQLite Repositories
 import { TaskRepository } from '../../database/repositories/TaskRepository';
+import { ProjectRepository } from '../../database/repositories/ProjectRepository';
 
 // TechLead approval timeout - use centralized constant
 const TECH_LEAD_APPROVAL_TIMEOUT_MS = APPROVAL_TIMEOUTS.TECH_LEAD_APPROVAL;
@@ -2039,7 +2040,98 @@ Or if you cannot fix it:
           prNumber
         );
         console.log(`💾 [PR] Saved PR info to Unified Memory: ${prUrl} (#${prNumber})`);
-      }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // 🔥 AUTO-MERGE TO MAIN (OPTIONAL - Controlled per Project)
+        // When enabled: Merge epic branch immediately after PR creation
+        // When disabled (default): PR waits for human review
+        // Toggle via: Project Settings → autoMergeEnabled (UI toggle)
+        // ═══════════════════════════════════════════════════════════════════
+        let autoMergeEnabled = false;
+        try {
+          const task = TaskRepository.findById(taskId);
+          if (task?.projectId) {
+            const project = ProjectRepository.findById(task.projectId);
+            autoMergeEnabled = project?.settings?.autoMergeEnabled === true;
+            console.log(`   📋 [PR] Project autoMergeEnabled: ${autoMergeEnabled}`);
+          }
+        } catch (lookupError: any) {
+          console.warn(`   ⚠️ [PR] Could not load project settings: ${lookupError.message}`);
+        }
+
+        if (!autoMergeEnabled) {
+          console.log(`\n📋 [PR] Auto-merge disabled - PR #${prNumber} awaits human review`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `📋 PR #${prNumber} created - awaiting human review`
+          );
+          // PR created successfully, human will review and merge
+        } else {
+          // Auto-merge enabled - proceed with automatic merge
+          console.log(`\n🔀 [AUTO-MERGE] Merging PR #${prNumber} to main automatically...`);
+          NotificationService.emitConsoleLog(
+            taskId,
+            'info',
+            `🔀 Auto-merging PR #${prNumber} to main...`
+          );
+
+          try {
+            const { execSync } = require('child_process');
+
+            // Merge the PR using GitHub CLI (squash merge for clean history)
+            const mergeOutput = execSync(
+              `gh pr merge ${prNumber} --squash --delete-branch`,
+              { cwd: repoPath, encoding: 'utf8', timeout: 120000 }
+            );
+            console.log(`✅ [AUTO-MERGE] PR #${prNumber} merged to main successfully`);
+            console.log(`   Output: ${mergeOutput.trim()}`);
+
+            // Update local main branch to have the merged code
+            console.log(`📥 [AUTO-MERGE] Updating local main branch...`);
+            try {
+              execSync('git fetch origin main', { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              execSync('git checkout main', { cwd: repoPath, encoding: 'utf8', timeout: 30000 });
+              execSync('git pull origin main --ff-only', { cwd: repoPath, encoding: 'utf8', timeout: 60000 });
+              console.log(`✅ [AUTO-MERGE] Local main branch updated with merged code`);
+            } catch (pullError: any) {
+              console.warn(`⚠️  [AUTO-MERGE] Could not update local main: ${pullError.message}`);
+              // Non-critical - remote main is updated, local can be updated later
+            }
+
+            NotificationService.emitConsoleLog(
+              taskId,
+              'info',
+              `✅ PR #${prNumber} merged to main`
+            );
+
+            // Update PR state in memory
+            await unifiedMemoryService.saveEpicPR(
+              taskId,
+              getEpicId(epic),
+              { url: prUrl, number: prNumber, state: 'merged' }
+            );
+
+          } catch (mergeError: any) {
+            // Merge failed - log but don't fail the epic
+            console.error(`⚠️  [AUTO-MERGE] Failed to auto-merge PR #${prNumber}: ${mergeError.message}`);
+            NotificationService.emitConsoleLog(
+              taskId,
+              'warn',
+              `⚠️  Auto-merge failed: ${mergeError.message}. Manual merge required.`
+            );
+
+            // Common reasons for failure:
+            if (mergeError.message.includes('review')) {
+              console.log(`   💡 Tip: PR requires review approval before merge`);
+            } else if (mergeError.message.includes('conflict')) {
+              console.log(`   💡 Tip: PR has merge conflicts that need resolution`);
+            } else if (mergeError.message.includes('check')) {
+              console.log(`   💡 Tip: CI checks must pass before merge`);
+            }
+          }
+        }
+      } // Close if (prUrl && prNumber)
 
     } catch (error: any) {
       console.error(`❌ [PR] Unexpected error creating PR: ${error.message}`);

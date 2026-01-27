@@ -252,16 +252,11 @@ export class SandboxPhase extends BasePhase {
         const gitPath = path.join(repoPath, '.git');
 
         // Check if already properly cloned
+        // 🔥 SANDBOX PRINCIPLE: If repo exists locally, USE IT AS-IS
+        // No git pull, no GitHub dependency - like a dev working on their laptop
+        // The local code is the source of truth for the sandbox
         if (fs.existsSync(gitPath)) {
-          console.log(`   ✅ [${repo.name}] Already cloned (valid .git)`);
-          try {
-            safeGitExecSync(`git -C "${repoPath}" pull --ff-only 2>/dev/null || true`, {
-              encoding: 'utf8',
-              timeout: 60000,
-            });
-          } catch {
-            // Ignore pull failures - repo is still valid
-          }
+          console.log(`   ✅ [${repo.name}] Already exists locally - using as-is (no GitHub sync)`);
           continue;
         }
 
