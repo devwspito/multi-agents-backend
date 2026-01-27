@@ -194,14 +194,61 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     // 2. Get workspace info from EventStore
     console.log(`   📂 Getting EventStore state for task ${taskId}...`);
     const state = await eventStore.getCurrentState(taskId);
-    const workspace = state.workspaces?.[0];
-    console.log(`   📂 Workspaces found: ${state.workspaces?.length || 0}`);
+    let workspace = state.workspaces?.[0];
+    console.log(`   📂 Workspaces in EventStore: ${state.workspaces?.length || 0}`);
+
+    // 2b. Fallback: Search disk for workspace directory
+    if (!workspace) {
+      console.log(`   ⚠️ No workspace in EventStore, searching disk...`);
+
+      // Try common workspace patterns
+      const workspaceBase = process.env.AGENT_WORKSPACE_PATH || path.join(os.homedir(), 'agent-workspace-prod');
+      const possiblePaths = [
+        path.join(workspaceBase, `task-${taskId}`),
+        path.join(workspaceBase, taskId),
+        `/tmp/agent-workspace/task-${taskId}`,
+        `/tmp/agent-workspace/${taskId}`,
+      ];
+
+      console.log(`   🔍 Searching in: ${workspaceBase}`);
+
+      for (const possiblePath of possiblePaths) {
+        if (fs.existsSync(possiblePath)) {
+          console.log(`   ✅ Found workspace on disk: ${possiblePath}`);
+          workspace = {
+            workspacePath: possiblePath,
+            repoLocalPath: possiblePath,
+            targetRepository: path.basename(possiblePath),
+          };
+          break;
+        }
+      }
+
+      // Also try to find any subdirectory in workspaceBase that contains taskId
+      if (!workspace && fs.existsSync(workspaceBase)) {
+        try {
+          const dirs = fs.readdirSync(workspaceBase);
+          const matchingDir = dirs.find(d => d.includes(taskId) || d.includes(taskId.substring(0, 12)));
+          if (matchingDir) {
+            const foundPath = path.join(workspaceBase, matchingDir);
+            console.log(`   ✅ Found workspace by partial match: ${foundPath}`);
+            workspace = {
+              workspacePath: foundPath,
+              repoLocalPath: foundPath,
+              targetRepository: matchingDir,
+            };
+          }
+        } catch (e) {
+          console.log(`   ⚠️ Error scanning workspace base: ${e}`);
+        }
+      }
+    }
 
     if (!workspace) {
-      console.log(`   ❌ No workspace found in EventStore!`);
+      console.log(`   ❌ No workspace found anywhere!`);
       return res.status(404).json({
         success: false,
-        error: 'No workspace found in EventStore for this task. The task may not have been executed yet.',
+        error: 'No workspace found. The task may not have been executed yet, or workspace was deleted.',
       });
     }
 
