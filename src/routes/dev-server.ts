@@ -498,51 +498,79 @@ router.post('/start-preview/:taskId', async (req: Request, res: Response) => {
     console.log(`🐳 [DevServer API] Found sandbox: ${sandbox.sandboxId} (${sandbox.instance.containerName})`);
 
     // 2. Detect framework inside container if not provided
+    // 🔥 FIX: Search recursively in /workspace subdirectories since repos are at /workspace/<repoName>/
     let detectedFramework = framework;
     if (!detectedFramework) {
-      // Check what files exist in /workspace using docker exec
       try {
         const { execSync } = await import('child_process');
 
+        // 🔥 Use 'find' to search recursively (up to 3 levels deep) like DevServerService does
         // Check for pubspec.yaml (Flutter)
         try {
-          execSync(`docker exec ${sandbox.instance.containerName} test -f /workspace/pubspec.yaml`, { encoding: 'utf-8' });
-          detectedFramework = 'flutter';
-          console.log(`🐳 [DevServer API] Detected Flutter project`);
-        } catch {
-          // Not Flutter, check for package.json
+          const pubspecResult = execSync(
+            `docker exec ${sandbox.instance.containerName} bash -c 'find /workspace -maxdepth 3 -name "pubspec.yaml" -type f 2>/dev/null | head -1'`,
+            { encoding: 'utf-8' }
+          ).trim();
+          if (pubspecResult) {
+            detectedFramework = 'flutter';
+            console.log(`🐳 [DevServer API] Detected Flutter project at: ${pubspecResult}`);
+          }
+        } catch { /* Not found */ }
+
+        // Check for package.json (Node.js projects)
+        if (!detectedFramework) {
           try {
-            const packageJsonContent = execSync(
-              `docker exec ${sandbox.instance.containerName} cat /workspace/package.json 2>/dev/null`,
+            const packageJsonPath = execSync(
+              `docker exec ${sandbox.instance.containerName} bash -c 'find /workspace -maxdepth 3 -name "package.json" -type f 2>/dev/null | head -1'`,
               { encoding: 'utf-8' }
-            );
-            const pkg = JSON.parse(packageJsonContent);
-            const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+            ).trim();
 
-            if (deps.vite) detectedFramework = 'vite';
-            else if (deps.next) detectedFramework = 'nextjs';
-            else if (deps['react-scripts']) detectedFramework = 'cra';
-            else if (deps['@vue/cli-service']) detectedFramework = 'vue';
-            else if (deps['@angular/core']) detectedFramework = 'angular';
-            else if (pkg.scripts?.dev) detectedFramework = 'node';
-            else if (pkg.scripts?.start) detectedFramework = 'node';
+            if (packageJsonPath) {
+              const packageJsonContent = execSync(
+                `docker exec ${sandbox.instance.containerName} cat "${packageJsonPath}" 2>/dev/null`,
+                { encoding: 'utf-8' }
+              );
+              const pkg = JSON.parse(packageJsonContent);
+              const deps = { ...pkg.dependencies, ...pkg.devDependencies };
 
-            console.log(`🐳 [DevServer API] Detected Node.js project: ${detectedFramework}`);
-          } catch {
-            // Check for Python
-            try {
+              if (deps.vite) detectedFramework = 'vite';
+              else if (deps.next) detectedFramework = 'nextjs';
+              else if (deps['react-scripts']) detectedFramework = 'cra';
+              else if (deps['@vue/cli-service']) detectedFramework = 'vue';
+              else if (deps['@angular/core']) detectedFramework = 'angular';
+              else if (pkg.scripts?.dev) detectedFramework = 'node';
+              else if (pkg.scripts?.start) detectedFramework = 'node';
+
+              console.log(`🐳 [DevServer API] Detected Node.js project (${detectedFramework}) at: ${packageJsonPath}`);
+            }
+          } catch { /* Not found */ }
+        }
+
+        // Check for Python projects
+        if (!detectedFramework) {
+          try {
+            const requirementsPath = execSync(
+              `docker exec ${sandbox.instance.containerName} bash -c 'find /workspace -maxdepth 3 -name "requirements.txt" -type f 2>/dev/null | head -1'`,
+              { encoding: 'utf-8' }
+            ).trim();
+
+            if (requirementsPath) {
               const requirements = execSync(
-                `docker exec ${sandbox.instance.containerName} cat /workspace/requirements.txt 2>/dev/null`,
+                `docker exec ${sandbox.instance.containerName} cat "${requirementsPath}" 2>/dev/null`,
                 { encoding: 'utf-8' }
               );
               if (requirements.includes('django')) detectedFramework = 'django';
               else if (requirements.includes('flask')) detectedFramework = 'flask';
               else if (requirements.includes('fastapi')) detectedFramework = 'fastapi';
-              console.log(`🐳 [DevServer API] Detected Python project: ${detectedFramework}`);
-            } catch {
-              detectedFramework = 'node'; // Default fallback
+              console.log(`🐳 [DevServer API] Detected Python project (${detectedFramework}) at: ${requirementsPath}`);
             }
-          }
+          } catch { /* Not found */ }
+        }
+
+        // Default fallback
+        if (!detectedFramework) {
+          detectedFramework = 'node';
+          console.log(`🐳 [DevServer API] No framework detected, using default: node`);
         }
       } catch (err: any) {
         console.error(`🐳 [DevServer API] Error detecting framework:`, err.message);
