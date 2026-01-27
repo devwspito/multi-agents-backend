@@ -652,10 +652,10 @@ class AgentPlatformApp {
       // Stop schedulers
       this.cleanupScheduler.stop();
 
-      // Cleanup sandboxes (stop all Docker containers)
-      const { sandboxService } = await import('./services/SandboxService');
-      await sandboxService.cleanup();
-      console.log('🐳 Sandboxes cleaned up');
+      // 🔥 IMPORTANT: Do NOT destroy sandboxes on shutdown!
+      // Sandboxes persist for LivePreview and manual work.
+      // User must manually destroy them from UI when done.
+      console.log('🐳 Sandboxes preserved (not destroyed on shutdown)');
 
       // Close database connection
       const { disconnectDatabase } = await import('./config/database');

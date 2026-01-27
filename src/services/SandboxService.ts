@@ -22,6 +22,7 @@ import { spawn, exec, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
+import { SandboxRepository } from '../database/repositories/SandboxRepository.js';
 
 // ============================================================================
 // Types
@@ -221,8 +222,8 @@ class SandboxService extends EventEmitter {
       this.dockerAvailable = true;
       console.log(`[SandboxService] ✅ Docker ready: ${version}`);
 
-      // Clean up any orphaned containers from previous runs
-      await this.cleanupOrphanedContainers();
+      // 🔥 IMPORTANT: Load existing sandboxes from SQLite (survive restarts)
+      await this.loadSandboxesFromDatabase();
 
       this.initialized = true;
       this.emit('docker:ready', { version });
@@ -432,6 +433,69 @@ class SandboxService extends EventEmitter {
   }
 
   /**
+   * 🔥 STARTUP RECOVERY: Load sandboxes from SQLite and verify Docker containers
+   *
+   * On startup:
+   * 1. Load all sandboxes from SQLite
+   * 2. For each: check if Docker container still exists
+   * 3. If exists and running: add to in-memory Map
+   * 4. If exists but stopped: start it and add to Map
+   * 5. If doesn't exist: remove from SQLite (container was manually removed)
+   */
+  private async loadSandboxesFromDatabase(): Promise<void> {
+    try {
+      const savedSandboxes = SandboxRepository.findAll();
+      console.log(`[SandboxService] 🔄 Loading ${savedSandboxes.length} sandboxes from SQLite...`);
+
+      for (const saved of savedSandboxes) {
+        try {
+          // Check if Docker container exists
+          const inspectResult = await this.runDockerCommand([
+            'inspect', '--format', '{{.State.Status}}', saved.containerName
+          ]);
+          const containerStatus = inspectResult.trim();
+
+          console.log(`[SandboxService]   📦 ${saved.containerName}: Docker status = ${containerStatus}`);
+
+          if (containerStatus === 'running') {
+            // Container running - add to Map
+            this.sandboxes.set(saved.taskId, saved);
+            console.log(`[SandboxService]   ✅ Restored running sandbox: ${saved.taskId}`);
+
+          } else if (containerStatus === 'exited' || containerStatus === 'stopped' || containerStatus === 'created') {
+            // Container stopped - try to start it
+            console.log(`[SandboxService]   ▶️ Starting stopped container: ${saved.containerName}`);
+            await this.runDockerCommand(['start', saved.containerName]);
+            saved.status = 'running';
+            this.sandboxes.set(saved.taskId, saved);
+            SandboxRepository.updateStatus(saved.taskId, 'running');
+            console.log(`[SandboxService]   ✅ Restarted and restored sandbox: ${saved.taskId}`);
+
+          } else {
+            // Container in unexpected state - mark as error
+            console.warn(`[SandboxService]   ⚠️ Container ${saved.containerName} in state: ${containerStatus}`);
+            SandboxRepository.updateStatus(saved.taskId, 'error');
+          }
+
+        } catch (error: any) {
+          // Container doesn't exist in Docker
+          if (error.message?.includes('No such object') || error.message?.includes('Error: No such')) {
+            console.log(`[SandboxService]   🗑️ Container ${saved.containerName} no longer exists, removing from DB`);
+            SandboxRepository.deleteByTaskId(saved.taskId);
+          } else {
+            console.warn(`[SandboxService]   ⚠️ Error checking container ${saved.containerName}: ${error.message}`);
+          }
+        }
+      }
+
+      console.log(`[SandboxService] ✅ Loaded ${this.sandboxes.size} sandboxes from SQLite`);
+
+    } catch (error: any) {
+      console.error(`[SandboxService] ❌ Failed to load sandboxes from database: ${error.message}`);
+    }
+  }
+
+  /**
    * Check if Docker is available
    */
   isDockerAvailable(): boolean {
@@ -580,6 +644,9 @@ class SandboxService extends EventEmitter {
         }
       }
 
+      // 🔥 PERSIST TO SQLITE: Sandbox survives backend restarts
+      SandboxRepository.upsert(instance);
+
       console.log(`[SandboxService] Sandbox created: ${instance.containerId.substring(0, 12)}`);
       this.emit('sandbox:created', { taskId, containerId: instance.containerId });
 
@@ -625,6 +692,9 @@ class SandboxService extends EventEmitter {
 
       instance.status = 'stopped';
       this.sandboxes.delete(sandboxId); // Use resolved sandboxId
+
+      // 🔥 REMOVE FROM SQLITE: Only happens on manual destruction
+      SandboxRepository.deleteByTaskId(sandboxId);
 
       console.log(`[SandboxService] Sandbox ${sandboxId} destroyed for task ${taskId}`);
       this.emit('sandbox:destroyed', { taskId, sandboxId });
@@ -874,8 +944,9 @@ class SandboxService extends EventEmitter {
         // Port mapping not available, that's OK
       }
 
-      // 7. Register in our in-memory map
+      // 7. Register in our in-memory map AND SQLite
       this.sandboxes.set(taskId, instance);
+      SandboxRepository.upsert(instance);
       this.emit('sandbox:recovered', { taskId, containerName });
 
       console.log(`[SandboxService] ✅ Existing sandbox recovered and started: ${containerName}`);
@@ -885,6 +956,8 @@ class SandboxService extends EventEmitter {
       // Container doesn't exist (docker inspect failed)
       if (error.message?.includes('No such object') || error.message?.includes('Error: No such')) {
         console.log(`[SandboxService] 📭 No existing container found for ${containerName}`);
+        // Also check and clean up SQLite if there's a stale entry
+        SandboxRepository.deleteByTaskId(taskId);
       } else {
         console.warn(`[SandboxService] ⚠️ Error checking for existing container: ${error.message}`);
       }
@@ -1497,9 +1570,10 @@ ENVEOF`);
   }
 
   /**
-   * Clean up orphaned containers from previous runs
+   * Clean up orphaned containers that are NOT in our database
+   * Call manually if needed - never called automatically
    */
-  private async cleanupOrphanedContainers(): Promise<void> {
+  async cleanupOrphanedContainers(): Promise<void> {
     try {
       // Find all containers with our naming pattern
       const output = await this.runDockerCommand([
@@ -1509,11 +1583,16 @@ ENVEOF`);
       if (!output) return;
 
       const containers = output.split('\n').filter(Boolean);
+      const dbSandboxes = SandboxRepository.findAll();
+      const knownContainers = new Set(dbSandboxes.map(s => s.containerName));
+
       for (const container of containers) {
-        console.log(`[SandboxService] Cleaning up orphaned container: ${container}`);
-        await this.runDockerCommand(['rm', '-f', container]).catch(() => {});
+        if (!knownContainers.has(container)) {
+          console.log(`[SandboxService] Cleaning up orphaned container: ${container}`);
+          await this.runDockerCommand(['rm', '-f', container]).catch(() => {});
+        }
       }
-    } catch (error) {
+    } catch {
       // Ignore errors during cleanup
     }
   }

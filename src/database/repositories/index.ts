@@ -62,3 +62,5 @@ export type { ICodeSnapshot, IFileChange, ChangeType } from './CodeSnapshotRepos
 
 export { EventRepository } from './EventRepository.js';
 export type { IEvent, EventType } from './EventRepository.js';
+
+export { SandboxRepository } from './SandboxRepository.js';

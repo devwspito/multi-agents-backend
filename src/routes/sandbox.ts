@@ -12,6 +12,7 @@ import os from 'os';
 import { sandboxService } from '../services/SandboxService.js';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
 import { eventStore } from '../services/EventStore.js';
+import { SandboxRepository } from '../database/repositories/SandboxRepository.js';
 
 const router = Router();
 
@@ -173,10 +174,10 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
 
     console.log(`[Sandbox API] 🔄 Relaunch requested for task ${taskId}`);
 
-    // 1. Check if sandbox already exists and is running
+    // 1. Check if sandbox already exists and is running (in-memory)
     const existing = sandboxService.findSandboxForTask(taskId);
     if (existing && existing.instance.status === 'running') {
-      console.log(`   ✅ Sandbox already running: ${existing.instance.containerId?.substring(0, 12)}`);
+      console.log(`   ✅ Sandbox already running (in-memory): ${existing.instance.containerId?.substring(0, 12)}`);
       return res.json({
         success: true,
         reused: true,
@@ -189,6 +190,35 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
           mappedPorts: existing.instance.mappedPorts,
         },
       });
+    }
+
+    // 1b. Check SQLite for persisted sandbox (survives backend restarts)
+    const savedSandbox = SandboxRepository.findByTaskId(taskId);
+    if (savedSandbox) {
+      console.log(`   💾 Found sandbox in SQLite: ${savedSandbox.containerName}`);
+
+      // Try to recover the container from Docker
+      const recovered = await sandboxService.findOrStartExistingSandbox(
+        taskId,
+        savedSandbox.workspacePath
+      );
+
+      if (recovered && recovered.status === 'running') {
+        console.log(`   ✅ Recovered sandbox from SQLite: ${recovered.containerId?.substring(0, 12)}`);
+        return res.json({
+          success: true,
+          reused: true,
+          recovered: true,
+          sandbox: {
+            taskId,
+            containerId: recovered.containerId?.substring(0, 12),
+            containerName: recovered.containerName,
+            status: recovered.status,
+            workspacePath: recovered.workspacePath,
+            mappedPorts: recovered.mappedPorts,
+          },
+        });
+      }
     }
 
     // 2. Get workspace info from EventStore
@@ -219,6 +249,8 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
             workspacePath: possiblePath,
             repoLocalPath: possiblePath,
             targetRepository: path.basename(possiblePath),
+            epicId: 'disk-recovery',
+            startedAt: new Date(),
           };
           break;
         }
@@ -236,6 +268,8 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
               workspacePath: foundPath,
               repoLocalPath: foundPath,
               targetRepository: matchingDir,
+              epicId: 'disk-recovery',
+              startedAt: new Date(),
             };
           }
         } catch (e) {

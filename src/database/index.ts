@@ -473,6 +473,32 @@ export function initializeDatabase(): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_project_networks_project_id ON project_networks(project_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_project_networks_status ON project_networks(status)`);
 
+  // ============================================
+  // SANDBOXES TABLE
+  // Persists sandbox instances across server restarts
+  // NEVER auto-destroyed - only manual destruction from UI
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sandboxes (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      container_id TEXT NOT NULL,
+      container_name TEXT NOT NULL,
+      image TEXT NOT NULL,
+      workspace_path TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      config TEXT NOT NULL,
+      mapped_ports TEXT,
+      repo_name TEXT,
+      sandbox_type TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sandboxes_task_id ON sandboxes(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sandboxes_container_name ON sandboxes(container_name)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status)`);
+
   console.log('[SQLite] Database initialized at:', DB_PATH);
 }
 
