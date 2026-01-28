@@ -200,6 +200,18 @@ function proxyToContainer(
           '<!-- CSP removed by preview proxy for Flutter compatibility -->'
         );
 
+        // 🔥 FIX: Disable Service Worker registration to prevent caching issues
+        // Service Workers cache responses and ignore no-cache headers
+        html = html.replace(
+          /navigator\.serviceWorker\.register\([^)]+\)/gi,
+          '/* Service Worker disabled by preview proxy */ Promise.resolve()'
+        );
+        // Also handle the flutter_bootstrap.js service worker setup
+        html = html.replace(
+          /"serviceWorker"\s*:\s*\{[^}]*\}/gi,
+          '"serviceWorker": { "serviceWorkerVersion": null }'
+        );
+
         console.log(`[Preview Proxy] Rewrote base href to: ${proxyBasePath}`);
 
         // Remove content-encoding and set correct content-length
@@ -213,6 +225,10 @@ function proxyToContainer(
         delete headers['x-frame-options'];
         delete headers['X-Frame-Options'];
         headers['content-length'] = Buffer.byteLength(html).toString();
+        // 🔥 FIX: Prevent caching to ensure fresh base href rewrite on each load
+        headers['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+        headers['pragma'] = 'no-cache';
+        headers['expires'] = '0';
         // 🔥 Set permissive CSP that allows Flutter Web to work in iframes
         headers['content-security-policy'] = [
           "default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:",
