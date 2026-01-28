@@ -643,8 +643,15 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
     const { taskId } = req.params;
     const { command, enableJudge, model, mode } = req.body;
 
+    // 🔍 DEBUG: Log incoming request
+    console.log(`[Sandbox API] 📥 Quick task request received`);
+    console.log(`[Sandbox API]   taskId: ${taskId}`);
+    console.log(`[Sandbox API]   body: ${JSON.stringify(req.body)}`);
+    console.log(`[Sandbox API]   command: "${command}"`);
+
     // Validate required field
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
+      console.log(`[Sandbox API] ❌ Validation failed: command is missing or invalid`);
       return res.status(400).json({
         success: false,
         error: 'Missing or invalid "command" field. Provide the task description.',
