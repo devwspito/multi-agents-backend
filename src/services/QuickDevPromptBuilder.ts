@@ -16,6 +16,7 @@ export interface QuickDevContext {
   fileList: string;          // ls output of workspace
   currentBranch?: string;    // Current git branch
   targetRepository?: string; // Repository name
+  mode?: 'code' | 'explore' | 'ask' | 'plan';  // Execution mode
 }
 
 /**
@@ -104,6 +105,232 @@ should use \`sandbox_bash\`. The workspace is already cloned and ready.
 
 Now complete the task: **${ctx.command}**
 `;
+}
+
+/**
+ * Build prompt for EXPLORE mode - read-only codebase exploration
+ */
+export function buildExplorePrompt(ctx: QuickDevContext): string {
+  const isolationRules = getInstructionSection('isolation');
+
+  return `# EXPLORE MODE - READ-ONLY CODEBASE ANALYSIS
+
+${isolationRules}
+
+---
+
+## YOUR ROLE
+You are a **Code Explorer** - you analyze and explain code WITHOUT making changes.
+Your job is to help the user understand their codebase.
+
+---
+
+## USER'S QUESTION
+**${ctx.command}**
+
+---
+
+## WORKSPACE CONTEXT
+- **Working Directory**: ${ctx.repoPath || ctx.workspacePath}
+- **Repository**: ${ctx.targetRepository || 'current'}
+- **Branch**: ${ctx.currentBranch || 'main'}
+
+### Files in workspace:
+\`\`\`
+${ctx.fileList}
+\`\`\`
+
+---
+
+## ALLOWED TOOLS (READ-ONLY)
+- \`Read\` - Read file contents
+- \`Glob\` - Find files by pattern
+- \`Grep\` - Search code content
+- \`sandbox_bash\` - ONLY for read commands: ls, cat, find, git status, git log
+
+## ⛔ PROHIBITED
+- **NO** Edit, Write, or file modifications
+- **NO** git commit, git push, or write operations
+- **NO** npm install, pip install, or dependency changes
+- **NO** running servers or executing code that changes state
+
+---
+
+## OUTPUT FORMAT
+Provide a clear, helpful explanation:
+1. Answer the user's question directly
+2. Include relevant code snippets you found
+3. Explain how the code works
+4. Point to specific files and line numbers
+
+End with:
+\`\`\`
+EXPLORE_COMPLETED
+\`\`\`
+
+Now explore the codebase to answer: **${ctx.command}**
+`;
+}
+
+/**
+ * Build prompt for ASK mode - question answering without actions
+ */
+export function buildAskPrompt(ctx: QuickDevContext): string {
+  const isolationRules = getInstructionSection('isolation');
+
+  return `# ASK MODE - ANSWER QUESTIONS ONLY
+
+${isolationRules}
+
+---
+
+## YOUR ROLE
+You are a **Technical Assistant** - you answer questions using your knowledge
+and the codebase context. You do NOT perform any actions.
+
+---
+
+## USER'S QUESTION
+**${ctx.command}**
+
+---
+
+## WORKSPACE CONTEXT
+- **Repository**: ${ctx.targetRepository || 'current'}
+- **Branch**: ${ctx.currentBranch || 'main'}
+
+### Available files:
+\`\`\`
+${ctx.fileList}
+\`\`\`
+
+---
+
+## ALLOWED TOOLS
+- \`Read\` - Read file contents if needed for context
+- \`Grep\` - Search for relevant code
+
+## ⛔ PROHIBITED
+- **NO** writing or modifying files
+- **NO** running commands that change state
+- **NO** git operations
+- **NO** installing dependencies
+
+---
+
+## OUTPUT FORMAT
+Answer the question directly and concisely:
+1. Provide a clear answer
+2. Include code examples if helpful
+3. Reference specific files if relevant
+4. Suggest next steps if applicable
+
+End with:
+\`\`\`
+ASK_COMPLETED
+\`\`\`
+
+Now answer: **${ctx.command}**
+`;
+}
+
+/**
+ * Build prompt for PLAN mode - analysis and planning without execution
+ */
+export function buildPlanPrompt(ctx: QuickDevContext): string {
+  const isolationRules = getInstructionSection('isolation');
+
+  return `# PLAN MODE - ANALYZE AND PLAN (NO EXECUTION)
+
+${isolationRules}
+
+---
+
+## YOUR ROLE
+You are a **Technical Planner** - you analyze the codebase and create implementation plans.
+You do NOT execute any changes - you ONLY provide a detailed plan.
+
+---
+
+## TASK TO PLAN
+**${ctx.command}**
+
+---
+
+## WORKSPACE CONTEXT
+- **Working Directory**: ${ctx.repoPath || ctx.workspacePath}
+- **Repository**: ${ctx.targetRepository || 'current'}
+- **Branch**: ${ctx.currentBranch || 'main'}
+
+### Available files:
+\`\`\`
+${ctx.fileList}
+\`\`\`
+
+---
+
+## ALLOWED TOOLS (READ-ONLY)
+- \`Read\` - Read files to understand current implementation
+- \`Glob\` - Find relevant files
+- \`Grep\` - Search for patterns and dependencies
+- \`sandbox_bash\` - ONLY for: ls, cat, find, git status, git diff
+
+## ⛔ PROHIBITED
+- **NO** Edit, Write, or file modifications
+- **NO** running build, test, or deploy commands
+- **NO** git commit, push, or branch operations
+- **NO** installing or updating dependencies
+
+---
+
+## OUTPUT FORMAT
+Provide a structured implementation plan:
+
+### 1. Analysis
+- What files need to be changed?
+- What are the dependencies?
+- What risks or challenges exist?
+
+### 2. Implementation Steps
+Number each step clearly:
+1. First, do X because...
+2. Then, modify Y to...
+3. Finally, update Z with...
+
+### 3. Files to Modify
+List each file with what changes are needed:
+- \`path/to/file.ts\` - Add function X, update import Y
+- \`path/to/other.ts\` - Modify class Z
+
+### 4. Testing Strategy
+How should the changes be verified?
+
+End with:
+\`\`\`
+PLAN_COMPLETED
+\`\`\`
+
+Now analyze and plan: **${ctx.command}**
+`;
+}
+
+/**
+ * Get the appropriate prompt builder based on mode
+ */
+export function buildPromptForMode(ctx: QuickDevContext): string {
+  const mode = ctx.mode || 'code';
+
+  switch (mode) {
+    case 'explore':
+      return buildExplorePrompt(ctx);
+    case 'ask':
+      return buildAskPrompt(ctx);
+    case 'plan':
+      return buildPlanPrompt(ctx);
+    case 'code':
+    default:
+      return buildQuickDevPrompt(ctx);
+  }
 }
 
 /**

@@ -16,7 +16,7 @@ import { AgentExecutorService } from './orchestration/AgentExecutorService';
 import { NotificationService } from './NotificationService';
 import { eventStore } from './EventStore';
 import { sandboxService } from './SandboxService';
-import { buildQuickDevPrompt, buildQuickJudgePrompt } from './QuickDevPromptBuilder';
+import { buildPromptForMode, buildQuickJudgePrompt } from './QuickDevPromptBuilder';
 import { safeGitExec } from '../utils/safeGitExecution';
 
 export interface QuickTaskParams {
@@ -25,6 +25,7 @@ export interface QuickTaskParams {
   enableJudge?: boolean;     // Optional: run Judge after dev completes
   commitMessage?: string;    // Optional: custom commit message
   model?: 'opus' | 'sonnet' | 'haiku';  // Optional: model selection (default: sonnet)
+  mode?: 'code' | 'explore' | 'ask' | 'plan';  // Execution mode (default: code)
 }
 
 export interface QuickTaskResult {
@@ -68,14 +69,15 @@ export class QuickDevService {
    * 5. Streams output via WebSocket
    */
   async executeQuickTask(params: QuickTaskParams): Promise<QuickTaskResult> {
-    const { taskId, command, enableJudge, model = 'sonnet' } = params;  // Default: sonnet (balanced)
+    const { taskId, command, enableJudge, model = 'sonnet', mode = 'code' } = params;
     const startTime = Date.now();
 
-    console.log(`[QuickDev] Starting quick task for ${taskId}: "${command}"`);
+    console.log(`[QuickDev] Starting quick task for ${taskId}: "${command}" | Mode: ${mode}`);
 
     // Emit start notification
     NotificationService.emitNotification(taskId, 'quick_task_started', {
       command,
+      mode,
       timestamp: new Date().toISOString(),
     });
 
@@ -94,25 +96,28 @@ export class QuickDevService {
       // 3. Get current branch
       const currentBranch = await this.getCurrentBranch(context.repoPath || context.workspacePath);
 
-      // 4. Build prompt
-      const prompt = buildQuickDevPrompt({
+      // 4. Build prompt based on mode
+      const prompt = buildPromptForMode({
         command,
         workspacePath: context.workspacePath,
         repoPath: context.repoPath,
         fileList,
         currentBranch,
         targetRepository: context.targetRepository,
+        mode,
       });
 
-      console.log(`[QuickDev] Executing developer agent with model: ${model}`);
+      // Map mode to agent type and name
+      const agentConfig = this.getAgentConfigForMode(mode);
+      console.log(`[QuickDev] Executing ${agentConfig.name} with model: ${model}`);
 
-      // 5. Execute developer agent
+      // 5. Execute agent based on mode
       const devResult = await this.agentExecutor.executeAgent(
-        'developer',                    // agentType
+        agentConfig.type,               // agentType (varies by mode)
         prompt,                         // prompt
         context.repoPath || context.workspacePath,  // workspacePath
         taskId,                         // taskId
-        'Quick Dev',                    // agentName
+        agentConfig.name,               // agentName (varies by mode)
         undefined,                      // sessionId
         false,                          // fork
         undefined,                      // attachments
@@ -126,13 +131,13 @@ export class QuickDevService {
         'bypassPermissions',            // permissionMode - trust the agent
       );
 
-      console.log(`[QuickDev] Developer completed. Output length: ${devResult.output.length}`);
+      console.log(`[QuickDev] ${agentConfig.name} completed. Output length: ${devResult.output.length}`);
 
-      // 6. Extract commit SHA if present
-      const commitSha = this.extractCommitSha(devResult.output);
+      // 6. Extract commit SHA if present (only relevant for code mode)
+      const commitSha = mode === 'code' ? this.extractCommitSha(devResult.output) : undefined;
 
-      // 7. Check for success marker
-      const devSuccess = devResult.output.includes('DEVELOPER_FINISHED_SUCCESSFULLY');
+      // 7. Check for success marker based on mode
+      const devSuccess = this.checkSuccessMarker(devResult.output, mode);
 
       // 8. Optional: Run Judge review
       let judgeResult: QuickTaskResult['judgeResult'] | undefined;
@@ -154,6 +159,7 @@ export class QuickDevService {
       NotificationService.emitNotification(taskId, 'quick_task_completed', {
         success: devSuccess,
         command,
+        mode,
         filesModified: devResult.filesModified,
         filesCreated: devResult.filesCreated,
         commitSha,
@@ -292,6 +298,40 @@ export class QuickDevService {
     }
 
     return undefined;
+  }
+
+  /**
+   * Get agent configuration based on execution mode
+   */
+  private getAgentConfigForMode(mode: string): { type: string; name: string } {
+    switch (mode) {
+      case 'explore':
+        return { type: 'explorer', name: 'Quick Explorer' };
+      case 'ask':
+        return { type: 'assistant', name: 'Quick Assistant' };
+      case 'plan':
+        return { type: 'planner', name: 'Quick Planner' };
+      case 'code':
+      default:
+        return { type: 'developer', name: 'Quick Dev' };
+    }
+  }
+
+  /**
+   * Check for success marker based on mode
+   */
+  private checkSuccessMarker(output: string, mode: string): boolean {
+    switch (mode) {
+      case 'explore':
+        return output.includes('EXPLORE_COMPLETED');
+      case 'ask':
+        return output.includes('ASK_COMPLETED');
+      case 'plan':
+        return output.includes('PLAN_COMPLETED');
+      case 'code':
+      default:
+        return output.includes('DEVELOPER_FINISHED_SUCCESSFULLY');
+    }
   }
 
   /**

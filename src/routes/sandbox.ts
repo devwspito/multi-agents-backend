@@ -641,7 +641,7 @@ router.post('/cleanup', async (req: Request, res: Response) => {
 router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
   try {
     const { taskId } = req.params;
-    const { command, enableJudge, model } = req.body;
+    const { command, enableJudge, model, mode } = req.body;
 
     // Validate required field
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -655,7 +655,11 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
     const validModels = ['opus', 'sonnet', 'haiku'];
     const selectedModel = validModels.includes(model) ? model : 'sonnet';
 
-    console.log(`[Sandbox API] Quick task for ${taskId}: "${command.substring(0, 50)}..." | Model: ${selectedModel}`);
+    // Validate mode if provided (Claude Code style modes)
+    const validModes = ['code', 'explore', 'ask', 'plan'];
+    const selectedMode = validModes.includes(mode) ? mode : 'code';
+
+    console.log(`[Sandbox API] Quick task for ${taskId}: "${command.substring(0, 50)}..." | Model: ${selectedModel} | Mode: ${selectedMode}`);
 
     // Import QuickDevService dynamically to avoid circular dependencies
     const { quickDevService } = await import('../services/QuickDevService.js');
@@ -667,8 +671,9 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
       command: command.trim(),
       enableJudge: enableJudge === true,
       model: selectedModel,
+      mode: selectedMode as 'code' | 'explore' | 'ask' | 'plan',
     }).then(result => {
-      console.log(`[Sandbox API] Quick task completed: success=${result.success}, model=${selectedModel}`);
+      console.log(`[Sandbox API] Quick task completed: success=${result.success}, model=${selectedModel}, mode=${selectedMode}`);
     }).catch(err => {
       console.error(`[Sandbox API] Quick task failed:`, err);
     });
