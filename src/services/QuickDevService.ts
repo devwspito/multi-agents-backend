@@ -18,6 +18,7 @@ import { eventStore } from './EventStore';
 import { sandboxService } from './SandboxService';
 import { buildPromptForMode, buildQuickJudgePrompt } from './QuickDevPromptBuilder';
 import { safeGitExec } from '../utils/safeGitExecution';
+import { TaskRepository } from '../database/repositories/TaskRepository';
 
 export interface QuickTaskParams {
   taskId: string;
@@ -207,7 +208,12 @@ export class QuickDevService {
   }
 
   /**
-   * Get workspace context from EventStore and SandboxService
+   * Get workspace context from Task, EventStore, and SandboxService
+   *
+   * Priority (same as orchestrator):
+   * 1. Task.orchestration.workspacePath (set by orchestrator - AUTHORITATIVE)
+   * 2. EventStore workspaces (has full workspace info)
+   * 3. SandboxService (has workspacePath from running container)
    */
   private async getWorkspaceContext(taskId: string): Promise<{
     workspacePath: string;
@@ -216,30 +222,63 @@ export class QuickDevService {
     sandboxId?: string;
   } | null> {
     try {
-      // Get state from EventStore (use imported singleton)
+      // Get sandbox info - we need this regardless
+      let sandbox = sandboxService.getSandbox(taskId);
+
+      // If no direct sandbox, try to find setup sandbox (taskId-setup-*)
+      if (!sandbox) {
+        const found = sandboxService.findSandboxForTask(taskId);
+        if (found?.instance) {
+          sandbox = found.instance;
+        }
+      }
+
+      // 1️⃣ PRIORITY: Task orchestration.workspacePath (set by orchestrator)
+      try {
+        const task = TaskRepository.findById(taskId);
+        if (task?.orchestration?.workspacePath) {
+          console.log(`[QuickDev] Using task.orchestration.workspacePath: ${task.orchestration.workspacePath}`);
+          return {
+            workspacePath: task.orchestration.workspacePath,
+            repoPath: task.orchestration.workspacePath,
+            sandboxId: sandbox?.containerId,
+          };
+        }
+      } catch (e) {
+        console.warn(`[QuickDev] Could not get task from repository:`, e);
+      }
+
+      // 2️⃣ FALLBACK: EventStore workspaces
       const state = await eventStore.getCurrentState(taskId);
       const workspace = state.workspaces?.[0];
 
-      if (!workspace) {
-        console.warn(`[QuickDev] No workspace in EventStore for task ${taskId}`);
-        return null;
+      if (workspace) {
+        console.log(`[QuickDev] Using EventStore workspace: ${workspace.workspacePath}`);
+        return {
+          workspacePath: workspace.workspacePath,
+          repoPath: workspace.repoLocalPath,
+          targetRepository: workspace.targetRepository,
+          sandboxId: sandbox?.containerId,
+        };
       }
 
-      // Get sandbox info
-      let sandboxId: string | undefined;
-      try {
-        const sandbox = sandboxService.getSandbox(taskId);
-        sandboxId = sandbox?.containerId;
-      } catch (e) {
-        console.warn(`[QuickDev] Could not get sandbox info:`, e);
+      // 3️⃣ LAST RESORT: SandboxService (for standalone sandboxes)
+      if (sandbox && sandbox.status === 'running') {
+        console.log(`[QuickDev] Using SandboxService.workspacePath: ${sandbox.workspacePath}`);
+
+        // The workspacePath in sandbox is the HOST path
+        // The workDir is the CONTAINER path (usually /workspace)
+        const containerWorkDir = sandbox.config?.workDir || '/workspace';
+
+        return {
+          workspacePath: containerWorkDir,  // Use container path for agent
+          repoPath: sandbox.workspacePath,  // Host path for git operations
+          sandboxId: sandbox.containerId,
+        };
       }
 
-      return {
-        workspacePath: workspace.workspacePath,
-        repoPath: workspace.repoLocalPath,
-        targetRepository: workspace.targetRepository,
-        sandboxId,
-      };
+      console.warn(`[QuickDev] No workspace found in Task, EventStore, or SandboxService for task ${taskId}`);
+      return null;
     } catch (error) {
       console.error(`[QuickDev] Error getting workspace context:`, error);
       return null;
