@@ -54,6 +54,10 @@ export type AgentType =
   | 'tech-lead'
   | 'developer'
   | 'judge'
+  | 'fixer'              // Sandbox fixer - diagnoses and fixes compilation errors
+  | 'explorer'           // Quick Dev - read-only codebase exploration
+  | 'assistant'          // Quick Dev - answers questions without actions
+  | 'planner'            // Quick Dev - plans changes without execution
   | 'verification-fixer'
   | 'recovery-analyst'
   | 'auto-merge'

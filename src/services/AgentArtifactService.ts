@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 
-export type AgentType = 'planning' | 'techlead' | 'judge' | 'developer';
+export type AgentType = 'planning' | 'techlead' | 'judge' | 'developer' | 'fixer' | 'explorer' | 'assistant' | 'planner';
 
 export interface ArtifactMetadata {
   agentType: AgentType;
