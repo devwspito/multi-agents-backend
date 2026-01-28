@@ -146,13 +146,18 @@ Examples:
 🔥 CRITICAL: runtimeInstallCmd - Command to install THIS language's runtime in ANY Docker container.
 This is REQUIRED for multi-repo projects where different repos use different languages.
 Example: If Flutter frontend and Node.js backend share one container, Node.js repo needs npm installed.
-MANDATORY examples:
-- Node.js/TypeScript: "apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs"
-- Python: "apt-get update && apt-get install -y python3 python3-pip python3-venv"
-- Go: "apt-get update && apt-get install -y wget && wget https://go.dev/dl/go1.22.0.linux-arm64.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-arm64.tar.gz && export PATH=$PATH:/usr/local/go/bin"
-- Rust: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+
+⚡ LIGHTWEIGHT PRINCIPLE: Always use DIRECT BINARY DOWNLOADS when possible (faster, no apt-get update).
+MANDATORY examples (FAST - direct binaries):
+- Node.js/TypeScript: "which node || (ARCH=$(uname -m) && NODE_ARCH=$([ \"$ARCH\" = \"aarch64\" ] && echo \"arm64\" || echo \"x64\") && curl -fsSL \"https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz\" | tar -xJ -C /usr/local --strip-components=1)"
+- Go: "which go || (ARCH=$(uname -m) && GO_ARCH=$([ \"$ARCH\" = \"aarch64\" ] && echo \"arm64\" || echo \"amd64\") && curl -fsSL \"https://go.dev/dl/go1.22.0.linux-$GO_ARCH.tar.gz\" | tar -xz -C /usr/local && export PATH=$PATH:/usr/local/go/bin)"
+- Rust: "which cargo || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)"
 - Flutter/Dart: Already in Flutter container - use "echo 'Flutter already installed'"
-- Java: "apt-get update && apt-get install -y openjdk-17-jdk"
+
+FALLBACK (only if binary not available):
+- Python: "which python3 || (apt-get update && apt-get install -y python3 python3-pip python3-venv)"
+- Java: "which java || (apt-get update && apt-get install -y openjdk-17-jdk)"
+
 IMPORTANT: The container may be Ubuntu, Flutter, Node, or ANY base image. runtimeInstallCmd must work regardless!
 
 CRITICAL NAMING RULES:
@@ -305,7 +310,7 @@ JSON RESPONSE:`;
           devCmd: 'npm run dev || npm start',
           devPort: 3000,
           // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
-          runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+          runtimeInstallCmd: 'which node || (ARCH=$(uname -m) && NODE_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "x64") && curl -fsSL "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1)',
           rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
         },
       },
@@ -343,7 +348,7 @@ JSON RESPONSE:`;
           devPort: 8080,
           testCmd: 'go test ./...',
           // 🔥 Install Go in ANY container (detect arch dynamically)
-          runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
+          runtimeInstallCmd: 'which go || (ARCH=$(uname -m) && GO_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "amd64") && curl -fsSL "https://go.dev/dl/go1.22.0.linux-$GO_ARCH.tar.gz" | tar -xz -C /usr/local && ln -sf /usr/local/go/bin/go /usr/bin/go)',
           rebuildCmd: 'go build .', // Rebuild binary after code changes
         },
       },
@@ -608,7 +613,7 @@ JSON RESPONSE:`;
           devCmd: 'go run .',
           devPort: 8080,
           testCmd: 'go test ./...',
-          runtimeInstallCmd: 'which go || (apt-get update && apt-get install -y wget && ARCH=$(dpkg --print-architecture) && wget -q https://go.dev/dl/go1.22.0.linux-${ARCH}.tar.gz && tar -C /usr/local -xzf go1.22.0.linux-${ARCH}.tar.gz && ln -sf /usr/local/go/bin/go /usr/bin/go)',
+          runtimeInstallCmd: 'which go || (ARCH=$(uname -m) && GO_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "amd64") && curl -fsSL "https://go.dev/dl/go1.22.0.linux-$GO_ARCH.tar.gz" | tar -xz -C /usr/local && ln -sf /usr/local/go/bin/go /usr/bin/go)',
           rebuildCmd: 'go build .', // Rebuild binary after code changes
         },
       },
@@ -780,7 +785,7 @@ JSON RESPONSE:`;
       devPort: devPort,
       testCmd: testCmd,
       // 🔥 Install Node.js in ANY container (works on Ubuntu, Flutter, Python, etc.)
-      runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+      runtimeInstallCmd: 'which node || (ARCH=$(uname -m) && NODE_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "x64") && curl -fsSL "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1)',
       rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload (Vite, Webpack, etc.)
     };
   }
@@ -831,7 +836,7 @@ JSON RESPONSE:`;
         installCmd: 'npm install',
         devCmd: 'PORT=4001 npm run dev || PORT=4001 npm start',
         devPort: 4001,
-        runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+        runtimeInstallCmd: 'which node || (ARCH=$(uname -m) && NODE_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "x64") && curl -fsSL "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1)',
         rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
       };
     }
@@ -849,7 +854,7 @@ JSON RESPONSE:`;
         installCmd: 'npm install',
         devCmd: 'npm run dev -- --host 0.0.0.0 --port 3000 || npm start',
         devPort: 3000,
-        runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+        runtimeInstallCmd: 'which node || (ARCH=$(uname -m) && NODE_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "x64") && curl -fsSL "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1)',
         rebuildCmd: "echo 'HMR handles rebuild'", // Vite/Webpack dev servers have hot reload
       };
     }
@@ -866,7 +871,7 @@ JSON RESPONSE:`;
       installCmd: 'npm install',
       devCmd: 'npm run dev || npm start',
       devPort: 3000,
-      runtimeInstallCmd: 'which node || (apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs)',
+      runtimeInstallCmd: 'which node || (ARCH=$(uname -m) && NODE_ARCH=$([ "$ARCH" = "aarch64" ] && echo "arm64" || echo "x64") && curl -fsSL "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1)',
       rebuildCmd: "echo 'HMR handles rebuild'", // Node dev servers have hot reload
     };
   }
