@@ -387,6 +387,10 @@ export type AgentRole =
   | 'tech_lead'          // Architecture and patterns for each Epic
   | 'developer'          // Code implementation for each Story
   | 'judge'              // Code review and approval
+  | 'fixer'              // Sandbox fixer - diagnoses and fixes errors
+  | 'explorer'           // Quick Dev - read-only exploration
+  | 'assistant'          // Quick Dev - Q&A mode
+  | 'planner'            // Quick Dev - planning mode
   | 'conflict_resolver'; // Merge conflict resolution
 
 /**
