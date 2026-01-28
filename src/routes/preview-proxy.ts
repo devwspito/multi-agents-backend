@@ -209,8 +209,11 @@ function proxyToContainer(
         // 🔥 FIX: Remove CSP headers and set permissive one for Flutter
         delete headers['content-security-policy'];
         delete headers['Content-Security-Policy'];
+        // 🔥 FIX: Remove X-Frame-Options that blocks iframe embedding
+        delete headers['x-frame-options'];
+        delete headers['X-Frame-Options'];
         headers['content-length'] = Buffer.byteLength(html).toString();
-        // 🔥 Set permissive CSP that allows Flutter Web to work
+        // 🔥 Set permissive CSP that allows Flutter Web to work in iframes
         headers['content-security-policy'] = [
           "default-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data:",
           "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.gstatic.com https://unpkg.com",
@@ -219,6 +222,7 @@ function proxyToContainer(
           "connect-src 'self' https://www.gstatic.com https://fonts.gstatic.com ws: wss: http://localhost:*",
           "img-src 'self' data: blob: https:",
           "worker-src 'self' blob:",
+          "frame-ancestors *",  // Allow embedding in any iframe
         ].join('; ');
 
         res.writeHead(proxyRes.statusCode || 200, headers);
