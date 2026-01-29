@@ -62,23 +62,14 @@ export const continueTaskSchema = z.object({
   additionalRequirements: z.string().min(1, 'Additional requirements are required'),
 });
 
+/**
+ * 🎯 SIMPLIFIED: Auto-approval is now binary
+ * - enabled: true = 100% autonomous (skip ALL approval phases)
+ * - enabled: false = 100% manual (require ALL approvals)
+ * No per-phase configuration, no thresholds
+ */
 export const autoApprovalConfigSchema = z.object({
   enabled: z.boolean(),
-  phases: z.array(
-    z.enum([
-      'planning',
-      'team-orchestration',
-      'recovery',
-      'integration',
-      'verification',
-      'auto-merge',
-      'tech-lead',
-      'development',
-      'judge',
-      'verification-fixer',
-    ])
-  ).optional(),
-  supervisorThreshold: z.number().min(0).max(100).optional(),
 });
 
 export const modelConfigSchema = z.object({

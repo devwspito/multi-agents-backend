@@ -984,18 +984,15 @@ export class TaskRepository {
 
   /**
    * Update auto-approval settings
+   *
+   * 🎯 SIMPLIFIED: Binary autonomous mode
+   * - enabled: true = 100% autonomous (skip ALL approval phases)
+   * - enabled: false = 100% manual (require ALL approvals)
    */
-  static updateAutoApproval(
-    id: string,
-    enabled: boolean,
-    phases?: string[],
-    threshold?: number
-  ): boolean {
+  static updateAutoApproval(id: string, enabled: boolean): boolean {
     return this.modifyOrchestration(id, (orch) => ({
       ...orch,
       autoApprovalEnabled: enabled,
-      autoApprovalPhases: phases ?? orch.autoApprovalPhases,
-      supervisorThreshold: threshold ?? orch.supervisorThreshold,
     }));
   }
 
