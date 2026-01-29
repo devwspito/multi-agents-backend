@@ -35,7 +35,6 @@ function getHostPort(taskId: string, containerPort: string = '8080'): string | n
   // 🔥 FIX: In host network mode, the container port IS the host port
   // No need to look up mappedPorts - just use the port directly
   if (USE_HOST_NETWORK) {
-    console.log(`[Preview Proxy] Host network mode - using port ${containerPort} directly`);
     return containerPort;
   }
 
@@ -162,8 +161,6 @@ function proxyToContainer(
     },
   };
 
-  console.log(`[Preview Proxy] ${req.method} → localhost:${hostPort}${targetPath}`);
-
   const proxyReq = http.request(options, (proxyRes) => {
     // Add CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -211,8 +208,6 @@ function proxyToContainer(
           /"serviceWorker"\s*:\s*\{[^}]*\}/gi,
           '"serviceWorker": { "serviceWorkerVersion": null }'
         );
-
-        console.log(`[Preview Proxy] Rewrote base href to: ${proxyBasePath}`);
 
         // Remove content-encoding and set correct content-length
         const headers = { ...proxyRes.headers };
