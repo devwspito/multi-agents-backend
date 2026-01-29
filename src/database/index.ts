@@ -665,6 +665,43 @@ export function initializeDatabase(): void {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_fixer_attempts_task_phase ON fixer_attempts(task_id, phase_name)`);
 
+  // ============================================
+  // QUICK TASK EXECUTIONS TABLE (Team-Lite)
+  // Stores team-lite executions for retry/resume
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS quick_task_executions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      command TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'code',
+      model TEXT NOT NULL DEFAULT 'sonnet',
+      status TEXT NOT NULL DEFAULT 'running',
+      sdk_session_id TEXT,
+      last_message_uuid TEXT,
+      can_resume INTEGER NOT NULL DEFAULT 0,
+      workspace_path TEXT NOT NULL,
+      sandbox_id TEXT,
+      output TEXT,
+      files_modified TEXT DEFAULT '[]',
+      files_created TEXT DEFAULT '[]',
+      tools_used TEXT DEFAULT '[]',
+      turns_completed INTEGER NOT NULL DEFAULT 0,
+      cost REAL NOT NULL DEFAULT 0,
+      duration INTEGER NOT NULL DEFAULT 0,
+      judge_approved INTEGER,
+      judge_feedback TEXT,
+      error TEXT,
+      error_stack TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_quick_task_executions_task_id ON quick_task_executions(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_quick_task_executions_status ON quick_task_executions(status)`);
+
   console.log('[SQLite] Database initialized at:', DB_PATH);
 }
 
