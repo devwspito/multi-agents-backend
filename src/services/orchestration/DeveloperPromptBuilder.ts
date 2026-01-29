@@ -257,11 +257,26 @@ ${suggestions.map(s => `| \`${s.file}\` | ${s.reason} |`).join('\n')}
   }
 
   private static buildTargetSection(ctx: DeveloperPromptContext): string {
-    return `## 🎯 TARGET REPOSITORY: ${ctx.targetRepository}
-**CRITICAL**: You MUST work ONLY in the "${ctx.targetRepository}" directory.
-- All file paths must start with: ${ctx.targetRepository}/
-- Navigate to this repository first: cd ${ctx.workspacePath}/${ctx.targetRepository}
-- DO NOT modify files in other repositories`;
+    return `## 🎯 WORKSPACE (Sandbox) & GIT TARGET
+
+### Acceso al Workspace Completo
+Tienes acceso a **TODO** el workspace en: \`${ctx.workspacePath}\`
+Puedes **LEER y ESCRIBIR** archivos en cualquier parte del workspace.
+
+### Target Repository para Git: \`${ctx.targetRepository}\`
+Cuando hagas **COMMIT** y **PUSH**, solo los cambios en \`${ctx.targetRepository}/\` se commitearán.
+Cambios en otros directorios permanecerán en el workspace pero NO irán al branch del epic.
+
+### Guía de Trabajo:
+- **LEE** de cualquier directorio (para entender APIs, modelos, estructuras existentes)
+- **ESCRIBE** donde sea necesario para completar tu tarea
+- **COMMIT** solo afectará los archivos en \`${ctx.targetRepository}/\`
+- Si necesitas crear archivos fuera del target, hazlo - pero entiende que no se commitearán
+
+### Directorio de trabajo:
+\`\`\`bash
+cd ${ctx.workspacePath}/${ctx.targetRepository}
+\`\`\``;
   }
 
   private static buildMemorySection(ctx: DeveloperPromptContext): string {

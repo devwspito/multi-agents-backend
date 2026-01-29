@@ -25,6 +25,7 @@ import { languageDetectionService, DetectedLanguage } from '../LanguageDetection
 import { eventStore } from '../EventStore';
 import fs from 'fs';
 import path from 'path';
+import { EnhancedJSONExtractor } from './utils/EnhancedJSONExtractor';
 
 /**
  * Planning Phase - Unified Planning (replaces ProblemAnalyst + ProductManager + ProjectManager)
@@ -509,7 +510,13 @@ ${judgeFeedback}
       const parsed = this.parseOutput(result.output);
 
       if (!parsed.epics || parsed.epics.length === 0) {
-        throw new Error('Planning Agent did not return valid epics. Cannot proceed.');
+        // Create error with rawOutput for GlobalFixer to attempt recovery
+        const error = new Error('Planning Agent did not return valid epics. Cannot proceed.') as any;
+        error.rawOutput = parsed.rawOutput || result.output;
+        error.extractionFailed = parsed.extractionFailed || false;
+        error.phaseName = 'Planning';
+        error.isJSONParsingError = true;
+        throw error;
       }
 
       // Validate epics for overlaps
@@ -1170,121 +1177,62 @@ After exploring the codebase, output EXACTLY this structure (no text before or a
 
   /**
    * Parse the agent output to extract structured data
-   * Uses multiple extraction patterns (similar to TechLeadPhase)
+   * Uses EnhancedJSONExtractor for robust multi-strategy extraction
    */
-  private parseOutput(output: string): { epics: any[]; analysis: any; architectureBrief: any } {
-    let parsed: any = { epics: [], analysis: null, architectureBrief: null };
-
+  private parseOutput(output: string): {
+    epics: any[];
+    analysis: any;
+    architectureBrief: any;
+    rawOutput?: string;
+    extractionFailed?: boolean;
+  } {
     console.log(`\n🔍 [Planning] Parsing agent output (${output.length} chars)...`);
 
-    // STEP 1: Try parsing as pure JSON first (if agent returns only JSON)
-    try {
-      const trimmed = output.trim();
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        parsed = JSON.parse(trimmed);
-        if (parsed.epics && Array.isArray(parsed.epics)) {
-          console.log('✅ [Planning] Parsed as pure JSON');
-          if (parsed.architectureBrief) {
-            console.log('✅ [Planning] Found architectureBrief with insights from existing code patterns');
-          }
-          return {
-            epics: parsed.epics,
-            analysis: parsed.analysis || null,
-            architectureBrief: parsed.architectureBrief || null
-          };
-        }
+    // Use EnhancedJSONExtractor for robust extraction
+    const result = EnhancedJSONExtractor.extract(output, {
+      requiredFields: ['epics'],
+      flexibleFields: ['epics', 'architectureBrief', 'analysis'],
+      verbose: true,
+    });
+
+    if (!result.success) {
+      console.error('❌ [Planning] EnhancedJSONExtractor failed');
+      if (result.diagnostics) {
+        console.error('📊 [Planning] Diagnostics:', JSON.stringify(result.diagnostics, null, 2));
       }
-    } catch (e) {
-      // Not pure JSON, continue
+      console.error('📋 [Planning] Agent output preview (first 2000 chars):');
+      console.error(output.substring(0, 2000));
+      if (output.length > 2000) {
+        console.error(`... (${output.length - 2000} more chars)`);
+      }
+
+      // Return with rawOutput so GlobalFixer can attempt recovery
+      return {
+        epics: [],
+        analysis: null,
+        architectureBrief: null,
+        rawOutput: output,
+        extractionFailed: true,
+      };
     }
 
-    // STEP 2: Try multiple markdown patterns (most specific to least specific)
-    const patterns = [
-      /```json\s*\n([\s\S]*?)\n```/,       // ```json\n{...}\n``` (strict)
-      /```json\s*\n([\s\S]*?)```/,         // ```json\n{...}``` (newline after json)
-      /```json\s*([\s\S]*?)```/,           // ```json{...}``` (no newlines)
-      /```\s*\n([\s\S]*?)\n```/,           // ```\n{...}\n``` (no json keyword)
-      /```\s*([\s\S]*?)```/                // ``` {...} ``` (minimal)
-    ];
+    console.log(`✅ [Planning] Parsed JSON via ${result.method}`);
 
-    for (const pattern of patterns) {
-      const match = output.match(pattern);
-      if (match) {
-        try {
-          const jsonText = match[1] || match[0];
-          const trimmed = jsonText.trim();
-          parsed = JSON.parse(trimmed);
+    const data = result.data as any;
 
-          if (parsed.epics && Array.isArray(parsed.epics)) {
-            console.log(`✅ [Planning] Parsed JSON using pattern: ${pattern.toString().substring(0, 40)}...`);
-            return { epics: parsed.epics, analysis: parsed.analysis || null, architectureBrief: parsed.architectureBrief || null };
-          } else {
-            console.log(`⚠️  [Planning] Parsed JSON but missing epics array`);
-            parsed = { epics: [], analysis: null, architectureBrief: null };
-          }
-        } catch (e) {
-          console.log(`⚠️  [Planning] Failed pattern: ${pattern.toString().substring(0, 40)}...`);
-        }
-      }
-    }
+    // Extract fields (may be at top level or nested)
+    const epics = data.epics || EnhancedJSONExtractor.findFieldAtAnyLevel(data, 'epics') || [];
+    const analysis = data.analysis || EnhancedJSONExtractor.findFieldAtAnyLevel(data, 'analysis') || null;
+    const architectureBrief = data.architectureBrief || EnhancedJSONExtractor.findFieldAtAnyLevel(data, 'architectureBrief') || null;
 
-    // STEP 3: Final fallback - find the longest valid JSON object with "epics" key
-    console.log('⚠️  [Planning] Standard patterns failed, trying fallback extraction...');
-
-    const candidates: Array<{text: string, length: number}> = [];
-
-    for (let i = 0; i < output.length; i++) {
-      if (output[i] === '{') {
-        let braceCount = 0;
-        let j = i;
-        let startFound = false;
-
-        while (j < output.length) {
-          if (output[j] === '{') {
-            braceCount++;
-            startFound = true;
-          } else if (output[j] === '}') {
-            braceCount--;
-            if (startFound && braceCount === 0) {
-              const candidate = output.substring(i, j + 1);
-              if (candidate.includes('"epics"')) {
-                candidates.push({ text: candidate, length: candidate.length });
-              }
-              break;
-            }
-          }
-          j++;
-        }
-      }
-    }
-
-    // Sort by length (longest first) and try to parse
-    candidates.sort((a, b) => b.length - a.length);
-
-    for (const candidate of candidates) {
-      try {
-        const candidateParsed = JSON.parse(candidate.text);
-        if (candidateParsed.epics && Array.isArray(candidateParsed.epics) && candidateParsed.epics.length > 0) {
-          console.log(`✅ [Planning] Parsed JSON using fallback extraction (${candidate.length} chars)`);
-          return { epics: candidateParsed.epics, analysis: candidateParsed.analysis || null, architectureBrief: candidateParsed.architectureBrief || null };
-        }
-      } catch (e) {
-        // Not valid JSON, continue
-      }
-    }
-
-    // STEP 4: Failed - log output for debugging
-    console.error('❌ [Planning] All JSON extraction patterns failed');
-    console.error('📋 [Planning] Agent output preview (first 2000 chars):');
-    console.error(output.substring(0, 2000));
-    if (output.length > 2000) {
-      console.error(`... (${output.length - 2000} more chars)`);
+    if (architectureBrief) {
+      console.log('✅ [Planning] Found architectureBrief with insights from existing code patterns');
     }
 
     return {
-      epics: [],
-      analysis: null,
-      architectureBrief: null,
+      epics,
+      analysis,
+      architectureBrief,
     };
   }
 
