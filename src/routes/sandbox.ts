@@ -300,17 +300,49 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
 
     console.log(`   ✅ Workspace found: ${workspacePath}`);
 
-    // 4. Detect language/framework from workspace
+    // 4. Detect language/framework from workspace (MULTI-REPO SUPPORT)
+    // 🔥 FIX: Scan subdirectories for repos, not just workspace root
     let language = 'nodejs';
+    const detectedRepos: { name: string; language: string; path: string }[] = [];
+
+    // First check workspace root
     if (fs.existsSync(path.join(workspacePath, 'pubspec.yaml'))) {
       language = 'flutter';
+      detectedRepos.push({ name: path.basename(workspacePath), language: 'flutter', path: workspacePath });
     } else if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
       language = 'nodejs';
+      detectedRepos.push({ name: path.basename(workspacePath), language: 'nodejs', path: workspacePath });
     } else if (fs.existsSync(path.join(workspacePath, 'requirements.txt'))) {
       language = 'python';
+      detectedRepos.push({ name: path.basename(workspacePath), language: 'python', path: workspacePath });
     }
 
-    console.log(`   🔧 Detected language: ${language}`);
+    // 🔥 MULTI-REPO: Scan subdirectories for additional repos
+    try {
+      const entries = fs.readdirSync(workspacePath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('node_modules')) {
+          const subDir = path.join(workspacePath, entry.name);
+
+          if (fs.existsSync(path.join(subDir, 'pubspec.yaml'))) {
+            detectedRepos.push({ name: entry.name, language: 'flutter', path: subDir });
+            // If ANY repo is Flutter, use Flutter image (it includes Node.js too)
+            language = 'flutter';
+            console.log(`   📦 Found Flutter repo: ${entry.name}`);
+          } else if (fs.existsSync(path.join(subDir, 'package.json'))) {
+            detectedRepos.push({ name: entry.name, language: 'nodejs', path: subDir });
+            console.log(`   📦 Found Node.js repo: ${entry.name}`);
+          } else if (fs.existsSync(path.join(subDir, 'requirements.txt')) || fs.existsSync(path.join(subDir, 'pyproject.toml'))) {
+            detectedRepos.push({ name: entry.name, language: 'python', path: subDir });
+            console.log(`   📦 Found Python repo: ${entry.name}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.log(`   ⚠️ Error scanning subdirectories: ${err}`);
+    }
+
+    console.log(`   🔧 Primary language: ${language} (${detectedRepos.length} repo(s) detected)`);
 
     // 5. Create new sandbox with existing workspace
     console.log(`   🐳 Creating sandbox for task ${taskId}...`);
@@ -339,28 +371,87 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     console.log(`      - containerName: ${instance.containerName}`);
     console.log(`      - status: ${instance.status}`);
 
-    // 6. Optionally start dev server
+    // 6. Optionally start dev servers (ALL repos, not just first)
+    // 🔥 Uses similar logic to SandboxPhase: start + verify with health check
     let devServerStarted = false;
+    const serverResults: Record<string, { started: boolean; verified: boolean; port?: number; url?: string; error?: string }> = {};
+
     if (startDevServer) {
       try {
         const envConfig = state.environmentConfig || {};
-        // 🔥 FIX: envConfig is keyed by repoName - get both key and value
         const repoNames = Object.keys(envConfig);
-        const firstRepoName = repoNames[0];
-        const firstConfig = envConfig[firstRepoName] as any;
-        const devCmd = firstConfig?.devCmd;
 
-        if (devCmd && firstRepoName) {
-          // 🔥 FIX: Use /workspace/${repoName}, NOT /workspace
-          const repoWorkDir = `/workspace/${firstRepoName}`;
-          console.log(`   🚀 Starting dev server in ${repoWorkDir}: ${devCmd}`);
-          // Run in background (don't await)
-          sandboxService.exec(taskId, `cd ${repoWorkDir} && ${devCmd}`, { timeout: 300000 })
-            .catch(err => console.warn(`   ⚠️ Dev server error: ${err.message}`));
-          devServerStarted = true;
+        console.log(`   🚀 Starting dev servers for ${repoNames.length} repo(s)...`);
+
+        // 🔥 FIX: Start ALL dev servers, not just the first one
+        for (const repoName of repoNames) {
+          const repoConfig = envConfig[repoName] as any;
+          const devCmd = repoConfig?.runCommand || repoConfig?.devCmd;
+          const devPort = repoConfig?.devPort || 3000;
+
+          if (!devCmd) {
+            console.log(`      ⚠️ [${repoName}] No devCmd/runCommand - skipping`);
+            serverResults[repoName] = { started: false, verified: false, error: 'No runCommand' };
+            continue;
+          }
+
+          const repoWorkDir = `/workspace/${repoName}`;
+          console.log(`      🚀 [${repoName}] Port ${devPort}: ${devCmd.substring(0, 60)}...`);
+
+          // Kill any previous server on this port
+          await sandboxService.exec(taskId, `pkill -f "port.*${devPort}" 2>/dev/null || fuser -k ${devPort}/tcp 2>/dev/null || true`, {
+            cwd: '/workspace',
+            timeout: 10000,
+          });
+
+          // Run in background (setsid ensures process survives even if parent dies)
+          const logFile = `/tmp/${repoName}-server.log`;
+          const startCmd = `setsid bash -c 'cd ${repoWorkDir} && ${devCmd}' > ${logFile} 2>&1 &`;
+
+          try {
+            await sandboxService.exec(taskId, startCmd, { timeout: 30000 });
+            serverResults[repoName] = { started: true, verified: false, port: devPort };
+            devServerStarted = true;
+          } catch (err: any) {
+            console.warn(`      ⚠️ [${repoName}] Start error: ${err.message}`);
+            serverResults[repoName] = { started: false, verified: false, error: err.message };
+          }
         }
+
+        // 🔥 Health check verification (like SandboxPhase)
+        // Wait a bit then verify servers are responding
+        if (devServerStarted) {
+          console.log(`   ⏳ Waiting 5s for servers to initialize...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          for (const [repoName, result] of Object.entries(serverResults)) {
+            if (!result.started || !result.port) continue;
+
+            try {
+              const curlCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 http://localhost:${result.port}/ 2>/dev/null || echo "000"`;
+              const curlResult = await sandboxService.exec(taskId, curlCmd, { cwd: '/workspace', timeout: 10000 });
+              const statusCode = parseInt(curlResult.stdout.trim()) || 0;
+
+              if (statusCode > 0 && statusCode < 600) {
+                const hostPort = instance.mappedPorts?.[result.port.toString()] || result.port;
+                serverResults[repoName].verified = true;
+                serverResults[repoName].url = `http://localhost:${hostPort}`;
+                console.log(`      ✅ [${repoName}] Verified on port ${result.port} (HTTP ${statusCode})`);
+              } else {
+                console.log(`      ⏳ [${repoName}] Not responding yet (may need more time to compile)`);
+              }
+            } catch (err) {
+              console.log(`      ⏳ [${repoName}] Health check failed (server may still be starting)`);
+            }
+          }
+        }
+
+        const startedCount = Object.values(serverResults).filter(r => r.started).length;
+        const verifiedCount = Object.values(serverResults).filter(r => r.verified).length;
+        console.log(`   📊 Results: ${startedCount} started, ${verifiedCount} verified`);
+
       } catch (err: any) {
-        console.warn(`   ⚠️ Could not start dev server: ${err.message}`);
+        console.warn(`   ⚠️ Could not start dev servers: ${err.message}`);
       }
     }
 
@@ -376,7 +467,9 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
         workspacePath: instance.workspacePath,
         mappedPorts: instance.mappedPorts,
         language,
+        detectedRepos,
       },
+      servers: serverResults,
     });
   } catch (error: any) {
     console.error('[Sandbox API] Error relaunching sandbox:', error);
