@@ -193,7 +193,8 @@
       "Bash(git rev-parse:*)",
       "Bash(git -C /Users/luiscorrea/Desktop/mult-agent-software-project/multi-agent-frontend status --short)",
       "WebFetch(domain:www.aitmpl.com)",
-      "WebFetch(domain:aitmpl.com)"
+      "WebFetch(domain:aitmpl.com)",
+      "WebFetch(domain:litestream.io)"
     ],
     "deny": [],
     "ask": []
