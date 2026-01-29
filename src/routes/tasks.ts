@@ -3134,6 +3134,118 @@ router.put('/:id/sandbox/file', authenticate, async (req: AuthRequest, res) => {
 });
 
 /**
+ * 📂 GET /api/tasks/:id/sandbox/repos
+ *
+ * List all git repositories in the task workspace.
+ * Used by frontend to show repo selector in commit modal.
+ */
+router.get('/:id/sandbox/repos', authenticate, async (req: AuthRequest, res) => {
+  const taskId = req.params.id;
+
+  try {
+    // Get workspace path from multiple sources
+    let workspacePath: string | null = null;
+
+    // 1. Try Task.orchestration.workspacePath (Lite Team / Full orchestration)
+    const task = TaskRepository.findById(taskId);
+    if (task?.orchestration?.workspacePath) {
+      workspacePath = task.orchestration.workspacePath;
+    }
+
+    // 2. Try EventStore
+    if (!workspacePath) {
+      const state = await eventStore.getCurrentState(taskId as any);
+      const workspaces = state.workspaces || [];
+      if (workspaces.length > 0) {
+        workspacePath = workspaces[0].workspacePath;
+      }
+    }
+
+    // 3. Try SandboxService
+    if (!workspacePath) {
+      const { sandboxService } = await import('../services/SandboxService');
+      const sandbox = sandboxService.getSandbox(taskId) || sandboxService.findSandboxForTask(taskId)?.instance;
+      if (sandbox?.workspacePath) {
+        workspacePath = sandbox.workspacePath;
+      }
+    }
+
+    if (!workspacePath) {
+      res.status(400).json({
+        success: false,
+        message: 'No workspace found for this task',
+        repos: [],
+      });
+      return;
+    }
+
+    console.log(`📂 [API] Listing repos in workspace: ${workspacePath}`);
+
+    // List directories in workspace
+    const fs = await import('fs');
+    const entries = fs.readdirSync(workspacePath, { withFileTypes: true });
+
+    const repos: Array<{
+      name: string;
+      path: string;
+      hasChanges: boolean;
+      currentBranch: string;
+    }> = [];
+
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('.')) {
+        const repoPath = path.join(workspacePath, entry.name);
+        const gitPath = path.join(repoPath, '.git');
+
+        // Check if it's a git repo
+        if (fs.existsSync(gitPath)) {
+          try {
+            // Get current branch
+            const branchResult = await safeGitExec('git branch --show-current', {
+              cwd: repoPath,
+              timeout: 10000,
+            });
+            const currentBranch = branchResult.stdout.trim() || 'main';
+
+            // Check for changes
+            const statusResult = await safeGitExec('git status --porcelain', {
+              cwd: repoPath,
+              timeout: 10000,
+            });
+            const hasChanges = !!statusResult.stdout.trim();
+
+            repos.push({
+              name: entry.name,
+              path: repoPath,
+              hasChanges,
+              currentBranch,
+            });
+          } catch (e) {
+            // Skip repos with git errors
+            console.warn(`   ⚠️ Could not get git status for ${entry.name}`);
+          }
+        }
+      }
+    }
+
+    console.log(`   Found ${repos.length} repos: ${repos.map(r => r.name).join(', ')}`);
+
+    res.json({
+      success: true,
+      workspacePath,
+      repos,
+    });
+  } catch (error: any) {
+    console.error(`❌ [API] Error listing repos:`, error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to list repositories',
+      error: error.message,
+    });
+  }
+});
+
+/**
  * 🚀 POST /api/tasks/:id/sandbox/commit
  *
  * Commit and push changes from the host workspace.
@@ -3156,14 +3268,43 @@ router.post('/:id/sandbox/commit', authenticate, async (req: AuthRequest, res) =
       return;
     }
 
-    // 2. Get workspaces from EventStore
-    const state = await eventStore.getCurrentState(taskId as any);
-    const workspaces = state.workspaces || [];
+    // 2. Get workspaces - try multiple sources (same as QuickDevService)
+    let workspaces: any[] = [];
+
+    // 2a. Try Task.orchestration.workspacePath first (Lite Team)
+    const task = TaskRepository.findById(taskId);
+    if (task?.orchestration?.workspacePath) {
+      console.log(`   📂 Using task.orchestration.workspacePath: ${task.orchestration.workspacePath}`);
+      workspaces = [{
+        workspacePath: task.orchestration.workspacePath,
+        repoLocalPath: task.orchestration.workspacePath,
+        targetRepository: path.basename(task.orchestration.workspacePath),
+      }];
+    }
+
+    // 2b. Try EventStore (Full orchestration)
+    if (workspaces.length === 0) {
+      const state = await eventStore.getCurrentState(taskId as any);
+      workspaces = state.workspaces || [];
+    }
+
+    // 2c. Try SandboxService (standalone sandbox)
+    if (workspaces.length === 0) {
+      const sandbox = sandboxService.getSandbox(taskId) || sandboxService.findSandboxForTask(taskId)?.instance;
+      if (sandbox?.workspacePath) {
+        console.log(`   📂 Using sandbox.workspacePath: ${sandbox.workspacePath}`);
+        workspaces = [{
+          workspacePath: sandbox.workspacePath,
+          repoLocalPath: sandbox.workspacePath,
+          targetRepository: path.basename(sandbox.workspacePath),
+        }];
+      }
+    }
 
     if (workspaces.length === 0) {
       res.status(400).json({
         success: false,
-        message: 'No workspace path found for this task',
+        message: 'No workspace path found for this task. Make sure the sandbox is running.',
       });
       return;
     }
