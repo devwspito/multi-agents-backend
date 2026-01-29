@@ -1045,7 +1045,10 @@ router.post('/:id/approve/:phase', authenticate, async (req: AuthRequest, res) =
 
 /**
  * PUT /api/tasks/:id/auto-approval
- * Configurar auto-aprobación para una tarea
+ * 🎯 SIMPLIFIED: Toggle autonomous mode (binary ON/OFF)
+ *
+ * - enabled: true = 100% autonomous (skip ALL approval phases)
+ * - enabled: false = 100% manual (require ALL approvals)
  */
 router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -1061,39 +1064,25 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       return;
     }
 
-    // Determine phases to use
-    let phases = validatedData.phases as string[] | undefined;
-    if (phases === undefined && validatedData.enabled) {
-      phases = ['planning', 'team-orchestration', 'verification', 'auto-merge'];
-    }
+    // 🎯 SIMPLIFIED: Just update the enabled flag (no phases, no thresholds)
+    TaskRepository.updateAutoApproval(task.id, validatedData.enabled);
 
-    // Update auto-approval configuration
-    TaskRepository.updateAutoApproval(
-      task.id,
-      validatedData.enabled,
-      phases,
-      validatedData.supervisorThreshold
-    );
-
-    // Refresh task to get updated values
-    const updatedTask = TaskRepository.findById(task.id)!;
-    const threshold = updatedTask.orchestration.supervisorThreshold ?? 80;
-    console.log(`🚁 [Auto-Approval] Configuration updated for task ${req.params.id}: enabled=${validatedData.enabled}, phases=${updatedTask.orchestration.autoApprovalPhases?.join(', ')}, supervisorThreshold=${threshold}%`);
+    const mode = validatedData.enabled ? 'AUTONOMOUS' : 'MANUAL';
+    console.log(`🚁 [Auto-Approval] Task ${req.params.id}: ${mode} mode`);
 
     res.json({
       success: true,
-      message: `Auto-approval ${validatedData.enabled ? 'enabled' : 'disabled'}`,
+      message: validatedData.enabled ? 'Autonomous mode enabled' : 'Manual mode enabled',
       data: {
-        enabled: updatedTask.orchestration.autoApprovalEnabled,
-        phases: updatedTask.orchestration.autoApprovalPhases || [],
-        supervisorThreshold: threshold,
+        enabled: validatedData.enabled,
+        mode,
       },
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({
         success: false,
-        message: 'Invalid auto-approval configuration',
+        message: 'Invalid configuration: expected { enabled: boolean }',
         errors: error.errors,
       });
       return;
@@ -1109,7 +1098,7 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
 
 /**
  * GET /api/tasks/:id/auto-approval
- * Obtener configuración de auto-aprobación
+ * 🎯 SIMPLIFIED: Get autonomous/manual mode status
  */
 router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => {
   try {
@@ -1123,12 +1112,13 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       return;
     }
 
+    const enabled = task.orchestration.autoApprovalEnabled || false;
+
     res.json({
       success: true,
       data: {
-        enabled: task.orchestration.autoApprovalEnabled || false,
-        phases: task.orchestration.autoApprovalPhases || [],
-        supervisorThreshold: task.orchestration.supervisorThreshold ?? 80,
+        enabled,
+        mode: enabled ? 'AUTONOMOUS' : 'MANUAL',
       },
     });
   } catch (error) {
@@ -1144,14 +1134,15 @@ router.get('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
  * POST /api/tasks/:id/bypass-approval
  * 🔥 BYPASS: Force-approve the current pending approval phase
  *
- * This allows the user to skip manual approval AFTER the orchestration has already started waiting.
- * Useful if you forgot to enable auto-approval before starting the task.
+ * 🎯 SIMPLIFIED: Binary autonomous mode
+ * - Bypasses current waiting approval phase
+ * - Optionally enables autonomous mode (100% auto-approve) for future phases
  *
- * Optionally enables auto-approval for future phases of the same type.
+ * @body enableAutonomousMode - boolean (optional) - Enable 100% autonomous mode after bypass
  */
 router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { enableAutoApproval = false, enableForAllPhases = false } = req.body;
+    const { enableAutonomousMode = false } = req.body;
 
     const task = TaskRepository.findByIdAndUser(req.params.id, req.user!.id);
 
@@ -1185,24 +1176,19 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
       const techLead = task.orchestration?.techLead;
 
       if (planning?.status === 'completed' && (!techLead || techLead?.status !== 'completed')) {
-        // Planning done but TechLead not complete = likely waiting on TechLead approval
         phase = 'tech-lead';
         phaseName = 'Tech Lead Architecture';
-        console.log(`🔍 [Bypass] Inferred phase: ${phase} (Planning done, TechLead not complete)`);
       } else if (planning?.status === 'in_progress' || planning?.status === 'pending') {
-        // Planning in progress = might be waiting on Planning approval
         phase = 'planning';
         phaseName = 'Planning';
-        console.log(`🔍 [Bypass] Inferred phase: ${phase} (Planning in progress)`);
       } else {
-        // Default to trying common approval phases
-        phase = 'tech-lead'; // Most common waiting point
+        phase = 'tech-lead';
         phaseName = 'Tech Lead';
-        console.log(`🔍 [Bypass] Using default phase: ${phase}`);
       }
+      console.log(`🔍 [Bypass] Inferred phase: ${phase}`);
     }
 
-    console.log(`🔥 [Bypass] Force-approving pending phase: ${phase} (${phaseName})`);
+    console.log(`🔥 [Bypass] Force-approving: ${phase} (${phaseName})`);
 
     // Clear the pending approval from DB
     TaskRepository.clearPendingApproval(taskId);
@@ -1218,46 +1204,23 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
       autoApproved: false,
     });
 
-    // Optionally enable auto-approval for future phases
-    if (enableAutoApproval) {
-      if (enableForAllPhases) {
-        // Enable for all main phases
-        TaskRepository.updateAutoApproval(taskId, true, [
-          'planning',
-          'team-orchestration',
-          'verification',
-          'auto-merge',
-          'tech-lead',
-          'development',
-          'judge',
-          'verification-fixer',
-        ] as any[]);
-        console.log(`✅ [Bypass] Auto-approval enabled for ALL phases`);
-      } else {
-        // Enable just for this phase type
-        const currentPhases = task.orchestration.autoApprovalPhases || [];
-        if (!currentPhases.includes(phase as any)) {
-          currentPhases.push(phase as any);
-        }
-        TaskRepository.updateAutoApproval(taskId, true, currentPhases);
-        console.log(`✅ [Bypass] Auto-approval enabled for phase: ${phase}`);
-      }
+    // 🎯 SIMPLIFIED: Optionally enable autonomous mode (100% auto-approve)
+    if (enableAutonomousMode) {
+      TaskRepository.updateAutoApproval(taskId, true);
+      console.log(`✅ [Bypass] Autonomous mode ENABLED`);
     }
 
     // 📡 Emit approval event to release the waiting orchestrator
     const { approvalEvents } = await import('../services/ApprovalEvents');
 
-    // 🔥 SHOTGUN APPROACH: If we don't have a persisted pendingApproval,
-    // emit approval for ALL common phases to ensure we release any waiting orchestrator
+    // SHOTGUN APPROACH: emit for all common phases to ensure release
     if (!pendingApproval || !pendingApproval.phase) {
-      console.log(`🔫 [Bypass] No persisted approval - emitting for common phases...`);
+      console.log(`🔫 [Bypass] Emitting for all common phases...`);
       const commonPhases = ['planning', 'tech-lead', 'team-orchestration', 'verification'];
       for (const p of commonPhases) {
-        console.log(`   📡 Emitting approval for: ${p}`);
-        approvalEvents.emitApproval(taskId, p, true, 'Bypassed by user (shotgun)');
+        approvalEvents.emitApproval(taskId, p, true, 'Bypassed by user');
       }
     } else {
-      // Normal case: emit for the specific phase
       approvalEvents.emitApproval(taskId, phase, true, 'Bypassed by user');
     }
 
@@ -1268,10 +1231,11 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
       approved: true,
     });
 
+    const modeMsg = enableAutonomousMode ? '\n\n✅ Autonomous mode enabled for remaining phases' : '';
     NotificationService.emitAgentMessage(
       taskId,
       'System',
-      `🔥 **${phaseName}** was bypassed (force-approved) by user. Continuing orchestration...${enableAutoApproval ? `\n\n✅ Auto-approval ${enableForAllPhases ? 'enabled for all phases' : `enabled for ${phase}`}` : ''}`
+      `🔥 **${phaseName}** was bypassed. Continuing orchestration...${modeMsg}`
     );
 
     res.json({
@@ -1280,8 +1244,7 @@ router.post('/:id/bypass-approval', authenticate, async (req: AuthRequest, res) 
       data: {
         phase: phase,
         phaseName: phaseName,
-        autoApprovalEnabled: task.orchestration.autoApprovalEnabled || false,
-        autoApprovalPhases: task.orchestration.autoApprovalPhases || [],
+        autonomousModeEnabled: enableAutonomousMode || task.orchestration.autoApprovalEnabled || false,
       },
     });
   } catch (error) {

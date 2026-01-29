@@ -83,17 +83,15 @@ export class ApprovalPhase extends BasePhase {
       return true;
     }
 
-    // Check if auto-approval is enabled
-    const autoApprovalEnabled = context.task.orchestration.autoApprovalEnabled;
-    const autoApprovalPhases = context.task.orchestration.autoApprovalPhases || [];
+    // 🎯 SIMPLIFIED: Binary auto-approval check
+    // Either 100% autonomous (skip ALL approvals) or 100% manual (require ALL approvals)
+    // No per-phase configuration, no thresholds
+    const autoApprovalEnabled = context.task.orchestration.autoApprovalEnabled === true;
 
-    // Normalize phase name for comparison (Planning -> planning, TechLead -> tech-lead)
-    const normalizedPhaseName = this.normalizePhase(previousPhase);
+    if (autoApprovalEnabled) {
+      console.log(`✅ [SKIP] Auto-approval ENABLED (autonomous mode) - skipping approval for: ${previousPhase}`);
 
-    if (autoApprovalEnabled && autoApprovalPhases.includes(normalizedPhaseName as any)) {
-      console.log(`✅ [SKIP] Auto-approval enabled for phase: ${previousPhase} (normalized: ${normalizedPhaseName})`);
-
-      NotificationService.emitConsoleLog(taskId, 'info', `✅ Auto-approval enabled for ${previousPhase} - continuing without human approval`);
+      NotificationService.emitConsoleLog(taskId, 'info', `✅ Autonomous mode - auto-approving ${previousPhase}`);
 
       // Log auto-approval in history
       if (!context.task.orchestration.approvalHistory) {
@@ -106,16 +104,17 @@ export class ApprovalPhase extends BasePhase {
         approved: true,
         approvedBy: 'system',
         approvedAt: new Date(),
-        comments: 'Auto-approved',
+        comments: 'Auto-approved (autonomous mode)',
         autoApproved: true,
       });
 
       TaskRepository.update(context.task.id, context.task);
 
-      return true; // Skip human approval
+      return true; // Skip human approval - autonomous mode
     }
 
-    return false; // Require human approval
+    console.log(`⏸️  [Approval] Manual mode - requiring approval for: ${previousPhase}`);
+    return false; // Require human approval - manual mode
   }
 
   /**
