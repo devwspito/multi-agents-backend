@@ -54,6 +54,14 @@ export class ApprovalPhase extends BasePhase {
 
     const taskId = (context.task.id as any).toString();
 
+    // 🔥 FIX: Phases that NEVER require approval
+    const noApprovalPhases = ['Sandbox', 'sandbox'];
+    const previousPhaseCheck = context.getData<string>('currentPhaseName');
+    if (previousPhaseCheck && noApprovalPhases.includes(previousPhaseCheck)) {
+      console.log(`⏭️  [Approval] Skipping - "${previousPhaseCheck}" phase never requires approval`);
+      return true;
+    }
+
     // 🔥 FIX: Check for existing pendingApproval in DB (recovery scenario)
     // If there's a pending approval, we MUST NOT skip - re-emit and wait
     const pendingApproval = context.task.orchestration?.pendingApproval;

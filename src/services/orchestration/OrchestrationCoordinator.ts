@@ -495,6 +495,15 @@ export class OrchestrationCoordinator {
             console.log(`⏭️  [${phaseName}] Custom skip logic triggered`);
             NotificationService.emitConsoleLog(taskId, 'info', `⏭️  Skipping ${phaseName} (custom logic)`);
             await this.syncSkippedPhaseToDb(taskId, phaseName, cachedPhaseStatuses);
+
+            // 🔥 FIX: Set currentPhaseName even for skipped phases!
+            // ApprovalPhase needs this to know what phase was last processed
+            // Without this, ApprovalPhase sees stale phase name (e.g., "Sandbox" instead of "Planning")
+            if (phaseName !== 'Approval') {
+              context.setData('currentPhaseName', phaseName);
+              console.log(`📝 Stored currentPhaseName in context: ${phaseName} (skipped via custom logic)`);
+            }
+
             continue;
           }
         }
