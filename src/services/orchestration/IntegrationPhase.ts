@@ -58,10 +58,20 @@ export class IntegrationPhase extends BasePhase {
 
   /**
    * Main phase execution
+   *
+   * 🔥 DISABLED: This phase is skipped - integration handled manually or via AutoMerge
    */
   protected async executePhase(
     context: OrchestrationContext
   ): Promise<Omit<PhaseResult, 'phaseName' | 'duration'>> {
+    // 🔥 SKIP: Integration disabled - return early
+    console.log(`\n⏭️  [IntegrationPhase] SKIPPED - Phase disabled`);
+    return {
+      success: true,
+      data: { skipped: true, reason: 'IntegrationPhase disabled - integration handled manually or via AutoMerge' },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-unreachable-code
     const taskId = this.getTaskIdString(context);
     const startTime = Date.now();
 
@@ -93,7 +103,7 @@ export class IntegrationPhase extends BasePhase {
       };
     }
 
-    const repoPath = path.join(workspacePath, targetRepository);
+    const repoPath = path.join(workspacePath as string, targetRepository);
     if (!fs.existsSync(repoPath)) {
       return {
         success: false,
