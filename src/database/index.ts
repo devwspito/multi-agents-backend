@@ -499,6 +499,172 @@ export function initializeDatabase(): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sandboxes_container_name ON sandboxes(container_name)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status)`);
 
+  // ============================================
+  // AGENT EXECUTIONS TABLE (Training Data)
+  // One row per agent execution - full prompt, tokens, cost
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_executions (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      project_id TEXT,
+      story_id TEXT,
+      epic_id TEXT,
+      agent_type TEXT NOT NULL,
+      agent_instance_id TEXT,
+      model_id TEXT NOT NULL,
+      phase_name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      prompt_hash TEXT NOT NULL,
+      workspace_path TEXT,
+      target_repository TEXT,
+      branch_name TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      duration_ms INTEGER,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_creation_tokens INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'running',
+      turns_completed INTEGER DEFAULT 0,
+      messages_received INTEGER DEFAULT 0,
+      final_output TEXT,
+      error_message TEXT,
+      error_type TEXT,
+      session_id TEXT,
+      checkpoint_id TEXT,
+      recoverable INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_exec_task ON agent_executions(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_exec_type ON agent_executions(agent_type)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_exec_status ON agent_executions(status)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_exec_started ON agent_executions(started_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_exec_model ON agent_executions(model_id)`);
+
+  // ============================================
+  // AGENT TURNS TABLE (Training Data)
+  // One row per EACH turn of the agent conversation
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_turns (
+      id TEXT PRIMARY KEY,
+      execution_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      turn_number INTEGER NOT NULL,
+      turn_type TEXT NOT NULL,
+      message_content TEXT,
+      message_role TEXT,
+      has_tool_calls INTEGER DEFAULT 0,
+      tool_calls_count INTEGER DEFAULT 0,
+      timestamp TEXT NOT NULL,
+      duration_ms INTEGER,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (execution_id) REFERENCES agent_executions(id) ON DELETE CASCADE,
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_execution ON agent_turns(execution_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_task ON agent_turns(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_number ON agent_turns(execution_id, turn_number)`);
+
+  // ============================================
+  // TOOL CALLS TABLE (Training Data)
+  // One row per EACH tool call - full input/output
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_calls (
+      id TEXT PRIMARY KEY,
+      execution_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_use_id TEXT,
+      tool_input TEXT NOT NULL,
+      tool_input_summary TEXT,
+      file_path TEXT,
+      bash_command TEXT,
+      bash_exit_code INTEGER,
+      tool_output TEXT,
+      tool_output_length INTEGER,
+      tool_success INTEGER DEFAULT 1,
+      tool_error TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      duration_ms INTEGER,
+      call_order INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (execution_id) REFERENCES agent_executions(id) ON DELETE CASCADE,
+      FOREIGN KEY (turn_id) REFERENCES agent_turns(id) ON DELETE CASCADE,
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tools_execution ON tool_calls(execution_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tools_turn ON tool_calls(turn_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tools_task ON tool_calls(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tools_name ON tool_calls(tool_name)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tools_file ON tool_calls(file_path)`);
+
+  // ============================================
+  // SECURITY OBSERVATIONS TABLE (Training Data)
+  // Vulnerabilities detected by SecurityAgent
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS security_observations (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      execution_id TEXT,
+      tool_call_id TEXT,
+      observation_type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      file_path TEXT,
+      line_number INTEGER,
+      code_snippet TEXT,
+      description TEXT NOT NULL,
+      recommendation TEXT,
+      owasp_category TEXT,
+      cwe_id TEXT,
+      agent_type TEXT,
+      phase_name TEXT,
+      detected_at TEXT NOT NULL,
+      false_positive INTEGER DEFAULT 0,
+      reviewed_at TEXT,
+      reviewed_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (execution_id) REFERENCES agent_executions(id) ON DELETE SET NULL,
+      FOREIGN KEY (tool_call_id) REFERENCES tool_calls(id) ON DELETE SET NULL
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_security_task ON security_observations(task_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_security_severity ON security_observations(severity)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_security_category ON security_observations(category)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_security_detected ON security_observations(detected_at)`);
+
+  // ============================================
+  // FIXER ATTEMPTS TABLE (Global Fixer tracking)
+  // ============================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fixer_attempts (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      phase_name TEXT NOT NULL,
+      attempt_count INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(task_id, phase_name)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_fixer_attempts_task_phase ON fixer_attempts(task_id, phase_name)`);
+
   console.log('[SQLite] Database initialized at:', DB_PATH);
 }
 

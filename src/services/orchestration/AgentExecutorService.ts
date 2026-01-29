@@ -51,6 +51,12 @@ import { DynamicModelRouter } from '../DynamicModelRouter';
 // Timeouts
 import { AGENT_TIMEOUTS } from './constants/Timeouts';
 
+// 🎯 Training Data: Granular execution tracking for ML training
+import { executionTracker } from '../training/ExecutionTracker';
+
+// 🔒 Security: Passive vulnerability detection (non-blocking)
+import { securityAgentService } from '../security/SecurityAgentService';
+
 /**
  * Parameters for saveFailedExecution
  */
@@ -523,6 +529,17 @@ export class AgentExecutorService {
         // Start execution tracking
         if (taskId) {
           ExecutionControlService.startExecution(taskId, agentType, 'executing');
+
+          // 🎯 Training Data: Start granular execution tracking
+          executionTracker.startExecution({
+            taskId,
+            agentType,
+            modelId: model,
+            phaseName: agentType, // Phase name = agent type for now
+            prompt: typeof promptContent === 'string' ? promptContent : prompt,
+            workspacePath,
+            sessionId,
+          });
         }
 
         // Start streaming
@@ -648,6 +665,14 @@ export class AgentExecutorService {
 
                   if (taskId) {
                     AgentActivityService.emitToolUse(taskId, agentType, tool, input);
+                    // 🎯 Training Data: Track tool call start
+                    if (toolId) {
+                      executionTracker.startToolCall(taskId, {
+                        toolName: tool,
+                        toolUseId: toolId,
+                        toolInput: input,
+                      });
+                    }
                   }
                 } else if (block.type === 'tool_result') {
                   const toolUseId = block.tool_use_id;
@@ -657,6 +682,12 @@ export class AgentExecutorService {
                     const pendingCall = pendingToolCalls.get(toolUseId);
                     if (pendingCall) {
                       AgentActivityService.processToolResult(taskId, agentType, pendingCall.name, pendingCall.input, result);
+                      // 🎯 Training Data: Track tool call completion
+                      executionTracker.completeToolCall(taskId, {
+                        toolUseId,
+                        toolOutput: typeof result === 'string' ? result : JSON.stringify(result),
+                        toolSuccess: true,
+                      });
                       pendingToolCalls.delete(toolUseId);
                     }
                   }
@@ -674,6 +705,10 @@ export class AgentExecutorService {
             if (messageType === 'turn_start') {
               if (!agentStarted) {
                 agentStarted = true;
+              }
+              // 🎯 Training Data: Track turn start
+              if (taskId) {
+                executionTracker.startTurn(taskId, 'assistant');
               }
             }
 
@@ -738,6 +773,16 @@ export class AgentExecutorService {
                   const isError = (message as any).is_error === true;
                   StreamingService.streamToolComplete(taskId, agentType, pendingCall.name, toolUseId, result, 0, !isError);
 
+                  // 🎯 Training Data: Track tool call completion with full details
+                  const bashExitCode = pendingCall.name === 'Bash' ? (isError ? 1 : 0) : undefined;
+                  executionTracker.completeToolCall(taskId, {
+                    toolUseId,
+                    toolOutput: typeof result === 'string' ? result : JSON.stringify(result),
+                    toolSuccess: !isError,
+                    toolError: isError ? (typeof result === 'string' ? result : 'Tool execution failed') : undefined,
+                    bashExitCode,
+                  });
+
                   // 🔥 TRACK: Separate created vs modified files
                   if (!isError) {
                     const filePath = pendingCall.input?.file_path || pendingCall.input?.path || pendingCall.input?.notebook_path;
@@ -760,6 +805,19 @@ export class AgentExecutorService {
                       exitCode: isError ? 1 : 0
                     });
                   }
+
+                  // 🔒 Security: Analyze tool result for vulnerabilities (non-blocking)
+                  securityAgentService.analyzeToolResult({
+                    taskId,
+                    executionId: executionTracker.getExecutionId(taskId) || undefined,
+                    toolCallId: toolUseId,
+                    toolName: pendingCall.name,
+                    toolInput: pendingCall.input,
+                    toolOutput: typeof result === 'string' ? result : JSON.stringify(result),
+                    toolSuccess: !isError,
+                    agentType,
+                    phaseName: agentType,
+                  });
 
                   pendingToolCalls.delete(toolUseId);
                 }
@@ -816,6 +874,13 @@ export class AgentExecutorService {
 
           if (taskId) {
             ExecutionControlService.endExecution(taskId);
+
+            // 🎯 Training Data: Track execution failure
+            const errorType = streamError.isTimeout ? 'timeout' :
+              streamError.isLoopDetection ? 'loop_detection' :
+              streamError.isHistoryOverflow ? 'history_overflow' :
+              streamError.isUserAbort ? 'user_abort' : 'stream_error';
+            executionTracker.failExecution(taskId, streamError.message || 'Stream error', errorType);
           }
 
           if (streamError.isLoopDetection || streamError.isNonRetryable) {
@@ -920,6 +985,18 @@ export class AgentExecutorService {
           setDockerHookContext(null);
           clearSandboxContext();  // 🔧 FIX: Also clear sandbox_bash context
           console.log(`🐳 [AgentExecutor] Docker hook context cleared for ${agentType}`);
+        }
+
+        // 🎯 Training Data: Complete execution tracking with final stats
+        if (taskId) {
+          executionTracker.completeExecution(taskId, {
+            finalOutput: output.substring(0, 50000), // Limit size
+            inputTokens: accumulatedUsage.input_tokens,
+            outputTokens: accumulatedUsage.output_tokens,
+            cacheReadTokens: accumulatedUsage.cache_read_input_tokens,
+            cacheCreationTokens: accumulatedUsage.cache_creation_input_tokens,
+            costUsd: cost,
+          });
         }
 
         return {

@@ -11,6 +11,7 @@ import fs from 'fs';
 import { env } from './config/env';
 import { connectDatabase } from './config/database';
 import { WorkspaceCleanupScheduler } from './services/WorkspaceCleanupScheduler';
+import { TrainingExportScheduler } from './services/training/TrainingExportScheduler';
 import { setupConsoleInterceptor } from './utils/consoleInterceptor';
 import { storageService } from './services/storage/StorageService';
 
@@ -32,6 +33,7 @@ import healthRoutes from './routes/health';
 import devServerRoutes from './routes/dev-server';
 import sandboxRoutes from './routes/sandbox';
 import previewProxyRoutes from './routes/preview-proxy';
+import trainingRoutes from './routes/training';
 
 /**
  * Multi-Agent Software Development Platform
@@ -43,6 +45,7 @@ class AgentPlatformApp {
   private io: SocketServer;
   private port: number;
   private cleanupScheduler: WorkspaceCleanupScheduler;
+  private trainingExportScheduler: TrainingExportScheduler;
   private isShuttingDown: boolean = false;
 
   constructor() {
@@ -67,6 +70,7 @@ class AgentPlatformApp {
     });
 
     this.cleanupScheduler = new WorkspaceCleanupScheduler();
+    this.trainingExportScheduler = new TrainingExportScheduler();
 
     this.app.set('trust proxy', 1);
   }
@@ -265,6 +269,7 @@ class AgentPlatformApp {
     this.app.use('/api/v1/dev-server', devServerRoutes);
     this.app.use('/api/v1/sandbox', sandboxRoutes);
     this.app.use('/api/v1/preview', previewProxyRoutes);
+    this.app.use('/api/v1/training', trainingRoutes);
 
     // Legacy API routes (backward compatibility - will be deprecated)
     this.app.use('/api/auth', authRoutes);
@@ -283,6 +288,7 @@ class AgentPlatformApp {
     this.app.use('/api/dev-server', devServerRoutes);
     this.app.use('/api/sandbox', sandboxRoutes);
     this.app.use('/api/preview', previewProxyRoutes);
+    this.app.use('/api/training', trainingRoutes);
 
     // 404 handler
     this.app.use((req: Request, res: Response) => {
@@ -582,6 +588,7 @@ class AgentPlatformApp {
 
       // Iniciar schedulers
       this.cleanupScheduler.start();
+      this.trainingExportScheduler.start();
 
       // 🧹 Start scheduled branch cleanup (runs daily at 2 AM)
       const { scheduledCleanup } = await import('./services/cleanup/ScheduledBranchCleanup');
@@ -651,6 +658,7 @@ class AgentPlatformApp {
 
       // Stop schedulers
       this.cleanupScheduler.stop();
+      this.trainingExportScheduler.stop();
 
       // 🔥 IMPORTANT: Do NOT destroy sandboxes on shutdown!
       // Sandboxes persist for LivePreview and manual work.

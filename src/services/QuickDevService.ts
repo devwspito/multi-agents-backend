@@ -156,11 +156,12 @@ export class QuickDevService {
       const duration = Date.now() - startTime;
       const cost = devResult.cost || 0;
 
-      // 10. Emit completion notification
+      // 10. Emit completion notification (include output for UI display)
       NotificationService.emitNotification(taskId, 'quick_task_completed', {
         success: devSuccess,
         command,
         mode,
+        output: devResult.output,  // 🎯 The agent's result - needed by frontend
         filesModified: devResult.filesModified,
         filesCreated: devResult.filesCreated,
         commitSha,

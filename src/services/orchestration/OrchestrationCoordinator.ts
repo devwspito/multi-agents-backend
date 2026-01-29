@@ -28,6 +28,7 @@ import { RetryService } from './RetryService';
 import { CostBudgetService } from './CostBudgetService';
 import { eventStore } from '../EventStore';
 import { contextCheckpointService } from './ContextCheckpointService';
+import { globalFixerService } from './GlobalFixerService';
 
 import path from 'path';
 import os from 'os';
@@ -586,12 +587,61 @@ export class OrchestrationCoordinator {
               'error',
               `⛔ ORCHESTRATION BLOCKED: ${phaseName} validation failed - execution stopped`
             );
+          } else {
+            // 🔧 GLOBAL FIXER: Attempt to fix non-validation errors before failing
+            // Check if error has raw output (for JSON parsing errors)
+            const errorWithData = result.error as any;
+            const rawOutput = result.data?.rawOutput || errorWithData?.rawOutput;
+            const isJSONError = errorWithData?.isJSONParsingError ||
+                               result.error?.includes('valid epics') ||
+                               result.error?.includes('JSON') ||
+                               result.error?.includes('parse');
+
+            if (rawOutput || isJSONError) {
+              console.log(`\n🔧 [GlobalFixer] Attempting to recover ${phaseName}...`);
+              NotificationService.emitConsoleLog(taskId, 'info', `🔧 GlobalFixer attempting to recover ${phaseName}...`);
+
+              try {
+                const fixResult = await globalFixerService.attemptFix(
+                  taskId,
+                  phaseName,
+                  result.error || 'Unknown error',
+                  rawOutput,
+                  phaseName === 'Planning' ? ['epics'] : ['stories']
+                );
+
+                if (fixResult.fixed && fixResult.data) {
+                  console.log(`✅ [GlobalFixer] Successfully recovered ${phaseName}!`);
+                  NotificationService.emitConsoleLog(taskId, 'info', `✅ GlobalFixer recovered ${phaseName} via ${fixResult.method}`);
+
+                  // Override result with fixed data, preserving PhaseResult structure
+                  result = {
+                    ...result,
+                    success: true,
+                    data: {
+                      ...(result.data || {}),
+                      ...fixResult.data,
+                      recoveredByFixer: true,
+                      fixerMethod: fixResult.method,
+                    },
+                    error: undefined,
+                  };
+                } else {
+                  console.log(`❌ [GlobalFixer] Could not recover ${phaseName}: ${fixResult.error}`);
+                  NotificationService.emitConsoleLog(taskId, 'warn', `GlobalFixer could not recover: ${fixResult.error}`);
+                }
+              } catch (fixerError: any) {
+                console.error(`❌ [GlobalFixer] Error during fix attempt:`, fixerError.message);
+              }
+            }
           }
 
-          // Phase failed - mark task as failed (SQLite updated in handlePhaseFailed)
-          NotificationService.emitConsoleLog(taskId, 'error', `❌ Phase ${phaseName} failed: ${result.error}`);
-          await this.handlePhaseFailed(task, phaseName, result);
-          return; // 🔥 EXPLICIT STOP: No further phases will execute
+          // If still failed after fixer attempt, mark task as failed
+          if (!result.success) {
+            NotificationService.emitConsoleLog(taskId, 'error', `❌ Phase ${phaseName} failed: ${result.error}`);
+            await this.handlePhaseFailed(task, phaseName, result);
+            return; // 🔥 EXPLICIT STOP: No further phases will execute
+          }
         }
 
         // Check if phase needs approval (paused, not failed)
