@@ -12,7 +12,10 @@ import os from 'os';
 import { sandboxService } from '../services/SandboxService.js';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
 import { SandboxRepository } from '../database/repositories/SandboxRepository.js';
-import { sandboxRelaunchService } from '../services/SandboxRelaunchService.js';
+import { TaskRepository } from '../database/repositories/TaskRepository.js';
+import { SandboxPhase } from '../services/orchestration/SandboxPhase.js';
+import { OrchestrationContext } from '../services/orchestration/Phase.js';
+import { agentExecutorService } from '../services/orchestration/AgentExecutorService.js';
 
 const router = Router();
 
@@ -160,96 +163,77 @@ router.post('/destroy/:taskId', async (req: Request, res: Response) => {
  * POST /api/sandbox/relaunch/:taskId
  * Re-launch a sandbox for an existing task (even if completed/failed days ago)
  *
- * 🔥 NOW USES SandboxPhase.execute() DIRECTLY - SAME AS ORCHESTRATOR
- *
- * This allows users to:
- * - Revisit completed projects in IDE + Preview
- * - Make quick changes via Lite Team
- * - Manually edit and commit/push
- *
- * The workspace directory must still exist on disk.
+ * 🔥 EXECUTES SandboxPhase.execute() DIRECTLY - SAME AS ORCHESTRATOR
  */
 router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
   try {
     const { taskId } = req.params;
 
-    console.log(`[Sandbox API] 🔄 Relaunch requested for task ${taskId}`);
-    console.log(`   🔥 Using SandboxPhase.execute() - SAME as orchestrator`);
+    console.log(`[Sandbox API] 🔄 Relaunch via SandboxPhase.execute() for ${taskId}`);
 
-    // 1. Check if sandbox already exists and is running (in-memory)
+    // 1. Check if sandbox already running
     const existing = sandboxService.findSandboxForTask(taskId);
-    if (existing && existing.instance.status === 'running') {
-      console.log(`   ✅ Sandbox already running (in-memory): ${existing.instance.containerId?.substring(0, 12)}`);
-      return res.json({
-        success: true,
-        reused: true,
-        sandbox: {
-          taskId,
-          containerId: existing.instance.containerId?.substring(0, 12),
-          containerName: existing.instance.containerName,
-          status: existing.instance.status,
-          workspacePath: existing.instance.workspacePath,
-          mappedPorts: existing.instance.mappedPorts,
-        },
-      });
+    if (existing?.instance.status === 'running') {
+      return res.json({ success: true, reused: true, sandbox: existing.instance });
     }
 
-    // 2. Check SQLite for persisted sandbox (survives backend restarts)
+    // 2. Check SQLite for persisted sandbox
     const savedSandbox = SandboxRepository.findByTaskId(taskId);
     if (savedSandbox) {
-      console.log(`   💾 Found sandbox in SQLite: ${savedSandbox.containerName}`);
-
-      // Try to recover the container from Docker
-      const recovered = await sandboxService.findOrStartExistingSandbox(
-        taskId,
-        savedSandbox.workspacePath
-      );
-
-      if (recovered && recovered.status === 'running') {
-        console.log(`   ✅ Recovered sandbox from SQLite: ${recovered.containerId?.substring(0, 12)}`);
-        return res.json({
-          success: true,
-          reused: true,
-          recovered: true,
-          sandbox: {
-            taskId,
-            containerId: recovered.containerId?.substring(0, 12),
-            containerName: recovered.containerName,
-            status: recovered.status,
-            workspacePath: recovered.workspacePath,
-            mappedPorts: recovered.mappedPorts,
-          },
-        });
+      const recovered = await sandboxService.findOrStartExistingSandbox(taskId, savedSandbox.workspacePath);
+      if (recovered?.status === 'running') {
+        return res.json({ success: true, reused: true, recovered: true, sandbox: recovered });
       }
     }
 
-    // 3. 🔥 Execute SandboxPhase directly - SAME as orchestrator
-    // This handles: workspace detection, language detection, sandbox creation,
-    // dependency installation, dev server startup, and Judge validation
-    const result = await sandboxRelaunchService.relaunchSandbox(taskId);
+    // 3. Get task and create context - SAME AS ORCHESTRATOR
+    const task = TaskRepository.findById(taskId);
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    // Get workspace path from task.orchestration
+    const workspacePath = (task.orchestration as any)?.workspacePath ||
+      path.join(process.env.AGENT_WORKSPACE_PATH || os.homedir(), `task-${taskId}`);
+
+    if (!fs.existsSync(workspacePath)) {
+      return res.status(404).json({ success: false, error: `Workspace not found: ${workspacePath}` });
+    }
+
+    // Get repositories from task
+    const repositories = (task.orchestration as any)?.repositories || [];
+
+    // 4. Create OrchestrationContext - SAME AS ORCHESTRATOR
+    const context = new OrchestrationContext(task, repositories, workspacePath);
+
+    // 5. Create executeAgent wrapper - SAME AS ORCHESTRATOR
+    const executeAgentWithContext = (
+      agentType: string, prompt: string, agentWorkspacePath: string,
+      agentTaskId?: string, agentName?: string, sessionId?: string,
+      fork?: boolean, attachments?: any[], options?: any
+    ) => agentExecutorService.executeAgent(
+      agentType, prompt, agentWorkspacePath, agentTaskId,
+      agentName, sessionId, fork, attachments, options, context
+    );
+
+    // 6. Create and execute SandboxPhase - SAME AS ORCHESTRATOR
+    const sandboxPhase = new SandboxPhase(executeAgentWithContext);
+    const result = await sandboxPhase.execute(context);
 
     if (result.success) {
       return res.json({
         success: true,
         reused: false,
-        devServerStarted: Object.values(result.servers || {}).some(r => r.verified),
-        sandbox: result.sandbox,
-        servers: result.servers,
+        sandbox: { taskId, workspacePath, status: 'running' },
+        servers: context.getData('devServerResults'),
       });
     } else {
-      return res.status(500).json({
-        success: false,
-        error: result.error || 'Failed to relaunch sandbox',
-        servers: result.servers,
-      });
+      return res.status(500).json({ success: false, error: result.error });
     }
 
   } catch (error: any) {
-    console.error('[Sandbox API] Error relaunching sandbox:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to relaunch sandbox',
-    });
+    console.error('[Sandbox API] Error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
