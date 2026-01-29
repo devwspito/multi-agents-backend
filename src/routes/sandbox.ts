@@ -13,6 +13,7 @@ import { sandboxService } from '../services/SandboxService.js';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
 import { eventStore } from '../services/EventStore.js';
 import { SandboxRepository } from '../database/repositories/SandboxRepository.js';
+import { startAllDevServers } from '../utils/SandboxServerUtils.js';
 
 const router = Router();
 
@@ -371,85 +372,28 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     console.log(`      - containerName: ${instance.containerName}`);
     console.log(`      - status: ${instance.status}`);
 
-    // 6. Optionally start dev servers (ALL repos, not just first)
-    // 🔥 Uses similar logic to SandboxPhase: start + verify with health check
+    // 6. Optionally start dev servers (ALL repos)
+    // 🔥 Uses startAllDevServers from SandboxServerUtils (SAME logic as SandboxPhase)
     let devServerStarted = false;
-    const serverResults: Record<string, { started: boolean; verified: boolean; port?: number; url?: string; error?: string }> = {};
+    let serverResults: Record<string, { started: boolean; verified: boolean; port?: number; url?: string; error?: string }> = {};
 
     if (startDevServer) {
       try {
         const envConfig = state.environmentConfig || {};
-        const repoNames = Object.keys(envConfig);
 
-        console.log(`   🚀 Starting dev servers for ${repoNames.length} repo(s)...`);
+        if (Object.keys(envConfig).length > 0) {
+          // 🔥 Use the SAME server startup logic as SandboxPhase
+          serverResults = await startAllDevServers(
+            taskId,
+            envConfig,
+            instance.mappedPorts || {},
+            {}  // No service env vars for relaunch (services should already be running)
+          );
 
-        // 🔥 FIX: Start ALL dev servers, not just the first one
-        for (const repoName of repoNames) {
-          const repoConfig = envConfig[repoName] as any;
-          const devCmd = repoConfig?.runCommand || repoConfig?.devCmd;
-          const devPort = repoConfig?.devPort || 3000;
-
-          if (!devCmd) {
-            console.log(`      ⚠️ [${repoName}] No devCmd/runCommand - skipping`);
-            serverResults[repoName] = { started: false, verified: false, error: 'No runCommand' };
-            continue;
-          }
-
-          const repoWorkDir = `/workspace/${repoName}`;
-          console.log(`      🚀 [${repoName}] Port ${devPort}: ${devCmd.substring(0, 60)}...`);
-
-          // Kill any previous server on this port
-          await sandboxService.exec(taskId, `pkill -f "port.*${devPort}" 2>/dev/null || fuser -k ${devPort}/tcp 2>/dev/null || true`, {
-            cwd: '/workspace',
-            timeout: 10000,
-          });
-
-          // Run in background (setsid ensures process survives even if parent dies)
-          const logFile = `/tmp/${repoName}-server.log`;
-          const startCmd = `setsid bash -c 'cd ${repoWorkDir} && ${devCmd}' > ${logFile} 2>&1 &`;
-
-          try {
-            await sandboxService.exec(taskId, startCmd, { timeout: 30000 });
-            serverResults[repoName] = { started: true, verified: false, port: devPort };
-            devServerStarted = true;
-          } catch (err: any) {
-            console.warn(`      ⚠️ [${repoName}] Start error: ${err.message}`);
-            serverResults[repoName] = { started: false, verified: false, error: err.message };
-          }
+          devServerStarted = Object.values(serverResults).some(r => r.verified);
+        } else {
+          console.log(`   ⚠️ No environmentConfig in EventStore - cannot start dev servers`);
         }
-
-        // 🔥 Health check verification (like SandboxPhase)
-        // Wait a bit then verify servers are responding
-        if (devServerStarted) {
-          console.log(`   ⏳ Waiting 5s for servers to initialize...`);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-
-          for (const [repoName, result] of Object.entries(serverResults)) {
-            if (!result.started || !result.port) continue;
-
-            try {
-              const curlCmd = `curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 http://localhost:${result.port}/ 2>/dev/null || echo "000"`;
-              const curlResult = await sandboxService.exec(taskId, curlCmd, { cwd: '/workspace', timeout: 10000 });
-              const statusCode = parseInt(curlResult.stdout.trim()) || 0;
-
-              if (statusCode > 0 && statusCode < 600) {
-                const hostPort = instance.mappedPorts?.[result.port.toString()] || result.port;
-                serverResults[repoName].verified = true;
-                serverResults[repoName].url = `http://localhost:${hostPort}`;
-                console.log(`      ✅ [${repoName}] Verified on port ${result.port} (HTTP ${statusCode})`);
-              } else {
-                console.log(`      ⏳ [${repoName}] Not responding yet (may need more time to compile)`);
-              }
-            } catch (err) {
-              console.log(`      ⏳ [${repoName}] Health check failed (server may still be starting)`);
-            }
-          }
-        }
-
-        const startedCount = Object.values(serverResults).filter(r => r.started).length;
-        const verifiedCount = Object.values(serverResults).filter(r => r.verified).length;
-        console.log(`   📊 Results: ${startedCount} started, ${verifiedCount} verified`);
-
       } catch (err: any) {
         console.warn(`   ⚠️ Could not start dev servers: ${err.message}`);
       }
