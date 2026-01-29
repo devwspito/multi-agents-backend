@@ -164,6 +164,7 @@ router.post('/destroy/:taskId', async (req: Request, res: Response) => {
  * Re-launch a sandbox for an existing task (even if completed/failed days ago)
  *
  * 🔥 EXECUTES SandboxPhase.execute() DIRECTLY - SAME AS ORCHESTRATOR
+ * 🔥 SCANS LOCAL WORKSPACE for repositories (not from DB)
  */
 router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
   try {
@@ -192,7 +193,7 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    // Get workspace path from task.orchestration
+    // Get workspace path from task.orchestration FIRST, then fallback
     const workspacePath = (task.orchestration as any)?.workspacePath ||
       path.join(process.env.AGENT_WORKSPACE_PATH || os.homedir(), `task-${taskId}`);
 
@@ -200,8 +201,16 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: `Workspace not found: ${workspacePath}` });
     }
 
-    // Get repositories from task
-    const repositories = (task.orchestration as any)?.repositories || [];
+    // 🔥 SCAN LOCAL WORKSPACE for repositories (not from DB)
+    const repositories = scanWorkspaceForRepos(workspacePath);
+    console.log(`[Sandbox API] 📂 Found ${repositories.length} repo(s) in workspace:`, repositories.map(r => r.name));
+
+    if (repositories.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No repositories found in workspace. Expected pubspec.yaml or package.json in subdirectories.',
+      });
+    }
 
     // 4. Create OrchestrationContext - SAME AS ORCHESTRATOR
     const context = new OrchestrationContext(task, repositories, workspacePath);
@@ -236,6 +245,67 @@ router.post('/relaunch/:taskId', async (req: Request, res: Response) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
+/**
+ * Scan workspace directory for repositories.
+ * Detects by presence of pubspec.yaml (Flutter) or package.json (Node.js).
+ */
+function scanWorkspaceForRepos(workspacePath: string): Array<{ name: string; language: string; repoType: string }> {
+  const repos: Array<{ name: string; language: string; repoType: string }> = [];
+
+  try {
+    const entries = fs.readdirSync(workspacePath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const repoPath = path.join(workspacePath, entry.name);
+
+      // Check for Flutter (pubspec.yaml)
+      if (fs.existsSync(path.join(repoPath, 'pubspec.yaml'))) {
+        repos.push({ name: entry.name, language: 'flutter', repoType: 'frontend' });
+        continue;
+      }
+
+      // Check for Node.js (package.json)
+      if (fs.existsSync(path.join(repoPath, 'package.json'))) {
+        // Determine if frontend or backend by checking for common patterns
+        const pkgPath = path.join(repoPath, 'package.json');
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+          const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+          // React/Vue/Angular = frontend, Express/Fastify/NestJS = backend
+          const isFrontend = deps.react || deps.vue || deps['@angular/core'] || deps.next;
+          const repoType = isFrontend ? 'frontend' : 'backend';
+
+          repos.push({ name: entry.name, language: 'nodejs', repoType });
+        } catch {
+          repos.push({ name: entry.name, language: 'nodejs', repoType: 'backend' });
+        }
+        continue;
+      }
+
+      // Check for Python (requirements.txt or setup.py)
+      if (fs.existsSync(path.join(repoPath, 'requirements.txt')) ||
+          fs.existsSync(path.join(repoPath, 'setup.py')) ||
+          fs.existsSync(path.join(repoPath, 'pyproject.toml'))) {
+        repos.push({ name: entry.name, language: 'python', repoType: 'backend' });
+        continue;
+      }
+
+      // Check for Go (go.mod)
+      if (fs.existsSync(path.join(repoPath, 'go.mod'))) {
+        repos.push({ name: entry.name, language: 'go', repoType: 'backend' });
+        continue;
+      }
+    }
+  } catch (err: any) {
+    console.error(`[scanWorkspaceForRepos] Error scanning ${workspacePath}:`, err.message);
+  }
+
+  return repos;
+}
 
 /**
  * GET /api/sandbox/:taskId
