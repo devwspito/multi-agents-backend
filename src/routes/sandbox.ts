@@ -623,4 +623,198 @@ router.post('/quick-task/:taskId', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/sandbox/quick-task-retry/:taskId
+ * Retry a failed quick task
+ *
+ * Creates a NEW execution with the same command from a failed execution.
+ * Does NOT resume the SDK session - starts fresh.
+ *
+ * @param taskId - Task ID to retry
+ * @query executionId - Specific execution ID to retry (optional, uses latest failed if omitted)
+ */
+router.post('/quick-task-retry/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { executionId } = req.query;
+
+    console.log(`[Sandbox API] Retry quick task for ${taskId}${executionId ? ` (execution: ${executionId})` : ''}`);
+
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    // Execute retry (runs async, streams via WebSocket)
+    quickDevService.retryQuickTask(taskId, executionId as string | undefined)
+      .then(result => {
+        console.log(`[Sandbox API] Quick task retry completed: success=${result.success}`);
+      })
+      .catch(err => {
+        console.error(`[Sandbox API] Quick task retry failed:`, err);
+      });
+
+    return res.json({
+      success: true,
+      message: 'Quick task retry started. Output will stream via WebSocket.',
+      taskId,
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error retrying quick task:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to retry quick task',
+    });
+  }
+});
+
+/**
+ * POST /api/sandbox/quick-task-resume/:taskId
+ * Resume a paused quick task
+ *
+ * Resumes the SDK session from where it left off.
+ * Requires the execution to have a valid sdkSessionId.
+ *
+ * @param taskId - Task ID to resume
+ * @query executionId - Specific execution ID to resume (optional, uses latest resumable if omitted)
+ * @body prompt - Additional prompt to send on resume (optional)
+ */
+router.post('/quick-task-resume/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { executionId } = req.query;
+    const { prompt } = req.body;
+
+    console.log(`[Sandbox API] Resume quick task for ${taskId}${executionId ? ` (execution: ${executionId})` : ''}`);
+
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    // Execute resume (runs async, streams via WebSocket)
+    quickDevService.resumeQuickTask(taskId, executionId as string | undefined, prompt)
+      .then(result => {
+        console.log(`[Sandbox API] Quick task resume completed: success=${result.success}`);
+      })
+      .catch(err => {
+        console.error(`[Sandbox API] Quick task resume failed:`, err);
+      });
+
+    return res.json({
+      success: true,
+      message: 'Quick task resume started. Output will stream via WebSocket.',
+      taskId,
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error resuming quick task:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to resume quick task',
+    });
+  }
+});
+
+/**
+ * GET /api/sandbox/quick-task-history/:taskId
+ * Get execution history for a task
+ *
+ * @param taskId - Task ID
+ * @query limit - Max number of executions to return (default: 20)
+ */
+router.get('/quick-task-history/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    const executions = quickDevService.getExecutionHistory(taskId, limit);
+    const stats = quickDevService.getExecutionStats(taskId);
+
+    return res.json({
+      success: true,
+      taskId,
+      executions,
+      stats,
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error getting execution history:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get execution history',
+    });
+  }
+});
+
+/**
+ * GET /api/sandbox/quick-task-execution/:executionId
+ * Get a specific execution by ID
+ *
+ * @param executionId - Execution ID
+ */
+router.get('/quick-task-execution/:executionId', async (req: Request, res: Response) => {
+  try {
+    const { executionId } = req.params;
+
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    const execution = quickDevService.getExecution(executionId);
+
+    if (!execution) {
+      return res.status(404).json({
+        success: false,
+        error: 'Execution not found',
+      });
+    }
+
+    return res.json({
+      success: true,
+      execution,
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error getting execution:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get execution',
+    });
+  }
+});
+
+/**
+ * GET /api/sandbox/quick-task-latest/:taskId
+ * Get the latest execution for a task
+ *
+ * @param taskId - Task ID
+ */
+router.get('/quick-task-latest/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+
+    const { quickDevService } = await import('../services/QuickDevService.js');
+
+    const execution = quickDevService.getLatestExecution(taskId);
+
+    if (!execution) {
+      return res.json({
+        success: true,
+        taskId,
+        execution: null,
+        message: 'No executions found for this task',
+      });
+    }
+
+    return res.json({
+      success: true,
+      taskId,
+      execution,
+    });
+
+  } catch (error: any) {
+    console.error('[Sandbox API] Error getting latest execution:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get latest execution',
+    });
+  }
+});
+
 export default router;
