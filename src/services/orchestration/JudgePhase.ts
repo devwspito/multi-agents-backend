@@ -29,6 +29,7 @@ import { unifiedMemoryService } from '../UnifiedMemoryService';
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { logSection } from './utils/LogHelpers';
 import { isEmpty, isNotEmpty } from './utils/ArrayHelpers';
+import { getStoryId } from './utils/IdNormalizer';
 import {
   buildPlanningJudgePrompt,
   buildTechLeadJudgePrompt,
@@ -1149,12 +1150,14 @@ export class JudgePhase extends BasePhase {
     let targetRepository = getDataOptional<string>(context, 'targetRepository');
     if (!targetRepository && (story as any).epicId) {
       const { eventStore } = await import('../EventStore');
+      const { findEpicById } = await import('./utils/IdNormalizer');
       const state = await eventStore.getCurrentState(task.id as any);
-      const epic = state.epics?.find((e: any) => e.id === (story as any).epicId);
+      // 🔥 FIX: Use findEpicById() for consistent ID normalization
+      const epic = findEpicById(state.epics, (story as any).epicId);
 
       if (!epic) {
         console.error(`\n❌ [Judge] CRITICAL: Cannot find epic for story!`);
-        throw new Error(`HUMAN_REQUIRED: Cannot find epic ${(story as any).epicId} for story ${story.id}`);
+        throw new Error(`HUMAN_REQUIRED: Cannot find epic ${(story as any).epicId} for story ${getStoryId(story)}`);
       }
 
       if (!epic.targetRepository) {
@@ -2004,12 +2007,16 @@ npm test             # Must pass
     const state = await eventStore.getCurrentState(task.id as any);
 
     // 🔥 CRITICAL: Verify story has branchName before retry
-    const storyFromEventStore = state.stories.find((s: any) => s.id === story.id);
+    // 🔥 FIX: Use getStoryId() for consistent ID normalization
+    const targetStoryId = getStoryId(story);
+    const storyFromEventStore = state.stories.find((s: any) => {
+      try { return getStoryId(s) === targetStoryId; } catch { return false; }
+    });
     if (storyFromEventStore?.branchName) {
       console.log(`✅ [Judge] Story has branchName for retry: ${storyFromEventStore.branchName}`);
     } else {
       console.warn(`⚠️  [Judge] Story does NOT have branchName yet`);
-      console.warn(`   Story ID: ${story.id}`);
+      console.warn(`   Story ID: ${targetStoryId}`);
       console.warn(`   Developer will create the branch on retry`);
     }
 
@@ -2125,16 +2132,20 @@ npm test             # Must pass
       const maxRetries = 3;
       const baseDelay = 500; // 500ms
 
+      // 🔥 FIX: Use getStoryId() for consistent ID normalization
+      const retryTargetStoryId = getStoryId(story);
       for (let retryAttempt = 0; retryAttempt < maxRetries; retryAttempt++) {
         try {
           const updatedState = await eventStore.getCurrentState(task.id as any);
-          updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+          updatedStory = updatedState.stories.find((s: any) => {
+            try { return getStoryId(s) === retryTargetStoryId; } catch { return false; }
+          });
 
           if (updatedStory && updatedStory.branchName) {
             console.log(`✅ [POST-RETRY SYNC] Retrieved story from EventStore (attempt ${retryAttempt + 1}/${maxRetries})`);
             break;
           } else {
-            console.warn(`⚠️  [POST-RETRY SYNC] Story ${story.id} not found or incomplete in EventStore (attempt ${retryAttempt + 1}/${maxRetries})`);
+            console.warn(`⚠️  [POST-RETRY SYNC] Story ${retryTargetStoryId} not found or incomplete in EventStore (attempt ${retryAttempt + 1}/${maxRetries})`);
             if (retryAttempt < maxRetries - 1) {
               const delay = baseDelay * Math.pow(2, retryAttempt); // Exponential backoff
               console.log(`⏳ [POST-RETRY SYNC] Waiting ${delay}ms before retry...`);

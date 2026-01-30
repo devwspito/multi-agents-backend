@@ -16,6 +16,7 @@ import { hasMarker, extractMarkerValue, COMMON_MARKERS } from '../../utils/Marke
 import { StoryPipelineContext, GitValidationStageResult } from '../types';
 import { DeveloperStageExecutor } from './DeveloperStage';
 import { scanWorkspaceForChanges } from '../../utils/GitCommitHelper';
+import { getStoryId } from '../../utils/IdNormalizer';
 
 export class GitValidationStageExecutor {
   constructor(private developerStageExecutor: DeveloperStageExecutor) {}
@@ -42,10 +43,14 @@ export class GitValidationStageExecutor {
       // Get updated story with branch info
       const { eventStore } = await import('../../../EventStore');
       const updatedState = await eventStore.getCurrentState(task.id as any);
-      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+      // 🔥 FIX: Use getStoryId() for consistent ID normalization
+      const targetStoryId = getStoryId(story);
+      const updatedStory = updatedState.stories.find((s: any) => {
+        try { return getStoryId(s) === targetStoryId; } catch { return false; }
+      });
 
       if (!updatedStory || !updatedStory.branchName) {
-        console.error(`❌ Story ${story.id} has no branch after developer`);
+        console.error(`❌ Story ${targetStoryId} has no branch after developer`);
         return {
           success: false,
           commitSHA: null,

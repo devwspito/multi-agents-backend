@@ -26,7 +26,7 @@ import { OutputParser } from './utils/OutputParser';
 import { IStory, IEpic, TaskRepository } from '../../database/repositories/TaskRepository.js';
 // 📦 Utility helpers
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
-import { getEpicId } from './utils/IdNormalizer';
+import { getEpicId, getStoryId } from './utils/IdNormalizer';
 
 export interface VerificationResult {
   epicId: string;
@@ -721,23 +721,31 @@ If validation fails:
 
     // 1. Run Completeness Check on each story in this epic
     const epicStoryIds = epic.stories || []; // These are string IDs
-    const epicStories = allStories.filter(s => epicStoryIds.includes(s.id));
+    // 🔥 FIX: Use getStoryId() for consistent ID normalization
+    const epicStories = allStories.filter(s => {
+      try {
+        const normalizedStoryId = getStoryId(s);
+        return epicStoryIds.includes(normalizedStoryId) ||
+               epicStoryIds.some(id => id === normalizedStoryId || id === s.id);
+      } catch { return false; }
+    });
 
     for (const story of epicStories) {
+      const storyId = getStoryId(story);
       try {
         const storyReport = await CompletenessValidator.validateStory(repoPath, {
-          id: story.id,
+          id: storyId,
           title: story.title,
           description: story.description,
           acceptanceCriteria: story.acceptanceCriteria,
         });
 
         if (!storyReport.isComplete) {
-          issues.push(`Story ${story.id}: ${storyReport.missingCount} missing requirement(s)`);
+          issues.push(`Story ${storyId}: ${storyReport.missingCount} missing requirement(s)`);
           completenessReport = storyReport; // Store last failed report
         }
       } catch (error: any) {
-        console.warn(`⚠️ [Verification] Error checking story ${story.id}:`, error.message);
+        console.warn(`⚠️ [Verification] Error checking story ${storyId}:`, error.message);
       }
     }
 

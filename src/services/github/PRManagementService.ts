@@ -6,6 +6,7 @@ import { GitHubService } from '../GitHubService';
 import { NotificationService } from '../NotificationService';
 import { AutoMergeService, IMergeResult } from './AutoMergeService';
 import { BranchCleanupService } from '../cleanup/BranchCleanupService';
+import { getEpicId } from '../orchestration/utils/IdNormalizer';
 
 const execAsync = promisify(exec);
 
@@ -466,10 +467,12 @@ export class PRManagementService {
 
       // Build branch mappings from task orchestration data
       const mappings = BranchCleanupService.buildBranchMappingsFromTask(task);
-      const mapping = mappings.get(epic.id);
+      // 🔥 FIX: Use getEpicId() for consistent ID normalization
+      const normalizedEpicId = getEpicId(epic);
+      const mapping = mappings.get(normalizedEpicId);
 
       if (!mapping || mapping.storyBranches.length === 0) {
-        console.log(`   ⏭️  No story branches found for epic ${epic.id}`);
+        console.log(`   ⏭️  No story branches found for epic ${normalizedEpicId}`);
         return;
       }
 
