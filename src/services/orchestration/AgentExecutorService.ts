@@ -931,6 +931,18 @@ export class AgentExecutorService {
         if (taskId && (cost > 0 || totalInputTokens > 0)) {
           unifiedMemoryService.addCost(taskId, cost, totalInputTokens + totalOutputTokens);
           console.log(`   💾 Cost saved: $${cost.toFixed(4)}`);
+
+          // 🔥 EMIT COST UPDATE TO FRONTEND
+          // Note: totalCost here is the running total that gets accumulated in the frontend
+          // Each emission adds to the running total displayed in the UI
+          NotificationService.emitCostUpdate(taskId, {
+            totalCost: cost, // This agent's cost (frontend accumulates)
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            cacheCreationTokens: accumulatedUsage.cache_creation_input_tokens,
+            cacheReadTokens: accumulatedUsage.cache_read_input_tokens,
+          });
+          console.log(`   📡 Cost emitted to frontend: $${cost.toFixed(4)}`);
         }
 
         // Post-execution hooks
