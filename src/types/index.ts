@@ -48,3 +48,17 @@ export {
   dbRowToJs,
   jsToDbRow,
 } from './fields';
+
+// Validation and sanitization
+export {
+  ValidationResult,
+  validateStory,
+  validateEpic,
+  validatePhaseExecution,
+  validateOrchestration,
+  sanitizeForExport,
+  validateAndSanitize,
+  validateStoryBatch,
+  validateEpicBatch,
+  checkTrainingDataQuality,
+} from './validation';
