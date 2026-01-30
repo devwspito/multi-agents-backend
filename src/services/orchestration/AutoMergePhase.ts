@@ -134,7 +134,7 @@ export class AutoMergePhase extends BasePhase {
       console.log(`   ✅ [AutoMerge] Recovered ${epicsWithPRs.length} PR(s) total`);
     }
 
-    console.log(`   ❌ Phase not completed - AutoMerge must execute`);
+    console.log(`   ⏳ Phase pending - AutoMerge must execute`);
     return false;
   }
 

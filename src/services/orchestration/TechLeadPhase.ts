@@ -85,7 +85,7 @@ export class TechLeadPhase extends BasePhase {
       return true;
     }
 
-    console.log(`   ❌ Phase not completed - TechLead must execute`);
+    console.log(`   ⏳ Phase pending - TechLead must execute`);
     return false;
   }
 

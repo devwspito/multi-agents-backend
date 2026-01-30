@@ -167,7 +167,7 @@ export class TeamOrchestrationPhase extends BasePhase {
       context.setData('completedEpicIds', completedEpicIds);
     }
 
-    console.log(`   ❌ Phase not completed - TeamOrchestration must execute`);
+    console.log(`   ⏳ Phase pending - TeamOrchestration must execute`);
     return false;
   }
 
@@ -1228,9 +1228,13 @@ export class TeamOrchestrationPhase extends BasePhase {
       // 🔄 TECH LEAD EXECUTION + APPROVAL LOOP
       // User can review and provide feedback on architecture before developers start
       // If rejected with feedback, re-execute TechLead with feedback as directive
-      const autoApprovalEnabled = parentContext.task.orchestration.autoApprovalEnabled;
-      const autoApprovalPhases = parentContext.task.orchestration.autoApprovalPhases || [];
-      const techLeadAutoApproved = autoApprovalEnabled && autoApprovalPhases.includes('tech-lead' as any);
+      // 🔥 FIX: Refresh task from DB to get latest autoApprovalEnabled value
+      // User may have toggled autonomous mode DURING execution via /auto-approval command
+      const freshTaskForApproval = TaskRepository.findById(parentContext.task.id);
+      const autoApprovalEnabled = freshTaskForApproval?.orchestration?.autoApprovalEnabled === true;
+      // 🔥 FIX: If autoApprovalEnabled is true, approve ALL phases (no need to check autoApprovalPhases)
+      // The "autonomous mode" toggle means approve EVERYTHING, not just specific phases
+      const techLeadAutoApproved = autoApprovalEnabled;
 
       const MAX_TECH_LEAD_RETRIES = 3;
       let techLeadRetryCount = 0;

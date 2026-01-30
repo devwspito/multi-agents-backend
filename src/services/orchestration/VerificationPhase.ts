@@ -82,7 +82,7 @@ export class VerificationPhase extends BasePhase {
       return true;
     }
 
-    console.log(`   ❌ Phase not completed - Verification must execute`);
+    console.log(`   ⏳ Phase pending - Verification must execute`);
     return false;
   }
 

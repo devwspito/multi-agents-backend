@@ -929,6 +929,7 @@ class SandboxService extends EventEmitter {
           memoryLimit: '8g', // Default, actual limit is in container
           cpuLimit: '4',
           networkMode: 'host',
+          workDir: '/workspace', // 🔥 FIX: Always set workDir to ensure correct Docker path
         },
         repoName: 'unified',
         sandboxType: 'fullstack',

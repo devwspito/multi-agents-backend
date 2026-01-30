@@ -69,7 +69,7 @@ export class PlanningPhase extends BasePhase {
       return true;
     }
 
-    console.log(`   ❌ Phase not completed - Planning must execute`);
+    console.log(`   ⏳ Phase pending - Planning must execute`);
     return false;
   }
 

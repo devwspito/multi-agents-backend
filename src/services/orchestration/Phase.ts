@@ -492,7 +492,7 @@ export abstract class BasePhase implements IPhase {
       if (reason) console.log(`   ${reason}`);
       console.log(`${'='.repeat(80)}\n`);
     } else {
-      console.log(`   ❌ Phase not completed - ${this.name} must execute`);
+      console.log(`   ⏳ Phase pending - ${this.name} must execute`);
     }
   }
 
