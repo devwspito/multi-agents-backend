@@ -8,6 +8,10 @@ export { EventType, IEvent };
 // 🔥 Standardized ID normalization for consistent lookups
 import { findEpicById, findStoryById, filterStoriesByEpicId } from './orchestration/utils/IdNormalizer';
 
+// 🔥 Standardized status types for data integrity
+import { BaseStatus } from '../types/status';
+import { StoryComplexity } from '../types/fields';
+
 // ============================================================================
 // 🔥🔥🔥 EVENT VALIDATION SCHEMAS - BULLETPROOF DATA INTEGRITY 🔥🔥🔥
 // ============================================================================
@@ -85,10 +89,10 @@ export interface TaskState {
     title: string;
     description: string;
     assignedTo?: string;
-    status: 'pending' | 'in_progress' | 'completed' | 'failed';
+    status: BaseStatus;  // 🔥 Use standardized BaseStatus type
     priority: number;
     complexity: string;
-    estimatedComplexity?: string;
+    estimatedComplexity?: StoryComplexity;
     branchName?: string;
     filesToRead?: string[];
     filesToModify?: string[];

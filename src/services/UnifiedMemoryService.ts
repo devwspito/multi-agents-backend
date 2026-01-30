@@ -11,7 +11,9 @@
 import { TaskRepository, ITask } from '../database/repositories/TaskRepository.js';
 import { eventStore } from './EventStore.js';
 // 🔥 Standardized ID normalization for consistent lookups
-import { findEpicById, findStoryById, filterStoriesByEpicId } from './orchestration/utils/IdNormalizer';
+import { findEpicById, findStoryById, filterStoriesByEpicId, getEpicIdSafe, getStoryIdSafe } from './orchestration/utils/IdNormalizer';
+// 🔥 Standardized status types for data integrity
+import { BaseStatus, PhaseStatus, StoryStatus } from '../types/status';
 
 /**
  * Types for execution tracking
@@ -35,7 +37,7 @@ export interface ExecutionMap {
 
 export interface PhaseExecution {
   phaseType: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'waiting_approval' | 'approved';
+  status: PhaseStatus;  // 🔥 Use standardized PhaseStatus type
   startedAt?: Date;
   completedAt?: Date;
   output?: any;
@@ -45,7 +47,7 @@ export interface PhaseExecution {
 export interface StoryExecution {
   storyId: string;
   epicId: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  status: BaseStatus;  // 🔥 Use standardized BaseStatus type
   startedAt?: Date;
   completedAt?: Date;
   output?: any;
@@ -54,19 +56,19 @@ export interface StoryExecution {
 
 export interface EpicExecution {
   epicId: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  status: BaseStatus;  // 🔥 Use standardized BaseStatus type
   techLeadCompleted?: boolean;
   startedAt?: Date;
   completedAt?: Date;
-  cost?: number;
+  costUsd?: number;  // 🔥 Standardized: costUsd (was cost)
 }
 
 export interface StoryProgress {
   storyId: string;
   epicId: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+  status: StoryStatus;  // 🔥 Use standardized StoryStatus type
   stage?: string;
-  retryCount?: number;
+  retryCount?: number;  // 🔥 Standardized: retryCount (not judgeIterations)
   lastUpdated?: Date;
   metadata?: any;
   commitHash?: string;
@@ -74,7 +76,7 @@ export interface StoryProgress {
   filesModified?: string[];  // Files edited during execution
   filesCreated?: string[];   // Files created from scratch
   toolsUsed?: string[];
-  cost_usd?: number;
+  costUsd?: number;  // 🔥 Standardized: costUsd (was cost_usd)
 }
 
 export interface ResumptionPoint {
@@ -167,7 +169,7 @@ class UnifiedMemoryServiceClass {
           epicId,
           status: epic.status || 'pending',
           techLeadCompleted: epic.techLeadCompleted,
-          cost: epic.cost_usd,
+          costUsd: epic.cost_usd,  // 🔥 Standardized: costUsd
         });
         if (epic.branchName) {
           map.epicBranches!.set(epicId, epic.branchName);
@@ -199,11 +201,11 @@ class UnifiedMemoryServiceClass {
               epicId,
               status: story.status || 'pending',
               stage: story.stage,
-              retryCount: story.judgeIterations,
+              retryCount: story.judgeIterations,  // 🔥 Standardized: retryCount
               metadata: story.metadata,
               filesModified: story.filesModified,
               toolsUsed: story.toolsUsed,
-              cost_usd: story.cost_usd,
+              costUsd: story.cost_usd,  // 🔥 Standardized: costUsd
             });
           }
         }
@@ -629,12 +631,12 @@ class UnifiedMemoryServiceClass {
       epicId,
       status: story.status || 'pending',
       stage: story.stage,
-      retryCount: story.judgeIterations,
+      retryCount: story.judgeIterations,  // 🔥 Standardized: retryCount
       metadata: story.metadata,
       filesModified: story.filesModified,
       filesCreated: story.filesCreated,
       toolsUsed: story.toolsUsed,
-      cost_usd: story.cost_usd,
+      costUsd: story.cost_usd,  // 🔥 Standardized: costUsd
     };
   }
 
@@ -659,13 +661,13 @@ class UnifiedMemoryServiceClass {
     this.updateOrchestration(taskId, (orch) => {
       const epics = orch.planning?.epics || [];
       const updatedEpics = epics.map((e: any) => {
-        // 🔥 FIX: Use consistent ID extraction (epic could have id, epicId, or title)
-        const currentEpicId = e.id || e.epicId || e.title;
+        // 🔥 FIX: Use IdNormalizer for consistent ID extraction
+        const currentEpicId = getEpicIdSafe(e);
         if (currentEpicId !== epicId) return e;
         foundEpic = true;
         const stories = (e.stories || []).map((s: any) => {
-          // 🔥 FIX: Use consistent ID extraction for stories too
-          const currentStoryId = s.id || s.storyId || s.title;
+          // 🔥 FIX: Use IdNormalizer for consistent ID extraction
+          const currentStoryId = getStoryIdSafe(s);
           if (currentStoryId === storyId) {
             foundStory = true;
             return modifier(s);
