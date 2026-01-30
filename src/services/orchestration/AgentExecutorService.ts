@@ -20,7 +20,7 @@ import { FailedExecutionRepository, FailureType } from '../../database/repositor
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { OrchestrationContext } from './Phase';
-import { getExplicitModelId } from '../../config/ModelConfigurations';
+import { getExplicitModelId, calculateCost, ClaudeModel } from '../../config/ModelConfigurations';
 
 // MCP Tools
 import { createCustomToolsServer } from '../../tools/customTools';
@@ -563,10 +563,7 @@ export class AgentExecutorService {
         const filesCreatedSet = new Set<string>();   // Files created (Write tool)
         const toolsUsedSet = new Set<string>();      // Unique tools used
 
-        // 🔥 Cost tracking: Use SDK cost directly (not token-based calculation)
-        let accumulatedCost = 0; // USD from Claude Agent SDK
-
-        // Note: accumulatedUsage kept for backward compatibility logging
+        // Token accumulation for cost calculation
         const accumulatedUsage = {
           input_tokens: 0,
           output_tokens: 0,
@@ -841,13 +838,8 @@ export class AgentExecutorService {
               }
             }
 
-            // 🔥 Cost from SDK (system messages contain accumulated cost in USD)
-            if ((message as any).type === 'system') {
-              const systemCost = (message as any).cost;
-              if (typeof systemCost === 'number' && systemCost > 0) {
-                accumulatedCost = systemCost; // SDK accumulates, we just capture latest
-              }
-            }
+            // Cost tracking is done at the end using accumulated tokens
+            // SDK doesn't emit system messages with cost - we calculate from tokens
 
             // Usage accumulation (kept for logging, not used for cost calculation)
             const msgUsage = (message as any).usage || (message as any).message?.usage || (message as any).data?.usage;
@@ -919,21 +911,25 @@ export class AgentExecutorService {
         // Extract output
         const output = this.extractOutputText(finalResult, allMessages) || '';
 
-        // 🔥 USE SDK COST DIRECTLY (no manual token-based calculation needed)
-        const cost = accumulatedCost;
-
-        // Token stats for logging (not used for cost)
+        // 🔥 FIX: Calculate REAL cost from accumulated tokens
+        // The SDK doesn't emit system messages with cost, so we calculate from tokens
         const inputTokens = accumulatedUsage.input_tokens;
         const outputTokens = accumulatedUsage.output_tokens;
 
-        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (from SDK)`);
-        if (inputTokens > 0 || outputTokens > 0) {
-          console.log(`   📊 Tokens: ${inputTokens.toLocaleString()} in / ${outputTokens.toLocaleString()} out`);
-        }
+        // Also check finalResult.usage in case we missed some tokens
+        const finalUsage = (finalResult as any)?.usage;
+        const totalInputTokens = Math.max(inputTokens, finalUsage?.input_tokens || 0);
+        const totalOutputTokens = Math.max(outputTokens, finalUsage?.output_tokens || 0);
 
-        // 🔥 SAVE SDK COST TO SQLite
-        if (taskId && cost > 0) {
-          unifiedMemoryService.addCost(taskId, cost, inputTokens + outputTokens);
+        // Calculate cost from tokens using actual model pricing
+        const cost = calculateCost(modelAlias as ClaudeModel, totalInputTokens, totalOutputTokens);
+
+        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (calculated from ${totalInputTokens.toLocaleString()} in + ${totalOutputTokens.toLocaleString()} out tokens)`);
+        console.log(`   📊 Model: ${modelAlias} | Pricing: input=$${modelAlias === 'opus' ? '15' : '3'}/M, output=$${modelAlias === 'opus' ? '75' : '15'}/M`);
+
+        // 🔥 SAVE REAL COST TO SQLite
+        if (taskId && (cost > 0 || totalInputTokens > 0)) {
+          unifiedMemoryService.addCost(taskId, cost, totalInputTokens + totalOutputTokens);
           console.log(`   💾 Cost saved: $${cost.toFixed(4)}`);
         }
 
