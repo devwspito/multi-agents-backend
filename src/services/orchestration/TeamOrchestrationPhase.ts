@@ -14,7 +14,7 @@ import {
   validateRequiredPhaseContext,
 } from './utils/PhaseValidationHelpers';
 import { isBillingError, BillingError } from './RetryService';
-import { logCheckpointRecovery, logCriticalError } from './utils/LogHelpers';
+import { logCheckpointRecovery } from './utils/LogHelpers';
 import { assertValidWorkspacePath } from './utils/WorkspaceValidator';
 // 🎯 UNIFIED MEMORY - THE SINGLE SOURCE OF TRUTH
 import { unifiedMemoryService } from '../UnifiedMemoryService';
@@ -288,119 +288,42 @@ export class TeamOrchestrationPhase extends BasePhase {
         }
       }
 
-      // 🚨 VALIDATION: Check epic quality
-      // For fresh tasks (pending): BLOCK if epics missing file paths
-      // For resumed tasks: WARN but allow continuation (epics were already approved)
-      const invalidEpics = planningEpics.filter(epic => {
+      // 📝 INFO: Log epics without explicit file paths (non-blocking)
+      // TechLead provides concrete instructions → Developers explore codebase
+      // This is informational only - execution continues regardless
+      const epicsWithoutFiles = planningEpics.filter(epic => {
         const hasFiles = (epic.filesToModify && epic.filesToModify.length > 0) ||
                         (epic.filesToCreate && epic.filesToCreate.length > 0);
         return !hasFiles;
       });
 
-      if (invalidEpics.length > 0) {
-        const invalidTitles = invalidEpics.map((e: any) => e.title || e.id).join(', ');
-
-        // 🔥 FIX: Check if this is a resume/retry (task not pending)
-        // For resumed tasks, warn but DON'T block - let developers figure out files
-        const isResumeOrRetry = task.status !== 'pending';
-
-        if (isResumeOrRetry) {
-          // WARN but continue for resumed tasks
-          console.warn(`⚠️ [TeamOrchestration] RESUME MODE: ${invalidEpics.length} epic(s) missing file paths: ${invalidTitles}`);
-          console.warn(`   ℹ️ Continuing anyway - developers will determine files to modify`);
-          NotificationService.emitConsoleLog(
-            taskId,
-            'warn',
-            `⚠️ RESUME: ${invalidEpics.length} epic(s) without explicit file paths - developers will explore codebase`
-          );
-        } else {
-          // BLOCK for fresh tasks - Planning should have specified files
-          logCriticalError('INVALID EPICS DETECTED', [
-            `${invalidEpics.length} epic(s) have NO file paths`,
-            `Invalid epics: ${invalidTitles}`,
-            `This should have been caught by Planning validation`,
-            `BLOCKING EXECUTION - Cannot proceed without file paths`,
-          ]);
-
-          NotificationService.emitConsoleLog(
-            taskId,
-            'error',
-            `🚨 CRITICAL: Found ${invalidEpics.length} invalid epic(s) without file paths`
-          );
-          NotificationService.emitConsoleLog(
-            taskId,
-            'error',
-            `⛔ EXECUTION BLOCKED - Cannot proceed to Tech Lead without concrete file paths`
-          );
-
-          throw new Error(
-            `🚨 CRITICAL VALIDATION FAILURE: ${invalidEpics.length} epic(s) missing file paths: ${invalidTitles}. ` +
-            `Planning must specify filesToModify or filesToCreate for each epic. ` +
-            `This error indicates a validation bypass - execution blocked.`
-          );
-        }
+      if (epicsWithoutFiles.length > 0) {
+        const titles = epicsWithoutFiles.map((e: any) => e.title || e.id).join(', ');
+        console.log(`ℹ️ [TeamOrchestration] ${epicsWithoutFiles.length} epic(s) without explicit file paths`);
+        console.log(`   → Epics: ${titles}`);
+        console.log(`   → TechLead will analyze codebase and provide concrete instructions to developers`);
       }
 
-      // 🔥 FIX: Validate targetRepository EARLY (before any processing)
+      // 🔧 AUTO-FIX: Assign targetRepository if missing (non-blocking)
+      // Use first available repo as default - TechLead will refine based on epic content
       const epicsWithoutRepo = planningEpics.filter(epic => !epic.targetRepository);
       if (epicsWithoutRepo.length > 0) {
-        const epicIds = epicsWithoutRepo.map((e: any) => getEpicIdSafe(e)).join(', ');
-
-        // 🔥 FIX: For resumed tasks, try to infer targetRepository or warn but continue
-        const isResumeOrRetry = task.status !== 'pending';
-
-        if (isResumeOrRetry) {
-          // For resumed tasks: Try to infer repo from epic title/description, or use first repo as default
-          const defaultRepo = context.repositories[0]?.name;
-          console.warn(`⚠️ [TeamOrchestration] RESUME MODE: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}`);
-
-          if (defaultRepo) {
-            console.warn(`   ℹ️ Auto-assigning default repository: ${defaultRepo}`);
-            epicsWithoutRepo.forEach(epic => {
-              epic.targetRepository = defaultRepo;
-            });
-            NotificationService.emitConsoleLog(
-              taskId,
-              'warn',
-              `⚠️ RESUME: Auto-assigned ${epicsWithoutRepo.length} epic(s) to repository: ${defaultRepo}`
-            );
-          } else {
-            console.warn(`   ℹ️ No repositories available - developers will handle`);
-            NotificationService.emitConsoleLog(
-              taskId,
-              'warn',
-              `⚠️ RESUME: ${epicsWithoutRepo.length} epic(s) without repository - will use context`
-            );
-          }
+        const defaultRepo = context.repositories[0]?.name;
+        if (defaultRepo) {
+          console.log(`🔧 [TeamOrchestration] Auto-assigning ${epicsWithoutRepo.length} epic(s) to default repo: ${defaultRepo}`);
+          epicsWithoutRepo.forEach(epic => {
+            epic.targetRepository = defaultRepo;
+          });
         } else {
-          // BLOCK for fresh tasks - Planning should have assigned repos
-          logCriticalError('EPICS WITHOUT TARGET REPOSITORY', [
-            `${epicsWithoutRepo.length} epic(s) have NO targetRepository assigned`,
-            `Invalid epics: ${epicIds}`,
-            `Each epic MUST specify which repository it belongs to`,
-            `BLOCKING EXECUTION - Cannot proceed without repository assignment`,
-          ]);
-
-          NotificationService.emitConsoleLog(
-            taskId,
-            'error',
-            `🚨 CRITICAL: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}`
-          );
-
-          throw new Error(
-            `🚨 CRITICAL VALIDATION FAILURE: ${epicsWithoutRepo.length} epic(s) missing targetRepository: ${epicIds}. ` +
-            `Planning must assign a target repository to each epic. ` +
-            `Available repositories: ${context.repositories.map(r => r.name).join(', ')}`
-          );
+          console.warn(`⚠️ [TeamOrchestration] No repositories available for ${epicsWithoutRepo.length} epic(s)`);
         }
       }
 
       console.log(`\n🎯 [TeamOrchestration] Found ${planningEpics.length} epic(s) from Planning`);
-      const isResumed = task.status !== 'pending';
-      if (isResumed) {
-        console.log(`🔄 [TeamOrchestration] RESUME MODE - proceeding with available epic data`);
-      } else {
-        console.log(`✅ [TeamOrchestration] All epics validated - have concrete file paths and target repositories`);
+      console.log(`   → TechLead will analyze each epic and create stories with concrete instructions`);
+      console.log(`   → Developers will explore codebase and implement changes`);
+      if (task.status !== 'pending') {
+        console.log(`🔄 [TeamOrchestration] RESUME MODE - continuing from last checkpoint`);
       }
 
       // 🔥 CRITICAL FIX: Register epics in Unified Memory for recovery tracking
