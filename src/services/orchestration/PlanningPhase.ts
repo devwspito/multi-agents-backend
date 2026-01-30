@@ -834,9 +834,17 @@ ${judgeFeedback}
       // 🔄 Mark checkpoint as failed
       await sessionCheckpointService.markFailed(taskId, 'planning', undefined, error.message);
 
+      // 🔥 FIX: Pass rawOutput in return data so GlobalFixer can attempt recovery
+      // Previously rawOutput was attached to error object but not returned,
+      // causing GlobalFixer to fail with "No raw output available for JSON parsing fix"
       return {
         success: false,
         error: error.message,
+        data: {
+          rawOutput: error.rawOutput,
+          extractionFailed: error.extractionFailed,
+          isJSONParsingError: error.isJSONParsingError,
+        },
       };
     }
     } // End of while loop
