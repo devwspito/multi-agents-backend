@@ -15,6 +15,7 @@ import { unifiedMemoryService } from '../../../UnifiedMemoryService';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from '../../utils/MarkerValidator';
 import { StoryPipelineContext, GitValidationStageResult } from '../types';
 import { DeveloperStageExecutor } from './DeveloperStage';
+import { scanWorkspaceForChanges } from '../../utils/GitCommitHelper';
 
 export class GitValidationStageExecutor {
   constructor(private developerStageExecutor: DeveloperStageExecutor) {}
@@ -74,58 +75,70 @@ export class GitValidationStageExecutor {
       console.log(`   Story: ${story.title}`);
       console.log(`   Branch: ${storyBranch || 'unknown'}`);
 
-      if (storyBranch && effectiveWorkspacePath && epic.targetRepository) {
-        const repoPath = `${effectiveWorkspacePath}/${epic.targetRepository}`;
+      if (storyBranch && effectiveWorkspacePath) {
+        // 🔥 MULTI-REPO: Scan ALL repos for changes, not just targetRepository
+        const reposWithChanges = scanWorkspaceForChanges(effectiveWorkspacePath).filter(r => r.hasChanges);
 
-        // Fetch with retries
-        await this.fetchWithRetries(repoPath);
+        // If targetRepository is specified, prioritize it; otherwise check all repos
+        const primaryRepo = epic.targetRepository || (reposWithChanges[0]?.repoName);
 
-        // Verify commits exist
-        const gitVerification = await this.developerStageExecutor.verifyDeveloperWorkFromGit(
-          effectiveWorkspacePath,
-          epic.targetRepository,
-          storyBranch,
-          story.id
-        );
+        if (primaryRepo) {
+          const repoPath = `${effectiveWorkspacePath}/${primaryRepo}`;
 
-        if (gitVerification?.hasCommits && gitVerification.commitSHA) {
-          console.log(`✅ Developer made ${gitVerification.commitCount} commits!`);
-          console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
-          commitSHA = gitVerification.commitSHA;
-          gitValidationPassed = true;
+          // Fetch with retries
+          await this.fetchWithRetries(repoPath);
 
-          // Ensure commit is on remote
-          await this.ensureCommitOnRemote(repoPath, storyBranch, commitSHA);
+          // Verify commits exist
+          const gitVerification = await this.developerStageExecutor.verifyDeveloperWorkFromGit(
+            effectiveWorkspacePath,
+            primaryRepo,
+            storyBranch,
+            story.id
+          );
 
-          // Checkpoint: Mark as pushed
-          await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'pushed', {
-            commitHash: commitSHA,
-          });
-          console.log(`📍 [CHECKPOINT] Story progress: pushed (commit: ${commitSHA.substring(0, 8)})`);
-
-          // Verify push on GitHub
-          try {
-            const { eventStore: es } = await import('../../../EventStore');
-            await es.verifyStoryPush({
-              taskId: task.id as any,
-              storyId: story.id,
-              branchName: storyBranch,
-              repoPath,
-            });
-          } catch (verifyErr: any) {
-            console.warn(`⚠️ [PushVerify] Could not verify push: ${verifyErr.message}`);
-          }
-
-        } else {
-          // Try auto-commit
-          console.log(`⚠️ No commits found, trying auto-commit...`);
-          const autoCommitResult = await this.tryAutoCommit(repoPath, story.title, storyBranch);
-
-          if (autoCommitResult.success && autoCommitResult.commitSHA) {
-            console.log(`✅ Auto-commit recovered work: ${autoCommitResult.commitSHA.substring(0, 8)}`);
-            commitSHA = autoCommitResult.commitSHA;
+          if (gitVerification?.hasCommits && gitVerification.commitSHA) {
+            console.log(`✅ Developer made ${gitVerification.commitCount} commits!`);
+            console.log(`   Latest commit: ${gitVerification.commitSHA.substring(0, 8)}`);
+            commitSHA = gitVerification.commitSHA;
             gitValidationPassed = true;
+
+            // Ensure commit is on remote
+            await this.ensureCommitOnRemote(repoPath, storyBranch, commitSHA);
+
+            // Checkpoint: Mark as pushed
+            await unifiedMemoryService.saveStoryProgress(taskId, normalizedEpicId, normalizedStoryId, 'pushed', {
+              commitHash: commitSHA,
+            });
+            console.log(`📍 [CHECKPOINT] Story progress: pushed (commit: ${commitSHA.substring(0, 8)})`);
+
+            // Verify push on GitHub
+            try {
+              const { eventStore: es } = await import('../../../EventStore');
+              await es.verifyStoryPush({
+                taskId: task.id as any,
+                storyId: story.id,
+                branchName: storyBranch,
+                repoPath,
+              });
+            } catch (verifyErr: any) {
+              console.warn(`⚠️ [PushVerify] Could not verify push: ${verifyErr.message}`);
+            }
+
+          } else {
+            // Try auto-commit on ALL repos with changes
+            console.log(`⚠️ No commits found, trying auto-commit on ${reposWithChanges.length} repo(s) with changes...`);
+
+            for (const repo of reposWithChanges) {
+              const autoCommitResult = await this.tryAutoCommit(repo.repoPath, story.title, storyBranch);
+              if (autoCommitResult.success && autoCommitResult.commitSHA) {
+                console.log(`✅ Auto-commit recovered work in ${repo.repoName}: ${autoCommitResult.commitSHA.substring(0, 8)}`);
+                commitSHA = autoCommitResult.commitSHA;
+                gitValidationPassed = true;
+              }
+            }
           }
+        } else {
+          console.log(`ℹ️ No repos with changes found in workspace`);
         }
       }
 
