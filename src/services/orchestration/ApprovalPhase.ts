@@ -83,10 +83,18 @@ export class ApprovalPhase extends BasePhase {
       return true;
     }
 
-    // 🎯 SIMPLIFIED: Binary auto-approval check
-    // Either 100% autonomous (skip ALL approvals) or 100% manual (require ALL approvals)
-    // No per-phase configuration, no thresholds
-    const autoApprovalEnabled = context.task.orchestration.autoApprovalEnabled === true;
+    // 🔥 FIX: REFRESH task from database to get latest autoApprovalEnabled value
+    // The context.task is a snapshot from when orchestration started, but the user
+    // may have toggled auto-approval via /auto-approval command during execution.
+    const refreshedTask = TaskRepository.findById(taskId);
+    const autoApprovalEnabled = refreshedTask?.orchestration?.autoApprovalEnabled === true;
+
+    // Update context.task with fresh value so other methods see it too
+    if (refreshedTask && context.task.orchestration) {
+      context.task.orchestration.autoApprovalEnabled = autoApprovalEnabled;
+    }
+
+    console.log(`🔍 [Approval] Checking autoApprovalEnabled (fresh from DB): ${autoApprovalEnabled}`);
 
     if (autoApprovalEnabled) {
       console.log(`✅ [SKIP] Auto-approval ENABLED (autonomous mode) - skipping approval for: ${previousPhase}`);
