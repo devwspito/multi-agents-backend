@@ -18,6 +18,8 @@ import { AgentTurnRepository, IAgentTurn } from '../../database/repositories/Age
 import { ToolCallRepository, IToolCall } from '../../database/repositories/ToolCallRepository';
 import { SecurityObservationRepository } from '../../database/repositories/SecurityObservationRepository';
 import { securityAgentService } from '../security/SecurityAgentService';
+// 🔥 Data integrity validation for training export
+import { sanitizeForExport } from '../../types/validation';
 
 /**
  * Training data structure for a single task
@@ -133,7 +135,62 @@ export interface ExportOptions {
 }
 
 class TrainingExportServiceClass {
-  private readonly VERSION = '1.0.0';
+  private readonly VERSION = '1.1.0';  // 🔥 Updated: Added data integrity validation
+
+  /**
+   * Validate and sanitize export data before sending to training.
+   * Returns a quality report with score and issues.
+   */
+  validateExportData(data: TrainingDataRecord): {
+    valid: boolean;
+    score: number;
+    issues: string[];
+    sanitizedData: TrainingDataRecord;
+  } {
+    const issues: string[] = [];
+    let score = 100;
+
+    // Check for required fields
+    if (!data.taskId) {
+      issues.push('Missing taskId');
+      score -= 20;
+    }
+    if (!data.success?.executions?.length) {
+      issues.push('No executions found');
+      score -= 15;
+    }
+
+    // Validate each execution has required fields
+    for (const exec of data.success?.executions || []) {
+      if (!exec.id) issues.push(`Execution missing id`);
+      if (!exec.agentType) issues.push(`Execution ${exec.id} missing agentType`);
+      if (exec.costUsd === undefined) {
+        issues.push(`Execution ${exec.id} missing costUsd`);
+        score -= 5;
+      }
+    }
+
+    // Check for deprecated field names in vulnerabilities
+    for (const vuln of data.vulnerabilities || []) {
+      if ((vuln as any).cost_usd !== undefined) {
+        issues.push(`Vulnerability uses deprecated field "cost_usd" - should be "costUsd"`);
+        score -= 2;
+      }
+    }
+
+    // Sanitize the data (normalize field names)
+    const sanitizedData = sanitizeForExport(data) as TrainingDataRecord;
+
+    // Ensure score is between 0 and 100
+    score = Math.max(0, Math.min(100, score));
+
+    return {
+      valid: issues.length === 0,
+      score,
+      issues,
+      sanitizedData,
+    };
+  }
 
   /**
    * Export training data for a single task
@@ -187,6 +244,51 @@ class TrainingExportServiceClass {
       })),
 
       recommendations: securityReport.recommendations,
+    };
+  }
+
+  /**
+   * Export task with validation and sanitization.
+   * Use this for production exports to ensure data quality.
+   *
+   * @param taskId - The task ID to export
+   * @param options - Export options
+   * @returns Sanitized data with quality report
+   */
+  async exportTaskSafe(taskId: string, options: {
+    failOnLowQuality?: boolean;
+    minQualityScore?: number;
+  } = {}): Promise<{
+    data: TrainingDataRecord;
+    qualityReport: {
+      valid: boolean;
+      score: number;
+      issues: string[];
+    };
+  }> {
+    const { failOnLowQuality = false, minQualityScore = 70 } = options;
+
+    const rawData = await this.exportTask(taskId);
+    const validation = this.validateExportData(rawData);
+
+    if (failOnLowQuality && validation.score < minQualityScore) {
+      throw new Error(
+        `[TrainingExport] Data quality too low (${validation.score}%). ` +
+        `Issues: ${validation.issues.join('; ')}`
+      );
+    }
+
+    if (validation.issues.length > 0) {
+      console.warn(`[TrainingExport] Task ${taskId} has quality issues:`, validation.issues);
+    }
+
+    return {
+      data: validation.sanitizedData,
+      qualityReport: {
+        valid: validation.valid,
+        score: validation.score,
+        issues: validation.issues,
+      },
     };
   }
 
