@@ -15,6 +15,7 @@ import { StoryPipelineContext, MergeStageResult } from '../types';
 import { sandboxService } from '../../../SandboxService';
 import { eventStore } from '../../../EventStore';
 import { scanWorkspaceForChanges } from '../../utils/GitCommitHelper';
+import { getStoryId } from '../../utils/IdNormalizer';
 
 // Dependency files that require reinstall when changed
 const DEPENDENCY_FILES: Record<string, { pattern: RegExp; installCmd: string; language: string }> = {
@@ -64,7 +65,11 @@ export class MergeStageExecutor {
       // Get updated story from event store
       const { eventStore } = await import('../../../EventStore');
       const updatedState = await eventStore.getCurrentState(task.id as any);
-      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+      // 🔥 FIX: Use getStoryId() for consistent ID normalization
+      const targetStoryId = getStoryId(story);
+      const updatedStory = updatedState.stories.find((s: any) => {
+        try { return getStoryId(s) === targetStoryId; } catch { return false; }
+      });
 
       // Merge to epic branch
       await this.mergeStoryToEpic(updatedStory, epic, effectiveWorkspacePath, repositories, taskId, sandboxId);

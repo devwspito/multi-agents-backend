@@ -10,6 +10,8 @@
 
 import { TaskRepository, ITask } from '../database/repositories/TaskRepository.js';
 import { eventStore } from './EventStore.js';
+// 🔥 Standardized ID normalization for consistent lookups
+import { findEpicById, findStoryById, filterStoriesByEpicId } from './orchestration/utils/IdNormalizer';
 
 /**
  * Types for execution tracking
@@ -386,7 +388,8 @@ class UnifiedMemoryServiceClass {
     const task = this.getTask(taskId);
     if (!task) return false;
     const epics = (task.orchestration as any).planning?.epics || [];
-    const epic = epics.find((e: any) => e.id === epicId);
+    // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+    const epic = findEpicById(epics, epicId);
     return epic?.status === 'completed';
   }
 
@@ -424,7 +427,8 @@ class UnifiedMemoryServiceClass {
     const task = this.getTask(taskId);
     if (!task) return null;
     const epics = (task.orchestration as any).planning?.epics || [];
-    const epic = epics.find((e: any) => e.id === epicId);
+    // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+    const epic = findEpicById(epics, epicId);
     return epic?.branchName || null;
   }
 
@@ -461,7 +465,8 @@ class UnifiedMemoryServiceClass {
     const task = this.getTask(taskId);
     if (!task) return null;
     const epics = (task.orchestration as any).planning?.epics || [];
-    const epic = epics.find((e: any) => e.id === epicId);
+    // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+    const epic = findEpicById(epics, epicId);
     if (!epic?.pullRequestNumber) return null;
     return {
       number: epic.pullRequestNumber,
@@ -512,15 +517,17 @@ class UnifiedMemoryServiceClass {
     const targetEpicId = storyId ? epicIdOrStoryId : null;
 
     if (targetEpicId) {
-      const epic = epics.find((e: any) => e.id === targetEpicId);
+      // 🔥 STANDARDIZED: Use findEpicById and findStoryById for consistent ID normalization
+      const epic = findEpicById(epics, targetEpicId);
       if (!epic) return false;
-      const story = (epic.stories || []).find((s: any) => s.id === targetStoryId);
+      const story = findStoryById(epic.stories || [], targetStoryId);
       return story?.status === 'completed';
     }
 
     // Search all epics for the story
     for (const epic of epics) {
-      const story = (epic.stories || []).find((s: any) => s.id === targetStoryId);
+      // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+      const story = findStoryById(epic.stories || [], targetStoryId);
       if (story?.status === 'completed') return true;
     }
     return false;
@@ -578,7 +585,8 @@ class UnifiedMemoryServiceClass {
     if (!task) return null;
     const epics = (task.orchestration as any).planning?.epics || [];
     for (const epic of epics) {
-      const story = (epic.stories || []).find((s: any) => s.id === storyId);
+      // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+      const story = findStoryById(epic.stories || [], storyId);
       if (story?.branchName) return story.branchName;
     }
     return null;
@@ -611,9 +619,10 @@ class UnifiedMemoryServiceClass {
     const task = this.getTask(taskId);
     if (!task) return null;
     const epics = (task.orchestration as any).planning?.epics || [];
-    const epic = epics.find((e: any) => e.id === epicId);
+    // 🔥 STANDARDIZED: Use findEpicById and findStoryById for consistent ID normalization
+    const epic = findEpicById(epics, epicId);
     if (!epic) return null;
-    const story = (epic.stories || []).find((s: any) => s.id === storyId);
+    const story = findStoryById(epic.stories || [], storyId);
     if (!story) return null;
     return {
       storyId: story.id,
@@ -780,7 +789,8 @@ class UnifiedMemoryServiceClass {
 
       // Analyze epics from event state
       for (const epic of state.epics) {
-        const epicStories = state.stories.filter(s => s.epicId === epic.id);
+        // 🔥 STANDARDIZED: Use filterStoriesByEpicId for consistent ID normalization
+        const epicStories = filterStoriesByEpicId(state.stories, epic.id);
         const allStoriesCompleted = epicStories.length > 0 &&
           epicStories.every(s => s.status === 'completed');
 
@@ -810,8 +820,8 @@ class UnifiedMemoryServiceClass {
         epicName: epic.name,
         techLeadCompleted: epic.techLeadCompleted || false,
         status: epic.status || 'pending',
-        stories: state.stories
-          .filter(s => s.epicId === epic.id)
+        // 🔥 STANDARDIZED: Use filterStoriesByEpicId for consistent ID normalization
+        stories: filterStoriesByEpicId(state.stories, epic.id)
           .map(s => ({
             storyId: s.id,
             title: s.title,

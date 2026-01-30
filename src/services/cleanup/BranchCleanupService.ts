@@ -13,6 +13,7 @@
 import { GitHubService } from '../GitHubService';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { getEpicId, getStoryId } from '../orchestration/utils/IdNormalizer';
 
 export interface EpicBranchMapping {
   epicId: string;
@@ -262,8 +263,11 @@ export class BranchCleanupService {
       const epic = team.epic;
       if (!epic) continue;
 
+      // 🔥 FIX: Use getEpicId() for consistent ID normalization
+      const normalizedEpicId = getEpicId(epic);
+
       const mapping: EpicBranchMapping = {
-        epicId: epic.id,
+        epicId: normalizedEpicId,
         epicBranch: epic.branchName,
         epicPullRequestNumber: epic.pullRequestNumber,
         storyBranches: [],
@@ -274,8 +278,9 @@ export class BranchCleanupService {
       if (team.techLead?.stories) {
         for (const story of team.techLead.stories) {
           if (story.branchName) {
+            // 🔥 FIX: Use getStoryId() for consistent ID normalization
             mapping.storyBranches.push({
-              storyId: story.id,
+              storyId: getStoryId(story),
               branchName: story.branchName,
               pullRequestNumber: story.pullRequestNumber,
               merged: story.status === 'completed',
@@ -284,7 +289,7 @@ export class BranchCleanupService {
         }
       }
 
-      mappings.set(epic.id, mapping);
+      mappings.set(normalizedEpicId, mapping);
     }
 
     console.log(`📋 [BranchCleanup] Built mappings for ${mappings.size} epic(s)`);

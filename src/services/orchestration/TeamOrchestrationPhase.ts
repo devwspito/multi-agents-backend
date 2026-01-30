@@ -21,7 +21,7 @@ import { unifiedMemoryService } from '../UnifiedMemoryService';
 // 📦 Centralized skip logic
 import { checkPhaseSkip } from './utils/SkipLogicHelper';
 import { CostAccumulator } from './utils/CostAccumulator';
-import { getEpicId, getEpicIdSafe, validateEpicIds } from './utils/IdNormalizer';
+import { getEpicId, getEpicIdSafe, getStoryId, validateEpicIds } from './utils/IdNormalizer';
 // ⏱️ Centralized timeout constants
 import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
 // 📦 SQLite Repositories
@@ -1478,9 +1478,11 @@ export class TeamOrchestrationPhase extends BasePhase {
       console.log(`   Completed: ${completedCount}`);
 
       if (completedCount < totalStories) {
+        // 🔥 FIX: Use getStoryId() for consistent ID normalization
+        // This ensures we compare normalized IDs (same as what DevelopersPhase saves)
         const missingStories = epicStories
-          .filter((s: any) => !completedInMemory.includes(s.id))
-          .map((s: any) => s.id);
+          .filter((s: any) => !completedInMemory.includes(getStoryId(s)))
+          .map((s: any) => getStoryId(s));
 
         console.error(`\n❌❌❌ [Team: ${epicName}] NOT ALL STORIES COMPLETED! ❌❌❌`);
         console.error(`   Missing stories: ${missingStories.join(', ')}`);

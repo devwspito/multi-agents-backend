@@ -16,6 +16,7 @@ import { OrchestrationContext } from '../../Phase';
 import { StoryPipelineContext, JudgeStageResult } from '../types';
 import { ExecuteAgentFn } from './MergeStage';
 import { ExecuteDeveloperFn } from './DeveloperStage';
+import { getStoryId } from '../../utils/IdNormalizer';
 
 export class JudgeStageExecutor {
   constructor(
@@ -44,7 +45,11 @@ export class JudgeStageExecutor {
       // Get updated story from event store
       const { eventStore } = await import('../../../EventStore');
       const updatedState = await eventStore.getCurrentState(task.id as any);
-      const updatedStory = updatedState.stories.find((s: any) => s.id === story.id);
+      // 🔥 FIX: Use getStoryId() for consistent ID normalization
+      const targetStoryId = getStoryId(story);
+      const updatedStory = updatedState.stories.find((s: any) => {
+        try { return getStoryId(s) === targetStoryId; } catch { return false; }
+      });
 
       // Sync workspace with remote
       if (effectiveWorkspacePath && repositories.length > 0) {

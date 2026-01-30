@@ -5,6 +5,9 @@ import crypto from 'crypto';
 import { EventRepository, EventType, IEvent } from '../database/repositories/EventRepository.js';
 export { EventType, IEvent };
 
+// 🔥 Standardized ID normalization for consistent lookups
+import { findEpicById, findStoryById, filterStoriesByEpicId } from './orchestration/utils/IdNormalizer';
+
 // ============================================================================
 // 🔥🔥🔥 EVENT VALIDATION SCHEMAS - BULLETPROOF DATA INTEGRITY 🔥🔥🔥
 // ============================================================================
@@ -476,7 +479,8 @@ export class EventStore {
           state.currentPhase = 'architecture';
           // 🔥 NEW: Mark specific epic as techLeadCompleted for per-epic tracking
           if (payload.epicId) {
-            const epicForTechLead = state.epics.find((e: any) => e.id === payload.epicId);
+            // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+            const epicForTechLead = findEpicById(state.epics, payload.epicId);
             if (epicForTechLead) {
               epicForTechLead.techLeadCompleted = true;
               console.log(`📝 [EventStore] Marked epic ${payload.epicId} techLeadCompleted=true`);
@@ -552,7 +556,8 @@ export class EventStore {
           break;
 
         case 'StoryBranchCreated':
-          const storyWithBranch = state.stories.find((s: any) => s.id === payload.storyId);
+          // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+          const storyWithBranch = findStoryById(state.stories, payload.storyId);
           if (storyWithBranch) {
             storyWithBranch.branchName = payload.branchName;
           }
@@ -560,7 +565,8 @@ export class EventStore {
 
         case 'EpicBranchCreated':
           // Update epic with the actual branch name created by TeamOrchestrationPhase
-          const epicWithBranch = state.epics.find((e: any) => e.id === payload.epicId);
+          // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+          const epicWithBranch = findEpicById(state.epics, payload.epicId);
           if (epicWithBranch) {
             epicWithBranch.branchName = payload.branchName;
             console.log(`📝 [EventStore] Updated epic ${payload.epicId} with branch: ${payload.branchName}`);
@@ -579,7 +585,8 @@ export class EventStore {
 
         // Developers
         case 'StoryStarted':
-          const story = state.stories.find((s: any) => s.id === payload.storyId);
+          // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+          const story = findStoryById(state.stories, payload.storyId);
           if (story) {
             story.status = 'in_progress';
             // 🔥 NEW: Store workspace info for LivePreview
@@ -589,7 +596,8 @@ export class EventStore {
             story.branchName = payload.branchName || story.branchName;
 
             // Update epic status to in_progress if it's still pending
-            const epicForStartedStory = state.epics.find((e: any) => e.id === story.epicId);
+            // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+            const epicForStartedStory = findEpicById(state.epics, story.epicId);
             if (epicForStartedStory && epicForStartedStory.status === 'pending') {
               epicForStartedStory.status = 'in_progress';
               // 🔥 NEW: Store workspace info on epic too
@@ -622,14 +630,16 @@ export class EventStore {
           break;
 
         case 'StoryCompleted':
-          const completedStory = state.stories.find((s: any) => s.id === payload.storyId);
+          // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+          const completedStory = findStoryById(state.stories, payload.storyId);
           if (completedStory) {
             completedStory.status = 'completed';
 
             // Update epic status based on story completion
-            const epicForStory = state.epics.find((e: any) => e.id === completedStory.epicId);
+            // 🔥 STANDARDIZED: Use findEpicById and filterStoriesByEpicId
+            const epicForStory = findEpicById(state.epics, completedStory.epicId);
             if (epicForStory) {
-              const epicStories = state.stories.filter((s: any) => s.epicId === epicForStory.id);
+              const epicStories = filterStoriesByEpicId(state.stories, completedStory.epicId);
               const allStoriesCompleted = epicStories.every((s: any) => s.status === 'completed');
               if (allStoriesCompleted) {
                 epicForStory.status = 'completed';
@@ -643,7 +653,8 @@ export class EventStore {
         case 'StoryPushVerified':
           // 🔥 CRITICAL: This confirms the branch actually exists on GitHub
           // If push is verified, the story is definitively COMPLETED regardless of previous status
-          const verifiedStory = state.stories.find((s: any) => s.id === payload.storyId);
+          // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+          const verifiedStory = findStoryById(state.stories, payload.storyId);
           if (verifiedStory) {
             verifiedStory.pushVerified = true;
             verifiedStory.pushVerifiedAt = payload.verifiedAt || new Date();
@@ -655,7 +666,8 @@ export class EventStore {
           break;
 
         case 'StoryFailed':
-          const failedStory = state.stories.find((s: any) => s.id === payload.storyId);
+          // 🔥 STANDARDIZED: Use findStoryById for consistent ID normalization
+          const failedStory = findStoryById(state.stories, payload.storyId);
           if (failedStory) {
             // 🔥 CRITICAL: Don't mark as failed if push was already verified
             // PushVerified is definitive proof the code made it to GitHub
@@ -682,7 +694,8 @@ export class EventStore {
 
         // PR
         case 'PRCreated':
-          const epicWithPR = state.epics.find((e: any) => e.id === payload.epicId);
+          // 🔥 STANDARDIZED: Use findEpicById for consistent ID normalization
+          const epicWithPR = findEpicById(state.epics, payload.epicId);
           if (epicWithPR) {
             epicWithPR.prCreated = true;
             epicWithPR.pullRequestNumber = payload.prNumber;
@@ -744,7 +757,8 @@ export class EventStore {
 
     // Check if epics have stories
     for (const epic of state.epics) {
-      const epicStories = state.stories.filter((s: any) => s.epicId === epic.id);
+      // 🔥 STANDARDIZED: Use filterStoriesByEpicId for consistent ID normalization
+      const epicStories = filterStoriesByEpicId(state.stories, epic.id);
       if (epic.stories.length > 0 && epicStories.length === 0) {
         errors.push(`Epic ${epic.id} references ${epic.stories.length} stories but no StoryCreated events found`);
       }

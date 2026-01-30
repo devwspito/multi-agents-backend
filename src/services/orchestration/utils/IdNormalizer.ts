@@ -132,3 +132,134 @@ export function validateStoryIds(stories: any[]): void {
     }
   }
 }
+
+// ============================================================================
+// 🔥 STANDARDIZED LOOKUP FUNCTIONS
+// ============================================================================
+// Use these functions for ALL lookups to ensure consistent ID normalization.
+// Never use `.find((s) => s.id === storyId)` directly - use these helpers instead.
+
+/**
+ * Find an epic in an array by ID (with normalization)
+ *
+ * @example
+ * // BEFORE (inconsistent):
+ * const epic = epics.find(e => e.id === epicId);
+ *
+ * // AFTER (standardized):
+ * const epic = findEpicById(epics, epicId);
+ */
+export function findEpicById(epics: any[], targetId: string): any | undefined {
+  if (!epics || !Array.isArray(epics)) return undefined;
+
+  return epics.find((e: any) => {
+    try {
+      return getEpicId(e) === targetId;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Find a story in an array by ID (with normalization)
+ *
+ * @example
+ * // BEFORE (inconsistent):
+ * const story = stories.find(s => s.id === storyId);
+ *
+ * // AFTER (standardized):
+ * const story = findStoryById(stories, storyId);
+ */
+export function findStoryById(stories: any[], targetId: string): any | undefined {
+  if (!stories || !Array.isArray(stories)) return undefined;
+
+  return stories.find((s: any) => {
+    try {
+      return getStoryId(s) === targetId;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Filter stories that belong to a specific epic
+ *
+ * @example
+ * // BEFORE (inconsistent):
+ * const epicStories = stories.filter(s => s.epicId === epic.id);
+ *
+ * // AFTER (standardized):
+ * const epicStories = filterStoriesByEpicId(stories, getEpicId(epic));
+ */
+export function filterStoriesByEpicId(stories: any[], epicId: string): any[] {
+  if (!stories || !Array.isArray(stories)) return [];
+
+  return stories.filter((s: any) => s.epicId === epicId);
+}
+
+/**
+ * Check if a story ID is in a list of IDs (with normalization)
+ *
+ * @example
+ * // BEFORE (inconsistent):
+ * const isComplete = completedIds.includes(story.id);
+ *
+ * // AFTER (standardized):
+ * const isComplete = isStoryIdInList(story, completedIds);
+ */
+export function isStoryIdInList(story: any, idList: string[]): boolean {
+  if (!story || !idList || !Array.isArray(idList)) return false;
+
+  try {
+    const normalizedId = getStoryId(story);
+    return idList.includes(normalizedId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if an epic ID is in a list of IDs (with normalization)
+ */
+export function isEpicIdInList(epic: any, idList: string[]): boolean {
+  if (!epic || !idList || !Array.isArray(idList)) return false;
+
+  try {
+    const normalizedId = getEpicId(epic);
+    return idList.includes(normalizedId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get all story IDs from an array (normalized)
+ */
+export function getStoryIds(stories: any[]): string[] {
+  if (!stories || !Array.isArray(stories)) return [];
+
+  return stories.map((s: any) => {
+    try {
+      return getStoryId(s);
+    } catch {
+      return '';
+    }
+  }).filter(id => id !== '');
+}
+
+/**
+ * Get all epic IDs from an array (normalized)
+ */
+export function getEpicIds(epics: any[]): string[] {
+  if (!epics || !Array.isArray(epics)) return [];
+
+  return epics.map((e: any) => {
+    try {
+      return getEpicId(e);
+    } catch {
+      return '';
+    }
+  }).filter(id => id !== '');
+}
