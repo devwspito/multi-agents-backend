@@ -44,9 +44,10 @@ const TECH_LEAD_APPROVAL_TIMEOUT_MS = APPROVAL_TIMEOUTS.TECH_LEAD_APPROVAL;
 //            - Each team has isolated workspace for their epic
 //            - More complex but allows true parallelism
 //
-// Set in .env: ENABLE_TEAM_ISOLATION=false (default) or ENABLE_TEAM_ISOLATION=true
 // ═══════════════════════════════════════════════════════════════════════════════
-const ENABLE_TEAM_ISOLATION = process.env.ENABLE_TEAM_ISOLATION === 'true';
+// NOTE: Team isolation REMOVED - with Docker bind mount, all teams share the same
+// workspace. Files edited in container are immediately visible on host.
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Team Orchestration Phase
@@ -818,7 +819,7 @@ export class TeamOrchestrationPhase extends BasePhase {
    */
   private async executeTeam(
     epic: any,
-    teamNumber: number,
+    _teamNumber: number, // Kept for API compatibility, no longer used
     parentContext: OrchestrationContext
   ): Promise<{
     success: boolean;
@@ -917,73 +918,18 @@ export class TeamOrchestrationPhase extends BasePhase {
       let pushSuccessful = false;
 
       const fs = require('fs');
-      const { execSync } = require('child_process');
 
-      // 🔧 TEAM ISOLATION TOGGLE - Controlled by ENABLE_TEAM_ISOLATION constant
-      // When disabled: All teams work on the SAME sandbox workspace (sequential execution)
-      // When enabled: Each team gets its own copy (for future parallel execution)
+      // Shared sandbox workspace - Docker bind mount means host and container share files
+      const teamWorkspacePath = workspacePath as string;
+      const repoPath = `${workspacePath}/${targetRepository}`;
 
-      const epicSlug = epicName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase().substring(0, 50);
-      const sourceRepoPath = `${workspacePath}/${targetRepository}`;
+      console.log(`\n📁 [Team: ${epicName}] Using shared sandbox workspace`);
+      console.log(`   Workspace: ${workspacePath}`);
+      console.log(`   Repo path: ${repoPath}`);
 
-      let teamWorkspacePath: string;
-      let repoPath: string;
-
-      if (ENABLE_TEAM_ISOLATION) {
-        // 🔒 ISOLATION MODE: Each team gets its own copy of the repository
-        teamWorkspacePath = `${workspacePath}/team-${teamNumber}-${epicSlug}`;
-        const isolatedRepoPath = `${teamWorkspacePath}/${targetRepository}`;
-
-        console.log(`\n🔒 [Team: ${epicName}] TEAM ISOLATION ENABLED - Creating isolated workspace...`);
-        console.log(`   Source repo: ${sourceRepoPath}`);
-        console.log(`   Isolated workspace: ${teamWorkspacePath}`);
-
-        // Create team directory
-        if (!fs.existsSync(teamWorkspacePath)) {
-          fs.mkdirSync(teamWorkspacePath, { recursive: true });
-          console.log(`✅ [Team: ${epicName}] Created team directory: ${teamWorkspacePath}`);
-        }
-
-        // Remove stale isolated workspace before copying
-        if (fs.existsSync(isolatedRepoPath)) {
-          console.log(`⚠️  [Team: ${epicName}] Removing stale isolated workspace: ${isolatedRepoPath}`);
-          fs.rmSync(isolatedRepoPath, { recursive: true, force: true });
-        }
-
-        // Copy repository to isolated workspace
-        if (!fs.existsSync(sourceRepoPath)) {
-          throw new Error(`Source repository not found: ${sourceRepoPath}`);
-        }
-
-        console.log(`📋 [Team: ${epicName}] Copying repository to isolated workspace...`);
-        try {
-          execSync(`rsync -a --ignore-errors "${sourceRepoPath}/" "${isolatedRepoPath}/"`, { encoding: 'utf8', stdio: 'pipe' });
-        } catch (rsyncErr: any) {
-          console.log(`⚠️ [Team: ${epicName}] rsync failed, trying cp with symlink cleanup...`);
-          try {
-            execSync(`find "${sourceRepoPath}" -type l ! -exec test -e {} \\; -delete 2>/dev/null || true`, { encoding: 'utf8', stdio: 'pipe' });
-          } catch { /* ignore */ }
-          execSync(`cp -R "${sourceRepoPath}" "${isolatedRepoPath}"`, { encoding: 'utf8' });
-        }
-        console.log(`✅ [Team: ${epicName}] Repository copied to: ${isolatedRepoPath}`);
-
-        repoPath = isolatedRepoPath;
-      } else {
-        // 🔧 SHARED MODE: All teams work on the SAME sandbox workspace
-        // No copies - everyone modifies the same files sequentially
-        // Note: workspacePath is validated above by assertValidWorkspacePath, so it's safe to cast
-        teamWorkspacePath = workspacePath as string;
-        repoPath = sourceRepoPath;
-
-        console.log(`\n🔧 [Team: ${epicName}] TEAM ISOLATION DISABLED - Using shared sandbox workspace`);
-        console.log(`   📁 Workspace: ${workspacePath}`);
-        console.log(`   📁 Repo path: ${repoPath}`);
-        console.log(`   ℹ️  All teams work on the same files sequentially`);
-
-        // Verify repo exists
-        if (!fs.existsSync(repoPath)) {
-          throw new Error(`Repository not found in sandbox: ${repoPath}`);
-        }
+      // Verify repo exists
+      if (!fs.existsSync(repoPath)) {
+        throw new Error(`Repository not found in sandbox: ${repoPath}`);
       }
 
       if (workspacePath && targetRepository) {
