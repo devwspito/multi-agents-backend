@@ -1078,36 +1078,24 @@ ${judgeFeedback}
 
       console.log(`✅ [TechLead] Judge approved - ${techLeadJudgeResult.storiesCount} stories for ${techLeadJudgeResult.epicsCount} epic(s)`);
 
-      // ✅ BACKWARD COMPATIBILITY: Also store in Task model (will remove later)
+      // Store epics with string IDs for compatibility
       const epicsWithStringIds = parsed.epics.map((epic: any) => ({
         ...epic,
         stories: epic.stories.map((s: any) => s.id),
         targetRepository: epic.targetRepository || undefined,
       }));
-      // TODO: Add epics and storiesMap to IAgentStep if needed
-      // For now, store in output only
-      // task.orchestration.techLead.epics = epicsWithStringIds;
-      // task.orchestration.techLead.storiesMap = storiesMap;
+
       task.orchestration.techLead.architectureDesign = parsed.architectureDesign;
       task.orchestration.techLead.teamComposition = parsed.teamComposition;
       task.orchestration.techLead.storyAssignments = parsed.storyAssignments;
-      // task.markModified('orchestration.techLead.epics');
-      // task.markModified('orchestration.techLead.storiesMap');
 
       // Store agent metadata
       task.orchestration.techLead.status = 'completed';
       task.orchestration.techLead.completedAt = new Date();
       task.orchestration.techLead.output = result.output;
       task.orchestration.techLead.sessionId = result.sessionId;
-      // TODO: Add canResumeSession, todos, lastTodoUpdate to IAgentStep if needed
-      // task.orchestration.techLead.canResumeSession = result.canResume;
       task.orchestration.techLead.usage = result.usage;
       task.orchestration.techLead.cost_usd = result.cost;
-
-      // if (result.todos) {
-      //   task.orchestration.techLead.todos = result.todos;
-      //   task.orchestration.techLead.lastTodoUpdate = new Date();
-      // }
 
       // Update costs
       task.orchestration.totalCost += result.cost;
@@ -1143,23 +1131,7 @@ ${judgeFeedback}
           `**Methodology**: ${costEstimate.methodology}\n\n` +
           `*This is an informational estimate and does not require approval.*`;
 
-        // TODO: Add costEstimate to IAgentStep if needed
-        // For now, cost estimate is already appended to output above
-        // task.orchestration.techLead.costEstimate = {
-        //   estimated: costEstimate.totalEstimated,
-        //   minimum: costEstimate.totalMinimum,
-        //   maximum: costEstimate.totalMaximum,
-        //   perStory: costEstimate.perStoryEstimate,
-        //   duration: costEstimate.estimatedDuration,
-        //   confidence: costEstimate.confidence,
-        //   methodology: costEstimate.methodology,
-        //   informationalOnly: true
-        // };
-
-        // 🔥 CRITICAL: Mark nested object as modified for Mongoose
-        // task.markModified('orchestration.techLead.costEstimate');
-
-        console.log(`✅ [Cost Estimation] Added to Tech Lead output (informational only)`);
+        console.log(`✅ [Cost Estimation] Added to Tech Lead output`);
       } catch (error: any) {
         console.warn(`⚠️  [Cost Estimation] Failed: ${error.message} - Continuing without cost estimate`);
         task.orchestration.techLead.output += `\n\n---\n\n## 💰 Cost Estimate\n\n*Cost estimation unavailable: ${error.message}*`;
