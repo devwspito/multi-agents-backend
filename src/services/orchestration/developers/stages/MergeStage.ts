@@ -14,6 +14,7 @@ import { unifiedMemoryService } from '../../../UnifiedMemoryService';
 import { StoryPipelineContext, MergeStageResult } from '../types';
 import { sandboxService } from '../../../SandboxService';
 import { eventStore } from '../../../EventStore';
+import { scanWorkspaceForChanges } from '../../utils/GitCommitHelper';
 
 // Dependency files that require reinstall when changed
 const DEPENDENCY_FILES: Record<string, { pattern: RegExp; installCmd: string; language: string }> = {
@@ -181,18 +182,32 @@ export class MergeStageExecutor {
     try {
       const { NotificationService } = await import('../../../NotificationService');
 
-      if (!epic.targetRepository) {
-        throw new Error(`Epic ${epic.id} has no targetRepository - cannot merge to main`);
+      // 🔥 MULTI-REPO: Determine target repo - scan for changes if not explicitly specified
+      let targetRepoName = epic.targetRepository;
+
+      if (!targetRepoName) {
+        // Scan workspace for repos with changes
+        const reposWithChanges = scanWorkspaceForChanges(workspacePath).filter(r => r.hasChanges);
+        if (reposWithChanges.length > 0) {
+          targetRepoName = reposWithChanges[0].repoName;
+          console.log(`ℹ️ [Merge] No targetRepository specified, using repo with changes: ${targetRepoName}`);
+        } else if (repositories.length > 0) {
+          // Fallback to first repository
+          targetRepoName = repositories[0].name || repositories[0].githubRepoName;
+          console.log(`ℹ️ [Merge] No targetRepository specified, using first repo: ${targetRepoName}`);
+        } else {
+          throw new Error(`Epic ${epic.id} has no targetRepository and no repositories found`);
+        }
       }
 
       const targetRepoObj = repositories.find(r =>
-        r.name === epic.targetRepository ||
-        r.full_name === epic.targetRepository ||
-        r.githubRepoName === epic.targetRepository
+        r.name === targetRepoName ||
+        r.full_name === targetRepoName ||
+        r.githubRepoName === targetRepoName
       );
 
       if (!targetRepoObj) {
-        throw new Error(`Repository ${epic.targetRepository} not found in context.repositories`);
+        throw new Error(`Repository ${targetRepoName} not found in context.repositories`);
       }
 
       const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;
@@ -375,18 +390,34 @@ export class MergeStageExecutor {
   ): Promise<void> {
     console.error(`🔥 [Merge] MERGE CONFLICT detected!`);
 
-    if (!epic.targetRepository) {
-      throw new Error(`Epic ${epic.id} has no targetRepository - cannot resolve conflict`);
+    if (!workspacePath) {
+      throw new Error('Cannot resolve merge conflict: workspacePath is null');
+    }
+
+    // 🔥 MULTI-REPO: Determine target repo - scan for changes if not explicitly specified
+    let targetRepoName = epic.targetRepository;
+
+    if (!targetRepoName) {
+      // Scan workspace for repos with changes
+      const reposWithChanges = scanWorkspaceForChanges(workspacePath).filter(r => r.hasChanges);
+      if (reposWithChanges.length > 0) {
+        targetRepoName = reposWithChanges[0].repoName;
+        console.log(`ℹ️ [Conflict] No targetRepository specified, using repo with changes: ${targetRepoName}`);
+      } else if (repositories.length > 0) {
+        targetRepoName = repositories[0].name || repositories[0].githubRepoName;
+      } else {
+        throw new Error(`Epic ${epic.id} has no targetRepository and no repositories found`);
+      }
     }
 
     const targetRepoObj = repositories.find(r =>
-      r.name === epic.targetRepository ||
-      r.full_name === epic.targetRepository ||
-      r.githubRepoName === epic.targetRepository
+      r.name === targetRepoName ||
+      r.full_name === targetRepoName ||
+      r.githubRepoName === targetRepoName
     );
 
     if (!targetRepoObj) {
-      throw new Error(`Repository ${epic.targetRepository} not found`);
+      throw new Error(`Repository ${targetRepoName} not found`);
     }
 
     const repoPath = `${workspacePath}/${targetRepoObj.name || targetRepoObj.full_name}`;

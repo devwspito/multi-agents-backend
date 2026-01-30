@@ -10,6 +10,141 @@
  */
 
 import { safeGitExecSync } from '../../../utils/safeGitExecution';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// ============================================================================
+// MULTI-REPO SUPPORT: Scan all repos in workspace for changes
+// ============================================================================
+
+export interface RepoChangeInfo {
+  repoName: string;
+  repoPath: string;
+  hasChanges: boolean;
+  modifiedFiles: string[];
+  untrackedFiles: string[];
+  totalChanges: number;
+}
+
+/**
+ * 🔥 MULTI-REPO: Scan ALL repositories in workspace for changes
+ *
+ * Instead of assuming one targetRepository, this scans the entire workspace
+ * and returns which repos have uncommitted changes.
+ *
+ * @param workspacePath - Root workspace path (contains multiple repo directories)
+ * @returns Array of repos with change info
+ */
+export function scanWorkspaceForChanges(workspacePath: string): RepoChangeInfo[] {
+  const results: RepoChangeInfo[] = [];
+
+  if (!fs.existsSync(workspacePath)) {
+    console.warn(`⚠️ [scanWorkspaceForChanges] Workspace not found: ${workspacePath}`);
+    return results;
+  }
+
+  const entries = fs.readdirSync(workspacePath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    // Skip non-directories and hidden files
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name.startsWith('team-')) {
+      continue;
+    }
+
+    const repoPath = path.join(workspacePath, entry.name);
+    const gitDir = path.join(repoPath, '.git');
+
+    // Only process directories with .git (actual repos)
+    if (!fs.existsSync(gitDir)) {
+      continue;
+    }
+
+    // Check for changes in this repo
+    try {
+      const statusOutput = safeGitExecSync(`git status --porcelain`, {
+        cwd: repoPath,
+        encoding: 'utf8',
+      });
+
+      const modifiedFiles: string[] = [];
+      const untrackedFiles: string[] = [];
+
+      if (statusOutput && statusOutput.trim().length > 0) {
+        const lines = statusOutput.trim().split('\n');
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const status = line.substring(0, 2);
+          const file = line.substring(3).trim();
+
+          if (status === '??') {
+            untrackedFiles.push(file);
+          } else {
+            modifiedFiles.push(file);
+          }
+        }
+      }
+
+      const hasChanges = modifiedFiles.length > 0 || untrackedFiles.length > 0;
+
+      results.push({
+        repoName: entry.name,
+        repoPath,
+        hasChanges,
+        modifiedFiles,
+        untrackedFiles,
+        totalChanges: modifiedFiles.length + untrackedFiles.length,
+      });
+
+      if (hasChanges) {
+        console.log(`📦 [scanWorkspaceForChanges] ${entry.name}: ${modifiedFiles.length} modified, ${untrackedFiles.length} untracked`);
+      }
+    } catch (err: any) {
+      console.warn(`⚠️ [scanWorkspaceForChanges] Error scanning ${entry.name}: ${err.message}`);
+    }
+  }
+
+  const reposWithChanges = results.filter(r => r.hasChanges);
+  console.log(`🔍 [scanWorkspaceForChanges] Scanned ${results.length} repos, ${reposWithChanges.length} have changes`);
+
+  return results;
+}
+
+/**
+ * 🔥 MULTI-REPO: Auto-commit changes in ALL repos that have modifications
+ *
+ * @param workspacePath - Root workspace path
+ * @param commitMessage - Message for all commits
+ * @param branchName - Branch to commit on (must exist in each repo)
+ * @returns Array of commit results per repo
+ */
+export async function autoCommitAllRepos(
+  workspacePath: string,
+  commitMessage: string,
+  branchName: string
+): Promise<{ repoName: string; result: CommitRecoveryResult }[]> {
+  const repos = scanWorkspaceForChanges(workspacePath);
+  const reposWithChanges = repos.filter(r => r.hasChanges);
+
+  if (reposWithChanges.length === 0) {
+    console.log(`ℹ️ [autoCommitAllRepos] No repos have uncommitted changes`);
+    return [];
+  }
+
+  console.log(`🔄 [autoCommitAllRepos] Committing changes in ${reposWithChanges.length} repo(s)...`);
+
+  const results: { repoName: string; result: CommitRecoveryResult }[] = [];
+
+  for (const repo of reposWithChanges) {
+    console.log(`   📦 Committing: ${repo.repoName} (${repo.totalChanges} changes)`);
+    const result = await autoCommitDeveloperWork(repo.repoPath, commitMessage, branchName);
+    results.push({ repoName: repo.repoName, result });
+  }
+
+  return results;
+}
+
+// ============================================================================
 
 export interface CommitRecoveryResult {
   success: boolean;
