@@ -230,7 +230,7 @@ export class DevelopersPhase extends BasePhase {
       return true;
     }
 
-    console.log(`   ❌ Phase not completed - Developers must execute`);
+    console.log(`   ⏳ Phase pending - Developers must execute`);
     return false;
   }
 

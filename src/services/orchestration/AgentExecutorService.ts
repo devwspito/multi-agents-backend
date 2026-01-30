@@ -443,8 +443,13 @@ export class AgentExecutorService {
           const explicitSandboxId = _options?.sandboxId;
 
           // 🔥 FIX: Extract repoName EARLY so it's available for context setting
-          // workspacePath format: /path/to/workspace/repo-name
-          const repoName = workspacePath.split('/').pop() || '';
+          // workspacePath format: /path/to/workspace/task-{taskId}/repo-name
+          // OR just /path/to/workspace/task-{taskId} (no repo suffix)
+          const lastSegment = workspacePath.split('/').pop() || '';
+          // 🔥 FIX: If last segment is a task directory (task-*), don't use it as repoName
+          // This happens when workspacePath is /path/to/workspace/task-{taskId} without repo suffix
+          // In that case, containerWorkDir should be /workspace, not /workspace/task-{taskId}
+          const repoName = lastSegment.startsWith('task-') ? '' : lastSegment;
 
           // 1️⃣ PRIORITY: Use explicit sandboxId if provided
           if (explicitSandboxId) {

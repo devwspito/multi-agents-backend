@@ -399,7 +399,7 @@ export class JudgePhase extends BasePhase {
       return true;
     }
 
-    console.log(`   ❌ Phase not completed - Judge must execute`);
+    console.log(`   ⏳ Phase pending - Judge must execute`);
     return false;
   }
 

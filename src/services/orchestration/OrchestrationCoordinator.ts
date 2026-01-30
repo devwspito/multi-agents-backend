@@ -146,9 +146,9 @@ export class OrchestrationCoordinator {
       console.log(`   Task ID: ${task.id}`);
       console.log(`   Status: ${task.status}`);
       console.log(`   currentPhase: ${task.orchestration?.currentPhase}`);
-      console.log(`   planning.status: ${planningStatus || 'UNDEFINED'}`);
-      console.log(`   techLead.status: ${techLeadStatus || 'UNDEFINED'}`);
-      console.log(`   teamOrchestration.status: ${teamStatus || 'UNDEFINED'}`);
+      console.log(`   planning.status: ${planningStatus || 'pending'}`);
+      console.log(`   techLead.status: ${techLeadStatus || 'pending'}`);
+      console.log(`   teamOrchestration.status: ${teamStatus || 'pending'}`);
 
       // 🛑 CANCELLED CHECK: Do not orchestrate cancelled tasks
       if (task.status === 'cancelled') {
@@ -1010,10 +1010,10 @@ export class OrchestrationCoordinator {
 
     // 🔍 DIAGNOSTIC: Log the raw orchestration data
     console.log(`🔍 [getPhaseStatusesFromTask] Raw orchestration for task ${task.id}:`);
-    console.log(`   planning.status = ${orchestration.planning?.status || 'UNDEFINED'}`);
-    console.log(`   techLead.status = ${orchestration.techLead?.status || 'UNDEFINED'}`);
-    console.log(`   teamOrchestration.status = ${orchestration.teamOrchestration?.status || 'UNDEFINED'}`);
-    console.log(`   judge.status = ${orchestration.judge?.status || 'UNDEFINED'}`);
+    console.log(`   planning.status = ${orchestration.planning?.status || 'pending'}`);
+    console.log(`   techLead.status = ${orchestration.techLead?.status || 'pending'}`);
+    console.log(`   teamOrchestration.status = ${orchestration.teamOrchestration?.status || 'pending'}`);
+    console.log(`   judge.status = ${orchestration.judge?.status || 'pending'}`);
 
     const phases = [
       { name: 'Sandbox', field: (orchestration as any).sandbox },

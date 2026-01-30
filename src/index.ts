@@ -400,12 +400,12 @@ class AgentPlatformApp {
             }
 
             // 3. Si hay aprobación pendiente, re-emitir evento usando datos persistidos
-            // 🔥 FIX: Skip re-emitting if the phase has auto-approval enabled
+            // 🔥 FIX: Skip re-emitting if autonomous mode is enabled (auto-approve ALL phases)
             const pendingApproval = task.orchestration?.pendingApproval;
             if (task.status === 'in_progress' && pendingApproval && pendingApproval.phase) {
-              const autoApprovalEnabled = task.orchestration?.autoApprovalEnabled;
-              const autoApprovalPhases = task.orchestration?.autoApprovalPhases || [];
-              const phaseHasAutoApproval = autoApprovalEnabled && autoApprovalPhases.includes(pendingApproval.phase);
+              const autoApprovalEnabled = task.orchestration?.autoApprovalEnabled === true;
+              // 🔥 FIX: Autonomous mode = approve ALL phases, no need to check specific phases
+              const phaseHasAutoApproval = autoApprovalEnabled;
 
               if (phaseHasAutoApproval) {
                 console.log(`✅ [WebSocket] Skipping approval_required re-emit - ${pendingApproval.phase} has auto-approval`);
