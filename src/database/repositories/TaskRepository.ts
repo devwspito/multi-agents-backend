@@ -44,10 +44,22 @@ export interface IStory {
   completedAt?: Date;
   judgeStatus?: ReviewStatus;
   judgeComments?: string;
+  /** @deprecated Use retryCount instead. Kept for backward compatibility with existing data. */
   judgeIterations?: number;
+  /** Standardized retry count field. Maps to judgeIterations in database. */
+  retryCount?: number;
+  /** @deprecated Use costUsd instead */
   cost_usd?: number;
+  /** Standardized cost field (camelCase) */
+  costUsd?: number;
+  /** @deprecated Use developerCostUsd instead */
   developerCost_usd?: number;
+  /** Standardized developer cost field */
+  developerCostUsd?: number;
+  /** @deprecated Use judgeCostUsd instead */
   judgeCost_usd?: number;
+  /** Standardized judge cost field */
+  judgeCostUsd?: number;
   judgeIterationCosts?: Array<{
     iteration: number;
     cost_usd: number;

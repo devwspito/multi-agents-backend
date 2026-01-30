@@ -2,6 +2,12 @@
  * DevelopersPhase Types
  *
  * Type definitions for Developer ↔ Judge communication and pipeline stages.
+ *
+ * FIELD NAMING CONVENTION:
+ * - costUsd: Standardized cost field (use this)
+ * - cost: Deprecated alias for backward compatibility
+ * - retryCount: Standardized retry field
+ * - iteration: Deprecated alias for retryCount
  */
 
 import { OrchestrationContext } from '../Phase';
@@ -27,8 +33,10 @@ export interface DeveloperOutput {
   filesModified: string[];
   /** List of files that were created */
   filesCreated: string[];
-  /** Cost of the developer execution in USD */
-  cost: number;
+  /** Cost of the developer execution in USD (standardized name) */
+  costUsd: number;
+  /** @deprecated Use costUsd instead. Kept for backward compatibility. */
+  cost?: number;
   /** Token usage for the developer */
   tokens: { input: number; output: number };
   /** When the developer completed */
@@ -82,11 +90,15 @@ export interface JudgeResult {
   requiresHumanReview?: boolean;
   /** Error message if evaluation failed */
   evaluationError?: string;
-  /** Cost of the judge execution in USD */
+  /** Cost of the judge execution in USD (standardized name) */
+  costUsd?: number;
+  /** @deprecated Use costUsd instead. Kept for backward compatibility. */
   cost?: number;
   /** Token usage */
   usage?: { input_tokens?: number; output_tokens?: number };
-  /** Current iteration (for retries) */
+  /** Current retry iteration (standardized name) */
+  retryCount?: number;
+  /** @deprecated Use retryCount instead. Kept for backward compatibility. */
   iteration?: number;
   /** Max retries allowed */
   maxRetries?: number;

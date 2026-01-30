@@ -189,7 +189,8 @@ class UnifiedMemoryServiceClass {
               storyId,
               epicId,
               status: story.status || 'pending',
-              retryCount: story.judgeIterations || 0,
+              // 🔥 Prefer retryCount, fallback to judgeIterations for backward compatibility
+              retryCount: story.retryCount ?? story.judgeIterations ?? 0,
               output: story.output,
             });
             if (story.branchName) {
@@ -201,11 +202,13 @@ class UnifiedMemoryServiceClass {
               epicId,
               status: story.status || 'pending',
               stage: story.stage,
-              retryCount: story.judgeIterations,  // 🔥 Standardized: retryCount
+              // 🔥 Prefer retryCount, fallback to judgeIterations for backward compatibility
+              retryCount: story.retryCount ?? story.judgeIterations,
               metadata: story.metadata,
               filesModified: story.filesModified,
               toolsUsed: story.toolsUsed,
-              costUsd: story.cost_usd,  // 🔥 Standardized: costUsd
+              // 🔥 Prefer costUsd, fallback to cost_usd for backward compatibility
+              costUsd: story.costUsd ?? story.cost_usd,
             });
           }
         }
@@ -631,20 +634,24 @@ class UnifiedMemoryServiceClass {
       epicId,
       status: story.status || 'pending',
       stage: story.stage,
-      retryCount: story.judgeIterations,  // 🔥 Standardized: retryCount
+      // 🔥 Prefer retryCount, fallback to judgeIterations for backward compatibility
+      retryCount: story.retryCount ?? story.judgeIterations,
       metadata: story.metadata,
       filesModified: story.filesModified,
       filesCreated: story.filesCreated,
       toolsUsed: story.toolsUsed,
-      costUsd: story.cost_usd,  // 🔥 Standardized: costUsd
+      // 🔥 Prefer costUsd, fallback to cost_usd for backward compatibility
+      costUsd: story.costUsd ?? story.cost_usd,
     };
   }
 
   incrementStoryRetry(taskId: string, _epicId: string, storyId: string): number {
     let newCount = 0;
     this.updateStoryInAllEpics(taskId, storyId, (story) => {
-      newCount = (story.judgeIterations || 0) + 1;
-      return { ...story, judgeIterations: newCount };
+      // 🔥 Read from retryCount first, fallback to judgeIterations for backward compatibility
+      newCount = (story.retryCount ?? story.judgeIterations ?? 0) + 1;
+      // 🔥 Write to BOTH fields for backward compatibility during migration
+      return { ...story, retryCount: newCount, judgeIterations: newCount };
     });
     return newCount;
   }
