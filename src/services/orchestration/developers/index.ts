@@ -1,11 +1,9 @@
 /**
  * Developers Module
  *
- * Extracted from DevelopersPhase.ts for better modularity.
- * Re-exports types and stage executors.
+ * Types for story development pipeline.
  */
 
-// Types
 export {
   DeveloperOutput,
   JudgeInput,
@@ -17,13 +15,3 @@ export {
   MergeStageResult,
   createJudgeInput,
 } from './types';
-
-// Stage Executors
-export {
-  DeveloperStageExecutor,
-  GitValidationStageExecutor,
-  JudgeStageExecutor,
-  MergeStageExecutor,
-  ExecuteDeveloperFn,
-  ExecuteAgentFn,
-} from './stages';

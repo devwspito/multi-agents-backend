@@ -62,3 +62,21 @@ export {
   validateEpicBatch,
   checkTrainingDataQuality,
 } from './validation';
+
+// Core entity types
+export {
+  Story,
+  Epic,
+  Repository,
+  Developer,
+  Task,
+  TaskOrchestration,
+  PhaseExecutionStatus,
+  AgentResult,
+  AgentMetadata,
+  AgentMetrics,
+  TokenUsage,
+  CostResult,
+  GitVerificationResult,
+  TaskState,
+} from './entities';
