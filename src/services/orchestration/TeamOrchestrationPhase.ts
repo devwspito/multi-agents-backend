@@ -1150,13 +1150,8 @@ export class TeamOrchestrationPhase extends BasePhase {
       // 🔄 TECH LEAD EXECUTION + APPROVAL LOOP
       // User can review and provide feedback on architecture before developers start
       // If rejected with feedback, re-execute TechLead with feedback as directive
-      // 🔥 FIX: Refresh task from DB to get latest autoApprovalEnabled value
-      // User may have toggled autonomous mode DURING execution via /auto-approval command
-      const freshTaskForApproval = TaskRepository.findById(parentContext.task.id);
-      const autoApprovalEnabled = freshTaskForApproval?.orchestration?.autoApprovalEnabled === true;
-      // 🔥 FIX: If autoApprovalEnabled is true, approve ALL phases (no need to check autoApprovalPhases)
-      // The "autonomous mode" toggle means approve EVERYTHING, not just specific phases
-      const techLeadAutoApproved = autoApprovalEnabled;
+      // Note: autoApprovalEnabled is checked INSIDE the loop (after TechLead execution)
+      // to allow user to enable autonomous mode during execution
 
       const MAX_TECH_LEAD_RETRIES = 3;
       let techLeadRetryCount = 0;
@@ -1204,8 +1199,13 @@ export class TeamOrchestrationPhase extends BasePhase {
         }
 
         // 🛑 TECH LEAD APPROVAL GATE - Check auto-approval AFTER execution
-        if (techLeadAutoApproved) {
-          console.log(`✅ [Team: ${epicName}] Tech Lead auto-approved (configured)`);
+        // 🔥 FIX: Re-fetch autoApprovalEnabled from DB INSIDE the loop
+        // User may have enabled autonomous mode DURING TechLead execution
+        const freshTaskInLoop = TaskRepository.findById(parentContext.task.id);
+        const currentAutoApprovalEnabled = freshTaskInLoop?.orchestration?.autoApprovalEnabled === true;
+
+        if (currentAutoApprovalEnabled) {
+          console.log(`✅ [Team: ${epicName}] Tech Lead auto-approved (autonomous mode enabled)`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead auto-approved for epic: ${epic.title}`);
           techLeadApproved = true;
           break; // Exit loop - no need to wait for manual approval
