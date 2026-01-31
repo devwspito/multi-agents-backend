@@ -5,7 +5,7 @@ import { getRoleInstructions } from '../../agents/ReadmeSystem';
 import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
-import { RealisticCostEstimator } from '../RealisticCostEstimator';
+// 🔥 REMOVED: RealisticCostEstimator - Real costs tracked via AgentExecutorService
 import { CryptoService } from '../CryptoService';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
 import { JudgePhase } from './JudgePhase';
@@ -1102,40 +1102,10 @@ ${judgeFeedback}
       task.orchestration.totalTokens +=
         (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0);
 
-      // 💰 COST ESTIMATION (INFORMATIONAL) - No approval required
-      console.log('\n💰 =============== COST ESTIMATION (INFORMATIONAL) ===============');
-      const realisticCostEstimator = new RealisticCostEstimator();
-      try {
-        const costEstimate = await realisticCostEstimator.estimateRealistic(
-          epicsWithStringIds,
-          context.repositories || [],
-          workspacePath
-        );
-
-        console.log(`\n💵 REALISTIC COST ESTIMATE:`);
-        console.log(`   Total: $${costEstimate.totalEstimated.toFixed(2)}`);
-        console.log(`   Range: $${costEstimate.totalMinimum.toFixed(2)} - $${costEstimate.totalMaximum.toFixed(2)}`);
-        console.log(`   Per story: $${costEstimate.perStoryEstimate.toFixed(2)}`);
-        console.log(`   Duration: ${costEstimate.estimatedDuration} minutes`);
-        console.log(`   Confidence: ${costEstimate.confidence}%`);
-        console.log(`   Methodology: ${costEstimate.methodology}\n`);
-
-        // Append cost estimate to Tech Lead output (informational)
-        task.orchestration.techLead.output += `\n\n---\n\n## 💰 Cost Estimate (Informational)\n\n` +
-          `**Total Estimated Cost**: $${costEstimate.totalEstimated.toFixed(2)}\n` +
-          `**Range**: $${costEstimate.totalMinimum.toFixed(2)} - $${costEstimate.totalMaximum.toFixed(2)}\n` +
-          `**Per Story**: $${costEstimate.perStoryEstimate.toFixed(2)}\n` +
-          `**Stories**: ${costEstimate.storiesCount}\n` +
-          `**Estimated Duration**: ${costEstimate.estimatedDuration} minutes\n` +
-          `**Confidence**: ${costEstimate.confidence}%\n` +
-          `**Methodology**: ${costEstimate.methodology}\n\n` +
-          `*This is an informational estimate and does not require approval.*`;
-
-        console.log(`✅ [Cost Estimation] Added to Tech Lead output`);
-      } catch (error: any) {
-        console.warn(`⚠️  [Cost Estimation] Failed: ${error.message} - Continuing without cost estimate`);
-        task.orchestration.techLead.output += `\n\n---\n\n## 💰 Cost Estimate\n\n*Cost estimation unavailable: ${error.message}*`;
-      }
+      // 🔥 REMOVED: Fake cost estimation
+      // Real costs are tracked live via AgentExecutorService.ts -> unifiedMemoryService.addCost()
+      // and emitted in real-time via NotificationService.emitCostUpdate()
+      console.log('\n💰 [TechLead] Real costs will be tracked per agent execution (no fake estimates)');
 
       // 🔥 ATOMIC SAVE: Use findByIdAndUpdate to avoid version conflicts
       // This replaces task.save() which fails when document version changes during execution
