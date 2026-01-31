@@ -917,19 +917,44 @@ export class AgentExecutorService {
         const output = this.extractOutputText(finalResult, allMessages) || '';
 
         // 🔥 FIX: Calculate REAL cost from accumulated tokens
-        // The SDK doesn't emit system messages with cost, so we calculate from tokens
+        // Try multiple paths to find usage data in the SDK result
         const inputTokens = accumulatedUsage.input_tokens;
         const outputTokens = accumulatedUsage.output_tokens;
 
-        // Also check finalResult.usage in case we missed some tokens
-        const finalUsage = (finalResult as any)?.usage;
-        const totalInputTokens = Math.max(inputTokens, finalUsage?.input_tokens || 0);
-        const totalOutputTokens = Math.max(outputTokens, finalUsage?.output_tokens || 0);
+        // 🔥 ENHANCED: Check multiple paths for usage in finalResult
+        const finalUsage = (finalResult as any)?.usage
+          || (finalResult as any)?.result?.usage
+          || (finalResult as any)?.data?.usage
+          || (finalResult as any)?.response?.usage;
+
+        // 🔥 DEBUG: Log what we have
+        console.log(`🔍 [AgentExecutor] ${agentType} Token sources:`);
+        console.log(`   accumulated: ${inputTokens} in, ${outputTokens} out`);
+        console.log(`   finalResult.usage:`, (finalResult as any)?.usage);
+        console.log(`   finalResult keys:`, Object.keys(finalResult || {}));
+
+        // Take the MAX of accumulated vs final result
+        let totalInputTokens = Math.max(inputTokens, finalUsage?.input_tokens || 0);
+        let totalOutputTokens = Math.max(outputTokens, finalUsage?.output_tokens || 0);
+
+        // 🔥 FALLBACK: If still 0, scan allMessages for any usage data
+        if (totalInputTokens === 0 && totalOutputTokens === 0) {
+          console.log(`   ⚠️ No usage found, scanning ${allMessages.length} messages...`);
+          for (const msg of allMessages) {
+            const msgAny = msg as any;
+            const usageData = msgAny.usage || msgAny.message?.usage || msgAny.data?.usage;
+            if (usageData) {
+              totalInputTokens += usageData.input_tokens || 0;
+              totalOutputTokens += usageData.output_tokens || 0;
+            }
+          }
+          console.log(`   📊 From allMessages scan: ${totalInputTokens} in, ${totalOutputTokens} out`);
+        }
 
         // Calculate cost from tokens using actual model pricing
         const cost = calculateCost(modelAlias as ClaudeModel, totalInputTokens, totalOutputTokens);
 
-        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (calculated from ${totalInputTokens.toLocaleString()} in + ${totalOutputTokens.toLocaleString()} out tokens)`);
+        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (${totalInputTokens.toLocaleString()} in + ${totalOutputTokens.toLocaleString()} out)`);
         console.log(`   📊 Model: ${modelAlias} | Pricing: input=$${modelAlias === 'opus' ? '15' : '3'}/M, output=$${modelAlias === 'opus' ? '75' : '15'}/M`);
 
         // 🔥 SAVE REAL COST TO SQLite
