@@ -241,12 +241,18 @@ export class UserRepository {
 
   /**
    * Get decrypted API key
+   * Returns undefined if key doesn't exist or decryption fails
    */
   static getDecryptedApiKey(id: string): string | undefined {
-    const stmt = db.prepare(`SELECT default_api_key FROM users WHERE id = ?`);
-    const row = stmt.get(id) as { default_api_key: string | null } | undefined;
-    if (!row?.default_api_key) return undefined;
-    return CryptoService.decrypt(row.default_api_key);
+    try {
+      const stmt = db.prepare(`SELECT default_api_key FROM users WHERE id = ?`);
+      const row = stmt.get(id) as { default_api_key: string | null } | undefined;
+      if (!row?.default_api_key) return undefined;
+      return CryptoService.decrypt(row.default_api_key);
+    } catch (error: any) {
+      console.warn(`[UserRepository] Failed to decrypt API key for user ${id}:`, error.message);
+      return undefined;
+    }
   }
 
   /**

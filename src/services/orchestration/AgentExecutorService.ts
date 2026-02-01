@@ -20,7 +20,7 @@ import { FailedExecutionRepository, FailureType } from '../../database/repositor
 import { NotificationService } from '../NotificationService';
 import { AgentActivityService } from '../AgentActivityService';
 import { OrchestrationContext } from './Phase';
-import { getExplicitModelId, calculateCost, ClaudeModel } from '../../config/ModelConfigurations';
+import { getExplicitModelId } from '../../config/ModelConfigurations';
 
 // MCP Tools
 import { createCustomToolsServer } from '../../tools/customTools';
@@ -916,46 +916,15 @@ export class AgentExecutorService {
         // Extract output
         const output = this.extractOutputText(finalResult, allMessages) || '';
 
-        // 🔥 FIX: Calculate REAL cost from accumulated tokens
-        // Try multiple paths to find usage data in the SDK result
-        const inputTokens = accumulatedUsage.input_tokens;
-        const outputTokens = accumulatedUsage.output_tokens;
+        // 🔥 USE SDK's total_cost_usd DIRECTLY - no calculation needed!
+        // The Claude Agent SDK provides the real cost in the result message
+        const cost = (finalResult as any)?.total_cost_usd || 0;
+        const usage = (finalResult as any)?.usage || {};
+        const totalInputTokens = usage.input_tokens || accumulatedUsage.input_tokens || 0;
+        const totalOutputTokens = usage.output_tokens || accumulatedUsage.output_tokens || 0;
 
-        // 🔥 ENHANCED: Check multiple paths for usage in finalResult
-        const finalUsage = (finalResult as any)?.usage
-          || (finalResult as any)?.result?.usage
-          || (finalResult as any)?.data?.usage
-          || (finalResult as any)?.response?.usage;
-
-        // 🔥 DEBUG: Log what we have
-        console.log(`🔍 [AgentExecutor] ${agentType} Token sources:`);
-        console.log(`   accumulated: ${inputTokens} in, ${outputTokens} out`);
-        console.log(`   finalResult.usage:`, (finalResult as any)?.usage);
-        console.log(`   finalResult keys:`, Object.keys(finalResult || {}));
-
-        // Take the MAX of accumulated vs final result
-        let totalInputTokens = Math.max(inputTokens, finalUsage?.input_tokens || 0);
-        let totalOutputTokens = Math.max(outputTokens, finalUsage?.output_tokens || 0);
-
-        // 🔥 FALLBACK: If still 0, scan allMessages for any usage data
-        if (totalInputTokens === 0 && totalOutputTokens === 0) {
-          console.log(`   ⚠️ No usage found, scanning ${allMessages.length} messages...`);
-          for (const msg of allMessages) {
-            const msgAny = msg as any;
-            const usageData = msgAny.usage || msgAny.message?.usage || msgAny.data?.usage;
-            if (usageData) {
-              totalInputTokens += usageData.input_tokens || 0;
-              totalOutputTokens += usageData.output_tokens || 0;
-            }
-          }
-          console.log(`   📊 From allMessages scan: ${totalInputTokens} in, ${totalOutputTokens} out`);
-        }
-
-        // Calculate cost from tokens using actual model pricing
-        const cost = calculateCost(modelAlias as ClaudeModel, totalInputTokens, totalOutputTokens);
-
-        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (${totalInputTokens.toLocaleString()} in + ${totalOutputTokens.toLocaleString()} out)`);
-        console.log(`   📊 Model: ${modelAlias} | Pricing: input=$${modelAlias === 'opus' ? '15' : '3'}/M, output=$${modelAlias === 'opus' ? '75' : '15'}/M`);
+        console.log(`💰 [AgentExecutor] ${agentType} COST: $${cost.toFixed(4)} (from SDK total_cost_usd)`);
+        console.log(`   📊 Tokens: ${totalInputTokens.toLocaleString()} in + ${totalOutputTokens.toLocaleString()} out | Model: ${modelAlias}`);
 
         // 🔥 SAVE REAL COST TO SQLite
         if (taskId && (cost > 0 || totalInputTokens > 0)) {
@@ -986,7 +955,7 @@ export class AgentExecutorService {
             output: output.substring(0, 1000),
             duration: executionDuration,
             cost,
-            tokens: inputTokens + outputTokens,
+            tokens: totalInputTokens + totalOutputTokens,
           });
         } catch (postHookError: any) {
           console.warn(`⚠️ [AgentExecutor] Post-hook error: ${postHookError.message}`);
@@ -999,7 +968,7 @@ export class AgentExecutorService {
               lastAgentType: agentType,
               lastOutput: output.substring(0, 2000),
               lastCost: cost,
-              lastTokens: inputTokens + outputTokens,
+              lastTokens: totalInputTokens + totalOutputTokens,
               totalExecutions: (sessionContext.totalExecutions || 0) + 1,
               totalCost: (sessionContext.totalCost || 0) + cost,
               updatedAt: new Date().toISOString(),
@@ -1015,7 +984,7 @@ export class AgentExecutorService {
           duration: executionDuration,
           success: true,
           cost,
-          tokens: inputTokens + outputTokens,
+          tokens: totalInputTokens + totalOutputTokens,
         });
 
         // 🐳 CLEANUP: Clear Docker hook context after successful execution
@@ -1064,18 +1033,31 @@ export class AgentExecutorService {
 
         console.error(`❌ [AgentExecutor] ${agentType} failed (attempt ${sdkAttempt}/${MAX_SDK_RETRIES}):`, error.message);
 
+        // 🔥 Enhanced error logging for SDK failures
+        if (error.message?.includes('exited with code')) {
+          console.error(`   📋 SDK Exit Details:`);
+          console.error(`      - Error name: ${error.name}`);
+          console.error(`      - Error code: ${error.code || 'N/A'}`);
+          console.error(`      - Stack: ${error.stack?.split('\n').slice(0, 3).join(' | ')}`);
+          if (error.stderr) console.error(`      - Stderr: ${error.stderr}`);
+          if (error.stdout) console.error(`      - Stdout: ${error.stdout}`);
+          console.error(`   💡 Common causes: Invalid API key, rate limiting, network issues`);
+        }
+
         lastError = error;
 
         if (error.isNonRetryable || error.isLoopDetection) {
           throw error;
         }
 
+        // 🔥 Also consider SDK exit errors as potentially retryable
         const isRetryableError = (
           error.message?.includes('Unterminated string in JSON') ||
           error.message?.includes('JSON') ||
           error.message?.includes('ECONNRESET') ||
           error.message?.includes('ETIMEDOUT') ||
           error.message?.includes('socket hang up') ||
+          error.message?.includes('exited with code') ||
           error.constructor.name === 'SyntaxError'
         );
 

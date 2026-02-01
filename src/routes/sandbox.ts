@@ -10,9 +10,11 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { sandboxService } from '../services/SandboxService.js';
+import { AppConfig } from '../config/AppConfig';
 import { sandboxPoolService } from '../services/SandboxPoolService.js';
 import { SandboxRepository } from '../database/repositories/SandboxRepository.js';
 import { TaskRepository } from '../database/repositories/TaskRepository.js';
+import { ConversationRepository, IMessage } from '../database/repositories/ConversationRepository.js';
 import { SandboxPhase } from '../services/orchestration/SandboxPhase.js';
 import { OrchestrationContext } from '../services/orchestration/Phase.js';
 import { agentExecutorService } from '../services/orchestration/AgentExecutorService.js';
@@ -130,8 +132,7 @@ router.post('/destroy/:taskId', async (req: Request, res: Response) => {
 
     // Optionally clean up workspace directory
     if (includeWorkspace) {
-      const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-      const taskWorkspace = path.join(workspaceDir, `task-${taskId}`);
+      const taskWorkspace = AppConfig.workspace.getTaskDir(taskId);
 
       try {
         if (fs.existsSync(taskWorkspace)) {
@@ -813,6 +814,160 @@ router.get('/quick-task-latest/:taskId', async (req: Request, res: Response) => 
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get latest execution',
+    });
+  }
+});
+
+// ====================================
+// 🔥 CONVERSATION ENDPOINTS (for Chat tab persistence)
+// ====================================
+
+/**
+ * GET /api/sandbox/conversations/:taskId
+ * Get all messages for a task's conversation
+ */
+router.get('/conversations/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+
+    if (!taskId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task ID is required',
+      });
+    }
+
+    const conversation = ConversationRepository.findByTaskId(taskId);
+
+    return res.json({
+      success: true,
+      taskId,
+      messages: conversation?.messages || [],
+      createdAt: conversation?.createdAt,
+      updatedAt: conversation?.updatedAt,
+    });
+  } catch (error: any) {
+    console.error('[Sandbox API] Error getting conversation:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get conversation',
+    });
+  }
+});
+
+/**
+ * POST /api/sandbox/conversations/:taskId/messages
+ * Add a message to a task's conversation
+ */
+router.post('/conversations/:taskId/messages', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { role, content, timestamp, mode, isError, cost, filesModified, filesCreated } = req.body;
+
+    if (!taskId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task ID is required',
+      });
+    }
+
+    if (!role || !content) {
+      return res.status(400).json({
+        success: false,
+        error: 'Role and content are required',
+      });
+    }
+
+    // Get or create conversation for this task
+    const task = TaskRepository.findById(taskId);
+    const userId = task?.userId || 'system';
+    ConversationRepository.getOrCreate(taskId, userId);
+
+    // Create the message
+    const message: IMessage = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      role: role as 'user' | 'assistant' | 'system',
+      content,
+      timestamp: timestamp ? new Date(timestamp) : new Date(),
+      attachments: [],
+      agent: mode || undefined,
+    };
+
+    // Add extra metadata if it's an assistant message
+    if (role === 'assistant') {
+      (message as any).cost = cost;
+      (message as any).filesModified = filesModified;
+      (message as any).filesCreated = filesCreated;
+      (message as any).isError = isError;
+    }
+
+    // Add message to conversation
+    ConversationRepository.addMessage(taskId, message);
+
+    return res.json({
+      success: true,
+      taskId,
+      message,
+    });
+  } catch (error: any) {
+    console.error('[Sandbox API] Error adding message:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to add message',
+    });
+  }
+});
+
+/**
+ * PUT /api/sandbox/conversations/:taskId
+ * Bulk update all messages for a task's conversation
+ */
+router.put('/conversations/:taskId', async (req: Request, res: Response) => {
+  try {
+    const { taskId } = req.params;
+    const { messages } = req.body;
+
+    if (!taskId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task ID is required',
+      });
+    }
+
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Messages must be an array',
+      });
+    }
+
+    // Get or create conversation for this task
+    const task = TaskRepository.findById(taskId);
+    const userId = task?.userId || 'system';
+    ConversationRepository.getOrCreate(taskId, userId);
+
+    // Update messages
+    const formattedMessages: IMessage[] = messages.map((msg: any, index: number) => ({
+      id: msg.id || `msg_${Date.now()}_${index}`,
+      role: msg.role as 'user' | 'assistant' | 'system',
+      content: msg.content,
+      timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+      attachments: msg.attachments || [],
+      agent: msg.mode || undefined,
+    }));
+
+    ConversationRepository.updateMessages(taskId, formattedMessages);
+
+    return res.json({
+      success: true,
+      taskId,
+      messageCount: formattedMessages.length,
+    });
+  } catch (error: any) {
+    console.error('[Sandbox API] Error updating conversation:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update conversation',
     });
   }
 });

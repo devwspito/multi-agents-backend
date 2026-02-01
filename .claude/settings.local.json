@@ -196,9 +196,17 @@
       "WebFetch(domain:aitmpl.com)",
       "WebFetch(domain:litestream.io)",
       "mcp__memory__search_nodes",
-      "mcp__memory__read_graph"
+      "mcp__memory__read_graph",
+      "Bash(do)",
+      "WebFetch(domain:www.nvidia.com)",
+      "WebFetch(domain:forums.developer.nvidia.com)",
+      "WebFetch(domain:docs.nvidia.com)",
+      "Bash(do echo \"=== $db ===\")"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
   }
 }

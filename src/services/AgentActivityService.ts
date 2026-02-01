@@ -15,6 +15,7 @@
 
 import { Server as SocketServer } from 'socket.io';
 import { NotificationService } from './NotificationService';
+import { StringUtils } from '../utils/StringUtils';
 
 export interface ActivityEvent {
   taskId: string;
@@ -415,8 +416,7 @@ export class AgentActivityService {
   }
 
   private static truncateContent(content: string, maxLength: number): string {
-    if (content.length <= maxLength) return content;
-    return content.substring(0, maxLength) + '...';
+    return StringUtils.truncate(content, maxLength);
   }
 
   private static sanitizeToolInput(input: any): any {
@@ -428,7 +428,7 @@ export class AgentActivityService {
     // Truncate long strings
     for (const key of Object.keys(sanitized)) {
       if (typeof sanitized[key] === 'string' && sanitized[key].length > 200) {
-        sanitized[key] = sanitized[key].substring(0, 200) + '...';
+        sanitized[key] = StringUtils.truncate(sanitized[key], 200);
       }
     }
 

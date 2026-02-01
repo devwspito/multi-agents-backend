@@ -10,6 +10,7 @@
  */
 
 import { safeGitExecSync } from '../../../utils/safeGitExecution';
+import { GitStatusParser } from '../../../utils/GitStatusParser';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -59,45 +60,27 @@ export function scanWorkspaceForChanges(workspacePath: string): RepoChangeInfo[]
       continue;
     }
 
-    // Check for changes in this repo
+    // Check for changes in this repo using centralized parser
     try {
       const statusOutput = safeGitExecSync(`git status --porcelain`, {
         cwd: repoPath,
         encoding: 'utf8',
       });
 
-      const modifiedFiles: string[] = [];
-      const untrackedFiles: string[] = [];
-
-      if (statusOutput && statusOutput.trim().length > 0) {
-        const lines = statusOutput.trim().split('\n');
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const status = line.substring(0, 2);
-          const file = line.substring(3).trim();
-
-          if (status === '??') {
-            untrackedFiles.push(file);
-          } else {
-            modifiedFiles.push(file);
-          }
-        }
-      }
-
-      const hasChanges = modifiedFiles.length > 0 || untrackedFiles.length > 0;
+      // 🔥 Use centralized GitStatusParser instead of duplicated logic
+      const parsed = GitStatusParser.parse(statusOutput);
 
       results.push({
         repoName: entry.name,
         repoPath,
-        hasChanges,
-        modifiedFiles,
-        untrackedFiles,
-        totalChanges: modifiedFiles.length + untrackedFiles.length,
+        hasChanges: parsed.hasChanges,
+        modifiedFiles: parsed.modified,
+        untrackedFiles: parsed.untracked,
+        totalChanges: parsed.allChanges.length,
       });
 
-      if (hasChanges) {
-        console.log(`📦 [scanWorkspaceForChanges] ${entry.name}: ${modifiedFiles.length} modified, ${untrackedFiles.length} untracked`);
+      if (parsed.hasChanges) {
+        console.log(`📦 [scanWorkspaceForChanges] ${entry.name}: ${GitStatusParser.formatSummary(parsed)}`);
       }
     } catch (err: any) {
       console.warn(`⚠️ [scanWorkspaceForChanges] Error scanning ${entry.name}: ${err.message}`);

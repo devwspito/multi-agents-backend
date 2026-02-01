@@ -334,12 +334,18 @@ export class ProjectRepository {
 
   /**
    * Get decrypted API key
+   * Returns undefined if key doesn't exist or decryption fails
    */
   static getDecryptedApiKey(id: string): string | undefined {
-    const stmt = db.prepare(`SELECT api_key FROM projects WHERE id = ?`);
-    const row = stmt.get(id) as { api_key: string | null } | undefined;
-    if (!row?.api_key) return undefined;
-    return CryptoService.decrypt(row.api_key);
+    try {
+      const stmt = db.prepare(`SELECT api_key FROM projects WHERE id = ?`);
+      const row = stmt.get(id) as { api_key: string | null } | undefined;
+      if (!row?.api_key) return undefined;
+      return CryptoService.decrypt(row.api_key);
+    } catch (error: any) {
+      console.warn(`[ProjectRepository] Failed to decrypt API key for project ${id}:`, error.message);
+      return undefined;
+    }
   }
 
   /**

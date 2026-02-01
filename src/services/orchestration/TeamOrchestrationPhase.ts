@@ -24,6 +24,8 @@ import { CostAccumulator } from './utils/CostAccumulator';
 import { getEpicId, getEpicIdSafe, getStoryId, validateEpicIds } from './utils/IdNormalizer';
 // ⏱️ Centralized timeout constants
 import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
+// 📦 Centralized git status parsing
+import { GitStatusParser } from '../../utils/GitStatusParser';
 // 📦 SQLite Repositories
 import { TaskRepository } from '../../database/repositories/TaskRepository';
 import { ProjectRepository } from '../../database/repositories/ProjectRepository';
@@ -1822,10 +1824,7 @@ ${epic.description || 'No description provided'}
         // This is critical for Flutter/other generators that create files in sandbox
         try {
           const untrackedOutput = safeGitExecSync(`git status --porcelain`, { cwd: repoPath, encoding: 'utf8' });
-          const untrackedFiles = untrackedOutput
-            .split('\n')
-            .filter((line: string) => line.startsWith('??'))
-            .map((line: string) => line.substring(3).trim());
+          const untrackedFiles = GitStatusParser.getUntracked(untrackedOutput);
 
           if (untrackedFiles.length > 0) {
             console.log(`   📁 Found ${untrackedFiles.length} untracked files before merge`);

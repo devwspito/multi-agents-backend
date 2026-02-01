@@ -10,10 +10,10 @@ import { z } from 'zod';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { AppConfig } from '../config/AppConfig';
 
 const router = Router();
-const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-const githubService = new GitHubService(workspaceDir);
+const githubService = new GitHubService(AppConfig.workspace.dir);
 
 // Validación schemas con Zod
 const createProjectSchema = z.object({

@@ -25,6 +25,7 @@ import { buildPromptForMode, buildQuickJudgePrompt } from './QuickDevPromptBuild
 import { safeGitExec } from '../utils/safeGitExecution.js';
 import { TaskRepository } from '../database/repositories/TaskRepository.js';
 import { QuickTaskExecutionRepository, IQuickTaskExecution } from '../database/repositories/QuickTaskExecutionRepository.js';
+import { autoRebuildService } from './AutoRebuildService.js';
 
 export interface QuickTaskParams {
   taskId: string;
@@ -179,6 +180,21 @@ export class QuickDevService {
 
       // 9. Check for success marker based on mode
       const devSuccess = this.checkSuccessMarker(devResult.output, mode);
+
+      // 9.5. 🔥 Auto-rebuild for code mode (Team-Lite needs this!)
+      // Only trigger if files were modified and task succeeded
+      if (mode === 'code' && devSuccess) {
+        const allChangedFiles = [...devResult.filesModified, ...devResult.filesCreated];
+        if (allChangedFiles.length > 0) {
+          console.log(`[QuickDev] Triggering auto-rebuild for ${allChangedFiles.length} changed files...`);
+          try {
+            await autoRebuildService.triggerRebuildForChangedFiles(taskId, allChangedFiles);
+          } catch (rebuildError: any) {
+            console.warn(`[QuickDev] Auto-rebuild error (non-fatal): ${rebuildError.message}`);
+            // Don't fail the task for rebuild errors
+          }
+        }
+      }
 
       // 10. Optional: Run Judge review
       let judgeResult: QuickTaskResult['judgeResult'] | undefined;

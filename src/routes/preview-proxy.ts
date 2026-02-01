@@ -291,6 +291,76 @@ router.options('*', (_req: Request, res: Response): void => {
 });
 
 /**
+ * GET /api/preview/:taskId/health
+ * POST /api/preview/:taskId/health
+ *
+ * Health check for preview server.
+ * GET: Check if server is running
+ * POST: Check and auto-fix (restart server if needed)
+ *
+ * Query params:
+ * - port: Port to check (default: 8080)
+ * - repoName: Repository name for build/web path
+ * - serverCmd: Optional explicit server command for restart
+ * - autoFix: If true (default for POST), restart server if not running
+ */
+router.all('/:taskId/health', async (req: Request, res: Response): Promise<void> => {
+  const taskId = req.params.taskId as string;
+  const port = parseInt(req.query.port as string) || 8080;
+  const repoName = req.query.repoName as string | undefined;
+  const serverCmd = req.query.serverCmd as string | undefined;
+  const autoFix = req.method === 'POST' || req.query.autoFix === 'true';
+
+  try {
+    if (autoFix) {
+      // Check and auto-fix
+      const result = await sandboxService.ensurePreviewServerHealthy(taskId, port, repoName, serverCmd);
+      res.json({
+        success: result.healthy,
+        healthy: result.healthy,
+        wasRestarted: result.wasRestarted,
+        error: result.error,
+        port,
+        message: result.healthy
+          ? (result.wasRestarted ? 'Server was restarted' : 'Server is healthy')
+          : `Server check failed: ${result.error}`,
+      });
+    } else {
+      // Just check, don't fix
+      const found = sandboxService.findSandboxForTask(taskId);
+      if (!found || found.instance.status !== 'running') {
+        res.json({
+          success: false,
+          healthy: false,
+          error: 'Sandbox not running',
+          port,
+        });
+        return;
+      }
+
+      // Simple port check using netstat or ss
+      const checkResult = await sandboxService.exec(taskId, `ss -tlnp | grep :${port} || netstat -tlnp | grep :${port} 2>/dev/null`, {
+        timeout: 5000,
+      });
+
+      const isHealthy = checkResult.exitCode === 0 && checkResult.stdout.trim().length > 0;
+      res.json({
+        success: true,
+        healthy: isHealthy,
+        port,
+        message: isHealthy ? 'Server is running' : 'Server not detected on port',
+      });
+    }
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      port,
+    });
+  }
+});
+
+/**
  * Proxy with specific port: /api/preview/:taskId/port/:port/*
  */
 router.all('/:taskId/port/:port/*', (req: Request, res: Response): void => {

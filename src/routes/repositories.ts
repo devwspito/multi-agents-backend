@@ -7,12 +7,11 @@ import { GitHubService } from '../services/GitHubService';
 import { EnvService } from '../services/EnvService';
 import { z } from 'zod';
 import crypto from 'crypto';
-import path from 'path';
-import os from 'os';
+import { AppConfig } from '../config/AppConfig';
+import { ApiResponse } from '../utils/ApiResponse';
 
 const router = Router();
-const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-const githubService = new GitHubService(workspaceDir);
+const githubService = new GitHubService(AppConfig.workspace.dir);
 
 /**
  * GET /api/repositories/github
@@ -23,11 +22,7 @@ router.get('/github', authenticate, async (req: AuthRequest, res): Promise<any> 
     const accessToken = UserRepository.getAccessToken(req.user!.id);
 
     if (!accessToken) {
-      res.status(401).json({
-        success: false,
-        message: 'GitHub access token not found. Please reconnect your GitHub account.',
-      });
-      return;
+      return ApiResponse.unauthorized(res, 'GitHub access token not found. Please reconnect your GitHub account.');
     }
 
     const user = { accessToken };
