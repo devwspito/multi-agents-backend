@@ -1757,7 +1757,8 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
     }
 
     // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
-    orchestrationCoordinator.orchestrateTask(req.params.id).catch((error) => {
+    // Pass isResume: true to prevent paused flag race condition
+    orchestrationCoordinator.orchestrateTask(req.params.id, { isResume: true }).catch((error) => {
       console.error(`❌ Error resuming task ${req.params.id}:`, error);
     });
 
@@ -2327,7 +2328,8 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
     // If retry_with_guidance or fixed_manually, trigger orchestration to continue
     if (validatedData.resolution === 'retry_with_guidance' || validatedData.resolution === 'fixed_manually') {
       // Trigger continuation in background
-      orchestrationCoordinator.orchestrateTask(taskId).catch((error) => {
+      // Pass isResume: true to prevent paused flag race condition
+      orchestrationCoordinator.orchestrateTask(taskId, { isResume: true }).catch((error) => {
         console.error(`❌ [Human Intervention] Failed to resume orchestration:`, error);
       });
       console.log(`🔄 [Human Intervention] Resuming orchestration for task ${taskId}`);
