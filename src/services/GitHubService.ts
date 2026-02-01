@@ -6,6 +6,7 @@ import { UserRepository } from '../database/repositories/UserRepository.js';
 import { EnvService } from './EnvService';
 import { IEnvVariable } from '../database/repositories/RepositoryRepository.js';
 import { safeGitExec, safeFetch, safePull, fixGitRemoteAuth } from '../utils/safeGitExecution';
+import { RetryService } from './orchestration/RetryService';
 
 const execAsync = promisify(exec);
 
@@ -139,65 +140,55 @@ export class GitHubService {
       // Doesn't exist, clone it
     }
 
-    // Retry logic for network errors (SSL, connection issues)
+    // 🔥 CENTRALIZED: Uses RetryService for consistent retry logic
     const maxRetries = 3;
-    let lastError: any;
+    const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`📥 Cloning ${githubRepoUrl} (branch: ${branch}) to ${repoPath}... (attempt ${attempt}/${maxRetries})`);
+    // Network-specific retryable errors
+    const networkErrors = [
+      'SSL_ERROR', 'unable to access', 'Connection refused',
+      'timed out', 'timeout', 'ETIMEDOUT', 'ECONNRESET'
+    ];
 
-        // Add authentication to GitHub URL
-        const authenticatedUrl = this.getAuthenticatedRepoUrl(githubRepoUrl, githubToken);
+    try {
+      await RetryService.executeWithRetry(
+        async () => {
+          console.log(`📥 Cloning ${githubRepoUrl} (branch: ${branch}) to ${repoPath}...`);
 
-        // Clone repository with timeout protection
-        // 🔥 Increased timeout for large repos - 3 minutes
-        await safeGitExec(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
-          cwd: targetDir,
-          timeout: 180000, // 180 seconds (3 minutes) for clone - large repos need more time
-        });
+          // Clone repository with timeout protection
+          await safeGitExec(`git clone -b ${branch} ${authenticatedUrl} ${repoName}`, {
+            cwd: targetDir,
+            timeout: 180000, // 180 seconds (3 minutes) for clone
+          });
 
-        console.log(`✅ Repository cloned successfully: ${repoName}`);
+          console.log(`✅ Repository cloned successfully: ${repoName}`);
 
-        // 🔥 CRITICAL: Fix remote URL immediately after cloning
-        // Remove embedded token so future operations use credential helper
-        console.log(`🔧 [GitHubService] Fixing remote auth for ${repoName}...`);
-        fixGitRemoteAuth(repoPath);
+          // Fix remote URL immediately after cloning
+          console.log(`🔧 [GitHubService] Fixing remote auth for ${repoName}...`);
+          fixGitRemoteAuth(repoPath);
 
-        // 🔐 Inject environment variables if provided
-        if (envVariables && envVariables.length > 0) {
-          console.log(`🔐 Injecting ${envVariables.length} environment variables...`);
-          await EnvService.writeEnvFile(repoPath, envVariables);
+          // Inject environment variables if provided
+          if (envVariables && envVariables.length > 0) {
+            console.log(`🔐 Injecting ${envVariables.length} environment variables...`);
+            await EnvService.writeEnvFile(repoPath, envVariables);
+          }
+        },
+        {
+          maxRetries,
+          initialDelayMs: 4000,
+          backoffMultiplier: 2,
+          retryableErrors: networkErrors,
+          onRetry: (attempt, error, delayMs) => {
+            console.error(`❌ Clone attempt ${attempt}/${maxRetries} failed: ${error.message}`);
+            console.log(`⏳ Retrying in ${delayMs / 1000}s...`);
+          },
         }
-
-        return repoPath;
-      } catch (error: any) {
-        lastError = error;
-        console.error(`❌ Clone attempt ${attempt}/${maxRetries} failed:`, error.message);
-
-        // If network/timeout error and not last attempt, retry with exponential backoff
-        if (attempt < maxRetries && (
-          error.message.includes('SSL_ERROR') ||
-          error.message.includes('unable to access') ||
-          error.message.includes('Connection refused') ||
-          error.message.includes('timed out') ||
-          error.message.includes('timeout') ||
-          error.message.includes('ETIMEDOUT') ||
-          error.message.includes('ECONNRESET')
-        )) {
-          const waitTime = Math.pow(2, attempt) * 2000; // 4s, 8s, 16s (longer waits for network issues)
-          console.log(`⏳ Retrying in ${waitTime / 1000}s...`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-          continue;
-        }
-
-        // If not retryable or last attempt, throw
-        break;
-      }
+      );
+      return repoPath;
+    } catch (lastError: any) {
+      console.error(`❌ All ${maxRetries} clone attempts failed for ${repoName}`);
+      throw new Error(`Failed to clone repository ${repoName} after ${maxRetries} attempts: ${lastError.message}`);
     }
-
-    console.error(`❌ All ${maxRetries} clone attempts failed for ${repoName}`);
-    throw new Error(`Failed to clone repository ${repoName} after ${maxRetries} attempts: ${lastError.message}`);
   }
 
   /**

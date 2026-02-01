@@ -8,6 +8,7 @@
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
 import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from './constants/Timeouts';
 import { GitStatusParser } from '../../utils/GitStatusParser';
+import { RetryService } from './RetryService';
 
 export class MergeService {
   constructor(private executeAgentFn?: Function) {}
@@ -136,45 +137,39 @@ export class MergeService {
         console.warn(`⚠️  [Merge] Could not get current remote URL`);
       }
 
-      // Try to push with retries
-      let pushSucceeded = false;
-      let lastError: any = null;
+      // 🔥 CENTRALIZED: Uses RetryService for consistent retry logic
       const maxRetries = 3;
-
-      for (let attempt = 1; attempt <= maxRetries && !pushSucceeded; attempt++) {
-        try {
-          console.log(`📤 [Merge] Push attempt ${attempt}/${maxRetries}...`);
-          const pushOutput = safeGitExecSync(
-            `git push origin ${epicBranch}`,
-            {
-              cwd: repoPath,
-              encoding: 'utf8',
-              timeout: GIT_TIMEOUTS.FETCH // 90 seconds (network operation)
+      try {
+        await RetryService.executeWithRetry(
+          async () => {
+            const pushOutput = safeGitExecSync(
+              `git push origin ${epicBranch}`,
+              {
+                cwd: repoPath,
+                encoding: 'utf8',
+                timeout: GIT_TIMEOUTS.FETCH // 90 seconds (network operation)
+              }
+            );
+            console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
+            console.log(`   Git push output:\n${pushOutput}`);
+            // Sync local with remote after push
+            try {
+              safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
+              console.log(`✅ [Merge] Local synced with remote`);
+            } catch (_pullErr) {
+              console.log(`   ℹ️ Pull skipped (already up to date)`);
             }
-          );
-          console.log(`✅ [Merge] PUSH SUCCESSFUL: ${epicBranch} pushed to remote`);
-          console.log(`   Git push output:\n${pushOutput}`);
-          pushSucceeded = true;
-          // FIX: Sync local with remote after push
-          try {
-            safeGitExecSync(`git pull origin ${epicBranch} --ff-only`, { cwd: repoPath, encoding: 'utf8', timeout: GIT_TIMEOUTS.CHECKOUT });
-            console.log(`✅ [Merge] Local synced with remote`);
-          } catch (_pullErr) {
-            console.log(`   ℹ️ Pull skipped (already up to date)`);
+          },
+          {
+            maxRetries,
+            initialDelayMs: 2000,
+            backoffMultiplier: 2,
+            onRetry: (attempt, error, delayMs) => {
+              console.log(`📤 [Merge] Push retry ${attempt}/${maxRetries} after ${delayMs}ms: ${error.message}`);
+            },
           }
-        } catch (pushError: any) {
-          lastError = pushError;
-          console.error(`❌ [Merge] Push attempt ${attempt} failed: ${pushError.message}`);
-
-          if (attempt < maxRetries) {
-            const delay = 2000 * attempt; // 2s, 4s, 6s
-            console.log(`⏳ [Merge] Waiting ${delay/1000}s before retry...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-          }
-        }
-      }
-
-      if (!pushSucceeded) {
+        );
+      } catch (lastError: any) {
         console.error(`❌ [Merge] CRITICAL: All ${maxRetries} push attempts failed!`);
         console.error(`   Epic branch: ${epicBranch}`);
         console.error(`   Repository: ${repoPath}`);
@@ -187,7 +182,6 @@ export class MergeService {
         console.error(`   3. Manual push: cd "${repoPath}" && git push origin ${epicBranch}`);
 
         // 🔥 CRITICAL: DO NOT continue if push fails
-        // Story branch will be deleted and code will be lost forever
         throw new Error(`Failed to push epic branch ${epicBranch} to remote after ${maxRetries} attempts: ${lastError?.message}`);
       }
 
