@@ -4,9 +4,28 @@ Comandos para monitorizar y gestionar el servidor de producción.
 
 ---
 
+cd ~/agents-software-arq && git pull origin main && npm run build && pm2 restart agents-backend && cd ~/mult-agents-frontend && git pull origin main && npm run build && pm2 restart agents-frontend
+
+
 ## Logs
 
 ```bash
+
+desplegar
+# Backend
+cd ~/agents-software-arq && npm run build && pm2 start npm --name "agents-backend" -- start
+
+# Frontend
+cd ~/mult-agents-frontend && npm run build && pm2 start npm --name "agents-frontend" -- start
+
+# Verificar
+pm2 list
+
+# Guardar para que sobreviva reinicios
+pm2 save
+
+------------------
+
 # Logs en tiempo real (CTRL+C para salir)
 sudo journalctl -u agents-backend -f
 

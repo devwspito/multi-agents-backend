@@ -115,6 +115,9 @@ router.post('/:id/pause', authenticate, async (req: AuthRequest, res) => {
       pausedBy: req.user!.id,
     }));
 
+    // Also update task.status so frontend can sync properly
+    TaskRepository.updateStatus(task.id, 'paused');
+
     console.log(`⏸️  [Pause] Task ${req.params.id} paused by user ${req.user!.id}`);
 
     const { NotificationService } = await import('../../services/NotificationService');
