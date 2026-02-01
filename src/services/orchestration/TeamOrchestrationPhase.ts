@@ -28,6 +28,8 @@ import { GIT_TIMEOUTS, APPROVAL_TIMEOUTS } from './constants/Timeouts';
 import { GitStatusParser } from '../../utils/GitStatusParser';
 // 📦 SQLite Repositories
 import { TaskRepository } from '../../database/repositories/TaskRepository';
+// 🤖 Centralized auto-approval
+import { AutoApprovalService } from '../AutoApprovalService';
 import { ProjectRepository } from '../../database/repositories/ProjectRepository';
 
 // TechLead approval timeout - use centralized constant
@@ -1201,14 +1203,13 @@ export class TeamOrchestrationPhase extends BasePhase {
         }
 
         // 🛑 TECH LEAD APPROVAL GATE - Check auto-approval AFTER execution
-        // 🔥 FIX: Re-fetch autoApprovalEnabled from DB INSIDE the loop
-        // User may have enabled autonomous mode DURING TechLead execution
-        const freshTaskInLoop = TaskRepository.findById(parentContext.task.id);
-        const currentAutoApprovalEnabled = freshTaskInLoop?.orchestration?.autoApprovalEnabled === true;
+        // 🔥 CENTRALIZED: Use AutoApprovalService for consistent auto-approval checks
+        const currentAutoApprovalEnabled = AutoApprovalService.isEnabled(parentContext.task.id);
 
         if (currentAutoApprovalEnabled) {
           console.log(`✅ [Team: ${epicName}] Tech Lead auto-approved (autonomous mode enabled)`);
           NotificationService.emitConsoleLog(taskId, 'info', `✅ Tech Lead auto-approved for epic: ${epic.title}`);
+          AutoApprovalService.recordAutoApproval(taskId, 'tech-lead');
           techLeadApproved = true;
           break; // Exit loop - no need to wait for manual approval
         }

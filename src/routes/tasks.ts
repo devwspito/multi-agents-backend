@@ -18,6 +18,8 @@ import { eventStore } from '../services/EventStore';
 // 🔥 Sandbox and Notifications - For manual rebuild
 import { sandboxService } from '../services/SandboxService';
 import { NotificationService } from '../services/NotificationService';
+// 🤖 Centralized auto-approval
+import { AutoApprovalService } from '../services/AutoApprovalService';
 
 // 🔥 Safe Git Execution - For commit/push from host
 import { safeGitExec } from '../utils/safeGitExecution';
@@ -1067,72 +1069,20 @@ router.put('/:id/auto-approval', authenticate, async (req: AuthRequest, res) => 
       return;
     }
 
-    // 🎯 SIMPLIFIED: Just update the enabled flag (no phases, no thresholds)
-    TaskRepository.updateAutoApproval(task.id, validatedData.enabled);
+    // 🔥 CENTRALIZED: Use AutoApprovalService for all auto-approval logic
+    const result = AutoApprovalService.setEnabled(task.id, validatedData.enabled, {
+      approvedBy: req.user!.id,
+      releasePendingApproval: true,
+    });
 
     const mode = validatedData.enabled ? 'AUTONOMOUS' : 'MANUAL';
-    console.log(`🚁 [Auto-Approval] Task ${req.params.id}: ${mode} mode`);
-
-    let releasedPendingApproval = false;
-
-    // 🔥 If ENABLING autonomous mode AND there's a pending approval, release it
-    if (validatedData.enabled) {
-      const pendingApproval = task.orchestration?.pendingApproval;
-
-      if (pendingApproval && pendingApproval.phase) {
-        console.log(`🔓 [Auto-Approval] Releasing pending approval: ${pendingApproval.phase}`);
-
-        // Clear pending approval
-        TaskRepository.clearPendingApproval(task.id);
-
-        // Log to approval history
-        TaskRepository.addApprovalHistory(task.id, {
-          phase: pendingApproval.phase,
-          phaseName: pendingApproval.phaseName || pendingApproval.phase,
-          approved: true,
-          approvedBy: 'system',
-          approvedAt: new Date(),
-          comments: 'Auto-approved (autonomous mode enabled)',
-          autoApproved: true,
-        });
-
-        // Emit approval event to release the waiting orchestrator
-        const { approvalEvents } = await import('../services/ApprovalEvents.js');
-        approvalEvents.emitApproval(task.id, pendingApproval.phase, true, 'Autonomous mode enabled');
-
-        // Emit WebSocket notification
-        const { NotificationService } = await import('../services/NotificationService.js');
-        NotificationService.emitApprovalGranted(task.id, {
-          phase: pendingApproval.phase,
-          approved: true,
-        });
-        NotificationService.emitConsoleLog(task.id, 'info', `✅ Autonomous mode enabled - auto-approving ${pendingApproval.phaseName || pendingApproval.phase}`);
-
-        releasedPendingApproval = true;
-      } else {
-        // No pending approval in DB, but orchestrator might be waiting
-        // Use shotgun approach to release any waiting phase
-        console.log(`🔫 [Auto-Approval] No pending approval found, emitting for common phases...`);
-
-        const { approvalEvents } = await import('../services/ApprovalEvents.js');
-        const { NotificationService } = await import('../services/NotificationService.js');
-
-        const commonPhases = ['planning', 'tech-lead', 'team-orchestration', 'verification'];
-        for (const phase of commonPhases) {
-          approvalEvents.emitApproval(task.id, phase, true, 'Autonomous mode enabled');
-        }
-
-        NotificationService.emitConsoleLog(task.id, 'info', `✅ Autonomous mode enabled - will auto-approve all future phases`);
-      }
-    }
 
     res.json({
-      success: true,
-      message: validatedData.enabled ? 'Autonomous mode enabled' : 'Manual mode enabled',
+      success: result.success,
+      message: result.message,
       data: {
         enabled: validatedData.enabled,
         mode,
-        releasedPendingApproval,
       },
     });
   } catch (error) {

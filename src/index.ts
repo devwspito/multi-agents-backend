@@ -14,6 +14,7 @@ import { WorkspaceCleanupScheduler } from './services/WorkspaceCleanupScheduler'
 import { TrainingExportScheduler } from './services/training/TrainingExportScheduler';
 import { setupConsoleInterceptor } from './utils/consoleInterceptor';
 import { storageService } from './services/storage/StorageService';
+import { AutoApprovalService } from './services/AutoApprovalService';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -400,14 +401,12 @@ class AgentPlatformApp {
             }
 
             // 3. Si hay aprobación pendiente, re-emitir evento usando datos persistidos
-            // 🔥 FIX: Skip re-emitting if autonomous mode is enabled (auto-approve ALL phases)
+            // 🔥 CENTRALIZED: Use AutoApprovalService for consistent auto-approval checks
             const pendingApproval = task.orchestration?.pendingApproval;
             if (task.status === 'in_progress' && pendingApproval && pendingApproval.phase) {
-              const autoApprovalEnabled = task.orchestration?.autoApprovalEnabled === true;
-              // 🔥 FIX: Autonomous mode = approve ALL phases, no need to check specific phases
-              const phaseHasAutoApproval = autoApprovalEnabled;
+              const autoApprovalEnabled = AutoApprovalService.isEnabled(taskId);
 
-              if (phaseHasAutoApproval) {
+              if (autoApprovalEnabled) {
                 console.log(`✅ [WebSocket] Skipping approval_required re-emit - ${pendingApproval.phase} has auto-approval`);
                 // Clear the stale pendingApproval since it will be auto-approved
                 const { TaskRepository } = await import('./database/repositories/TaskRepository.js');
@@ -415,6 +414,7 @@ class AgentPlatformApp {
                   const { pendingApproval: _, ...rest } = orch as any;
                   return rest;
                 });
+                AutoApprovalService.recordAutoApproval(taskId, pendingApproval.phase);
               } else {
                 console.log(`⏸️  Re-emitting approval_required from persisted data:`, {
                   phase: pendingApproval.phase,
