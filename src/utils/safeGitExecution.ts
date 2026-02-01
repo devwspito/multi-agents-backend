@@ -18,6 +18,7 @@
 
 import { exec, execSync as nodeExecSync } from 'child_process';
 import { promisify } from 'util';
+import { GIT_TIMEOUTS } from '../services/orchestration/constants/Timeouts.js';
 
 const execAsync = promisify(exec);
 
@@ -93,16 +94,7 @@ export function normalizeRepoName(name: string): string {
 
 // Timeouts are OPT-IN - only used if GIT_ENABLE_TIMEOUTS=true
 const TIMEOUTS_ENABLED = process.env.GIT_ENABLE_TIMEOUTS === 'true';
-
-// Generous timeouts for large repositories and slow connections
-const GIT_TIMEOUTS = {
-  FETCH: 120000,    // 2 minutes for fetch
-  PUSH: 180000,     // 3 minutes for push
-  PULL: 180000,     // 3 minutes for pull
-  CLONE: 300000,    // 5 minutes for clone
-  LS_REMOTE: 30000, // 30 seconds for ls-remote
-  DEFAULT: 120000,  // 2 minutes default
-};
+// GIT_TIMEOUTS imported from centralized constants (Timeouts.ts)
 
 /**
  * Execute a git command with timeout protection (async)

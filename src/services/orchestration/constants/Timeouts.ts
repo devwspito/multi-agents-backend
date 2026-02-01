@@ -5,26 +5,30 @@
  * All values are in milliseconds.
  */
 
-// Git operation timeouts
+// Git operation timeouts - generous values for large repos and slow connections
 export const GIT_TIMEOUTS = {
   /** Git fetch from remote (network dependent) */
-  FETCH: 90_000,
+  FETCH: 120_000,    // 2 minutes
   /** Git push to remote */
-  PUSH: 60_000,
+  PUSH: 180_000,     // 3 minutes
+  /** Git pull from remote */
+  PULL: 180_000,     // 3 minutes
   /** Git clone repository */
-  CLONE: 120_000,
+  CLONE: 300_000,    // 5 minutes
   /** Git status check (local) */
-  STATUS: 10_000,
+  STATUS: 10_000,    // 10 seconds
   /** Git log query */
-  LOG: 5_000,
+  LOG: 5_000,        // 5 seconds
   /** Git diff operation */
-  DIFF: 10_000,
+  DIFF: 10_000,      // 10 seconds
   /** Git checkout branch */
-  CHECKOUT: 30_000,
+  CHECKOUT: 30_000,  // 30 seconds
   /** Git merge operation */
-  MERGE: 60_000,
+  MERGE: 60_000,     // 1 minute
   /** Git ls-remote check */
-  LS_REMOTE: 30_000,
+  LS_REMOTE: 30_000, // 30 seconds
+  /** Default for other operations */
+  DEFAULT: 120_000,  // 2 minutes
 } as const;
 
 // Agent execution timeouts

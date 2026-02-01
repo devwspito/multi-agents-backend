@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import crypto from 'crypto';
+import { StringUtils } from '../utils/StringUtils';
 
 // 🔥 SQLite is the SINGLE SOURCE OF TRUTH
 import { EventRepository, EventType, IEvent } from '../database/repositories/EventRepository.js';
@@ -911,7 +912,7 @@ export class EventStore {
         agentName: 'EventStore',
       });
 
-      console.log(`✅ [EventStore] Story ${storyId} push VERIFIED: ${branchName} (${commitSha?.substring(0, 7)})`);
+      console.log(`✅ [EventStore] Story ${storyId} push VERIFIED: ${branchName} (${StringUtils.shortCommitSha(commitSha)})`);
       return { verified: true, commitSha };
 
     } catch (error: any) {

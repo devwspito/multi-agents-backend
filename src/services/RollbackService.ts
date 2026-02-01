@@ -13,6 +13,7 @@
 import { execSync } from 'child_process';
 import { CodeSnapshotRepository, ICodeSnapshot, IFileChange } from '../database/repositories/CodeSnapshotRepository.js';
 import { LogService } from './logging/LogService';
+import { StringUtils } from '../utils/StringUtils';
 
 export interface Checkpoint {
   id: string;
@@ -258,8 +259,8 @@ class RollbackService {
         taskId,
         category: 'git',
         metadata: {
-          fromCommit: currentCommit.substring(0, 7),
-          toCommit: targetCommit.substring(0, 7),
+          fromCommit: StringUtils.shortCommitSha(currentCommit),
+          toCommit: StringUtils.shortCommitSha(targetCommit),
           filesRestored: filesChanged.length,
         },
       });

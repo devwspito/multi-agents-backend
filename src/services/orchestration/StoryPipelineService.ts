@@ -10,6 +10,7 @@
 import { OrchestrationContext, updateTaskFireAndForget } from './Phase';
 import { NotificationService } from '../NotificationService';
 import { safeGitExecSync, smartGitFetch } from '../../utils/safeGitExecution';
+import { StringUtils } from '../../utils/StringUtils';
 import { sandboxService } from '../SandboxService.js';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
 import { ProjectRadiography } from '../ProjectRadiographyService';
@@ -25,6 +26,7 @@ import {
 import { MergeService } from './MergeService';
 import { gitVerificationService } from './GitVerificationService';
 import { RecoveryService } from './RecoveryService';
+import { autoRebuildService } from '../AutoRebuildService.js';
 
 export interface StoryPipelineResult {
   developerCost: number;
@@ -381,7 +383,7 @@ export class StoryPipelineService {
         }
       );
       if (checkpoint) {
-        console.log(`🔄 [CHECKPOINT] Created: ${checkpoint.id} (${checkpoint.commitHash.substring(0, 7)})`);
+        console.log(`🔄 [CHECKPOINT] Created: ${checkpoint.id} (${StringUtils.shortCommitSha(checkpoint.commitHash)})`);
       }
 
       // 🔄 SESSION RESUME: Check for existing session checkpoint for this story
@@ -1360,11 +1362,8 @@ export class StoryPipelineService {
   /**
    * 🔥 AUTO-REBUILD: Automatically rebuild after merge for frameworks using static builds
    *
-   * This is AGNOSTIC - it reads rebuildCmd from EventStore's environmentConfig,
-   * which was set by LanguageDetectionService based on LLM analysis.
-   *
-   * For frameworks with HMR (hot module replacement), rebuildCmd will be "echo 'HMR handles rebuild'"
-   * which we skip. For static builds (Flutter Web), rebuildCmd will be "flutter build web".
+   * DELEGATED to centralized AutoRebuildService.
+   * This method is kept for backwards compatibility with existing callers.
    */
   async triggerAutoRebuild(
     taskId: string,
@@ -1373,13 +1372,6 @@ export class StoryPipelineService {
     repositories: any[],
     epic: any
   ): Promise<void> {
-    // Check if sandbox is running using SandboxService (which uses taskId for lookup)
-    const sandbox = sandboxService.getSandbox(taskId);
-    if (!sandbox) {
-      console.log(`   ⚠️ [AutoRebuild] No sandbox running for task ${taskId} - skipping auto-rebuild`);
-      return;
-    }
-
     // Find target repo name
     const targetRepoObj = repositories.find((r: any) =>
       r.name === epic.targetRepository ||
@@ -1394,83 +1386,7 @@ export class StoryPipelineService {
 
     const repoName = targetRepoObj.name || targetRepoObj.full_name;
 
-    // 🔥 AGNOSTIC: Get rebuildCmd from EventStore's environmentConfig
-    const { eventStore } = await import('../EventStore');
-    const state = await eventStore.getCurrentState(taskId as any);
-    const envConfig = state.environmentConfig || {};
-    const repoConfig = envConfig[repoName];
-
-    if (!repoConfig) {
-      console.log(`   ⚠️ [AutoRebuild] No environmentConfig for repo "${repoName}" - skipping`);
-      return;
-    }
-
-    const rebuildCmd = repoConfig.rebuildCmd;
-    const framework = repoConfig.framework || repoConfig.language || 'unknown';
-
-    // Skip if no rebuildCmd or if it's just an echo (HMR handles rebuild)
-    if (!rebuildCmd || rebuildCmd.startsWith("echo ")) {
-      console.log(`   ℹ️ [AutoRebuild] Repo "${repoName}" uses HMR or has no rebuildCmd - skipping`);
-      return;
-    }
-
-    console.log(`\n🔨 [AutoRebuild] Detected ${framework} project - triggering rebuild...`);
-    console.log(`   Command: ${rebuildCmd}`);
-    console.log(`   Repository: ${repoName}`);
-
-    // Notify frontend that rebuild is starting
-    NotificationService.emitNotification(taskId, 'rebuild_started', {
-      framework,
-      message: `Rebuilding ${framework} after merge...`,
-    });
-
-    try {
-      const startTime = Date.now();
-
-      // 🔥 FIX: Execute in the correct repo directory, NOT /workspace root
-      const repoWorkDir = `/workspace/${repoName}`;
-      const result = await sandboxService.exec(taskId, rebuildCmd, {
-        cwd: repoWorkDir,
-        timeout: 300000, // 5 minutes for builds
-      });
-
-      const duration = Math.round((Date.now() - startTime) / 1000);
-
-      if (result.exitCode === 0) {
-        console.log(`   ✅ [AutoRebuild] ${framework} rebuild completed in ${duration}s`);
-
-        // Notify frontend to refresh iframe
-        NotificationService.emitNotification(taskId, 'rebuild_complete', {
-          framework,
-          success: true,
-          duration,
-          message: `${framework} rebuild complete! Refreshing preview...`,
-        });
-
-        NotificationService.emitConsoleLog(
-          taskId,
-          'info',
-          `🔄 [AutoRebuild] ${framework} rebuilt after merge - preview updated`
-        );
-      } else {
-        console.warn(`   ⚠️ [AutoRebuild] ${framework} rebuild failed (exit ${result.exitCode})`);
-        console.warn(`      stderr: ${result.stderr?.substring(0, 300)}`);
-
-        NotificationService.emitNotification(taskId, 'rebuild_complete', {
-          framework,
-          success: false,
-          error: result.stderr?.substring(0, 200) || 'Build failed',
-          message: `${framework} rebuild failed - manual refresh may be needed`,
-        });
-      }
-    } catch (rebuildError: any) {
-      console.error(`   ❌ [AutoRebuild] Error: ${rebuildError.message}`);
-
-      NotificationService.emitNotification(taskId, 'rebuild_complete', {
-        framework,
-        success: false,
-        error: rebuildError.message,
-      });
-    }
+    // 🔥 Delegate to centralized AutoRebuildService
+    await autoRebuildService.triggerRebuild({ taskId, repoName });
   }
 }

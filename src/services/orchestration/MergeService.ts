@@ -7,6 +7,7 @@
 
 import { safeGitExecSync, fixGitRemoteAuth } from '../../utils/safeGitExecution';
 import { GIT_TIMEOUTS, AGENT_TIMEOUTS } from './constants/Timeouts';
+import { GitStatusParser } from '../../utils/GitStatusParser';
 
 export class MergeService {
   constructor(private executeAgentFn?: Function) {}
@@ -74,10 +75,7 @@ export class MergeService {
       // 2.5. Handle untracked files
       try {
         const untrackedOutput = safeGitExecSync(`cd "${repoPath}" && git status --porcelain`, { encoding: 'utf8' });
-        const untrackedFiles = untrackedOutput
-          .split('\n')
-          .filter((line: string) => line.startsWith('??'))
-          .map((line: string) => line.substring(3).trim());
+        const untrackedFiles = GitStatusParser.getUntracked(untrackedOutput);
 
         if (untrackedFiles.length > 0) {
           console.log(`   Found ${untrackedFiles.length} untracked files (e.g., from flutter create)`);

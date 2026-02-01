@@ -803,42 +803,45 @@ class SandboxService extends EventEmitter {
   }
 
   /**
-   * 🔍 SMART SANDBOX LOOKUP - Find sandbox using 4-level fallback
-   * Use this when you need to find a sandbox that might have been created with
-   * a different ID pattern (e.g., taskId-setup-repoName)
+   * 🔍 SANDBOX LOOKUP - Find sandbox using EXACT taskId match only
+   *
+   * 🔥 FIX: Removed prefix-based fallback that caused cross-task contamination.
+   * Each task MUST have its own sandbox with exact taskId matching.
+   * Preview isolation requires strict 1:1 task-to-sandbox relationship.
    */
   findSandboxForTask(taskId: string): { sandboxId: string; instance: SandboxInstance } | undefined {
-    // 🔥 CRITICAL: Lookup must be EXACT to prevent cross-task contamination
-    // Never use partial matching (includes) as it can match wrong containers
+    // 🔥 CRITICAL: EXACT match ONLY - no prefix matching!
+    // Prefix matching caused cross-task contamination where Task B would show Task A's preview
 
-    // 1️⃣ PRIORITY: Direct lookup by taskId (EXACT match)
+    // 1️⃣ Check in-memory map (EXACT match only)
     let instance = this.sandboxes.get(taskId);
     if (instance && instance.status === 'running') {
       return { sandboxId: taskId, instance };
     }
 
-    // 2️⃣ FALLBACK: Search for setup sandboxes (taskId-setup-* or taskId-repoName)
-    // Only matches sandboxes that START WITH this exact taskId
-    for (const [sandboxId, sb] of this.sandboxes) {
-      if (sandboxId.startsWith(`${taskId}-`) && sb.status === 'running') {
-        console.log(`[SandboxService] 🔍 Found related sandbox: ${sandboxId}`);
-        return { sandboxId, instance: sb };
-      }
+    // 2️⃣ Check database for persisted sandbox (EXACT match via SandboxRepository)
+    const dbSandbox = SandboxRepository.findByTaskId(taskId);
+    if (dbSandbox && dbSandbox.status === 'running') {
+      // Sync to in-memory map for faster future lookups
+      this.sandboxes.set(taskId, dbSandbox);
+      console.log(`[SandboxService] 🔍 Found sandbox in DB for task: ${taskId}`);
+      return { sandboxId: taskId, instance: dbSandbox };
     }
 
-    // 3️⃣ LAST: Return any instance even if not running (for destroy operations)
+    // 3️⃣ Return non-running instance if exists (for destroy/status operations)
     instance = this.sandboxes.get(taskId);
     if (instance) {
       return { sandboxId: taskId, instance };
     }
 
-    // Search in non-running sandboxes (only exact prefix match)
-    for (const [sandboxId, sb] of this.sandboxes) {
-      if (sandboxId.startsWith(`${taskId}-`)) {
-        return { sandboxId, instance: sb };
-      }
+    // Check DB for non-running sandbox
+    if (dbSandbox) {
+      this.sandboxes.set(taskId, dbSandbox);
+      return { sandboxId: taskId, instance: dbSandbox };
     }
 
+    // No sandbox found for this exact taskId
+    console.log(`[SandboxService] ⚠️ No sandbox found for task: ${taskId}`);
     return undefined;
   }
 
@@ -1595,6 +1598,125 @@ ENVEOF`);
       }
     } catch {
       // Ignore errors during cleanup
+    }
+  }
+
+  /**
+   * 🔥 Health check for preview server
+   *
+   * Checks if a server is running on the specified port.
+   * If not, restarts it using the provided serverCmd or a detected command.
+   *
+   * @param taskId - Task ID to find the sandbox
+   * @param port - Port to check (default: 8080)
+   * @param repoName - Repository name for build/web path
+   * @param serverCmd - Optional: explicit server command to use for restart
+   * @returns true if server is running or was successfully restarted
+   */
+  async ensurePreviewServerHealthy(
+    taskId: string,
+    port: number = 8080,
+    repoName?: string,
+    serverCmd?: string
+  ): Promise<{ healthy: boolean; wasRestarted: boolean; error?: string }> {
+    const found = this.findSandboxForTask(taskId);
+    if (!found || found.instance.status !== 'running') {
+      return { healthy: false, wasRestarted: false, error: 'Sandbox not running' };
+    }
+
+    const { instance } = found;
+
+    try {
+      // 🔥 Generic port check - works for any server type
+      const checkCmd = `ss -tlnp 2>/dev/null | grep ":${port}" || netstat -tlnp 2>/dev/null | grep ":${port}"`;
+      const checkResult = await this.execInContainer(instance.containerName, checkCmd, 5000);
+
+      if (checkResult.exitCode === 0 && checkResult.stdout.trim()) {
+        // Server is running on the port
+        return { healthy: true, wasRestarted: false };
+      }
+
+      // Server not running - try to restart it
+      console.log(`[SandboxService] ⚠️ No server running on port ${port}, attempting restart...`);
+
+      // Kill any zombie processes on this port
+      await this.execInContainer(
+        instance.containerName,
+        `fuser -k ${port}/tcp 2>/dev/null || true`,
+        5000
+      );
+
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      // 🔥 Determine server command
+      let finalServerCmd = serverCmd;
+
+      if (!finalServerCmd) {
+        // Try to get devCmd from instance config (if stored)
+        const devCmd = (instance.config as any)?.devCmd;
+
+        if (devCmd && devCmd.includes('&&')) {
+          // Extract server portion from "build && serve" pattern
+          const parts = devCmd.split('&&').map((p: string) => p.trim());
+          finalServerCmd = parts[parts.length - 1];
+        } else if (devCmd) {
+          finalServerCmd = devCmd;
+        }
+      }
+
+      // 🔥 If still no command, use sensible default based on repoName
+      if (!finalServerCmd) {
+        const effectiveRepoName = repoName || instance.repoName;
+        const buildWebDir = effectiveRepoName
+          ? `/workspace/${effectiveRepoName}/build/web`
+          : '/workspace/build/web';
+
+        // Verify directory exists
+        const dirCheckResult = await this.execInContainer(
+          instance.containerName,
+          `test -d "${buildWebDir}" && echo "exists"`,
+          5000
+        );
+
+        if (!dirCheckResult.stdout.includes('exists')) {
+          console.warn(`[SandboxService] ⚠️ Build directory not found: ${buildWebDir}`);
+          return { healthy: false, wasRestarted: false, error: `Build directory not found: ${buildWebDir}. Provide serverCmd parameter.` };
+        }
+
+        // Default to Python http.server for Flutter builds (most common static build case)
+        finalServerCmd = `python3 -m http.server ${port} --directory "${buildWebDir}" --bind 0.0.0.0`;
+        console.log(`[SandboxService] ℹ️ Using default server: ${finalServerCmd}`);
+      }
+
+      // Make paths absolute if they're relative
+      if (repoName && !finalServerCmd.includes('/workspace/')) {
+        finalServerCmd = finalServerCmd.replace(
+          /--directory\s+(\S+)/g,
+          `--directory "/workspace/${repoName}/$1"`
+        );
+      }
+
+      // Start server in background
+      const serverLogFile = `/tmp/preview-server-${port}.log`;
+      const startCmd = `nohup ${finalServerCmd} > ${serverLogFile} 2>&1 &`;
+
+      console.log(`[SandboxService] 🚀 Starting: ${finalServerCmd}`);
+      await this.execInContainer(instance.containerName, startCmd, 5000);
+
+      // Verify it started
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const verifyResult = await this.execInContainer(instance.containerName, checkCmd, 5000);
+
+      if (verifyResult.exitCode === 0 && verifyResult.stdout.trim()) {
+        console.log(`[SandboxService] ✅ Server restarted successfully on port ${port}`);
+        return { healthy: true, wasRestarted: true };
+      } else {
+        console.warn(`[SandboxService] ❌ Failed to restart server`);
+        return { healthy: false, wasRestarted: true, error: 'Failed to start server' };
+      }
+    } catch (error: any) {
+      console.error(`[SandboxService] ❌ Health check error: ${error.message}`);
+      return { healthy: false, wasRestarted: false, error: error.message };
     }
   }
 

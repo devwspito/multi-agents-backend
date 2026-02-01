@@ -12,8 +12,8 @@ import { RepositoryRepository } from '../database/repositories/RepositoryReposit
 import { GitHubService } from '../services/GitHubService';
 import { BranchCleanupService } from '../services/cleanup/BranchCleanupService';
 import { WorkspaceCleanupService } from '../services/cleanup/WorkspaceCleanupService';
-import path from 'path';
-import os from 'os';
+import { AppConfig } from '../config/AppConfig';
+import { ApiResponse } from '../utils/ApiResponse';
 
 const router = Router();
 
@@ -31,42 +31,35 @@ router.post('/task/:taskId', authenticate, async (req: Request, res: Response): 
     // Get task
     const task = TaskRepository.findById(taskId);
     if (!task) {
-      return res.status(404).json({ error: 'Task not found' });
+      return ApiResponse.notFound(res, 'Task');
     }
 
     // Security check
     if (task.userId !== userId) {
-      return res.status(403).json({ error: 'Not authorized to clean up this task' });
+      return ApiResponse.forbidden(res, 'Not authorized to clean up this task');
     }
 
     // Check if task is completed
     if (task.status !== 'completed') {
-      return res.status(400).json({
-        error: 'Task is not completed yet',
-        hint: 'Only completed tasks with merged PRs can be cleaned up',
-      });
+      return ApiResponse.badRequest(res, 'Task is not completed yet. Only completed tasks with merged PRs can be cleaned up.');
     }
 
     // Get repositories
     const repositories = RepositoryRepository.findByIds(task.repositoryIds || []);
 
     if (repositories.length === 0) {
-      return res.status(400).json({ error: 'No repositories found for this task' });
+      return ApiResponse.badRequest(res, 'No repositories found for this task');
     }
 
     // Setup GitHubService
-    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
-    const githubService = new GitHubService(workspaceDir);
+    const githubService = new GitHubService(AppConfig.workspace.dir);
     const cleanupService = new BranchCleanupService(githubService);
 
     // Build branch mappings from task data
     const mappings = BranchCleanupService.buildBranchMappingsFromTask(task);
 
     if (mappings.size === 0) {
-      return res.status(400).json({
-        error: 'No branch mappings found',
-        hint: 'Task may not have created any branches, or orchestration data is missing',
-      });
+      return ApiResponse.badRequest(res, 'No branch mappings found. Task may not have created any branches, or orchestration data is missing.');
     }
 
     console.log(`\n🧹 Starting cleanup for task ${taskId}`);
@@ -151,7 +144,7 @@ router.post('/epic/:taskId/:epicId', authenticate, async (req: Request, res: Res
     }
 
     // Setup GitHubService
-    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const workspaceDir = AppConfig.workspace.dir;
     const githubService = new GitHubService(workspaceDir);
     const cleanupService = new BranchCleanupService(githubService);
 
@@ -338,7 +331,7 @@ router.get('/scheduled/status', authenticate, async (_req: Request, res: Respons
  */
 router.get('/workspaces/scan', authenticate, async (_req: Request, res: Response): Promise<any> => {
   try {
-    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const workspaceDir = AppConfig.workspace.dir;
     const cleanupService = new WorkspaceCleanupService(workspaceDir);
 
     console.log('\n🔍 Starting workspace corruption scan...');
@@ -378,7 +371,7 @@ router.post('/workspaces/cleanup', authenticate, async (req: Request, res: Respo
   try {
     const dryRun = req.query.dryRun === 'true';
 
-    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const workspaceDir = AppConfig.workspace.dir;
     const cleanupService = new WorkspaceCleanupService(workspaceDir);
 
     console.log(`\n🧹 Starting workspace cleanup (dryRun: ${dryRun})...`);
@@ -431,7 +424,7 @@ router.post('/workspaces/validate', authenticate, async (req: Request, res: Resp
       });
     }
 
-    const workspaceDir = process.env.AGENT_WORKSPACE_DIR || path.join(os.tmpdir(), 'agent-workspace');
+    const workspaceDir = AppConfig.workspace.dir;
     const cleanupService = new WorkspaceCleanupService(workspaceDir);
 
     const validation = await cleanupService.validateRepositoryIds(repositoryIds);
