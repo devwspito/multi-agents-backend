@@ -530,7 +530,8 @@ export async function comprehensiveWorkRecovery(
 // GIT FETCH WITH RETRY - Exponential backoff for network operations
 // ============================================================================
 
-import { GIT_TIMEOUTS, RETRY_CONFIG, calculateBackoffDelay } from '../constants/Timeouts';
+import { GIT_TIMEOUTS, RETRY_CONFIG } from '../constants/Timeouts';
+import { RetryService } from '../RetryService';
 
 export interface GitFetchResult {
   success: boolean;
@@ -540,6 +541,7 @@ export interface GitFetchResult {
 
 /**
  * Git fetch with exponential backoff retry
+ * 🔥 CENTRALIZED: Uses RetryService for consistent retry logic
  *
  * Replaces scattered retry logic in DevelopersPhase, JudgePhase, etc.
  */
@@ -558,33 +560,35 @@ export async function gitFetchWithRetry(
   } = options;
 
   const fetchCommand = prune ? 'git fetch origin --prune' : 'git fetch origin';
+  let finalAttempt = 1;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      safeGitExecSync(`cd "${repoPath}" && ${fetchCommand}`, {
-        encoding: 'utf8',
-        timeout,
-      });
-
-      return { success: true, attempt };
-    } catch (error: any) {
-      console.warn(`⚠️ [Git Fetch] Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
-
-      if (attempt < maxRetries) {
-        const waitMs = calculateBackoffDelay(attempt);
-        console.log(`   ⏳ Waiting ${waitMs}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-      } else {
-        return {
-          success: false,
-          attempt,
-          error: `Git fetch failed after ${maxRetries} attempts: ${error.message}`,
-        };
+  try {
+    await RetryService.executeWithRetry(
+      async () => {
+        safeGitExecSync(`cd "${repoPath}" && ${fetchCommand}`, {
+          encoding: 'utf8',
+          timeout,
+        });
+      },
+      {
+        maxRetries,
+        initialDelayMs: 1000,
+        backoffMultiplier: 2,
+        onRetry: (attempt, error, delayMs) => {
+          finalAttempt = attempt + 1;
+          console.warn(`⚠️ [Git Fetch] Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
+          console.log(`   ⏳ Waiting ${delayMs}ms before retry...`);
+        },
       }
-    }
+    );
+    return { success: true, attempt: finalAttempt };
+  } catch (error: any) {
+    return {
+      success: false,
+      attempt: maxRetries,
+      error: `Git fetch failed after ${maxRetries} attempts: ${error.message}`,
+    };
   }
-
-  return { success: false, attempt: maxRetries, error: 'Unexpected exit from retry loop' };
 }
 
 // ============================================================================

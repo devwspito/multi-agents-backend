@@ -7,6 +7,7 @@
 
 import { safeGitExecSync, smartGitFetch } from '../../utils/safeGitExecution';
 import { GIT_TIMEOUTS } from './constants/Timeouts';
+import { RetryService } from './RetryService';
 
 export interface GitVerificationResult {
   commitSHA: string | null;
@@ -80,26 +81,32 @@ export class GitVerificationService {
 
   /**
    * Fetch from remote with exponential backoff retry
+   * 🔥 CENTRALIZED: Uses RetryService for consistent retry logic
    */
   async fetchWithRetry(repoPath: string, maxRetries = 3): Promise<boolean> {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        safeGitExecSync(`git fetch origin --prune`, {
-          cwd: repoPath,
-          encoding: 'utf8',
-          timeout: GIT_TIMEOUTS.FETCH
-        });
-        return true;
-      } catch (err: any) {
-        if (attempt < maxRetries) {
-          const waitMs = 2000 * Math.pow(2, attempt - 1);
-          await new Promise(resolve => setTimeout(resolve, waitMs));
-        } else {
-          console.error(`[GIT] Fetch failed after ${maxRetries} attempts: ${err.message}`);
+    try {
+      await RetryService.executeWithRetry(
+        async () => {
+          safeGitExecSync(`git fetch origin --prune`, {
+            cwd: repoPath,
+            encoding: 'utf8',
+            timeout: GIT_TIMEOUTS.FETCH
+          });
+        },
+        {
+          maxRetries,
+          initialDelayMs: 2000,
+          backoffMultiplier: 2,
+          onRetry: (attempt, error, delayMs) => {
+            console.log(`[GIT] Fetch retry ${attempt}/${maxRetries} after ${delayMs}ms: ${error.message}`);
+          },
         }
-      }
+      );
+      return true;
+    } catch (err: any) {
+      console.error(`[GIT] Fetch failed after ${maxRetries} attempts: ${err.message}`);
+      return false;
     }
-    return false;
   }
 
   /**
@@ -215,9 +222,9 @@ export class GitVerificationService {
       }
 
       // Checkout branch (with retry)
-      let checkoutSuccess = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
+      // 🔥 CENTRALIZED: Uses RetryService for consistent retry logic
+      await RetryService.executeWithRetry(
+        async () => {
           // Check if branch exists locally
           let branchExistsLocally = false;
           try {
@@ -230,19 +237,17 @@ export class GitVerificationService {
           } else {
             safeGitExecSync(`git checkout -b ${branchName} origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
           }
-          checkoutSuccess = true;
-          break;
-        } catch (_) {
-          if (attempt < 2) {
-            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+        },
+        {
+          maxRetries: 3,
+          initialDelayMs: 2000,
+          backoffMultiplier: 1.5,
+          onRetry: (attempt, _error, delayMs) => {
+            console.log(`[GIT] Checkout retry ${attempt}/3 after ${delayMs}ms - fetching latest...`);
             smartGitFetch(repoPath, { timeout: GIT_TIMEOUTS.FETCH, force: true });
-          }
+          },
         }
-      }
-
-      if (!checkoutSuccess) {
-        throw new Error(`Failed to checkout ${branchName} after 3 retries`);
-      }
+      );
 
       // Reset to remote
       safeGitExecSync(`git reset --hard origin/${branchName}`, { cwd: repoPath, encoding: 'utf8' });
