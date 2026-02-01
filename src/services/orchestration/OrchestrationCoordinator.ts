@@ -118,9 +118,22 @@ export class OrchestrationCoordinator {
    *
    * @param taskId - Task ID to orchestrate
    */
-  async orchestrateTask(taskId: string): Promise<void> {
+  async orchestrateTask(taskId: string, options?: { isResume?: boolean }): Promise<void> {
     // Create structured logger for this task
     const log = createTaskLogger(taskId, 'analysis', 'planning-agent');
+
+    // 🔥 FIX: If this is a resume, forcefully clear paused flag FIRST
+    // This prevents race conditions where another write overwrites our resume
+    if (options?.isResume) {
+      TaskRepository.modifyOrchestration(taskId, (orch) => ({
+        ...orch,
+        paused: false,
+        pausedAt: undefined,
+        pausedBy: undefined,
+      }));
+      TaskRepository.update(taskId, { status: 'in_progress' });
+      console.log(`▶️  [Resume] Forcefully cleared paused flag for task ${taskId}`);
+    }
 
     log.info(`${'='.repeat(60)}`);
     log.info(`Starting orchestration for task: ${taskId}`);
