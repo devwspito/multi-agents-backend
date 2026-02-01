@@ -20,6 +20,8 @@ import { sandboxService } from '../services/SandboxService';
 import { NotificationService } from '../services/NotificationService';
 // 🤖 Centralized auto-approval
 import { AutoApprovalService } from '../services/AutoApprovalService';
+// 🔄 Centralized resume logic
+import { ResumeService } from '../services/ResumeService';
 
 // 🔥 Safe Git Execution - For commit/push from host
 import { safeGitExec } from '../utils/safeGitExecution';
@@ -1655,71 +1657,51 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
-    // Log resume type (for paused tasks)
-    if (isBillingPaused && isBillingError) {
-      console.log(`\n💰 [Resume] BILLING RECOVERY for task ${req.params.id}`);
-      console.log(`   Completed teams: ${teamOrch?.completedTeams || 0}`);
-      console.log(`   Pending epics: ${teamOrch?.pendingEpicIds?.join(', ') || 'none'}`);
-      console.log(`   User recharged credits and is resuming...`);
-    } else {
-      console.log(`▶️  [Resume] Task ${req.params.id} resumed by user ${req.user!.id}`);
+    // 🔥 CENTRALIZED: Use ResumeService for all resume logic
+    const resumeReason = isBillingError ? 'billing_recovery' : 'user_action';
+
+    // Also clear team orchestration pause if needed
+    if (isBillingPaused && teamOrch) {
+      TaskRepository.modifyOrchestration(taskId, (orch) => ({
+        ...orch,
+        teamOrchestration: {
+          ...(orch as any).teamOrchestration,
+          status: 'in_progress',
+          pauseReason: undefined,
+          pausedAt: undefined,
+        },
+      }));
     }
 
-    // Clear pause flags and update status if needed
-    if (isBillingPaused) {
-      TaskRepository.update(taskId, { status: 'in_progress' });
+    // Resume task via centralized service
+    const resumeResult = await ResumeService.resumeTask(
+      req.params.id,
+      orchestrationCoordinator,
+      { reason: resumeReason }
+    );
+
+    if (!resumeResult.success) {
+      res.status(400).json({
+        success: false,
+        message: resumeResult.message,
+      });
+      return;
     }
 
-    TaskRepository.modifyOrchestration(taskId, (orch) => {
-      orch.paused = false;
-      orch.pausedAt = undefined;
-      orch.pausedBy = undefined;
-
-      // Clear billing pause metadata but keep pending epics for retry
-      if (isBillingPaused && (orch as any).teamOrchestration) {
-        (orch as any).teamOrchestration.status = 'in_progress';
-        (orch as any).teamOrchestration.pauseReason = undefined;
-        (orch as any).teamOrchestration.pausedAt = undefined;
-      }
-
-      return orch;
-    });
-
-    // Notificar via WebSocket
-    const { NotificationService } = await import('../services/NotificationService');
-
+    // Emit billing recovery notification if applicable
     if (isBillingError) {
-      NotificationService.emitConsoleLog(
-        req.params.id,
-        'info',
-        '💰 Credits recharged! Resuming orchestration with pending epics...'
-      );
       NotificationService.emitNotification(req.params.id, 'billing_recovery', {
         message: 'Orchestration resumed after billing recovery',
         pendingEpics: teamOrch?.pendingEpicIds?.length || 0,
       });
-    } else {
-      NotificationService.emitConsoleLog(
-        req.params.id,
-        'info',
-        '▶️  Orchestration resuming...'
-      );
     }
-
-    // v1 OrchestrationCoordinator - battle-tested with full intelligent prompts
-    // Pass isResume: true to prevent paused flag race condition
-    orchestrationCoordinator.orchestrateTask(req.params.id, { isResume: true }).catch((error) => {
-      console.error(`❌ Error resuming task ${req.params.id}:`, error);
-    });
 
     res.json({
       success: true,
-      message: isBillingError
-        ? 'Task resumed after billing recovery - pending epics will be retried'
-        : 'Task resumed successfully',
+      message: resumeResult.message,
       data: {
         taskId: req.params.id,
-        currentPhase: task.orchestration.currentPhase,
+        currentPhase: resumeResult.currentPhase,
         billingRecovery: isBillingError,
         pendingEpics: teamOrch?.pendingEpicIds || [],
       },
@@ -2277,12 +2259,11 @@ router.post('/:id/intervention/resolve', authenticate, async (req: AuthRequest, 
 
     // If retry_with_guidance or fixed_manually, trigger orchestration to continue
     if (validatedData.resolution === 'retry_with_guidance' || validatedData.resolution === 'fixed_manually') {
-      // Trigger continuation in background
-      // Pass isResume: true to prevent paused flag race condition
-      orchestrationCoordinator.orchestrateTask(taskId, { isResume: true }).catch((error) => {
-        console.error(`❌ [Human Intervention] Failed to resume orchestration:`, error);
+      // 🔥 CENTRALIZED: Use ResumeService for all resume logic
+      await ResumeService.resumeTask(taskId, orchestrationCoordinator, {
+        reason: 'human_intervention',
+        message: `Human intervention resolved: ${validatedData.resolution}`,
       });
-      console.log(`🔄 [Human Intervention] Resuming orchestration for task ${taskId}`);
     }
 
     res.json({

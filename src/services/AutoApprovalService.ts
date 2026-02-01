@@ -134,7 +134,7 @@ export class AutoApprovalService {
    * @param phase - Phase name
    * @returns true if the phase should be auto-approved
    */
-  static shouldAutoApprovePhase(taskId: string, phase: string): boolean {
+  static shouldAutoApprovePhase(taskId: string, _phase: string): boolean {
     // For now, all phases follow the global setting
     // In the future, we could have per-phase settings
     return this.isEnabled(taskId);

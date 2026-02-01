@@ -2,6 +2,7 @@ import { TaskRepository, ITask } from '../../database/repositories/TaskRepositor
 import { OrchestrationCoordinator } from './OrchestrationCoordinator';
 import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
+import { ResumeService } from '../ResumeService.js';
 // ⚡ OPTIMIZATION: Removed eventStore and AgentArtifactService imports
 // Recovery now delegates to orchestrator which handles it more efficiently
 import * as fs from 'fs';
@@ -313,9 +314,12 @@ export class OrchestrationRecoveryService {
       // This prevents conflicts when multiple tasks are recovered
       const taskOrchestrator = new OrchestrationCoordinator();
 
-      // Reanudar orquestación (el coordinador detectará qué fases ya completaron)
-      // Pass isResume: true to prevent paused flag race condition
-      await taskOrchestrator.orchestrateTask(taskId, { isResume: true });
+      // 🔥 CENTRALIZED: Use ResumeService for all resume logic
+      // Prepares state and starts orchestration
+      await ResumeService.resumeTask(taskId, taskOrchestrator, {
+        reason: 'auto_recovery',
+        message: 'Auto-recovery from server restart',
+      });
 
       console.log(`✅ [Recovery] Task ${taskId} recovered successfully`);
     } catch (error: any) {
@@ -435,9 +439,12 @@ export class OrchestrationRecoveryService {
       // Create new orchestrator and resume
       const taskOrchestrator = new OrchestrationCoordinator();
 
-      // Run orchestration in background (don't block)
-      // Pass isResume: true to prevent paused flag race condition
-      taskOrchestrator.orchestrateTask(taskId, { isResume: true }).catch((error) => {
+      // 🔥 CENTRALIZED: Use ResumeService for all resume logic
+      // ResumeService handles state prep and async orchestration start
+      ResumeService.resumeTask(taskId, taskOrchestrator, {
+        reason: 'failed_retry',
+        message: `Retrying from phase: ${task.orchestration.currentPhase}`,
+      }).catch((error) => {
         console.error(`❌ [Recovery] Resume failed for task ${taskId}:`, error.message);
         NotificationService.emitTaskFailed(taskId, {
           error: `Resume failed: ${error.message}`,
