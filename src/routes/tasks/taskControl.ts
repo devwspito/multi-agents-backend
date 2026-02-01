@@ -252,7 +252,8 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       );
     }
 
-    orchestrationCoordinator.orchestrateTask(req.params.id).catch((error) => {
+    // Pass isResume: true to prevent race condition with paused flag
+    orchestrationCoordinator.orchestrateTask(req.params.id, { isResume: true }).catch((error) => {
       console.error(`❌ Error resuming task ${req.params.id}:`, error);
     });
 
