@@ -314,7 +314,8 @@ export class OrchestrationRecoveryService {
       const taskOrchestrator = new OrchestrationCoordinator();
 
       // Reanudar orquestación (el coordinador detectará qué fases ya completaron)
-      await taskOrchestrator.orchestrateTask(taskId);
+      // Pass isResume: true to prevent paused flag race condition
+      await taskOrchestrator.orchestrateTask(taskId, { isResume: true });
 
       console.log(`✅ [Recovery] Task ${taskId} recovered successfully`);
     } catch (error: any) {
@@ -435,7 +436,8 @@ export class OrchestrationRecoveryService {
       const taskOrchestrator = new OrchestrationCoordinator();
 
       // Run orchestration in background (don't block)
-      taskOrchestrator.orchestrateTask(taskId).catch((error) => {
+      // Pass isResume: true to prevent paused flag race condition
+      taskOrchestrator.orchestrateTask(taskId, { isResume: true }).catch((error) => {
         console.error(`❌ [Recovery] Resume failed for task ${taskId}:`, error.message);
         NotificationService.emitTaskFailed(taskId, {
           error: `Resume failed: ${error.message}`,
