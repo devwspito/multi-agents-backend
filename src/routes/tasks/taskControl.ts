@@ -220,19 +220,20 @@ router.post('/:id/resume', authenticate, async (req: AuthRequest, res) => {
       pausedBy: undefined,
     }));
 
-    if (isBillingPaused) {
-      TaskRepository.update(task.id, { status: 'in_progress' });
-      if (teamOrch) {
-        TaskRepository.modifyOrchestration(task.id, (orch) => ({
-          ...orch,
-          teamOrchestration: {
-            ...(orch as any).teamOrchestration,
-            status: 'in_progress',
-            pauseReason: undefined,
-            pausedAt: undefined,
-          },
-        }));
-      }
+    // Always update task.status to 'in_progress' when resuming
+    // (regardless of whether it was billing pause or manual pause)
+    TaskRepository.update(task.id, { status: 'in_progress' });
+
+    if (teamOrch) {
+      TaskRepository.modifyOrchestration(task.id, (orch) => ({
+        ...orch,
+        teamOrchestration: {
+          ...(orch as any).teamOrchestration,
+          status: 'in_progress',
+          pauseReason: undefined,
+          pausedAt: undefined,
+        },
+      }));
     }
 
     const { NotificationService } = await import('../../services/NotificationService');
