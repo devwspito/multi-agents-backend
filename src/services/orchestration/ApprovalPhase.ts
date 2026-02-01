@@ -2,6 +2,7 @@ import { BasePhase, OrchestrationContext, PhaseResult, updateTaskFireAndForget }
 import { approvalEvents } from '../ApprovalEvents'; // Event-based approval system
 import { NotificationService } from '../NotificationService';
 import { TaskRepository } from '../../database/repositories/TaskRepository.js';
+import { AutoApprovalService } from '../AutoApprovalService.js';
 
 /**
  * Approval Phase
@@ -83,40 +84,24 @@ export class ApprovalPhase extends BasePhase {
       return true;
     }
 
-    // 🔥 FIX: REFRESH task from database to get latest autoApprovalEnabled value
-    // The context.task is a snapshot from when orchestration started, but the user
-    // may have toggled auto-approval via /auto-approval command during execution.
-    const refreshedTask = TaskRepository.findById(taskId);
-    const autoApprovalEnabled = refreshedTask?.orchestration?.autoApprovalEnabled === true;
+    // 🔥 CENTRALIZED: Use AutoApprovalService for all auto-approval checks
+    // This ensures consistent behavior across the entire codebase
+    const autoApprovalEnabled = AutoApprovalService.isEnabled(taskId);
 
     // Update context.task with fresh value so other methods see it too
-    if (refreshedTask && context.task.orchestration) {
+    if (context.task.orchestration) {
       context.task.orchestration.autoApprovalEnabled = autoApprovalEnabled;
     }
 
-    console.log(`🔍 [Approval] Checking autoApprovalEnabled (fresh from DB): ${autoApprovalEnabled}`);
+    console.log(`🔍 [Approval] Checking autoApprovalEnabled (via AutoApprovalService): ${autoApprovalEnabled}`);
 
     if (autoApprovalEnabled) {
       console.log(`✅ [SKIP] Auto-approval ENABLED (autonomous mode) - skipping approval for: ${previousPhase}`);
 
       NotificationService.emitConsoleLog(taskId, 'info', `✅ Autonomous mode - auto-approving ${previousPhase}`);
 
-      // Log auto-approval in history
-      if (!context.task.orchestration.approvalHistory) {
-        context.task.orchestration.approvalHistory = [];
-      }
-
-      context.task.orchestration.approvalHistory.push({
-        phase: previousPhase,
-        phaseName: this.getPhaseName(previousPhase),
-        approved: true,
-        approvedBy: 'system',
-        approvedAt: new Date(),
-        comments: 'Auto-approved (autonomous mode)',
-        autoApproved: true,
-      });
-
-      TaskRepository.update(context.task.id, context.task);
+      // Record auto-approval via centralized service
+      AutoApprovalService.recordAutoApproval(taskId, previousPhase);
 
       return true; // Skip human approval - autonomous mode
     }
