@@ -120,9 +120,38 @@ function rowToProject(row: ProjectRow, includeSecrets = false): IProject {
   };
 
   if (includeSecrets) {
-    project.apiKey = row.api_key || undefined;
+    // Decrypt API key if encrypted
+    if (row.api_key) {
+      try {
+        project.apiKey = CryptoService.isEncrypted(row.api_key)
+          ? CryptoService.decrypt(row.api_key)
+          : row.api_key;
+      } catch (error: any) {
+        console.warn(`[ProjectRepository] Failed to decrypt API key for project ${row.id}:`, error.message);
+        project.apiKey = undefined;
+      }
+    }
+
     project.webhookApiKey = row.webhook_api_key || undefined;
-    project.devAuth = parseJSON(row.dev_auth, undefined);
+
+    // Decrypt devAuth sensitive fields
+    const devAuth = row.dev_auth ? parseJSON<IDevAuth>(row.dev_auth, { method: 'none' }) : null;
+    if (devAuth) {
+      try {
+        if (devAuth.token && CryptoService.isEncrypted(devAuth.token)) {
+          devAuth.token = CryptoService.decrypt(devAuth.token);
+        }
+        if (devAuth.credentials?.password && CryptoService.isEncrypted(devAuth.credentials.password)) {
+          devAuth.credentials = {
+            ...devAuth.credentials,
+            password: CryptoService.decrypt(devAuth.credentials.password),
+          };
+        }
+      } catch (error: any) {
+        console.warn(`[ProjectRepository] Failed to decrypt devAuth for project ${row.id}:`, error.message);
+      }
+      project.devAuth = devAuth;
+    }
   }
 
   return project;

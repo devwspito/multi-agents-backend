@@ -197,7 +197,7 @@ export class OrchestrationCoordinator {
 
       // ⚡ OPTIMIZATION: Fetch Repositories + User (both depend only on task)
       const { UserRepository } = await import('../../database/repositories/UserRepository.js');
-      const repositories = RepositoryRepository.findByIds(task.repositoryIds || []);
+      const repositories = RepositoryRepository.findByIds(task.repositoryIds || [], true); // decryptSecrets=true for env variables
       const user = UserRepository.findById(task.userId, true); // includeSecrets=true for accessToken
 
       if (repositories.length === 0) {

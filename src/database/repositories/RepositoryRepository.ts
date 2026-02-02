@@ -55,7 +55,25 @@ interface RepositoryRow {
   updated_at: string;
 }
 
-function rowToRepository(row: RepositoryRow): IRepository {
+function rowToRepository(row: RepositoryRow, decryptSecrets = false): IRepository {
+  // Parse env variables
+  let envVariables: IEnvVariable[] = parseJSON(row.env_variables, []);
+
+  // Decrypt secret env variables if requested
+  if (decryptSecrets && envVariables.length > 0) {
+    envVariables = envVariables.map(envVar => {
+      if (envVar.isSecret && envVar.value && CryptoService.isEncrypted(envVar.value)) {
+        try {
+          return { ...envVar, value: CryptoService.decrypt(envVar.value) };
+        } catch (error: any) {
+          console.warn(`[RepositoryRepository] Failed to decrypt env var ${envVar.key}:`, error.message);
+          return envVar;
+        }
+      }
+      return envVar;
+    });
+  }
+
   return {
     id: row.id,
     name: row.name,
@@ -69,7 +87,7 @@ function rowToRepository(row: RepositoryRow): IRepository {
     pathPatterns: parseJSON(row.path_patterns, []),
     executionOrder: row.execution_order || undefined,
     dependencies: parseJSON(row.dependencies, undefined),
-    envVariables: parseJSON(row.env_variables, []),
+    envVariables,
     isActive: row.is_active === 1,
     lastSyncedAt: row.last_synced_at ? new Date(row.last_synced_at) : undefined,
     createdAt: new Date(row.created_at),
@@ -80,44 +98,48 @@ function rowToRepository(row: RepositoryRow): IRepository {
 export class RepositoryRepository {
   /**
    * Find repository by ID
+   * @param decryptSecrets - If true, decrypts secret environment variables
    */
-  static findById(id: string): IRepository | null {
+  static findById(id: string, decryptSecrets = false): IRepository | null {
     const stmt = db.prepare(`SELECT * FROM repositories WHERE id = ?`);
     const row = stmt.get(id) as RepositoryRow | undefined;
     if (!row) return null;
 
-    return rowToRepository(row);
+    return rowToRepository(row, decryptSecrets);
   }
 
   /**
    * Find repositories by project ID
+   * @param decryptSecrets - If true, decrypts secret environment variables
    */
-  static findByProjectId(projectId: string): IRepository[] {
+  static findByProjectId(projectId: string, decryptSecrets = false): IRepository[] {
     const stmt = db.prepare(`SELECT * FROM repositories WHERE project_id = ? AND is_active = 1 ORDER BY execution_order, created_at`);
     const rows = stmt.all(projectId) as RepositoryRow[];
-    return rows.map(rowToRepository);
+    return rows.map(row => rowToRepository(row, decryptSecrets));
   }
 
   /**
    * Find repository by workspace ID
+   * @param decryptSecrets - If true, decrypts secret environment variables
    */
-  static findByWorkspaceId(workspaceId: string): IRepository | null {
+  static findByWorkspaceId(workspaceId: string, decryptSecrets = false): IRepository | null {
     const stmt = db.prepare(`SELECT * FROM repositories WHERE workspace_id = ?`);
     const row = stmt.get(workspaceId) as RepositoryRow | undefined;
     if (!row) return null;
 
-    return rowToRepository(row);
+    return rowToRepository(row, decryptSecrets);
   }
 
   /**
    * Find repository by GitHub repo name
+   * @param decryptSecrets - If true, decrypts secret environment variables
    */
-  static findByGithubRepoName(projectId: string, githubRepoName: string): IRepository | null {
+  static findByGithubRepoName(projectId: string, githubRepoName: string, decryptSecrets = false): IRepository | null {
     const stmt = db.prepare(`SELECT * FROM repositories WHERE project_id = ? AND github_repo_name = ?`);
     const row = stmt.get(projectId, githubRepoName) as RepositoryRow | undefined;
     if (!row) return null;
 
-    return rowToRepository(row);
+    return rowToRepository(row, decryptSecrets);
   }
 
   /**
@@ -304,14 +326,15 @@ export class RepositoryRepository {
 
   /**
    * Find multiple repositories by IDs
+   * @param decryptSecrets - If true, decrypts secret environment variables
    */
-  static findByIds(ids: string[]): IRepository[] {
+  static findByIds(ids: string[], decryptSecrets = false): IRepository[] {
     if (ids.length === 0) return [];
 
     const placeholders = ids.map(() => '?').join(',');
     const stmt = db.prepare(`SELECT * FROM repositories WHERE id IN (${placeholders}) AND is_active = 1`);
     const rows = stmt.all(...ids) as RepositoryRow[];
-    return rows.map(rowToRepository);
+    return rows.map(row => rowToRepository(row, decryptSecrets));
   }
 }
 

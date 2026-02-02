@@ -36,7 +36,22 @@ interface UserRow {
   updated_at: string;
 }
 
-function rowToUser(row: UserRow): IUser {
+function rowToUser(row: UserRow, decryptSecrets = false): IUser {
+  // Decrypt defaultApiKey if requested and encrypted
+  let defaultApiKey: string | undefined;
+  if (row.default_api_key) {
+    if (decryptSecrets && CryptoService.isEncrypted(row.default_api_key)) {
+      try {
+        defaultApiKey = CryptoService.decrypt(row.default_api_key);
+      } catch (error: any) {
+        console.warn(`[UserRepository] Failed to decrypt API key for user ${row.id}:`, error.message);
+        defaultApiKey = undefined;
+      }
+    } else {
+      defaultApiKey = row.default_api_key;
+    }
+  }
+
   return {
     id: row.id,
     githubId: row.github_id,
@@ -46,7 +61,7 @@ function rowToUser(row: UserRow): IUser {
     accessToken: row.access_token,
     refreshToken: row.refresh_token || undefined,
     tokenExpiry: stringToDate(row.token_expiry),
-    defaultApiKey: row.default_api_key || undefined,
+    defaultApiKey,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -55,6 +70,7 @@ function rowToUser(row: UserRow): IUser {
 export class UserRepository {
   /**
    * Find user by ID
+   * @param includeSecrets - If true, includes and decrypts sensitive fields
    */
   static findById(id: string, includeSecrets = false): IUser | null {
     const columns = includeSecrets
@@ -73,11 +89,12 @@ export class UserRepository {
       (row as any).default_api_key = null;
     }
 
-    return rowToUser(row);
+    return rowToUser(row, includeSecrets);
   }
 
   /**
    * Find user by GitHub ID
+   * @param includeSecrets - If true, includes and decrypts sensitive fields
    */
   static findByGithubId(githubId: string, includeSecrets = false): IUser | null {
     const columns = includeSecrets
@@ -95,16 +112,17 @@ export class UserRepository {
       (row as any).default_api_key = null;
     }
 
-    return rowToUser(row);
+    return rowToUser(row, includeSecrets);
   }
 
   /**
    * Find user by email
+   * @param includeSecrets - If true, decrypts sensitive fields
    */
-  static findByEmail(email: string): IUser | null {
+  static findByEmail(email: string, includeSecrets = false): IUser | null {
     const stmt = db.prepare(`SELECT * FROM users WHERE email = ?`);
     const row = stmt.get(email) as UserRow | undefined;
-    return row ? rowToUser(row) : null;
+    return row ? rowToUser(row, includeSecrets) : null;
   }
 
   /**
