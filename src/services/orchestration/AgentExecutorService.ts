@@ -404,7 +404,19 @@ export class AgentExecutorService {
         const autonomousToolsServer = createAutonomousToolsServer();
 
         // Build query options
-        const baseEnv = { ...process.env, ANTHROPIC_API_KEY: apiKey };
+        // 🔧 CRITICAL: Disable terminal features that contaminate JSON output with ANSI codes
+        // The \x1B[?2026h (synchronized output mode) was causing JSON parsing failures
+        const baseEnv = {
+          ...process.env,
+          ANTHROPIC_API_KEY: apiKey,
+          // Disable terminal features that emit escape codes
+          TERM: 'dumb',           // Basic terminal - no escape sequences
+          NO_COLOR: '1',          // Disable colors (standard env var)
+          FORCE_COLOR: '0',       // Force no colors (used by many libs)
+          CI: 'true',             // CI mode - no interactive features
+          CLICOLOR: '0',          // BSD/macOS color control
+          CLICOLOR_FORCE: '0',    // Force no colors on BSD/macOS
+        };
 
         const queryOptions: any = {
           cwd: workspacePath,
