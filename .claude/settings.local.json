@@ -201,7 +201,13 @@
       "WebFetch(domain:www.nvidia.com)",
       "WebFetch(domain:forums.developer.nvidia.com)",
       "WebFetch(domain:docs.nvidia.com)",
-      "Bash(do echo \"=== $db ===\")"
+      "Bash(do echo \"=== $db ===\")",
+      "WebFetch(domain:multiagent.duckdns.org)",
+      "WebFetch(domain:opencode.ai)",
+      "WebFetch(domain:docs.claude.com)",
+      "WebFetch(domain:cefboud.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(npx patch-package:*)"
     ],
     "deny": [],
     "ask": [],
