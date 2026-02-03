@@ -524,36 +524,20 @@ class AgentPlatformApp {
       // Initialize SQLite database
       await connectDatabase();
 
-      // 🔄 Auto-recover interrupted orchestrations
-      console.log('🔄 Checking for interrupted orchestrations...');
-      const { OrchestrationRecoveryService } = await import('./services/orchestration/OrchestrationRecoveryService');
-      const recoveryService = new OrchestrationRecoveryService();
-
-      // Run recovery in background (don't block server startup)
-      recoveryService.recoverAllInterruptedOrchestrations().catch((error) => {
-        console.error('❌ Orchestration recovery failed:', error);
-      });
-      console.log('✅ Auto-recovery of interrupted orchestrations is ENABLED');
-
-      // 🔄 Start failed execution retry processor
-      console.log('🔄 Starting failed execution retry service...');
-      const { FailedExecutionRetryService } = await import('./services/FailedExecutionRetryService');
-      FailedExecutionRetryService.startBackgroundProcessor(2 * 60 * 1000); // Check every 2 minutes
-      console.log('✅ Failed execution retry service is ENABLED');
-
-      // 🔄 Recover active execution checkpoints
-      console.log('🔄 Checking for active execution checkpoints...');
-      const { ExecutionCheckpointService } = await import('./services/ExecutionCheckpointService');
-      ExecutionCheckpointService.recoverActiveExecutions().catch((error) => {
-        console.error('❌ Checkpoint recovery failed:', error);
-      });
-      console.log('✅ Execution checkpoint recovery is ENABLED');
+      // 🚫 AUTO-RECOVERY DISABLED BY DESIGN
+      // All retry and resume operations are MANUAL ONLY
+      // - To resume a task: Use the frontend "Resume" button or API endpoint
+      // - To retry a failed execution: Use the frontend retry action or API endpoint
+      // This prevents zombie processes and unexpected API costs
+      console.log('⚠️  Auto-recovery is DISABLED (manual retry/resume only)');
+      console.log('⚠️  Failed execution retry is DISABLED (manual retry only)');
+      console.log('⚠️  Checkpoint recovery is DISABLED (manual resume only)');
 
       // 🏥 Start health monitoring service
       console.log('🏥 Starting health monitoring service...');
       const { healthCheckService } = await import('./services/orchestration/HealthCheckService');
       healthCheckService.startPeriodicMonitoring(60000); // Check every 60 seconds
-      console.log('✅ Health monitoring is ENABLED (checks every 60s, auto-recovery for stuck tasks)');
+      console.log('✅ Health monitoring is ENABLED (checks every 60s, NO auto-recovery)');
 
       // Inicializar middleware
       this.initializeMiddleware();

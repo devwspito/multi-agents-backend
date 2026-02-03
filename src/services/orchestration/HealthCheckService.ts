@@ -532,13 +532,15 @@ class HealthCheckServiceImpl {
           });
         }
 
-        // Auto-recover stuck tasks (only if system is generally healthy)
-        if (health.healthy) {
-          const stuckTasks = health.checks.runningTasks.details?.stuckTasks || [];
-          for (const stuckTask of stuckTasks) {
-            console.log(`🔧 [HealthCheck] Auto-recovering stuck task: ${stuckTask.taskId}`);
-            await this.attemptAutoRecovery(stuckTask.taskId);
-          }
+        // 🚫 AUTO-RECOVERY DISABLED BY DESIGN
+        // Stuck tasks are logged but NOT automatically recovered
+        // User must manually resume via frontend or API
+        const stuckTasks = health.checks.runningTasks.details?.stuckTasks || [];
+        if (stuckTasks.length > 0) {
+          console.log(`⚠️  [HealthCheck] ${stuckTasks.length} stuck task(s) detected - manual resume required`);
+          stuckTasks.forEach((t: { taskId: string; stuckDuration: number }) => {
+            console.log(`   📌 Task ${t.taskId} stuck for ${Math.round(t.stuckDuration / 60000)} minutes`);
+          });
         }
       } catch (error: any) {
         console.error(`❌ [HealthCheck] Monitoring error:`, error.message);
