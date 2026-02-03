@@ -10,8 +10,9 @@ import path from 'path';
 import fs from 'fs';
 
 // Database path - stored in project data directory
+// Uses SQLITE_PATH from .env, with fallback to DATABASE_PATH for backwards compatibility
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const DB_PATH = process.env.DATABASE_PATH || path.join(DATA_DIR, 'app.db');
+const DB_PATH = process.env.SQLITE_PATH || process.env.DATABASE_PATH || path.join(DATA_DIR, 'app.db');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
