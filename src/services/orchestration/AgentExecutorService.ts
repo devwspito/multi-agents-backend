@@ -411,6 +411,7 @@ export class AgentExecutorService {
           model,
           permissionMode: effectivePermissionMode,
           env: baseEnv,
+          executable: 'node',  // Explicitly use node to avoid spawn ENOENT errors
           mcpServers: {
             'custom-dev-tools': customToolsServer,
             'extra-tools': extraToolsServer,
