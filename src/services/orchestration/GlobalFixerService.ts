@@ -15,6 +15,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { MODEL_IDS } from '../../config/ModelConfigurations';
 import { EnhancedJSONExtractor } from './utils/EnhancedJSONExtractor';
+import { safeJSONParse } from './utils/OutputParser';
 import db from '../../database/index';
 import { generateId, now } from '../../database/utils';
 
@@ -286,7 +287,7 @@ JSON:`;
 
       // Last resort: try direct parse
       try {
-        const directParse = JSON.parse(opusOutput);
+        const directParse = safeJSONParse(opusOutput);
         console.log(`✅ [GlobalFixer] OPUS output parsed directly!`);
         return {
           fixed: true,

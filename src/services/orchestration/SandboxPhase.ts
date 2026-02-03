@@ -31,6 +31,7 @@ import { serviceContainerManager, ServiceContainerGroup } from '../ServiceContai
 import { startDevServer } from '../../utils/SandboxServerUtils.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { safeJSONParse } from './utils/OutputParser.js';
 
 // Network mode: 'host' for Linux (simple), 'bridge' for Mac (needs port mapping)
 const USE_BRIDGE_MODE = process.env.DOCKER_USE_BRIDGE_MODE === 'true';
@@ -1171,13 +1172,13 @@ CRITICAL: If anything fails, return approved=false with fixSuggestion.`;
       try {
         const jsonMatch = judgeResult.output.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[1]);
+          const parsed = safeJSONParse(jsonMatch[1]);
           judgeApproved = parsed.approved === true;
           judgeDetails = parsed.details || '';
           judgeFix = parsed.fixSuggestion || '';
         } else {
           // Try direct parse
-          const parsed = JSON.parse(judgeResult.output.trim());
+          const parsed = safeJSONParse(judgeResult.output.trim());
           judgeApproved = parsed.approved === true;
           judgeDetails = parsed.details || '';
           judgeFix = parsed.fixSuggestion || '';
@@ -1782,7 +1783,7 @@ Working directory: ${repoDir}`;
       try {
         const jsonMatch = fixerResult.output.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[1]);
+          const parsed = safeJSONParse(jsonMatch[1]);
           fixed = parsed.fixed === true;
           rootCause = parsed.rootCause || '';
           fixApplied = parsed.fixApplied || '';
@@ -1790,7 +1791,7 @@ Working directory: ${repoDir}`;
           reason = parsed.reason || parsed.manualAction || '';
         } else {
           // Try direct parse
-          const parsed = JSON.parse(fixerResult.output.trim());
+          const parsed = safeJSONParse(fixerResult.output.trim());
           fixed = parsed.fixed === true;
           rootCause = parsed.rootCause || '';
           fixApplied = parsed.fixApplied || '';

@@ -6,6 +6,7 @@ import { NotificationService } from '../NotificationService';
 import { LogService } from '../logging/LogService';
 import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue, COMMON_MARKERS } from './utils/MarkerValidator';
+import { safeJSONParse } from './utils/OutputParser';
 import {
   initializeJudgeOrchestration,
   addOrUpdateJudgeEvaluation,
@@ -355,7 +356,7 @@ export class JudgePhase extends BasePhase {
         jsonStr = jsonStr.replace(/^```\s*/, '').replace(/\s*```$/, '');
       }
 
-      const parsed = JSON.parse(jsonStr);
+      const parsed = safeJSONParse(jsonStr);
       console.log(`   ✅ [${type} Judge] Parsed JSON successfully: verdict=${parsed.verdict}, score=${parsed.score}`);
 
       return {

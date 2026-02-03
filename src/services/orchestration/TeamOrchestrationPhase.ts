@@ -5,6 +5,7 @@ import { LogService } from '../logging/LogService';
 import { TechLeadPhase } from './TechLeadPhase';
 import { DevelopersPhase } from './DevelopersPhase';
 import { approvalEvents } from '../ApprovalEvents';
+import { safeJSONParse } from './utils/OutputParser';
 // JudgePhase runs per-story inside DevelopersPhase, not as separate batch in multi-team mode
 // QAPhase, FixerPhase, GitHubService, PRManagementService REMOVED - Judge handles quality validation per-story
 import { safeGitExecSync, fixGitRemoteAuth, normalizeRepoName, smartGitFetch } from '../../utils/safeGitExecution';
@@ -1925,7 +1926,7 @@ ${epic.description || 'No description provided'}
               cwd: repoPath,
               encoding: 'utf8'
             });
-            const prData = JSON.parse(existingPR);
+            const prData = safeJSONParse(existingPR);
             prUrl = prData.url;
             prNumber = prData.number;
             console.log(`✅ [PR] PR already exists: ${prUrl}`);
