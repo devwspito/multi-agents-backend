@@ -3,6 +3,62 @@
  * Handles JSON extraction, validation, and fallback strategies
  */
 
+/**
+ * Strip ALL ANSI escape sequences from text
+ * This is critical for parsing JSON that may contain terminal control codes
+ *
+ * Handles:
+ * - CSI sequences: \x1B[ ... <final byte> (colors, cursor, modes like ?2026h)
+ * - OSC sequences: \x1B] ... ST
+ * - Single character escapes
+ * - 8-bit CSI: \x9B
+ */
+export function stripAnsiCodes(text: string): string {
+  return text
+    // CSI sequences: \x1B[ ... <final byte> (includes colors, cursor, modes like ?2026h)
+    .replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '')
+    // OSC sequences: \x1B] ... ST (string terminator \x1B\\ or \x07)
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    // Single character escapes: \x1B followed by single char
+    .replace(/\x1B[NOPXZc^_]/g, '')
+    // 8-bit CSI: \x9B ... <final byte>
+    .replace(/\x9B[0-9;]*[A-Za-z]/g, '')
+    // Any remaining escape sequences
+    .replace(/\x1B./g, '')
+    // Legacy pattern for good measure
+    .replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+/**
+ * Safe JSON.parse that strips ANSI codes before parsing
+ *
+ * USE THIS INSTEAD OF JSON.parse() when parsing agent output!
+ * The Claude Agent SDK can emit ANSI escape sequences (\x1B[?2026h, etc.)
+ * that contaminate the output and cause JSON parsing failures.
+ *
+ * @param text - The raw text to parse (may contain ANSI codes)
+ * @returns The parsed JSON object
+ * @throws SyntaxError if the cleaned text is not valid JSON
+ */
+export function safeJSONParse<T = any>(text: string): T {
+  const cleaned = stripAnsiCodes(text);
+  return JSON.parse(cleaned);
+}
+
+/**
+ * Safe JSON.parse with error handling - returns null instead of throwing
+ *
+ * @param text - The raw text to parse (may contain ANSI codes)
+ * @returns The parsed JSON object or null if parsing fails
+ */
+export function safeJSONParseSafe<T = any>(text: string): T | null {
+  try {
+    return safeJSONParse<T>(text);
+  } catch {
+    return null;
+  }
+}
+
 export interface ParseResult<T = any> {
   success: boolean;
   data?: T;
@@ -194,27 +250,10 @@ export class OutputParser {
 
   /**
    * Strip ALL ANSI escape sequences from text
-   * This is critical for parsing JSON that may contain terminal control codes
+   * Delegates to the exported stripAnsiCodes function
    */
   static stripAnsiCodes(text: string): string {
-    // Comprehensive ANSI escape sequence patterns:
-    // - \x1B[ followed by any parameters and final byte (CSI sequences)
-    // - \x1B] followed by OSC sequences (Operating System Commands)
-    // - \x1B followed by single character commands
-    // - \x9B (8-bit CSI) followed by parameters
-    return text
-      // CSI sequences: \x1B[ ... <final byte> (includes colors, cursor, modes like ?2026h)
-      .replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '')
-      // OSC sequences: \x1B] ... ST (string terminator \x1B\\ or \x07)
-      .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
-      // Single character escapes: \x1B followed by single char
-      .replace(/\x1B[NOPXZc^_]/g, '')
-      // 8-bit CSI: \x9B ... <final byte>
-      .replace(/\x9B[0-9;]*[A-Za-z]/g, '')
-      // Any remaining escape sequences
-      .replace(/\x1B./g, '')
-      // Legacy pattern for good measure
-      .replace(/\u001b\[[0-9;]*m/g, '');
+    return stripAnsiCodes(text);
   }
 
   /**

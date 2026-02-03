@@ -5,6 +5,7 @@ import { getRoleInstructions } from '../../agents/ReadmeSystem';
 import { TaskRepository } from '../../database/repositories/TaskRepository.js';
 import { AgentActivityService } from '../AgentActivityService';
 import { hasMarker, extractMarkerValue } from './utils/MarkerValidator';
+import { safeJSONParse } from './utils/OutputParser';
 // 🔥 REMOVED: RealisticCostEstimator - Real costs tracked via AgentExecutorService
 import { CryptoService } from '../CryptoService';
 import { ProjectRadiographyService, ProjectRadiography } from '../ProjectRadiographyService';
@@ -583,7 +584,7 @@ ${judgeFeedback}
       try {
         const trimmed = result.output.trim();
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          parsed = JSON.parse(trimmed);
+          parsed = safeJSONParse(trimmed);
           if (parsed.epics && Array.isArray(parsed.epics)) {
             console.log('✅ [TechLead] Parsed as pure JSON (backward compatibility)');
           } else {
@@ -612,7 +613,7 @@ ${judgeFeedback}
               // Use captured group if available, otherwise full match
               const jsonText = match[1] || match[0];
               const trimmed = jsonText.trim();
-              parsed = JSON.parse(trimmed);
+              parsed = safeJSONParse(trimmed);
 
               // Verify it has the required structure
               if (parsed.epics && Array.isArray(parsed.epics)) {
@@ -669,7 +670,7 @@ ${judgeFeedback}
 
         for (const candidate of candidates) {
           try {
-            const candidateParsed = JSON.parse(candidate.text);
+            const candidateParsed = safeJSONParse(candidate.text);
             if (candidateParsed.epics && Array.isArray(candidateParsed.epics) && candidateParsed.epics.length > 0) {
               parsed = candidateParsed;
               console.log(`✅ [TechLead] Parsed JSON using fallback extraction (found ${candidate.length} char object with epics)`);

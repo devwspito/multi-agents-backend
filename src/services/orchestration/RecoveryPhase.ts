@@ -19,6 +19,7 @@ import {
 import { execSync } from 'child_process';
 import * as path from 'path';
 import { NotificationService } from '../NotificationService';
+import { safeJSONParse } from './utils/OutputParser';
 
 /**
  * Verified PR information
@@ -249,7 +250,7 @@ export class RecoveryPhase extends BasePhase {
         { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
       );
 
-      const prs = JSON.parse(output);
+      const prs = safeJSONParse(output);
 
       // Fetch files for each PR
       for (const pr of prs) {
@@ -258,7 +259,7 @@ export class RecoveryPhase extends BasePhase {
             `gh pr view ${pr.number} --json files`,
             { cwd: repoPath, encoding: 'utf8', timeout: 30000 }
           );
-          const filesData = JSON.parse(filesOutput);
+          const filesData = safeJSONParse(filesOutput);
           pr.files = filesData.files?.map((f: any) => f.path) || [];
         } catch (fileErr) {
           pr.files = [];
