@@ -15,6 +15,9 @@ export class OutputParser {
    * Extract JSON from various formats
    */
   static extractJSON(output: string): ParseResult {
+    // CRITICAL: Strip ANSI codes FIRST before any parsing attempts
+    const cleanedOutput = this.stripAnsiCodes(output);
+
     const patterns = [
       /```json\n?([\s\S]*?)\n?```/,
       /```\n?([\s\S]*?)\n?```/,
@@ -23,7 +26,7 @@ export class OutputParser {
     ];
 
     for (const pattern of patterns) {
-      const match = output.match(pattern);
+      const match = cleanedOutput.match(pattern);
       if (match) {
         try {
           const jsonStr = match[1].trim();
@@ -37,7 +40,7 @@ export class OutputParser {
 
     // Try parsing entire output as JSON
     try {
-      const data = JSON.parse(output.trim());
+      const data = JSON.parse(cleanedOutput.trim());
       return { success: true, data, rawOutput: output };
     } catch (e) {
       return {
@@ -190,11 +193,36 @@ export class OutputParser {
   }
 
   /**
+   * Strip ALL ANSI escape sequences from text
+   * This is critical for parsing JSON that may contain terminal control codes
+   */
+  static stripAnsiCodes(text: string): string {
+    // Comprehensive ANSI escape sequence patterns:
+    // - \x1B[ followed by any parameters and final byte (CSI sequences)
+    // - \x1B] followed by OSC sequences (Operating System Commands)
+    // - \x1B followed by single character commands
+    // - \x9B (8-bit CSI) followed by parameters
+    return text
+      // CSI sequences: \x1B[ ... <final byte> (includes colors, cursor, modes like ?2026h)
+      .replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '')
+      // OSC sequences: \x1B] ... ST (string terminator \x1B\\ or \x07)
+      .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+      // Single character escapes: \x1B followed by single char
+      .replace(/\x1B[NOPXZc^_]/g, '')
+      // 8-bit CSI: \x9B ... <final byte>
+      .replace(/\x9B[0-9;]*[A-Za-z]/g, '')
+      // Any remaining escape sequences
+      .replace(/\x1B./g, '')
+      // Legacy pattern for good measure
+      .replace(/\u001b\[[0-9;]*m/g, '');
+  }
+
+  /**
    * Clean and format output for storage
    */
   static cleanOutput(output: string, maxLength = 5000): string {
-    // Remove ANSI escape codes
-    let cleaned = output.replace(/\u001b\[[0-9;]*m/g, '');
+    // Remove ALL ANSI escape codes (comprehensive)
+    let cleaned = this.stripAnsiCodes(output);
 
     // Remove excessive whitespace
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
@@ -233,8 +261,11 @@ export class OutputParser {
       return { success: false, error: 'Empty output', rawOutput: output };
     }
 
-    // Strategy 1: Standard extraction
-    const standardResult = this.extractJSON(output);
+    // CRITICAL: Strip ANSI codes FIRST before any parsing attempts
+    const cleanedOutput = this.stripAnsiCodes(output);
+
+    // Strategy 1: Standard extraction (already uses cleaned output internally)
+    const standardResult = this.extractJSON(cleanedOutput);
     if (standardResult.success) {
       if (!requiredField || (standardResult.data && requiredField in standardResult.data)) {
         return standardResult as ParseResult<T>;
@@ -244,8 +275,8 @@ export class OutputParser {
       }
     }
 
-    // Strategy 2: Try brace matching for balanced JSON
-    const candidates = this.findBalancedJSONBlocks(output);
+    // Strategy 2: Try brace matching for balanced JSON (on cleaned output)
+    const candidates = this.findBalancedJSONBlocks(cleanedOutput);
     if (verbose) {
       console.log(`   📋 Found ${candidates.length} balanced JSON candidates`);
     }
@@ -267,8 +298,8 @@ export class OutputParser {
       }
     }
 
-    // Strategy 3: Strip markdown and try again
-    const stripped = output
+    // Strategy 3: Strip markdown and try again (on cleaned output)
+    const stripped = cleanedOutput
       .replace(/```json\s*/g, '')
       .replace(/```\s*/g, '')
       .replace(/^[^{[]*/, '') // Remove text before JSON

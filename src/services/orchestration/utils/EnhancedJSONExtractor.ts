@@ -31,6 +31,26 @@ export interface ExtractionOptions {
 
 export class EnhancedJSONExtractor {
   /**
+   * Strip ALL ANSI escape sequences from text
+   * This is critical for parsing JSON that may contain terminal control codes
+   */
+  private static stripAnsiCodes(text: string): string {
+    return text
+      // CSI sequences: \x1B[ ... <final byte> (includes colors, cursor, modes like ?2026h)
+      .replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '')
+      // OSC sequences: \x1B] ... ST (string terminator \x1B\\ or \x07)
+      .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+      // Single character escapes: \x1B followed by single char
+      .replace(/\x1B[NOPXZc^_]/g, '')
+      // 8-bit CSI: \x9B ... <final byte>
+      .replace(/\x9B[0-9;]*[A-Za-z]/g, '')
+      // Any remaining escape sequences
+      .replace(/\x1B./g, '')
+      // Legacy pattern for good measure
+      .replace(/\u001b\[[0-9;]*m/g, '');
+  }
+
+  /**
    * Extract JSON with multiple strategies and good diagnostics
    */
   static extract<T = any>(
@@ -38,18 +58,22 @@ export class EnhancedJSONExtractor {
     options: ExtractionOptions = {}
   ): ExtractionResult<T> {
     const { requiredFields = [], flexibleFields = [], verbose = false } = options;
+
+    // CRITICAL: Strip ANSI codes FIRST before any parsing attempts
+    const cleanedOutput = this.stripAnsiCodes(output);
+
     const diagnostics: ExtractionResult['diagnostics'] = {
-      inputLength: output.length,
+      inputLength: cleanedOutput.length,
       jsonCandidatesFound: 0,
       parseErrors: [],
     };
 
     if (verbose) {
-      console.log(`\n[EnhancedJSONExtractor] Parsing output (${output.length} chars)...`);
+      console.log(`\n[EnhancedJSONExtractor] Parsing output (${cleanedOutput.length} chars, stripped from ${output.length})...`);
     }
 
     // STEP 1: Try pure JSON (trimmed)
-    const pureResult = this.tryPureJSON<T>(output, requiredFields, verbose);
+    const pureResult = this.tryPureJSON<T>(cleanedOutput, requiredFields, verbose);
     if (pureResult) {
       return {
         success: true,
@@ -60,7 +84,7 @@ export class EnhancedJSONExtractor {
     }
 
     // STEP 2: Try markdown code blocks
-    const markdownResult = this.tryMarkdownBlocks<T>(output, requiredFields, verbose, diagnostics);
+    const markdownResult = this.tryMarkdownBlocks<T>(cleanedOutput, requiredFields, verbose, diagnostics);
     if (markdownResult) {
       return {
         success: true,
@@ -71,7 +95,7 @@ export class EnhancedJSONExtractor {
     }
 
     // STEP 3: Strip text before first { and after last } (simple approach)
-    const strippedResult = this.tryStripPreamble<T>(output, requiredFields, verbose, diagnostics);
+    const strippedResult = this.tryStripPreamble<T>(cleanedOutput, requiredFields, verbose, diagnostics);
     if (strippedResult) {
       return {
         success: true,
@@ -83,7 +107,7 @@ export class EnhancedJSONExtractor {
 
     // STEP 4: Balanced brace matching WITH string tracking (handles { } inside strings)
     const braceResult = this.tryBraceMatchingWithStringTracking<T>(
-      output,
+      cleanedOutput,
       requiredFields,
       flexibleFields,
       verbose,
@@ -100,7 +124,7 @@ export class EnhancedJSONExtractor {
 
     // STEP 5: JSON repair strategy (fix common syntax errors)
     const repairResult = this.tryJSONRepair<T>(
-      output,
+      cleanedOutput,
       requiredFields,
       flexibleFields,
       verbose,
@@ -118,13 +142,13 @@ export class EnhancedJSONExtractor {
     // All strategies failed
     if (verbose) {
       console.error('[EnhancedJSONExtractor] All extraction strategies failed');
-      console.error('[EnhancedJSONExtractor] Output preview:', output.substring(0, 500));
+      console.error('[EnhancedJSONExtractor] Output preview:', cleanedOutput.substring(0, 500));
     }
 
     return {
       success: false,
       error: 'All JSON extraction strategies failed',
-      rawOutput: output,
+      rawOutput: cleanedOutput,
       diagnostics,
     };
   }
